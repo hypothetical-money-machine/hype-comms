@@ -42,15 +42,20 @@ func (s *WSServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	clientAddr := conn.RemoteAddr().String()
+	log.Printf("WebSocket client connected: %s", clientAddr)
+
 	// Handle messages from this client
 	for {
 		var wsMsg WebSocketMessage
 		if err := conn.ReadJSON(&wsMsg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+				log.Printf("WebSocket client %s disconnected: %v", clientAddr, err)
 			}
 			return
 		}
+
+		log.Printf("WebSocket message from %s: type=%s", clientAddr, wsMsg.Type)
 
 		// Handle different message types
 		switch wsMsg.Type {

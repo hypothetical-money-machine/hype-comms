@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hype-comms/hmm-chat/internal/transport/http"
@@ -24,7 +25,12 @@ func NewWebSocketClient(serverAddr string) (*WebSocketClient, error) {
 	wsURL := url.URL{Scheme: "ws", Host: serverAddr, Path: "/ws"}
 	log.Printf("Connecting to %s", wsURL.String())
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	// Set a timeout on the dialer
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+	}
+
+	conn, _, err := dialer.Dial(wsURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -51,7 +57,11 @@ func (c *WebSocketClient) readLoop() {
 		var wsMsg http.WebSocketMessage
 		if err := c.conn.ReadJSON(&wsMsg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.errors <- err
+				log.Printf("WebSocket read error: %v", err)
+				select {
+				case c.errors <- err:
+				case <-c.closeDone:
+				}
 			}
 			return
 		}
@@ -68,7 +78,11 @@ func (c *WebSocketClient) readLoop() {
 func (c *WebSocketClient) writeLoop() {
 	for msg := range c.send {
 		if err := c.conn.WriteJSON(msg); err != nil {
-			c.errors <- err
+			log.Printf("WebSocket write error: %v", err)
+			select {
+			case c.errors <- err:
+			case <-c.closeDone:
+			}
 			return
 		}
 	}
