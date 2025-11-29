@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -66,7 +67,7 @@ func NewModel(wsClient *WebSocketClient) Model {
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
-		m.listenForWebSocket(),
+		tickCmd(),
 		func() tea.Msg { m.wsClient.ListChannels(); return nil },
 	)
 }
@@ -126,9 +127,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsErrorReceived:
 		m.lastError = msg.err.Error()
+
+	case tickMsg:
+		// Check for websocket messages without blocking
+		m.checkWebSocketMessages()
 	}
 
-	cmds = append(cmds, m.listenForWebSocket())
+	cmds = append(cmds, tickCmd())
 	return m, tea.Batch(cmds...)
 }
 
@@ -303,21 +308,30 @@ func (m *Model) handleWebSocketMessage(wsMsg *http.WebSocketMessage) {
 	}
 }
 
-// listenForWebSocket returns a command that listens for WebSocket messages
-func (m *Model) listenForWebSocket() tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case msg := <-m.wsClient.GetRecvChan():
-			if msg != nil {
-				return wsMessageReceived{msg}
-			}
-		case err := <-m.wsClient.GetErrorChan():
-			if err != nil {
-				return wsErrorReceived{err}
-			}
+// checkWebSocketMessages checks for pending websocket messages without blocking
+func (m *Model) checkWebSocketMessages() {
+	select {
+	case msg := <-m.wsClient.GetRecvChan():
+		if msg != nil {
+			m.handleWebSocketMessage(msg)
 		}
-		return nil
+	case err := <-m.wsClient.GetErrorChan():
+		if err != nil {
+			m.lastError = err.Error()
+		}
+	default:
+		// No messages waiting, that's fine
 	}
+}
+
+// tickMsg is a periodic tick message
+type tickMsg struct{}
+
+// tickCmd returns a command that ticks periodically
+func tickCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return tickMsg{}
+	})
 }
 
 // wsMessageReceived is a message from the WebSocket
