@@ -211,7 +211,11 @@ func (s *WSServer) sendMessage(conn *websocket.Conn, msgType string, payload int
 		Payload: json.RawMessage(payloadBytes),
 	}
 
-	conn.WriteJSON(wsMsg)
+	if err := conn.WriteJSON(wsMsg); err != nil {
+		log.Printf("Failed to send message type %s: %v", msgType, err)
+		return
+	}
+	log.Printf("Sent message to %s: type=%s", conn.RemoteAddr().String(), msgType)
 }
 
 // sendError sends an error message to the client
@@ -221,5 +225,9 @@ func (s *WSServer) sendError(conn *websocket.Conn, message string) {
 		Error: message,
 	}
 
-	conn.WriteJSON(wsMsg)
+	if err := conn.WriteJSON(wsMsg); err != nil {
+		log.Printf("Failed to send error message: %v", err)
+		return
+	}
+	log.Printf("Sent error to %s: %s", conn.RemoteAddr().String(), message)
 }
