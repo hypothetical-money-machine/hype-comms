@@ -29,7 +29,7 @@ func TestMessageUseCase_SendMessage(t *testing.T) {
 
 		channel, _ := channelUC.CreateChannel(ctx, "test-channel")
 
-		msg, err := messageUC.SendMessage(ctx, channel.ID, "hello world")
+		msg, err := messageUC.SendMessage(ctx, channel.ID, "user123", "hello world")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -38,6 +38,9 @@ func TestMessageUseCase_SendMessage(t *testing.T) {
 		}
 		if msg.ChannelID != channel.ID {
 			t.Errorf("expected channel ID %q, got %q", channel.ID, msg.ChannelID)
+		}
+		if msg.AuthorID != "user123" {
+			t.Errorf("expected author ID 'user123', got %q", msg.AuthorID)
 		}
 		if msg.ID == "" {
 			t.Error("expected non-empty message ID")
@@ -49,7 +52,7 @@ func TestMessageUseCase_SendMessage(t *testing.T) {
 
 		channel, _ := channelUC.CreateChannel(ctx, "test-channel")
 
-		_, err := messageUC.SendMessage(ctx, channel.ID, "")
+		_, err := messageUC.SendMessage(ctx, channel.ID, "user123", "")
 		if err != domain.ErrMessageEmpty {
 			t.Errorf("expected ErrMessageEmpty, got %v", err)
 		}
@@ -58,7 +61,7 @@ func TestMessageUseCase_SendMessage(t *testing.T) {
 	t.Run("rejects message to non-existent channel", func(t *testing.T) {
 		messageUC, _ := setupMessageUseCase()
 
-		_, err := messageUC.SendMessage(ctx, "non-existent", "hello")
+		_, err := messageUC.SendMessage(ctx, "non-existent", "user123", "hello")
 		if err != domain.ErrChannelNotFound {
 			t.Errorf("expected ErrChannelNotFound, got %v", err)
 		}
@@ -75,7 +78,7 @@ func TestMessageUseCase_GetMessages(t *testing.T) {
 
 		// Send multiple messages
 		for i := 0; i < 5; i++ {
-			messageUC.SendMessage(ctx, channel.ID, "message")
+			messageUC.SendMessage(ctx, channel.ID, "user123", "message")
 			time.Sleep(time.Millisecond) // Ensure different timestamps
 		}
 
@@ -108,7 +111,7 @@ func TestMessageUseCase_GetMessage(t *testing.T) {
 		messageUC, channelUC := setupMessageUseCase()
 
 		channel, _ := channelUC.CreateChannel(ctx, "test-channel")
-		sent, _ := messageUC.SendMessage(ctx, channel.ID, "test message")
+		sent, _ := messageUC.SendMessage(ctx, channel.ID, "user123", "test message")
 
 		got, err := messageUC.GetMessage(ctx, sent.ID)
 		if err != nil {

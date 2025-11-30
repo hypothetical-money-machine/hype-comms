@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,7 +26,7 @@ func NewMessageUseCase(mr MessageRepository, b MessageBroadcaster, cr ChannelRep
 }
 
 // SendMessage sends a message to a channel
-func (uc *MessageUseCase) SendMessage(ctx context.Context, channelID domain.ChannelID, text string) (*domain.Message, error) {
+func (uc *MessageUseCase) SendMessage(ctx context.Context, channelID domain.ChannelID, authorID domain.UserID, text string) (*domain.Message, error) {
 	// Verify channel exists
 	if _, err := uc.channelRepo.GetChannel(ctx, channelID); err != nil {
 		return nil, err
@@ -34,6 +35,7 @@ func (uc *MessageUseCase) SendMessage(ctx context.Context, channelID domain.Chan
 	msg := &domain.Message{
 		ID:        domain.MessageID(uuid.New().String()),
 		ChannelID: channelID,
+		AuthorID:  authorID,
 		Text:      text,
 		CreatedAt: time.Now(),
 	}
@@ -46,10 +48,12 @@ func (uc *MessageUseCase) SendMessage(ctx context.Context, channelID domain.Chan
 		return nil, err
 	}
 
-	// Broadcast to subscribers (non-blocking)
-	go func() {
-		_ = uc.broadcaster.Broadcast(context.Background(), channelID, msg)
-	}()
+	// Broadcast to subscribers (synchronous but non-blocking internally)
+	// The broadcaster uses select with default case, so this won't block on slow subscribers
+	if err := uc.broadcaster.Broadcast(ctx, channelID, msg); err != nil {
+		// Log but don't fail - message is persisted, real-time delivery is best-effort
+		slog.Warn("Failed to broadcast message", "message_id", msg.ID, "channel_id", channelID, "error", err)
+	}
 
 	return msg, nil
 }
