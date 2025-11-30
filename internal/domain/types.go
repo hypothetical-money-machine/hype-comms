@@ -8,6 +8,9 @@ type ChannelID string
 // MessageID is a unique identifier for a message
 type MessageID string
 
+// UserID is a unique identifier for a user/author
+type UserID string
+
 // Channel represents a communication channel
 type Channel struct {
 	ID        ChannelID
@@ -31,6 +34,7 @@ func (c *Channel) Validate() error {
 type Message struct {
 	ID        MessageID
 	ChannelID ChannelID
+	AuthorID  UserID
 	Text      string
 	CreatedAt time.Time
 }

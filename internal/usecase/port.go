@@ -26,4 +26,5 @@ type MessageBroadcaster interface {
 	Broadcast(ctx context.Context, channelID domain.ChannelID, msg *domain.Message) error
 	Subscribe(ctx context.Context, channelID domain.ChannelID) (<-chan *domain.Message, error)
 	Unsubscribe(ctx context.Context, channelID domain.ChannelID, ch <-chan *domain.Message) error
+	Close() error
 }
