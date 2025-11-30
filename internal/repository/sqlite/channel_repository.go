@@ -3,11 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/hype-comms/hmm-chat/internal/domain"
+	"github.com/mattn/go-sqlite3"
 )
 
 // ChannelRepository is a SQLite implementation of the ChannelRepository interface
@@ -22,7 +24,7 @@ func NewChannelRepository(db *Database) *ChannelRepository {
 
 // CreateChannel creates a new channel in the database
 func (r *ChannelRepository) CreateChannel(ctx context.Context, ch *domain.Channel) error {
-	log.Printf("[REPO] CreateChannel: name=%s, id=%s", ch.Name, ch.ID)
+	slog.Debug("Creating channel", "name", ch.Name, "id", ch.ID)
 	now := time.Now()
 	_, err := r.db.conn.ExecContext(ctx, `
 		INSERT INTO channels (id, name, created_at, updated_at)
@@ -30,18 +32,19 @@ func (r *ChannelRepository) CreateChannel(ctx context.Context, ch *domain.Channe
 	`, string(ch.ID), ch.Name, now, now)
 
 	if err != nil {
-		// Check if it's a duplicate name error
-		if err.Error() == "UNIQUE constraint failed: channels.name" {
-			log.Printf("[REPO] CreateChannel failed: channel '%s' already exists", ch.Name)
+		// Check if it's a unique constraint violation (duplicate name)
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
+			slog.Debug("CreateChannel failed: channel already exists", "name", ch.Name)
 			return domain.ErrChannelAlreadyExists
 		}
-		log.Printf("[REPO] CreateChannel error: %v", err)
+		slog.Error("CreateChannel error", "error", err)
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
 	ch.CreatedAt = now
 	ch.UpdatedAt = now
-	log.Printf("[REPO] CreateChannel success: %s", ch.Name)
+	slog.Debug("Channel created", "name", ch.Name)
 	return nil
 }
 
@@ -69,22 +72,34 @@ func (r *ChannelRepository) GetChannel(ctx context.Context, id domain.ChannelID)
 
 	ch.ID = domain.ChannelID(channelID)
 	ch.Name = name
-	ch.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-	ch.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+	if t, err := ParseSQLiteTime(createdAt); err != nil {
+		slog.Warn("Failed to parse channel created_at", "channel_id", channelID, "value", createdAt, "error", err)
+	} else {
+		ch.CreatedAt = t
+	}
+	if t, err := ParseSQLiteTime(updatedAt); err != nil {
+		slog.Warn("Failed to parse channel updated_at", "channel_id", channelID, "value", updatedAt, "error", err)
+	} else {
+		ch.UpdatedAt = t
+	}
 
 	return &ch, nil
 }
 
-// ListChannels returns all channels from the database
+// maxChannelsLimit is the maximum number of channels to return in a single query
+const maxChannelsLimit = 1000
+
+// ListChannels returns all channels from the database (limited to prevent unbounded results)
 func (r *ChannelRepository) ListChannels(ctx context.Context) ([]*domain.Channel, error) {
-	log.Println("[REPO] ListChannels")
+	slog.Debug("Listing channels")
 	rows, err := r.db.conn.QueryContext(ctx, `
 		SELECT id, name, created_at, updated_at
 		FROM channels
 		ORDER BY created_at DESC
-	`)
+		LIMIT ?
+	`, maxChannelsLimit)
 	if err != nil {
-		log.Printf("[REPO] ListChannels error: %v", err)
+		slog.Error("ListChannels error", "error", err)
 		return nil, fmt.Errorf("failed to list channels: %w", err)
 	}
 	defer rows.Close()
@@ -99,24 +114,32 @@ func (r *ChannelRepository) ListChannels(ctx context.Context) ([]*domain.Channel
 
 		err := rows.Scan(&channelID, &name, &createdAt, &updatedAt)
 		if err != nil {
-			log.Printf("[REPO] ListChannels scan error: %v", err)
+			slog.Error("ListChannels scan error", "error", err)
 			return nil, fmt.Errorf("failed to scan channel: %w", err)
 		}
 
 		ch.ID = domain.ChannelID(channelID)
 		ch.Name = name
-		ch.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		ch.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		if t, err := ParseSQLiteTime(createdAt); err != nil {
+			slog.Warn("Failed to parse channel created_at", "channel_id", channelID, "value", createdAt, "error", err)
+		} else {
+			ch.CreatedAt = t
+		}
+		if t, err := ParseSQLiteTime(updatedAt); err != nil {
+			slog.Warn("Failed to parse channel updated_at", "channel_id", channelID, "value", updatedAt, "error", err)
+		} else {
+			ch.UpdatedAt = t
+		}
 
 		channels = append(channels, &ch)
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("[REPO] ListChannels iteration error: %v", err)
+		slog.Error("ListChannels iteration error", "error", err)
 		return nil, fmt.Errorf("failed to iterate channels: %w", err)
 	}
 
-	log.Printf("[REPO] ListChannels success: found %d channels", len(channels))
+	slog.Debug("ListChannels complete", "count", len(channels))
 	return channels, nil
 }
 
