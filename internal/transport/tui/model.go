@@ -66,9 +66,14 @@ func NewModel(wsClient *WebSocketClient) Model {
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
+	log.Println("[TUI] Init called")
 	return tea.Batch(
 		tickCmd(),
-		func() tea.Msg { m.wsClient.ListChannels(); return nil },
+		func() tea.Msg {
+			log.Println("[TUI] Requesting channel list...")
+			m.wsClient.ListChannels()
+			return nil
+		},
 	)
 }
 
@@ -131,17 +136,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Check for websocket messages without blocking
 		m.checkWebSocketMessages()
+		cmds = append(cmds, tickCmd())
 	}
-
-	cmds = append(cmds, tickCmd())
 	return m, tea.Batch(cmds...)
 }
 
 // View renders the model
 func (m Model) View() string {
 	if m.view == viewChannelList {
-		return m.viewChannelListScreen()
+		view := m.viewChannelListScreen()
+		log.Printf("[TUI] View: channel list, %d channels", len(m.channels))
+		return view
 	}
+	log.Printf("[TUI] View: chat screen, channel=%s", m.currentChannelName)
 	return m.viewChatScreen()
 }
 
@@ -238,49 +245,60 @@ func (m *Model) handleCommand(cmd string) {
 
 // handleWebSocketMessage handles messages from the WebSocket
 func (m *Model) handleWebSocketMessage(wsMsg *http.WebSocketMessage) {
+	log.Printf("[TUI] Handling WebSocket message: type=%s", wsMsg.Type)
 	switch wsMsg.Type {
 	case "message":
 		var msg http.MessageResponse
 		payloadBytes, _ := json.Marshal(wsMsg.Payload)
 		if err := json.Unmarshal(payloadBytes, &msg); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
+			log.Printf("[TUI] Failed to unmarshal message: %v", err)
 			return
 		}
+		log.Printf("[TUI] Added message to channel %s", msg.ChannelID)
 		m.messages[msg.ChannelID] = append(m.messages[msg.ChannelID], msg)
 		m.lastError = ""
 
 	case "subscribed":
+		log.Println("[TUI] Subscribed to channel")
 		m.lastError = ""
 
 	case "message_sent":
+		log.Println("[TUI] Message sent")
 		m.lastError = ""
 
 	case "channel_created":
 		var ch http.ChannelResponse
 		payloadBytes, _ := json.Marshal(wsMsg.Payload)
 		if err := json.Unmarshal(payloadBytes, &ch); err != nil {
-			log.Printf("Failed to unmarshal channel: %v", err)
+			log.Printf("[TUI] Failed to unmarshal channel: %v", err)
 			return
 		}
+		log.Printf("[TUI] Created channel: %s", ch.Name)
 		m.channels = append(m.channels, ch)
 		m.lastError = fmt.Sprintf("Created channel: %s", ch.Name)
 
 	case "channels_list":
+		log.Println("[TUI] Received channels_list")
 		var payload map[string]interface{}
 		payloadBytes, _ := json.Marshal(wsMsg.Payload)
 		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-			log.Printf("Failed to unmarshal channels_list: %v", err)
+			log.Printf("[TUI] Failed to unmarshal channels_list: %v", err)
 			return
 		}
 
 		if channels, ok := payload["channels"].([]interface{}); ok {
+			log.Printf("[TUI] Got %d channels", len(channels))
 			m.channels = make([]http.ChannelResponse, len(channels))
 			for i, ch := range channels {
 				chBytes, _ := json.Marshal(ch)
 				var chResp http.ChannelResponse
 				json.Unmarshal(chBytes, &chResp)
 				m.channels[i] = chResp
+				log.Printf("[TUI] Channel %d: %s", i, chResp.Name)
 			}
+			log.Printf("[TUI] Total channels in model: %d", len(m.channels))
+		} else {
+			log.Printf("[TUI] Failed to parse channels list, payload keys: %v", len(payload))
 		}
 
 	case "history":
@@ -313,10 +331,12 @@ func (m *Model) checkWebSocketMessages() {
 	select {
 	case msg := <-m.wsClient.GetRecvChan():
 		if msg != nil {
+			log.Printf("[TUI] Received WebSocket message: type=%s", msg.Type)
 			m.handleWebSocketMessage(msg)
 		}
 	case err := <-m.wsClient.GetErrorChan():
 		if err != nil {
+			log.Printf("[TUI] WebSocket error: %v", err)
 			m.lastError = err.Error()
 		}
 	default:
