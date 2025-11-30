@@ -52,12 +52,13 @@ func NewWebSocketClient(serverAddr string) (*WebSocketClient, error) {
 
 // readLoop reads messages from the server
 func (c *WebSocketClient) readLoop() {
+	log.Println("[WS-CLIENT] readLoop started")
 	defer close(c.recv)
 	for {
 		var wsMsg http.WebSocketMessage
 		if err := c.conn.ReadJSON(&wsMsg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket read error: %v", err)
+				log.Printf("[WS-CLIENT] WebSocket read error: %v", err)
 				select {
 				case c.errors <- err:
 				case <-c.closeDone:
@@ -66,8 +67,10 @@ func (c *WebSocketClient) readLoop() {
 			return
 		}
 
+		log.Printf("[WS-CLIENT] Received message: type=%s", wsMsg.Type)
 		select {
 		case c.recv <- &wsMsg:
+			log.Printf("[WS-CLIENT] Message sent to recv channel")
 		case <-c.closeDone:
 			return
 		}
@@ -76,15 +79,18 @@ func (c *WebSocketClient) readLoop() {
 
 // writeLoop writes messages to the server
 func (c *WebSocketClient) writeLoop() {
+	log.Println("[WS-CLIENT] writeLoop started")
 	for msg := range c.send {
+		log.Printf("[WS-CLIENT] Writing message: %T", msg)
 		if err := c.conn.WriteJSON(msg); err != nil {
-			log.Printf("WebSocket write error: %v", err)
+			log.Printf("[WS-CLIENT] WebSocket write error: %v", err)
 			select {
 			case c.errors <- err:
 			case <-c.closeDone:
 			}
 			return
 		}
+		log.Println("[WS-CLIENT] Message written successfully")
 	}
 }
 
@@ -130,11 +136,13 @@ func (c *WebSocketClient) CreateChannel(name string) error {
 
 // ListChannels requests the list of channels
 func (c *WebSocketClient) ListChannels() error {
+	log.Println("[WS-CLIENT] ListChannels called")
 	msg := http.WebSocketMessage{
 		Type: "list_channels",
 	}
 
 	c.send <- msg
+	log.Println("[WS-CLIENT] ListChannels message queued")
 	return nil
 }
 

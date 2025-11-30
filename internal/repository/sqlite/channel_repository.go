@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/hype-comms/hmm-chat/internal/domain"
@@ -21,6 +22,7 @@ func NewChannelRepository(db *Database) *ChannelRepository {
 
 // CreateChannel creates a new channel in the database
 func (r *ChannelRepository) CreateChannel(ctx context.Context, ch *domain.Channel) error {
+	log.Printf("[REPO] CreateChannel: name=%s, id=%s", ch.Name, ch.ID)
 	now := time.Now()
 	_, err := r.db.conn.ExecContext(ctx, `
 		INSERT INTO channels (id, name, created_at, updated_at)
@@ -30,13 +32,16 @@ func (r *ChannelRepository) CreateChannel(ctx context.Context, ch *domain.Channe
 	if err != nil {
 		// Check if it's a duplicate name error
 		if err.Error() == "UNIQUE constraint failed: channels.name" {
+			log.Printf("[REPO] CreateChannel failed: channel '%s' already exists", ch.Name)
 			return domain.ErrChannelAlreadyExists
 		}
+		log.Printf("[REPO] CreateChannel error: %v", err)
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
 	ch.CreatedAt = now
 	ch.UpdatedAt = now
+	log.Printf("[REPO] CreateChannel success: %s", ch.Name)
 	return nil
 }
 
@@ -72,12 +77,14 @@ func (r *ChannelRepository) GetChannel(ctx context.Context, id domain.ChannelID)
 
 // ListChannels returns all channels from the database
 func (r *ChannelRepository) ListChannels(ctx context.Context) ([]*domain.Channel, error) {
+	log.Println("[REPO] ListChannels")
 	rows, err := r.db.conn.QueryContext(ctx, `
 		SELECT id, name, created_at, updated_at
 		FROM channels
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
+		log.Printf("[REPO] ListChannels error: %v", err)
 		return nil, fmt.Errorf("failed to list channels: %w", err)
 	}
 	defer rows.Close()
@@ -92,6 +99,7 @@ func (r *ChannelRepository) ListChannels(ctx context.Context) ([]*domain.Channel
 
 		err := rows.Scan(&channelID, &name, &createdAt, &updatedAt)
 		if err != nil {
+			log.Printf("[REPO] ListChannels scan error: %v", err)
 			return nil, fmt.Errorf("failed to scan channel: %w", err)
 		}
 
@@ -104,9 +112,11 @@ func (r *ChannelRepository) ListChannels(ctx context.Context) ([]*domain.Channel
 	}
 
 	if err := rows.Err(); err != nil {
+		log.Printf("[REPO] ListChannels iteration error: %v", err)
 		return nil, fmt.Errorf("failed to iterate channels: %w", err)
 	}
 
+	log.Printf("[REPO] ListChannels success: found %d channels", len(channels))
 	return channels, nil
 }
 
