@@ -49,8 +49,22 @@ func (r *MessageRepository) GetMessage(ctx context.Context, id domain.MessageID)
 	return nil, domain.ErrMessageNotFound
 }
 
+// maxMessagesLimit is the maximum number of messages to return in a single query
+const maxMessagesLimit = 100
+
 // ListMessages retrieves messages from a channel with pagination
 func (r *MessageRepository) ListMessages(ctx context.Context, channelID domain.ChannelID, limit, offset int) ([]*domain.Message, error) {
+	// Validate and clamp pagination parameters
+	if limit <= 0 {
+		limit = 50 // Default limit
+	}
+	if limit > maxMessagesLimit {
+		limit = maxMessagesLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
