@@ -45,6 +45,7 @@ type Model struct {
 // NewModel creates a new TUI model
 func NewModel(wsClient *WebSocketClient) Model {
 	ti := textinput.New()
+	ti.Prompt = "> "
 	ti.Placeholder = "Type a message..."
 	ti.Focus()
 
@@ -88,11 +89,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "enter":
 			if m.view == viewChannelList {
-				if len(m.channels) > 0 {
+				text := m.input.Value()
+				if strings.HasPrefix(text, "/") {
+					m.handleCommand(text)
+					m.input.SetValue("")
+				} else if len(m.channels) > 0 {
 					m.currentChannelID = m.channels[0].ID
 					m.currentChannelName = m.channels[0].Name
 					m.view = viewChat
 					m.input.Focus()
+					m.input.SetValue("")
 					cmds = append(cmds, func() tea.Msg {
 						m.wsClient.Subscribe(m.currentChannelID)
 						m.wsClient.GetHistory(m.currentChannelID, 50, 0)
@@ -115,11 +121,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if m.view == viewChat {
-			newInput, cmd := m.input.Update(msg)
-			m.input = newInput
-			cmds = append(cmds, cmd)
-		}
+		// Forward key events to textinput
+		newInput, cmd := m.input.Update(msg)
+		m.input = newInput
+		cmds = append(cmds, cmd)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -176,7 +181,7 @@ func (m Model) viewChannelListScreen() string {
 		sb.WriteString(fmt.Sprintf("\nError: %s\n", m.lastError))
 	}
 
-	sb.WriteString("\n> ")
+	sb.WriteString("\n")
 	sb.WriteString(m.input.View())
 
 	return sb.String()
