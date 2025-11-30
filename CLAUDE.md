@@ -67,3 +67,7 @@ Types: `subscribe`, `send`, `create_channel`, `list_channels`, `history`, `unsub
 
 - `/create <name>` - Create a new channel
 - `/list` - List all channels
+
+## Git Operations
+
+Use the `git-ops` agent for all git operations (commits, pushes, pulls, branch management, etc.). This keeps the main context focused on development work.
