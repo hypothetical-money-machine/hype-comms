@@ -1,6 +1,8 @@
 package http
 
 import (
+	"encoding/json"
+
 	"github.com/hype-comms/hmm-chat/internal/domain"
 )
 
@@ -25,6 +27,7 @@ type SendMessageRequest struct {
 type MessageResponse struct {
 	ID        string `json:"id"`
 	ChannelID string `json:"channel_id"`
+	AuthorID  string `json:"author_id"`
 	Text      string `json:"text"`
 	CreatedAt string `json:"created_at"`
 }
@@ -48,6 +51,7 @@ func DomainMessageToResponse(msg *domain.Message) MessageResponse {
 	return MessageResponse{
 		ID:        string(msg.ID),
 		ChannelID: string(msg.ChannelID),
+		AuthorID:  string(msg.AuthorID),
 		Text:      msg.Text,
 		CreatedAt: msg.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
@@ -56,7 +60,7 @@ func DomainMessageToResponse(msg *domain.Message) MessageResponse {
 // WebSocketMessage is a message sent over WebSocket
 type WebSocketMessage struct {
 	Type    string          `json:"type"`
-	Payload interface{}     `json:"payload,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 	Error   string          `json:"error,omitempty"`
 }
 
@@ -68,6 +72,7 @@ type SubscribePayload struct {
 // SendMessagePayload is the payload for sending a message
 type SendMessagePayload struct {
 	ChannelID string `json:"channel_id"`
+	AuthorID  string `json:"author_id"`
 	Text      string `json:"text"`
 }
 
