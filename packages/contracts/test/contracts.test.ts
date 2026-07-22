@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   apiErrorEnvelopeSchema,
   conversationSchema,
+  createDevelopmentWelcomeMessageRequestSchema,
+  developmentIdentityNameSchema,
+  developmentWelcomeMessageEventSchema,
   messageSchema,
   sendMessageRequestSchema,
   systemConnectedEventSchema,
@@ -78,6 +81,32 @@ describe("entity contracts", () => {
 });
 
 describe("transport contracts", () => {
+  it("validates temporary development identities and welcome messages", () => {
+    expect(developmentIdentityNameSchema.parse("  Morgan  ")).toBe("Morgan");
+    expect(() => developmentIdentityNameSchema.parse("Morgan\nAdmin")).toThrow();
+
+    const request = createDevelopmentWelcomeMessageRequestSchema.parse({
+      clientMessageId: MESSAGE_ID,
+      authorName: "Morgan",
+      body: "Hello, welcome channel!",
+    });
+    expect(request).toMatchObject({ authorName: "Morgan" });
+
+    expect(
+      developmentWelcomeMessageEventSchema.parse({
+        version: 1,
+        type: "development.welcome_message_created",
+        message: {
+          id: MESSAGE_ID,
+          clientMessageId: MESSAGE_ID,
+          authorName: "Morgan",
+          body: "Hello, welcome channel!",
+          createdAt: NOW,
+        },
+      }),
+    ).toMatchObject({ type: "development.welcome_message_created" });
+  });
+
   it("validates the stable API error envelope", () => {
     expect(
       apiErrorEnvelopeSchema.parse({

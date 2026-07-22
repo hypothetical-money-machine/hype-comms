@@ -11,6 +11,7 @@ async function main(): Promise<void> {
     logger: createLoggerOptions(config),
     lifecycle,
     allowedOrigins: config.allowedOrigins,
+    enableDevelopmentChat: config.nodeEnv !== "production",
   });
 
   const shutdown = installGracefulShutdown({

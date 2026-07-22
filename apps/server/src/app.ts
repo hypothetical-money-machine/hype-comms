@@ -4,6 +4,8 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
+import { developmentChatRoutes } from "./modules/development/routes.js";
+import { DevelopmentWelcomeStore } from "./modules/development/welcome-store.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -13,6 +15,8 @@ export interface BuildAppOptions {
   readonly lifecycle?: Lifecycle;
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
+  readonly enableDevelopmentChat?: boolean;
+  readonly developmentWelcomeStore?: DevelopmentWelcomeStore;
 }
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -48,6 +52,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
         allowedOrigins,
         consumeTicket: options.consumeRealtimeTicket ?? denyRealtimeTickets,
       });
+      if (options.enableDevelopmentChat === true) {
+        await v1.register(developmentChatRoutes, {
+          allowedOrigins,
+          store: options.developmentWelcomeStore ?? new DevelopmentWelcomeStore(),
+        });
+      }
     },
     { prefix: "/v1" },
   );

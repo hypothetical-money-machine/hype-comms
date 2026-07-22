@@ -1,6 +1,12 @@
 import { once } from "node:events";
 
-import { apiErrorEnvelopeSchema, systemConnectedEventSchema } from "@hmm-chat/contracts";
+import {
+  apiErrorEnvelopeSchema,
+  developmentWelcomeHistorySchema,
+  developmentWelcomeMessageEventSchema,
+  developmentWelcomeMessageSchema,
+  systemConnectedEventSchema,
+} from "@hmm-chat/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
@@ -105,5 +111,87 @@ describe("realtime route", () => {
     expect(event.workspaceSequence).toBe("9");
     expect(event.delivery).toBe("at_least_once");
     expect(consumeTicket).toHaveBeenCalledOnce();
+  });
+});
+
+describe("development welcome channel", () => {
+  it("stores messages in memory and returns history", async () => {
+    const app = await buildApp({ enableDevelopmentChat: true });
+    apps.push(app);
+    const clientMessageId = "10000000-0000-4000-8000-000000000010";
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/development/welcome/messages",
+      payload: { clientMessageId, authorName: "Morgan", body: "Hello!" },
+    });
+    const history = await app.inject({
+      method: "GET",
+      url: "/v1/development/welcome/messages",
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(developmentWelcomeMessageSchema.parse(created.json())).toMatchObject({
+      clientMessageId,
+      authorName: "Morgan",
+      body: "Hello!",
+    });
+    expect(developmentWelcomeHistorySchema.parse(history.json()).messages).toHaveLength(1);
+  });
+
+  it("broadcasts created messages to connected desktop clients", async () => {
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      enableDevelopmentChat: true,
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/development/welcome/realtime`,
+      { origin: "app://bundle" },
+    );
+    await once(socket, "open");
+
+    const messagePromise = once(socket, "message");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/development/welcome/messages",
+      payload: {
+        clientMessageId: "10000000-0000-4000-8000-000000000011",
+        authorName: "Alex",
+        body: "Realtime hello",
+      },
+    });
+    const [data] = await messagePromise;
+    socket.close();
+
+    expect(created.statusCode).toBe(201);
+    expect(developmentWelcomeMessageEventSchema.parse(JSON.parse(data.toString()))).toMatchObject({
+      message: { authorName: "Alex", body: "Realtime hello" },
+    });
+  });
+
+  it("rejects invalid identities and keeps development routes opt-in", async () => {
+    const enabledApp = await buildApp({ enableDevelopmentChat: true });
+    const disabledApp = await buildApp();
+    apps.push(enabledApp, disabledApp);
+
+    const invalid = await enabledApp.inject({
+      method: "POST",
+      url: "/v1/development/welcome/messages",
+      payload: {
+        clientMessageId: "10000000-0000-4000-8000-000000000012",
+        authorName: "Morgan\nAdmin",
+        body: "Nope",
+      },
+    });
+    const absent = await disabledApp.inject({
+      method: "GET",
+      url: "/v1/development/welcome/messages",
+    });
+
+    expect(invalid.statusCode).toBe(400);
+    expect(apiErrorEnvelopeSchema.parse(invalid.json()).error.code).toBe("BAD_REQUEST");
+    expect(absent.statusCode).toBe(404);
   });
 });
