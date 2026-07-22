@@ -1,0 +1,35 @@
+{
+  "name": "@hmm-chat/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebuild": "npm run build --workspace @hmm-chat/contracts",
+    "build": "tsc -p tsconfig.json",
+    "predev": "npm run build --workspace @hmm-chat/contracts",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "pretest": "npm run build --workspace @hmm-chat/contracts",
+    "test": "vitest run",
+    "pretypecheck": "npm run build --workspace @hmm-chat/contracts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@fastify/cors": "11.3.0",
+    "@fastify/websocket": "11.3.0",
+    "@hmm-chat/contracts": "*",
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/ws": "^8.18.0",
+    "tsx": "4.23.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10",
+    "ws": "^8.18.0"
+  }
+}

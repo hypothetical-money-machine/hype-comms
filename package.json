@@ -1,0 +1,47 @@
+{
+  "name": "hmm-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop-first, realtime team chat for Hypothetical Money Machine.",
+  "license": "UNLICENSED",
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": "24.x",
+    "npm": ">=11.16 <12"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "dev": "concurrently -k -s first -n server,desktop \"npm run dev:server\" \"npm run dev:desktop\"",
+    "dev:desktop": "npm run dev --workspace @hmm-chat/desktop",
+    "dev:server": "npm run dev --workspace @hmm-chat/server",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings=0",
+    "package:desktop": "npm run package --workspace @hmm-chat/desktop",
+    "start:server": "npm run start --workspace @hmm-chat/server",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify:desktop-package": "node scripts/verify-desktop-package.mjs"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.2.1",
+    "@electron/fuses": "2.1.3",
+    "@eslint/js": "10.0.1",
+    "concurrently": "9.2.4",
+    "eslint": "10.7.0",
+    "globals": "17.7.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0"
+  }
+}

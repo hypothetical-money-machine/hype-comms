@@ -1,190 +1,67 @@
 # HMM Chat
 
-A real-time chat system built with Go, WebSockets, and a terminal UI client.
+HMM Chat is a desktop-first team chat product for a private Hypothetical Money Machine
+pilot. The first release targets macOS, Windows, and Linux with an Electron client and a
+server-authoritative realtime backend.
 
-## Features
+The repository is in its foundation milestone: it contains the secure desktop shell,
+shared wire contracts, and API bootstrap—not a feature-complete chat service yet. See
+[ROADMAP.md](ROADMAP.md) for delivery milestones and [docs/architecture.md](docs/architecture.md)
+for the implementation contract.
 
-- **API Server**: WebSocket-based chat server with SQLite persistence
-- **TUI Client**: Interactive terminal user interface built with Bubble Tea
-- **Channels**: Create and manage chat channels
-- **Real-time Broadcasting**: Messages broadcast instantly to all connected clients
-- **Message History**: Retrieve historical messages from any channel
-- **Clean Architecture**: Domain-driven design with clear separation of concerns
+## Repository layout
 
-## Quick Start
-
-### Prerequisites
-
-- Go 1.21+
-- SQLite3 (included in build)
-
-### Build
-
-```bash
-make build
+```text
+apps/desktop       Electron + React desktop client
+apps/server        Fastify HTTP/WebSocket service
+packages/contracts Versioned Zod schemas and shared TypeScript types
+docs               Architecture and security decisions
 ```
 
-Or build individually:
+## Prerequisites
 
-```bash
-go build -o bin/server ./cmd/server
-go build -o bin/client ./cmd/client
-```
+- Node.js 24.18.x (LTS)
+- npm 11.16.x
 
-### Run Server
+Native desktop packaging also needs the host platform's packaging tools. In particular,
+Debian package creation through electron-builder requires a `libcrypt.so.1` compatibility
+library; the native GitHub Actions packaging jobs are the canonical smoke test.
 
-```bash
-# Using make
-make run-server
-
-# Or directly
-./bin/server
-
-# Or with go run (development)
-make dev-server
-```
-
-The server will start on `localhost:8080` and create a `chat.db` file for message storage.
-
-### Run Client
-
-In a separate terminal:
-
-```bash
-# Using make
-make run-client
-
-# Or directly
-./bin/client
-
-# Or with go run (development)
-make dev-client
-```
-
-## Usage
-
-### Terminal UI Client
-
-The TUI client provides an interactive interface for chatting.
-
-**Main Screen (Channel List)**:
-- `Enter` - Join the first channel
-- `/create <name>` - Create a new channel
-- `/list` - Refresh channel list
-- `q` - Quit
-
-**Chat Screen**:
-- Type message and press `Enter` to send
-- `Tab` - Switch back to channel list
-- `q` - Quit
-
-### WebSocket Protocol
-
-The server accepts WebSocket connections at `/ws`. Messages are JSON with the following format:
-
-#### Client → Server
-
-```json
-{
-  "type": "message",
-  "payload": {
-    "channel_id": "channel-uuid",
-    "text": "Hello!"
-  }
-}
-```
-
-Message types:
-- `message` - Send a message to a channel
-- `subscribe` - Subscribe to a channel (get real-time updates)
-- `create_channel` - Create a new channel
-- `list_channels` - Get all channels
-- `history` - Get message history for a channel
-- `unsubscribe` - Unsubscribe from a channel
-
-#### Server → Client
-
-```json
-{
-  "type": "message",
-  "payload": {
-    "id": "message-uuid",
-    "channel_id": "channel-uuid",
-    "text": "Hello!",
-    "created_at": "2025-11-29T12:34:56Z"
-  }
-}
-```
-
-Response types:
-- `message` - New message received
-- `channels_list` - List of available channels
-- `history` - Message history for a channel
-- `channel_created` - New channel created
-- `subscribed` - Successfully subscribed to a channel
-- `error` - Error message
-
-## Architecture
-
-The project follows clean architecture principles:
-
-```
-internal/
-├── domain/              # Core business logic (entities, validation, errors)
-├── usecase/             # Application logic (channels, messages, broadcasting)
-├── repository/          # Data access layer (SQLite, in-memory)
-├── platform/            # Infrastructure (broadcaster, config, logger)
-└── transport/           # Interface adapters (HTTP, WebSocket, TUI)
-```
-
-### Key Components
-
-- **Domain**: `Channel` and `Message` entities with validation rules
-- **UseCases**: `ChannelUseCase` and `MessageUseCase` orchestrate business logic
-- **Repositories**: Implement channel and message persistence
-- **Broadcaster**: In-memory pub/sub for real-time message distribution
-- **WebSocket Server**: Handles client connections and message protocol
-- **TUI Client**: Bubble Tea application for terminal interaction
-
-## Database
-
-The server uses SQLite with automatic migrations. The database file (`chat.db`) is created automatically on first run.
-
-**Tables**:
-- `channels` - Stores channel metadata
-- `messages` - Stores messages with timestamps
-- `schema_versions` - Tracks applied migrations
+The repository pins the expected runtime in `.node-version` and `.nvmrc`.
 
 ## Development
 
-### Run Tests
-
 ```bash
-make test
+npm ci
+npm run dev
 ```
 
-### Clean Up
+Run one process at a time with `npm run dev:server` or `npm run dev:desktop`.
+
+## Verification
 
 ```bash
-make clean
+npm run check
+npm run package:desktop
 ```
 
-Removes binaries and database files.
+`check` runs formatting, linting, type checks, unit tests, and production builds across all
+workspaces. Desktop installers must also be exercised on native macOS, Windows, and Linux
+runners before release.
 
-## Notes
+## Prototype history
 
-- No user authentication - all messages are anonymous
-- Single server instance (in-memory broadcaster)
-- WebSocket connections are text-based JSON messages
-- Message history is paginated (default 50 messages, max 100)
+The original Go WebSocket server and Bubble Tea client remain recoverable at the annotated
+tag `prototype-go-tui-2025-11-30`. The Electron-first rebuild continues on `main` without
+rewriting that history.
 
-## Future Enhancements
+## Status and scope
 
-- User authentication and identification
-- Private messages
-- Message editing and deletion
-- User presence and typing indicators
-- Persistent user settings
-- Multi-server support with Redis broadcaster
-- Rate limiting
-- Message reactions
+The pilot is intentionally bounded to one invited workspace and up to 25 people. Its core
+scope is channels, 1:1 direct messages, threads, reactions, mentions, unread state, file
+attachments, search, native notifications, and reconnect-safe offline sends. Voice/video,
+bots, workflow automation, enterprise identity, federation, mobile clients, and Slack import
+are deferred until pilot evidence justifies them.
+
+This is a private, unlicensed repository. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md) before making changes.
