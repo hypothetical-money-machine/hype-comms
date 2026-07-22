@@ -4,6 +4,7 @@ out/
 release/
 coverage/
 .vite/
+.jj/
 *.tsbuildinfo
 
 .env

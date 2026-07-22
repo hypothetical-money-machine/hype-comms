@@ -38,6 +38,23 @@ for IPC validation, authorization, configuration, and wire contracts. Target a w
 with `npm test --workspace @hmm-chat/server -- config.test.ts`. Run `npm run check` before
 every pull request; desktop packaging changes also require the relevant native smoke job.
 
+## Version Control (Jujutsu)
+
+This checkout is a colocated Jujutsu/Git repository. Use `jj` for normal version-control work;
+it stores Git-compatible commits and can work with the existing `origin` remote.
+
+- Inspect work with `jj status` and `jj log`.
+- Update from the remote with `jj git fetch`, then rebase or merge using JJ as appropriate.
+- Describe the current change with `jj describe -m "<message>"`; create a successor change with
+  `jj new`.
+- Create or update a bookmark for work to publish, then push it with
+  `jj git push --bookmark <bookmark>`.
+- Before publishing, inspect `jj diff` and run the relevant checks. Keep commits focused and use
+  the Conventional Commit format below.
+
+Avoid interleaving mutating `git` and `jj` commands. If Git must make a change, run
+`jj git import` before continuing with JJ.
+
 ## Commit & Pull Request Guidelines
 
 Follow the existing Conventional Commit style: `feat(scope): ...`, `fix: ...`,
