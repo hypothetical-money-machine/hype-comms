@@ -3,6 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  createDevelopmentWelcomeMessagesUrl,
+  createDevelopmentWelcomeRealtimeUrl,
   createServerHealthUrl,
   DEFAULT_DEVELOPMENT_API_ORIGIN,
   DEFAULT_PRODUCTION_API_ORIGIN,
@@ -137,6 +139,12 @@ describe("API origin validation", () => {
     );
     expect(createServerHealthUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
       "https://api.chat.hypemm.com/livez",
+    );
+    expect(createDevelopmentWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
+      "http://127.0.0.1:3000/v1/development/welcome/messages",
+    );
+    expect(createDevelopmentWelcomeRealtimeUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "wss://api.chat.hypemm.com/v1/development/welcome/realtime",
     );
   });
 

@@ -53,10 +53,20 @@ Artifacts land in `apps/desktop/release/`.
 
 ```bash
 npm ci
-npm run dev
+npm run dev -- --name Morgan
 ```
 
-Run one process at a time with `npm run dev:server` or `npm run dev:desktop`.
+The temporary development identity is supplied by `--name`. The `#welcome` channel works
+across connected clients, but its in-memory history resets whenever the server restarts.
+With the first client still running, open a second terminal and join the same local channel
+under another identity:
+
+```bash
+npm run dev:join -- --name Alex
+```
+
+Run one process at a time with `npm run dev:server` or set `HMM_CHAT_NAME` and run
+`npm run dev:desktop`.
 
 ## Verification
 

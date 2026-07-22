@@ -64,7 +64,9 @@ export default defineConfig(({ command }) => {
       },
     },
     preload: {
-      plugins: [externalizeDepsPlugin()],
+      // The sandboxed preload cannot require arbitrary packages at runtime. Bundle the
+      // validators used at the IPC boundary instead of externalizing them.
+      plugins: [externalizeDepsPlugin({ exclude: ["@hmm-chat/contracts", "zod"] })],
       build: {
         outDir: path.join(desktopRoot, "dist/preload"),
         rollupOptions: {

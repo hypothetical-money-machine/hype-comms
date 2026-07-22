@@ -1,12 +1,19 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  developmentIdentitySchema,
+  messageBodySchema,
+  type DevelopmentWelcomeMessage,
+} from "@hmm-chat/contracts";
 import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
 
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import type { NotificationAction, ServerStatus } from "../shared/desktop-api";
+import { resolveDevelopmentIdentity } from "./development-identity";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -17,6 +24,7 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
+import { WelcomeTransport } from "./welcome-transport";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -36,6 +44,27 @@ let rendererReady = false;
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
 const pendingNotificationActions: NotificationAction[] = [];
+const pendingWelcomeMessages: DevelopmentWelcomeMessage[] = [];
+const developmentIdentity = resolveDevelopmentIdentity(
+  process.argv,
+  process.env,
+  app.isPackaged ? "Guest" : undefined,
+);
+if (!app.isPackaged) {
+  const identityProfile = createHash("sha256")
+    .update(developmentIdentity.name)
+    .digest("hex")
+    .slice(0, 16);
+  app.setPath("userData", path.join(app.getPath("userData"), `development-${identityProfile}`));
+}
+const welcomeTransport = app.isPackaged
+  ? null
+  : new WelcomeTransport({
+      apiOrigin: __HMM_CHAT_API_ORIGIN__,
+      identity: developmentIdentity,
+      rendererOrigin: "http://127.0.0.1:5173",
+      onMessage: deliverWelcomeMessage,
+    });
 
 function sendToRenderer(channel: string, payload: unknown): boolean {
   if (mainWindow === null || mainWindow.isDestroyed() || !rendererReady) {
@@ -53,11 +82,23 @@ export function deliverNotificationAction(action: NotificationAction): void {
   }
 }
 
+function deliverWelcomeMessage(message: DevelopmentWelcomeMessage): void {
+  if (!sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message)) {
+    pendingWelcomeMessages.push(message);
+  }
+}
+
 function flushPendingRendererEvents(): void {
   while (pendingNotificationActions.length > 0) {
     const action = pendingNotificationActions.shift();
     if (action !== undefined) {
       sendToRenderer(DESKTOP_CHANNELS.notificationAction, action);
+    }
+  }
+  while (pendingWelcomeMessages.length > 0) {
+    const message = pendingWelcomeMessages.shift();
+    if (message !== undefined) {
+      sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message);
     }
   }
 }
@@ -175,6 +216,33 @@ function registerIpcHandlers(): void {
     serverStatusRequest = request;
     return request;
   });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.identity);
+  ipcMain.handle(DESKTOP_CHANNELS.identity, (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted identity IPC sender");
+    }
+    return developmentIdentitySchema.parse(developmentIdentity);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeHistory);
+  ipcMain.handle(DESKTOP_CHANNELS.welcomeHistory, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted welcome-history IPC sender");
+    }
+    return (await welcomeTransport?.getMessages()) ?? [];
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeSend);
+  ipcMain.handle(DESKTOP_CHANNELS.welcomeSend, async (event, body: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted welcome-send IPC sender");
+    }
+    if (welcomeTransport === null) {
+      throw new Error("Temporary welcome chat is available only in development");
+    }
+    return welcomeTransport.sendMessage(messageBodySchema.parse(body));
+  });
 }
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {
@@ -291,6 +359,7 @@ if (!hasSingleInstanceLock) {
       lockDownSession(session.defaultSession);
       await installBundledRendererProtocol(rendererRoot);
       registerIpcHandlers();
+      welcomeTransport?.start();
 
       if (app.isPackaged) {
         app.setAsDefaultProtocolClient("hmm-chat");
@@ -322,5 +391,9 @@ if (!hasSingleInstanceLock) {
     if (process.platform !== "darwin") {
       app.quit();
     }
+  });
+
+  app.on("before-quit", () => {
+    welcomeTransport?.stop();
   });
 }

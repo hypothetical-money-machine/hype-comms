@@ -21,7 +21,8 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
-    "dev": "concurrently -k -s first -n server,desktop \"npm run dev:server\" \"npm run dev:desktop\"",
+    "dev": "node scripts/dev.mjs",
+    "dev:join": "node scripts/dev-join.mjs",
     "dev:desktop": "npm run dev --workspace @hmm-chat/desktop",
     "dev:server": "npm run dev --workspace @hmm-chat/server",
     "format": "prettier --write .",

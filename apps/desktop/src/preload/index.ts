@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
+import {
+  developmentIdentitySchema,
+  developmentWelcomeHistorySchema,
+  developmentWelcomeMessageSchema,
+  messageBodySchema,
+  type DevelopmentWelcomeMessage,
+} from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import type {
@@ -44,6 +51,25 @@ const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
+  getIdentity: async () =>
+    developmentIdentitySchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.identity)),
+  getWelcomeMessages: async () => {
+    const messages: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeHistory);
+    return developmentWelcomeHistorySchema.parse({ messages }).messages;
+  },
+  sendWelcomeMessage: async (body: string) => {
+    const validatedBody = messageBodySchema.parse(body);
+    return developmentWelcomeMessageSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeSend, validatedBody),
+    );
+  },
+  onWelcomeMessage: (listener: (message: DevelopmentWelcomeMessage) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.welcomeMessage,
+      listener,
+      (value): value is DevelopmentWelcomeMessage =>
+        developmentWelcomeMessageSchema.safeParse(value).success,
+    ),
   onNotificationAction: (listener: (action: NotificationAction) => void) =>
     subscribe(DESKTOP_CHANNELS.notificationAction, listener, isNotificationAction),
 });

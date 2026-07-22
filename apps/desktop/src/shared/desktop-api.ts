@@ -1,3 +1,5 @@
+import type { DevelopmentIdentity, DevelopmentWelcomeMessage } from "@hmm-chat/contracts";
+
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
 export interface NotificationAction {
@@ -9,6 +11,10 @@ export type ServerStatus = "reachable" | "unreachable";
 
 export interface ChatTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
+  readonly getIdentity: () => Promise<DevelopmentIdentity>;
+  readonly getWelcomeMessages: () => Promise<readonly DevelopmentWelcomeMessage[]>;
+  readonly sendWelcomeMessage: (body: string) => Promise<DevelopmentWelcomeMessage>;
+  readonly onWelcomeMessage: (listener: (message: DevelopmentWelcomeMessage) => void) => () => void;
 }
 
 export interface DesktopApi extends ChatTransport {

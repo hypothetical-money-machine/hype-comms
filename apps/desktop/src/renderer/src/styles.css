@@ -128,6 +128,11 @@ h1 {
   font-size: 0.72rem;
 }
 
+.sidebar footer strong {
+  color: #dce3f4;
+  font-size: 0.8rem;
+}
+
 .server-status {
   display: flex;
   align-items: center;
@@ -176,6 +181,51 @@ h1 {
   text-align: center;
 }
 
+.message-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 28px;
+}
+
+.message {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 0;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  color: #0b1020;
+  background: #91e8c8;
+  border-radius: 11px;
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+
+.message header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+.message time {
+  color: #6f7b97;
+  font-size: 0.7rem;
+}
+
+.message p {
+  margin-bottom: 0;
+  color: #d2d8e8;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .empty-mark {
   width: 54px;
   height: 54px;
@@ -219,6 +269,12 @@ h1 {
   background: #1d2943;
   border: 0;
   border-radius: 8px;
+}
+
+.composer button:not(:disabled) {
+  color: #0b1020;
+  background: #91e8c8;
+  cursor: pointer;
 }
 
 .sr-only {

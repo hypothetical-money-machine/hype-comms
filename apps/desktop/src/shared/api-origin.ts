@@ -42,3 +42,13 @@ export function normalizeProductionApiOrigin(value: string): string | null {
 export function createServerHealthUrl(apiOrigin: string): string {
   return new URL("/livez", apiOrigin).href;
 }
+
+export function createDevelopmentWelcomeMessagesUrl(apiOrigin: string): string {
+  return new URL("/v1/development/welcome/messages", apiOrigin).href;
+}
+
+export function createDevelopmentWelcomeRealtimeUrl(apiOrigin: string): string {
+  const url = new URL("/v1/development/welcome/realtime", apiOrigin);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
+}
