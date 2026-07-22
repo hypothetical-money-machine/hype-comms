@@ -31,8 +31,8 @@ The repository pins the expected runtime in `.node-version` and `.nvmrc`.
 
 ### CachyOS / Arch Linux
 
-This host already has `fnm`. Install the Node version manager and the legacy crypt library
-needed by electron-builder's Debian packager, then use the repository-pinned Node release:
+Install the Node version manager and the legacy crypt library needed by electron-builder's
+Debian packager, then use the repository-pinned Node release:
 
 ```bash
 sudo pacman -S --needed fnm libxcrypt-compat
