@@ -62,7 +62,7 @@ if (asarPaths.length === 0) {
 }
 
 for (const asarPath of asarPaths) {
-  const entries = new Set(listPackage(asarPath));
+  const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
   for (const requiredEntry of requiredAsarEntries) {
     if (!entries.has(requiredEntry)) {
       throw new Error(`${asarPath} is missing ${requiredEntry}`);

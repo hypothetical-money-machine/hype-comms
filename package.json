@@ -28,6 +28,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
     "package:desktop": "npm run package --workspace @hmm-chat/desktop",
+    "package:desktop:appimage": "npm run package:linux:appimage --workspace @hmm-chat/desktop",
     "start:server": "npm run start --workspace @hmm-chat/server",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",

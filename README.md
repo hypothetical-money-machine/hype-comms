@@ -29,6 +29,26 @@ library; the native GitHub Actions packaging jobs are the canonical smoke test.
 
 The repository pins the expected runtime in `.node-version` and `.nvmrc`.
 
+### CachyOS / Arch Linux
+
+This host already has `fnm`. Install the Node version manager and the legacy crypt library
+needed by electron-builder's Debian packager, then use the repository-pinned Node release:
+
+```bash
+sudo pacman -S --needed fnm libxcrypt-compat
+eval "$(fnm env)"
+fnm install 24.18.0
+fnm use 24.18.0
+npm ci
+npm run check
+npm run package:desktop
+npm run verify:desktop-package
+```
+
+The AppImage does not need the `libcrypt.so.1` compatibility layer to build. To produce only
+that artifact, run `npm run package:desktop:appimage` instead of `npm run package:desktop`.
+Artifacts land in `apps/desktop/release/`.
+
 ## Development
 
 ```bash
