@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import type { DogfoodMessage, DogfoodSessionState } from "@hmm-chat/contracts";
+import type { ChatMessage, ChatSessionState } from "@hmm-chat/contracts";
 
 import type { DesktopApi, ServerStatus } from "../../shared/desktop-api";
 
@@ -10,9 +10,9 @@ interface AppProps {
 }
 
 function mergeMessages(
-  current: readonly DogfoodMessage[],
-  incoming: readonly DogfoodMessage[],
-): DogfoodMessage[] {
+  current: readonly ChatMessage[],
+  incoming: readonly ChatMessage[],
+): ChatMessage[] {
   const messages = new Map(current.map((message) => [message.id, message]));
   for (const message of incoming) {
     messages.set(message.id, message);
@@ -35,7 +35,7 @@ function SignIn({
   onSignedIn,
 }: {
   readonly client: DesktopApi;
-  readonly onSignedIn: (state: DogfoodSessionState) => void;
+  readonly onSignedIn: (state: ChatSessionState) => void;
 }) {
   const [name, setName] = useState("");
   const [accessCode, setAccessCode] = useState("");
@@ -125,8 +125,8 @@ export function App({ client }: AppProps) {
   const [version, setVersion] = useState<string>("…");
   const [status, setStatus] = useState<string>("Connecting to #welcome…");
   const [serverStatus, setServerStatus] = useState<ServerStatus>("unreachable");
-  const [session, setSession] = useState<DogfoodSessionState | null>(null);
-  const [messages, setMessages] = useState<DogfoodMessage[]>([]);
+  const [session, setSession] = useState<ChatSessionState | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const messageList = useRef<HTMLDivElement>(null);
@@ -206,7 +206,7 @@ export function App({ client }: AppProps) {
     if (signedIn && !sending) messageInput.current?.focus();
   }, [signedIn, sending]);
 
-  const handleSignedIn = useCallback((next: DogfoodSessionState) => {
+  const handleSignedIn = useCallback((next: ChatSessionState) => {
     setSession(next);
     setStatus("Connecting to #welcome…");
   }, []);

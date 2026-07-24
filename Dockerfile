@@ -45,7 +45,7 @@ FROM base AS runtime
 ENV NODE_ENV=production \
     HMM_HOST=0.0.0.0 \
     HMM_PORT=3000 \
-    HMM_DOGFOOD_DATA_PATH=/data/hmm-chat.sqlite
+    HMM_CHAT_DATA_PATH=/data/hmm-chat.sqlite
 
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=production-deps /app/package.json ./package.json

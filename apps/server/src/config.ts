@@ -14,9 +14,9 @@ const rawConfigSchema = z
     shutdownTimeoutMs: z.coerce.number().int().min(100).max(60_000).default(10_000),
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
-    dogfoodEnabled: z.enum(["true", "false"]).default("false"),
-    dogfoodAccessCode: optionalString(z.string().min(16)),
-    dogfoodDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
+    chatEnabled: z.enum(["true", "false"]).default("false"),
+    chatAccessCode: optionalString(z.string().min(16)),
+    chatDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
     webRoot: optionalString(z.string().min(1)),
   })
   .strict();
@@ -50,7 +50,7 @@ export interface ServerConfig {
   readonly shutdownTimeoutMs: number;
   readonly allowedOrigins: readonly string[];
   readonly publicApiUrl: string;
-  readonly dogfood: {
+  readonly chat: {
     readonly enabled: boolean;
     readonly accessCode?: string;
     readonly dataPath: string;
@@ -82,9 +82,9 @@ export function loadConfig(
     shutdownTimeoutMs: env.HMM_SHUTDOWN_TIMEOUT_MS,
     allowedOrigins: env.HMM_ALLOWED_ORIGINS,
     publicApiUrl: env.HMM_PUBLIC_API_URL,
-    dogfoodEnabled: env.HMM_DOGFOOD_ENABLED,
-    dogfoodAccessCode: env.HMM_DOGFOOD_ACCESS_CODE,
-    dogfoodDataPath: env.HMM_DOGFOOD_DATA_PATH,
+    chatEnabled: env.HMM_CHAT_ENABLED,
+    chatAccessCode: env.HMM_CHAT_ACCESS_CODE,
+    chatDataPath: env.HMM_CHAT_DATA_PATH,
   });
 
   if (!result.success) {
@@ -93,8 +93,8 @@ export function loadConfig(
     );
   }
 
-  if (result.data.dogfoodEnabled === "true" && result.data.dogfoodAccessCode === undefined) {
-    throw new ConfigError(["dogfoodAccessCode: Required when dogfood mode is enabled"]);
+  if (result.data.chatEnabled === "true" && result.data.chatAccessCode === undefined) {
+    throw new ConfigError(["chatAccessCode: Required when chat is enabled"]);
   }
 
   const defaultOrigins =
@@ -143,12 +143,12 @@ export function loadConfig(
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,
-    dogfood: {
-      enabled: result.data.dogfoodEnabled === "true",
-      ...(result.data.dogfoodAccessCode === undefined
+    chat: {
+      enabled: result.data.chatEnabled === "true",
+      ...(result.data.chatAccessCode === undefined
         ? {}
-        : { accessCode: result.data.dogfoodAccessCode }),
-      dataPath: result.data.dogfoodDataPath,
+        : { accessCode: result.data.chatAccessCode }),
+      dataPath: result.data.chatDataPath,
       cookieSecure: parsedPublicApiUrl.protocol === "https:",
     },
     ...(result.data.webRoot === undefined ? {} : { webRoot: result.data.webRoot }),

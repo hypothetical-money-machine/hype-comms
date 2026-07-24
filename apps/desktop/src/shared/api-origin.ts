@@ -51,15 +51,15 @@ export function createServerHealthUrl(apiOrigin: string): string {
 }
 
 export function createSessionUrl(apiOrigin: string): string {
-  return new URL("/v1/dogfood/session", apiOrigin).href;
+  return new URL("/v1/chat/session", apiOrigin).href;
 }
 
 export function createWelcomeMessagesUrl(apiOrigin: string): string {
-  return new URL("/v1/dogfood/welcome/messages", apiOrigin).href;
+  return new URL("/v1/chat/welcome/messages", apiOrigin).href;
 }
 
 export function createWelcomeRealtimeUrl(apiOrigin: string): string {
-  const url = new URL("/v1/dogfood/welcome/realtime", apiOrigin);
+  const url = new URL("/v1/chat/welcome/realtime", apiOrigin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SignInThrottle } from "../src/modules/dogfood/throttle.js";
+import { SignInThrottle } from "../src/modules/chat/throttle.js";
 
 describe("sign-in throttle", () => {
   it("allows attempts until the failure budget is spent", () => {

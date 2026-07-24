@@ -2,25 +2,25 @@ import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { Lifecycle } from "./lifecycle.js";
 import { createLoggerOptions } from "./logging.js";
-import { DogfoodChatStore } from "./modules/dogfood/store.js";
+import { ChatStore } from "./modules/chat/store.js";
 import { installGracefulShutdown } from "./shutdown.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const lifecycle = new Lifecycle();
-  const dogfoodChat =
-    config.dogfood.enabled && config.dogfood.accessCode !== undefined
+  const chat =
+    config.chat.enabled && config.chat.accessCode !== undefined
       ? {
-          accessCode: config.dogfood.accessCode,
-          store: new DogfoodChatStore(config.dogfood.dataPath),
-          cookieSecure: config.dogfood.cookieSecure,
+          accessCode: config.chat.accessCode,
+          store: new ChatStore(config.chat.dataPath),
+          cookieSecure: config.chat.cookieSecure,
         }
       : undefined;
   const app = await buildApp({
     logger: createLoggerOptions(config),
     lifecycle,
     allowedOrigins: config.allowedOrigins,
-    ...(dogfoodChat === undefined ? {} : { dogfoodChat }),
+    ...(chat === undefined ? {} : { chat }),
     ...(config.webRoot === undefined ? {} : { webRoot: config.webRoot }),
   });
 

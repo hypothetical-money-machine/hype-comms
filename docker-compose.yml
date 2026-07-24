@@ -1,6 +1,6 @@
-# Single-service deployment for the weekend dogfood server.
+# Single-service deployment for the chat server.
 #
-# Copy .env.example to .env and set HMM_DOGFOOD_ACCESS_CODE before starting. The access code is
+# Copy .env.example to .env and set HMM_CHAT_ACCESS_CODE before starting. The access code is
 # required: compose refuses to start rather than falling back to an insecure default.
 #
 #   docker compose up --build -d
@@ -26,9 +26,9 @@ services:
       # it also decides whether session cookies carry the Secure attribute.
       HMM_PUBLIC_API_URL: ${HMM_PUBLIC_API_URL:-https://chat.hypemm.com}
       HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-https://chat.hypemm.com}
-      HMM_DOGFOOD_ENABLED: "true"
-      HMM_DOGFOOD_ACCESS_CODE: ${HMM_DOGFOOD_ACCESS_CODE:?set HMM_DOGFOOD_ACCESS_CODE in .env}
-      HMM_DOGFOOD_DATA_PATH: /data/hmm-chat.sqlite
+      HMM_CHAT_ENABLED: "true"
+      HMM_CHAT_ACCESS_CODE: ${HMM_CHAT_ACCESS_CODE:?set HMM_CHAT_ACCESS_CODE in .env}
+      HMM_CHAT_DATA_PATH: /data/hmm-chat.sqlite
     volumes:
       - chat-data:/data
     read_only: true

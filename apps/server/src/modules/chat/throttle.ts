@@ -16,7 +16,7 @@ export interface SignInThrottleOptions {
  * Fixed-window throttle for access-code sign-in attempts.
  *
  * Only failures are counted, so a correct code never consumes budget. State is per-process and
- * in-memory: it is deliberately scoped to the single-replica dogfood deployment and resets on
+ * in-memory: it is deliberately scoped to the single-replica deployment and resets on
  * restart. Behind a reverse proxy every request shares the proxy's address unless Fastify is
  * configured to trust forwarded headers, which collapses this into a global budget.
  */

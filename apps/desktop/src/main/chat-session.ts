@@ -1,8 +1,8 @@
 import {
   apiErrorEnvelopeSchema,
-  dogfoodSessionRequestSchema,
-  dogfoodSessionSchema,
-  type DogfoodSessionState,
+  chatSignInRequestSchema,
+  chatIdentitySchema,
+  type ChatSessionState,
 } from "@hmm-chat/contracts";
 import { net, type Session } from "electron";
 
@@ -41,8 +41,8 @@ export class ChatSession {
   readonly #apiOrigin: string;
   readonly #session: Session;
   readonly #sessionUrl: string;
-  readonly #listeners = new Set<(state: DogfoodSessionState) => void>();
-  #state: DogfoodSessionState = { status: "signed-out" };
+  readonly #listeners = new Set<(state: ChatSessionState) => void>();
+  #state: ChatSessionState = { status: "signed-out" };
 
   constructor(options: { apiOrigin: string; session: Session }) {
     this.#apiOrigin = options.apiOrigin;
@@ -50,7 +50,7 @@ export class ChatSession {
     this.#sessionUrl = createSessionUrl(options.apiOrigin);
   }
 
-  get state(): DogfoodSessionState {
+  get state(): ChatSessionState {
     return this.#state;
   }
 
@@ -58,25 +58,25 @@ export class ChatSession {
     return this.#apiOrigin;
   }
 
-  subscribe(listener: (state: DogfoodSessionState) => void): () => void {
+  subscribe(listener: (state: ChatSessionState) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
 
-  #setState(state: DogfoodSessionState): void {
+  #setState(state: ChatSessionState): void {
     this.#state = state;
     for (const listener of this.#listeners) listener(state);
   }
 
   /** Re-reads the session from the server so a stored cookie survives an app restart. */
-  async restore(): Promise<DogfoodSessionState> {
+  async restore(): Promise<ChatSessionState> {
     try {
       const response = await this.#fetch(this.#sessionUrl, { method: "GET" });
       if (!response.ok) {
         this.#setState({ status: "signed-out" });
         return this.#state;
       }
-      const session = dogfoodSessionSchema.parse(await response.json());
+      const session = chatIdentitySchema.parse(await response.json());
       this.#setState({ status: "signed-in", name: session.name });
     } catch {
       // A restore failure is indistinguishable from an unreachable server; stay signed out and
@@ -86,8 +86,8 @@ export class ChatSession {
     return this.#state;
   }
 
-  async signIn(input: { name: string; accessCode: string }): Promise<DogfoodSessionState> {
-    const request = dogfoodSessionRequestSchema.parse(input);
+  async signIn(input: { name: string; accessCode: string }): Promise<ChatSessionState> {
+    const request = chatSignInRequestSchema.parse(input);
 
     let response: Response;
     try {
@@ -115,7 +115,7 @@ export class ChatSession {
     return this.#state;
   }
 
-  async signOut(): Promise<DogfoodSessionState> {
+  async signOut(): Promise<ChatSessionState> {
     try {
       await this.#fetch(this.#sessionUrl, { method: "DELETE" });
     } catch {

@@ -3,10 +3,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  dogfoodSessionRequestSchema,
+  chatSignInRequestSchema,
   messageBodySchema,
-  type DogfoodMessage,
-  type DogfoodSessionState,
+  type ChatMessage,
+  type ChatSessionState,
 } from "@hmm-chat/contracts";
 import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
@@ -47,7 +47,7 @@ let rendererReady = false;
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
 const pendingNotificationActions: NotificationAction[] = [];
-const pendingWelcomeMessages: DogfoodMessage[] = [];
+const pendingWelcomeMessages: ChatMessage[] = [];
 // Only a hint for the sign-in form. The server derives the real author from the session.
 const suggestedName = app.isPackaged ? "" : resolveSuggestedName(process.argv, process.env);
 if (!app.isPackaged && suggestedName !== "") {
@@ -73,13 +73,13 @@ export function deliverNotificationAction(action: NotificationAction): void {
   }
 }
 
-function deliverWelcomeMessage(message: DogfoodMessage): void {
+function deliverWelcomeMessage(message: ChatMessage): void {
   if (!sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message)) {
     pendingWelcomeMessages.push(message);
   }
 }
 
-function deliverSessionState(state: DogfoodSessionState): void {
+function deliverSessionState(state: ChatSessionState): void {
   sendToRenderer(DESKTOP_CHANNELS.sessionChanged, state);
   if (state.status === "signed-in") {
     chatTransport?.start();
@@ -229,7 +229,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionState, (event): DogfoodSessionState => {
+  ipcMain.handle(DESKTOP_CHANNELS.sessionState, (event): ChatSessionState => {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted session-state IPC sender");
     }
@@ -245,7 +245,7 @@ function registerIpcHandlers(): void {
       throw new Error("Chat is not configured");
     }
 
-    const parsed = dogfoodSessionRequestSchema.safeParse(request);
+    const parsed = chatSignInRequestSchema.safeParse(request);
     if (!parsed.success) {
       throw new Error("Enter a name and an access code");
     }

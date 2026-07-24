@@ -142,13 +142,13 @@ describe("API origin validation", () => {
       "https://api.chat.hypemm.com/livez",
     );
     expect(createSessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://api.chat.hypemm.com/v1/dogfood/session",
+      "https://api.chat.hypemm.com/v1/chat/session",
     );
     expect(createWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
-      "http://127.0.0.1:3000/v1/dogfood/welcome/messages",
+      "http://127.0.0.1:3000/v1/chat/welcome/messages",
     );
     expect(createWelcomeRealtimeUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "wss://api.chat.hypemm.com/v1/dogfood/welcome/realtime",
+      "wss://api.chat.hypemm.com/v1/chat/welcome/realtime",
     );
   });
 

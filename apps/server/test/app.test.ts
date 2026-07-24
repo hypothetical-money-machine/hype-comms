@@ -8,8 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
-import { DogfoodChatStore } from "../src/modules/dogfood/store.js";
-import { SignInThrottle } from "../src/modules/dogfood/throttle.js";
+import { ChatStore } from "../src/modules/chat/store.js";
+import { SignInThrottle } from "../src/modules/chat/throttle.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -39,7 +39,7 @@ describe("operational routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       headers: { "content-type": "application/json" },
       payload: "not json",
     });
@@ -78,7 +78,7 @@ describe("operational routes", () => {
   });
 });
 
-describe("dogfood web client", () => {
+describe("static web client", () => {
   it("serves the browser client without exposing server files", async () => {
     const webRoot = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-web-"));
     await writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>HMM Chat</title>");
@@ -146,38 +146,38 @@ describe("realtime route", () => {
   });
 });
 
-describe("weekend dogfood chat", () => {
+describe("chat channel", () => {
   it("requires the access code, derives authors from the session, and persists history", async () => {
-    const store = new DogfoodChatStore(":memory:");
+    const store = new ChatStore(":memory:");
     const app = await buildApp({
       allowedOrigins: ["https://chat.hypemm.com"],
-      dogfoodChat: { accessCode: "weekend-secret", store },
+      chat: { accessCode: "weekend-secret", store },
     });
     apps.push(app);
 
     const denied = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       payload: { name: "Morgan", accessCode: "wrong-secret" },
     });
     const signedIn = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       payload: { name: "Morgan", accessCode: "weekend-secret" },
     });
     const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
     const created = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/welcome/messages",
+      url: "/v1/chat/welcome/messages",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
       payload: {
         clientMessageId: "10000000-0000-4000-8000-000000000020",
-        body: "Dogfood hello",
+        body: "Chat hello",
       },
     });
     const history = await app.inject({
       method: "GET",
-      url: "/v1/dogfood/welcome/messages",
+      url: "/v1/chat/welcome/messages",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
     });
 
@@ -185,26 +185,26 @@ describe("weekend dogfood chat", () => {
     expect(signedIn.statusCode).toBe(204);
     expect(cookie).toBeDefined();
     expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({ authorName: "Morgan", body: "Dogfood hello" });
+    expect(created.json()).toMatchObject({ authorName: "Morgan", body: "Chat hello" });
     expect(history.json()).toMatchObject({ messages: [{ authorName: "Morgan" }] });
   });
 
   it("broadcasts messages to authenticated same-origin websocket clients", async () => {
-    const store = new DogfoodChatStore(":memory:");
+    const store = new ChatStore(":memory:");
     const app = await buildApp({
       allowedOrigins: ["https://chat.hypemm.com"],
-      dogfoodChat: { accessCode: "weekend-secret", store },
+      chat: { accessCode: "weekend-secret", store },
     });
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const signedIn = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       payload: { name: "Alex", accessCode: "weekend-secret" },
     });
     const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/dogfood/welcome/realtime`,
+      `${address.replace("http://", "ws://")}/v1/chat/welcome/realtime`,
       {
         headers: { cookie: `hmm_chat_session=${cookie?.value ?? ""}` },
         origin: "https://chat.hypemm.com",
@@ -215,28 +215,28 @@ describe("weekend dogfood chat", () => {
     const messagePromise = once(socket, "message");
     await app.inject({
       method: "POST",
-      url: "/v1/dogfood/welcome/messages",
+      url: "/v1/chat/welcome/messages",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
       payload: {
         clientMessageId: "10000000-0000-4000-8000-000000000021",
-        body: "Realtime dogfood",
+        body: "Realtime chat",
       },
     });
     const [data] = await messagePromise;
     socket.close();
 
     expect(JSON.parse(data.toString())).toMatchObject({
-      type: "dogfood.welcome_message_created",
-      message: { authorName: "Alex", body: "Realtime dogfood" },
+      type: "chat.welcome_message_created",
+      message: { authorName: "Alex", body: "Realtime chat" },
     });
   });
 });
 
-describe("dogfood session security", () => {
+describe("chat session security", () => {
   async function signIn(app: Awaited<ReturnType<typeof buildApp>>, name: string, code: string) {
     const response = await app.inject({
       method: "POST",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       payload: { name, accessCode: code },
     });
     return {
@@ -247,17 +247,17 @@ describe("dogfood session security", () => {
 
   it("rejects a cookie signed by a different server secret", async () => {
     const app = await buildApp({
-      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(":memory:") },
+      chat: { accessCode: "weekend-secret-code", store: new ChatStore(":memory:") },
     });
     const other = await buildApp({
-      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(":memory:") },
+      chat: { accessCode: "weekend-secret-code", store: new ChatStore(":memory:") },
     });
     apps.push(app, other);
 
     const { cookie } = await signIn(other, "Morgan", "weekend-secret-code");
     const replayed = await app.inject({
       method: "GET",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
     });
 
@@ -266,16 +266,16 @@ describe("dogfood session security", () => {
   });
 
   it("invalidates existing sessions when the access code is rotated", async () => {
-    const store = new DogfoodChatStore(":memory:");
-    const before = await buildApp({ dogfoodChat: { accessCode: "original-access-code", store } });
+    const store = new ChatStore(":memory:");
+    const before = await buildApp({ chat: { accessCode: "original-access-code", store } });
     apps.push(before);
     const { cookie } = await signIn(before, "Morgan", "original-access-code");
 
-    const after = await buildApp({ dogfoodChat: { accessCode: "rotated-access-code", store } });
+    const after = await buildApp({ chat: { accessCode: "rotated-access-code", store } });
     apps.push(after);
     const replayed = await after.inject({
       method: "GET",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
     });
 
@@ -288,19 +288,19 @@ describe("dogfood session security", () => {
     const filename = path.join(directory, "chat.sqlite");
 
     const first = await buildApp({
-      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(filename) },
+      chat: { accessCode: "weekend-secret-code", store: new ChatStore(filename) },
     });
     apps.push(first);
     const { cookie } = await signIn(first, "Morgan", "weekend-secret-code");
     await first.close();
 
     const second = await buildApp({
-      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(filename) },
+      chat: { accessCode: "weekend-secret-code", store: new ChatStore(filename) },
     });
     apps.push(second);
     const restored = await second.inject({
       method: "GET",
-      url: "/v1/dogfood/session",
+      url: "/v1/chat/session",
       cookies: { hmm_chat_session: cookie?.value ?? "" },
     });
     await rm(directory, { recursive: true, force: true });
@@ -311,16 +311,16 @@ describe("dogfood session security", () => {
 
   it("omits Secure when the deployment is not served over HTTPS", async () => {
     const secure = await buildApp({
-      dogfoodChat: {
+      chat: {
         accessCode: "weekend-secret-code",
-        store: new DogfoodChatStore(":memory:"),
+        store: new ChatStore(":memory:"),
         cookieSecure: true,
       },
     });
     const insecure = await buildApp({
-      dogfoodChat: {
+      chat: {
         accessCode: "weekend-secret-code",
-        store: new DogfoodChatStore(":memory:"),
+        store: new ChatStore(":memory:"),
         cookieSecure: false,
       },
     });
@@ -336,9 +336,9 @@ describe("dogfood session security", () => {
 
   it("throttles repeated failed sign-in attempts", async () => {
     const app = await buildApp({
-      dogfoodChat: {
+      chat: {
         accessCode: "weekend-secret-code",
-        store: new DogfoodChatStore(":memory:"),
+        store: new ChatStore(":memory:"),
         throttle: new SignInThrottle({ maxFailures: 2, windowMs: 60_000 }),
       },
     });

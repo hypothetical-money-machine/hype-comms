@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import {
   apiErrorEnvelopeSchema,
-  createDogfoodMessageRequestSchema,
-  dogfoodHistorySchema,
-  dogfoodMessageEventSchema,
-  dogfoodMessageSchema,
-  type DogfoodMessage,
+  createChatMessageRequestSchema,
+  chatHistorySchema,
+  chatMessageEventSchema,
+  chatMessageSchema,
+  type ChatMessage,
 } from "@hmm-chat/contracts";
 import WebSocket, { type RawData } from "ws";
 
@@ -38,7 +38,7 @@ export class ChatTransport {
   readonly #messagesUrl: string;
   readonly #realtimeUrl: string;
   readonly #rendererOrigin: string;
-  readonly #onMessage: (message: DogfoodMessage) => void;
+  readonly #onMessage: (message: ChatMessage) => void;
   #socket: WebSocket | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
@@ -47,7 +47,7 @@ export class ChatTransport {
   constructor(options: {
     session: ChatSession;
     rendererOrigin: string;
-    onMessage: (message: DogfoodMessage) => void;
+    onMessage: (message: ChatMessage) => void;
   }) {
     this.#session = options.session;
     this.#messagesUrl = createWelcomeMessagesUrl(options.session.apiOrigin);
@@ -76,13 +76,13 @@ export class ChatTransport {
     throw new ChatTransportError(message, response.status);
   }
 
-  async getMessages(): Promise<readonly DogfoodMessage[]> {
+  async getMessages(): Promise<readonly ChatMessage[]> {
     const response = await this.#session.fetch(this.#messagesUrl, { method: "GET" });
-    return dogfoodHistorySchema.parse(await this.#payload(response)).messages;
+    return chatHistorySchema.parse(await this.#payload(response)).messages;
   }
 
-  async sendMessage(body: string): Promise<DogfoodMessage> {
-    const request = createDogfoodMessageRequestSchema.parse({
+  async sendMessage(body: string): Promise<ChatMessage> {
+    const request = createChatMessageRequestSchema.parse({
       clientMessageId: randomUUID(),
       body,
     });
@@ -91,7 +91,7 @@ export class ChatTransport {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),
     });
-    return dogfoodMessageSchema.parse(await this.#payload(response));
+    return chatMessageSchema.parse(await this.#payload(response));
   }
 
   start(): void {
@@ -132,7 +132,7 @@ export class ChatTransport {
     });
     socket.on("message", (data: RawData) => {
       try {
-        const event = dogfoodMessageEventSchema.safeParse(JSON.parse(data.toString()));
+        const event = chatMessageEventSchema.safeParse(JSON.parse(data.toString()));
         if (event.success) {
           this.#onMessage(event.data.message);
         }

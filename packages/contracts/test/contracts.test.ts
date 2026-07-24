@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   apiErrorEnvelopeSchema,
   conversationSchema,
-  createDogfoodMessageRequestSchema,
+  createChatMessageRequestSchema,
   displayNameSchema,
-  dogfoodMessageEventSchema,
-  dogfoodSessionStateSchema,
+  chatMessageEventSchema,
+  chatSessionStateSchema,
   messageSchema,
   sendMessageRequestSchema,
   systemConnectedEventSchema,
@@ -82,13 +82,13 @@ describe("entity contracts", () => {
 });
 
 describe("transport contracts", () => {
-  it("validates display names and dogfood welcome messages", () => {
+  it("validates display names and welcome messages", () => {
     expect(displayNameSchema.parse("  Morgan  ")).toBe("Morgan");
     expect(() => displayNameSchema.parse("Morgan\nAdmin")).toThrow();
 
     // The create request carries no author: the server derives it from the session.
     expect(() =>
-      createDogfoodMessageRequestSchema.parse({
+      createChatMessageRequestSchema.parse({
         clientMessageId: MESSAGE_ID,
         authorName: "Morgan",
         body: "Hello, welcome channel!",
@@ -96,16 +96,16 @@ describe("transport contracts", () => {
     ).toThrow();
 
     expect(
-      createDogfoodMessageRequestSchema.parse({
+      createChatMessageRequestSchema.parse({
         clientMessageId: MESSAGE_ID,
         body: "Hello, welcome channel!",
       }),
     ).toMatchObject({ body: "Hello, welcome channel!" });
 
     expect(
-      dogfoodMessageEventSchema.parse({
+      chatMessageEventSchema.parse({
         version: 1,
-        type: "dogfood.welcome_message_created",
+        type: "chat.welcome_message_created",
         message: {
           id: MESSAGE_ID,
           clientMessageId: MESSAGE_ID,
@@ -114,21 +114,21 @@ describe("transport contracts", () => {
           createdAt: NOW,
         },
       }),
-    ).toMatchObject({ type: "dogfood.welcome_message_created" });
+    ).toMatchObject({ type: "chat.welcome_message_created" });
   });
 
   it("keeps the session state discriminated and free of credentials", () => {
-    expect(dogfoodSessionStateSchema.parse({ status: "signed-out" })).toEqual({
+    expect(chatSessionStateSchema.parse({ status: "signed-out" })).toEqual({
       status: "signed-out",
     });
-    expect(dogfoodSessionStateSchema.parse({ status: "signed-in", name: "Morgan" })).toEqual({
+    expect(chatSessionStateSchema.parse({ status: "signed-in", name: "Morgan" })).toEqual({
       status: "signed-in",
       name: "Morgan",
     });
     expect(() =>
-      dogfoodSessionStateSchema.parse({ status: "signed-in", name: "Morgan", accessCode: "x" }),
+      chatSessionStateSchema.parse({ status: "signed-in", name: "Morgan", accessCode: "x" }),
     ).toThrow();
-    expect(() => dogfoodSessionStateSchema.parse({ status: "signed-in" })).toThrow();
+    expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
   });
 
   it("validates the stable API error envelope", () => {

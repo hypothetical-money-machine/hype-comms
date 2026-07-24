@@ -35,15 +35,15 @@ describe("loadConfig", () => {
     ).toThrow(ConfigError);
   });
 
-  it("requires a strong access code when weekend dogfood mode is enabled", () => {
-    expect(() => loadConfig({ HMM_DOGFOOD_ENABLED: "true" })).toThrow(ConfigError);
+  it("requires a strong access code when chat mode is enabled", () => {
+    expect(() => loadConfig({ HMM_CHAT_ENABLED: "true" })).toThrow(ConfigError);
     expect(
       loadConfig({
-        HMM_DOGFOOD_ENABLED: "true",
-        HMM_DOGFOOD_ACCESS_CODE: "a-secure-weekend-access-code",
+        HMM_CHAT_ENABLED: "true",
+        HMM_CHAT_ACCESS_CODE: "a-secure-weekend-access-code",
       }),
     ).toMatchObject({
-      dogfood: {
+      chat: {
         enabled: true,
         accessCode: "a-secure-weekend-access-code",
         dataPath: "/data/hmm-chat.sqlite",

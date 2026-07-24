@@ -87,19 +87,19 @@ The origin is read when the client is built, so restart `dev:desktop` after chan
 HTTP to a non-loopback host is rejected: that is the case where the access code and session cookie
 would cross the network in the clear.
 
-## Weekend dogfood deployment
+## Container deployment
 
-The server can run as a container for a small, access-code-protected dogfood deployment. This
+The server can run as a container for a small, access-code-protected deployment. This
 path is deliberately temporary: it predates the M1 invitation and session work in
 [ROADMAP.md](ROADMAP.md) and is expected to be deleted rather than grown.
 
 ```bash
 cp .env.example .env
-# set HMM_DOGFOOD_ACCESS_CODE, e.g. openssl rand -base64 24
+# set HMM_CHAT_ACCESS_CODE, e.g. openssl rand -base64 24
 docker compose up --build -d
 ```
 
-Compose refuses to start without `HMM_DOGFOOD_ACCESS_CODE`, so there is no insecure default. The
+Compose refuses to start without `HMM_CHAT_ACCESS_CODE`, so there is no insecure default. The
 container publishes only on `127.0.0.1`, expecting a reverse proxy or tunnel on the same host to
 terminate TLS. It runs as a non-root user with a read-only root filesystem and all capabilities
 dropped.
@@ -115,7 +115,7 @@ docker build -t hmm-chat-server:smoke --target runtime .
 scripts/smoke-container.sh hmm-chat-server:smoke
 ```
 
-### Dogfood authentication model
+### Authentication model
 
 Everyone shares one access code. Signing in issues an HTTP-only, `SameSite=Strict` cookie signed
 with a 32-byte key generated on first boot and stored in the SQLite database, so restarts do not

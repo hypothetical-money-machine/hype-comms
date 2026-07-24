@@ -5,9 +5,9 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
-import { dogfoodRoutes } from "./modules/dogfood/routes.js";
-import type { DogfoodChatStore } from "./modules/dogfood/store.js";
-import type { SignInThrottle } from "./modules/dogfood/throttle.js";
+import { chatRoutes } from "./modules/chat/routes.js";
+import type { ChatStore } from "./modules/chat/store.js";
+import type { SignInThrottle } from "./modules/chat/throttle.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -17,9 +17,9 @@ export interface BuildAppOptions {
   readonly lifecycle?: Lifecycle;
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
-  readonly dogfoodChat?: {
+  readonly chat?: {
     readonly accessCode: string;
-    readonly store: DogfoodChatStore;
+    readonly store: ChatStore;
     readonly cookieSecure?: boolean;
     readonly throttle?: SignInThrottle;
   };
@@ -75,23 +75,21 @@ export async function buildApp(options: BuildAppOptions = {}) {
         allowedOrigins,
         consumeTicket: options.consumeRealtimeTicket ?? denyRealtimeTickets,
       });
-      if (options.dogfoodChat !== undefined) {
-        await v1.register(dogfoodRoutes, {
+      if (options.chat !== undefined) {
+        await v1.register(chatRoutes, {
           allowedOrigins,
-          accessCode: options.dogfoodChat.accessCode,
-          store: options.dogfoodChat.store,
-          cookieSecure: options.dogfoodChat.cookieSecure ?? true,
-          ...(options.dogfoodChat.throttle === undefined
-            ? {}
-            : { throttle: options.dogfoodChat.throttle }),
+          accessCode: options.chat.accessCode,
+          store: options.chat.store,
+          cookieSecure: options.chat.cookieSecure ?? true,
+          ...(options.chat.throttle === undefined ? {} : { throttle: options.chat.throttle }),
         });
       }
     },
     { prefix: "/v1" },
   );
 
-  if (options.dogfoodChat !== undefined) {
-    app.addHook("onClose", async () => options.dogfoodChat?.store.close());
+  if (options.chat !== undefined) {
+    app.addHook("onClose", async () => options.chat?.store.close());
   }
 
   lifecycle.markReady();
