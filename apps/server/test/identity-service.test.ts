@@ -130,6 +130,93 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(await repository.findUserByEmail(emailSchema.parse("different@example.com"))).toBeNull();
   });
 
+  it("keeps an owner active as owner after an administrative sign-in link is redeemed", async () => {
+    const owner = await seedOwner();
+    const session = await signIn("owner@example.com");
+    const membership = await repository.findActiveMembershipByUserId(owner.id);
+
+    expect(membership).toMatchObject({
+      userId: owner.id,
+      role: "owner",
+      status: "active",
+    });
+    expect(await service.authenticate(session.token)).toMatchObject({
+      email: "owner@example.com",
+      role: "owner",
+    });
+  });
+
+  it("does not reduce an active owner's role when their member invitation is redeemed", async () => {
+    const owner = await seedOwner();
+    const invitation = await service.createInvitation(
+      owner.id,
+      emailSchema.parse("owner@example.com"),
+      "member",
+    );
+    const session = await signIn("owner@example.com");
+    const membership = await repository.findActiveMembershipByUserId(owner.id);
+
+    expect(await repository.findInvitationById(invitation.id)).toMatchObject({
+      status: "accepted",
+    });
+    expect(membership).toMatchObject({
+      userId: owner.id,
+      role: "owner",
+      status: "active",
+    });
+    expect(await service.authenticate(session.token)).toMatchObject({
+      email: "owner@example.com",
+      role: "owner",
+    });
+  });
+
+  it("activates a genuinely new invitee as a member", async () => {
+    const owner = await seedOwner();
+    await service.createInvitation(owner.id, emailSchema.parse("new@example.com"), "member");
+    const session = await signIn("new@example.com");
+    const member = await repository.findUserByEmail(emailSchema.parse("new@example.com"));
+    if (member === null) throw new Error("Invited member was not created");
+
+    expect(await repository.findActiveMembershipByUserId(member.id)).toMatchObject({
+      role: "member",
+      status: "active",
+    });
+    expect(await service.authenticate(session.token)).toMatchObject({
+      email: "new@example.com",
+      role: "member",
+    });
+  });
+
+  it("reactivates a revoked member when they are invited again", async () => {
+    const owner = await seedOwner();
+    const email = emailSchema.parse("returning@example.com");
+    await service.createInvitation(owner.id, email, "member");
+    await signIn(email, "127.0.0.1");
+    const member = await repository.findUserByEmail(email);
+    const ownerMembership = await repository.findActiveMembershipByUserId(owner.id);
+    if (member === null || ownerMembership === null) {
+      throw new Error("Seeded identities are missing");
+    }
+    await repository.upsertMembership({
+      workspaceId: ownerMembership.workspaceId,
+      userId: member.id,
+      role: "member",
+      status: "revoked",
+    });
+
+    await service.createInvitation(owner.id, email, "member");
+    const session = await signIn(email, "127.0.0.2");
+
+    expect(await repository.findMembership(ownerMembership.workspaceId, member.id)).toMatchObject({
+      role: "member",
+      status: "active",
+    });
+    expect(await service.authenticate(session.token)).toMatchObject({
+      email,
+      role: "member",
+    });
+  });
+
   it("derives unique usernames with deterministic numeric collision suffixes", async () => {
     const owner = await seedOwner("member+tag@example.com");
     await service.createInvitation(owner.id, emailSchema.parse("member-tag@example.com"), "member");

@@ -317,7 +317,9 @@ export class IdentityService {
       await repository.upsertMembership({
         workspaceId: invitation.workspaceId,
         userId: user.id,
-        role: invitation.role,
+        // Invitation activation grants access; it must not alter the privileges of a membership
+        // that is already active. Non-active and missing memberships still receive the invited role.
+        role: membership?.status === "active" ? membership.role : invitation.role,
         status: "active",
       });
       return user;

@@ -130,6 +130,62 @@ describeWithPostgres("invite CLI", () => {
     });
   });
 
+  it("issues repeated owner sign-in links without inviting or changing the owner", async () => {
+    await seedOwner();
+    const firstOutput = new TestOutput();
+    const secondOutput = new TestOutput();
+    const repository = new IdentityRepository(pool);
+    const owner = await repository.findUserByEmail(emailSchema.parse("owner@example.com"));
+    if (owner === null) throw new Error("Owner was not seeded");
+    const initialMembership = await repository.findActiveMembershipByUserId(owner.id);
+
+    const firstExitCode = await runInviteCli(
+      ["--email", "owner@example.com"],
+      cliEnv(),
+      firstOutput.streams,
+    );
+    const secondExitCode = await runInviteCli(
+      ["--email", "owner@example.com"],
+      cliEnv(),
+      secondOutput.streams,
+    );
+    const invitationCount = await pool.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM invitations WHERE email = $1",
+      ["owner@example.com"],
+    );
+    const membershipBeforeRedemption = await repository.findActiveMembershipByUserId(owner.id);
+    const token = magicLinkTokenSchema.parse(magicLinkFrom(secondOutput).searchParams.get("token"));
+    const service = new IdentityService(
+      repository,
+      new NullEmailSender(),
+      new SignInThrottle(),
+      () => new Date(),
+      "http://127.0.0.1:3000",
+    );
+    const session = await service.redeemMagicLink(token, "CLI owner test");
+
+    expect(firstExitCode).toBe(0);
+    expect(secondExitCode).toBe(0);
+    expect(firstOutput.stderr).toBe("");
+    expect(secondOutput.stderr).toBe("");
+    expect(secondOutput.stdout).toContain("Existing member: owner@example.com");
+    expect(secondOutput.stdout).toContain("Current role: owner");
+    expect(invitationCount.rows[0]?.count).toBe(0);
+    expect(membershipBeforeRedemption).toEqual(initialMembership);
+    expect(membershipBeforeRedemption).toMatchObject({
+      role: "owner",
+      status: "active",
+    });
+    expect(await repository.findActiveMembershipByUserId(owner.id)).toMatchObject({
+      role: "owner",
+      status: "active",
+    });
+    expect(await service.authenticate(session.token)).toMatchObject({
+      email: "owner@example.com",
+      role: "owner",
+    });
+  });
+
   it("reuses an existing pending invitation on a repeated run", async () => {
     await seedOwner();
     const firstOutput = new TestOutput();

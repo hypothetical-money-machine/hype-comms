@@ -118,6 +118,10 @@ export async function runInviteCli(
         "No seeded workspace owner was found. Set HMM_OWNER_EMAIL and start the server once to seed it.",
       );
     }
+    const existingUser = await repository.findUserByEmail(input.email);
+    const membership =
+      existingUser === null ? null : await repository.findMembership(workspace.id, existingUser.id);
+    const activeMembership = membership?.status === "active" ? membership : null;
 
     const sender = new CapturingEmailSender();
     const service = new IdentityService(
@@ -127,12 +131,10 @@ export async function runInviteCli(
       () => new Date(),
       config.publicApiUrl,
     );
-    const { invitation, reused } = await createOrReuseInvitation(
-      service,
-      repository,
-      owner.userId,
-      input,
-    );
+    const invitationResult =
+      activeMembership === null
+        ? await createOrReuseInvitation(service, repository, owner.userId, input)
+        : null;
     // requestMagicLink answers identically whether or not it issued a link, and swallows failures
     // so that the HTTP path cannot leak which addresses are real. For an operator command that
     // silence is unhelpful, so surface the underlying cause on stderr.
@@ -146,14 +148,22 @@ export async function runInviteCli(
     const captured = sender.captured;
     if (captured === null) {
       throw new Error(
-        "No magic link was produced. Verify that the invitation is pending and has not expired.",
+        "No magic link was produced. Verify that the membership is active or the invitation is pending and has not expired.",
       );
     }
 
-    output.stdout.write(`Invited: ${input.email}\n`);
-    output.stdout.write(`Role: ${input.role}\n`);
-    output.stdout.write(`Invitation expires: ${invitation.expiresAt}\n`);
-    if (reused) output.stdout.write("Existing pending invitation reused.\n");
+    if (activeMembership === null) {
+      if (invitationResult === null) throw new Error("Invitation was not created");
+      output.stdout.write(`Invited: ${input.email}\n`);
+      output.stdout.write(`Role: ${input.role}\n`);
+      output.stdout.write(`Invitation expires: ${invitationResult.invitation.expiresAt}\n`);
+      if (invitationResult.reused) {
+        output.stdout.write("Existing pending invitation reused.\n");
+      }
+    } else {
+      output.stdout.write(`Existing member: ${input.email}\n`);
+      output.stdout.write(`Current role: ${activeMembership.role}\n`);
+    }
     output.stdout.write(`Magic link expires: ${captured.expiresAt.toISOString()}\n`);
     output.stdout.write(
       "Warning: this link grants access. Send it only through a private channel.\n",
