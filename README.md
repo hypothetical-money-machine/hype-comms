@@ -104,6 +104,13 @@ container publishes only on `127.0.0.1`, expecting a reverse proxy or tunnel on 
 terminate TLS. It runs as a non-root user with a read-only root filesystem and all capabilities
 dropped.
 
+Postgres backs the M1 identity model and is still being built, so it sits behind an opt-in compose
+profile. A plain `docker compose up` runs the chat server alone. To bring up the identity database,
+set `HMM_POSTGRES_PASSWORD` and `HMM_DATABASE_URL` in `.env` and run
+`docker compose --profile identity up -d`. The server registers identity features only when
+`HMM_DATABASE_URL` is set. Apply migrations with
+`npm run migrate --workspace @hmm-chat/server`.
+
 `HMM_PUBLIC_API_URL` must be HTTPS when `NODE_ENV=production`, and it also decides whether session
 cookies carry `Secure`. Chat history and the session signing key live in the `chat-data` volume at
 `/data`; deleting that volume clears history and signs everyone out.

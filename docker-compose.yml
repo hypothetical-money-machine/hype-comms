@@ -29,10 +29,10 @@ services:
       HMM_CHAT_ENABLED: "true"
       HMM_CHAT_ACCESS_CODE: ${HMM_CHAT_ACCESS_CODE:?set HMM_CHAT_ACCESS_CODE in .env}
       HMM_CHAT_DATA_PATH: /data/hmm-chat.sqlite
-      HMM_DATABASE_URL: postgres://hmm:${HMM_POSTGRES_PASSWORD:?set HMM_POSTGRES_PASSWORD in .env}@postgres:5432/hmm_chat
-    depends_on:
-      postgres:
-        condition: service_healthy
+      # Identity storage. Empty by default: the M1 identity model is still being built and the
+      # server registers those features only when this is set. Set it in .env and start Postgres
+      # with `docker compose --profile identity up -d` once identity routes exist.
+      HMM_DATABASE_URL: ${HMM_DATABASE_URL:-}
     volumes:
       - chat-data:/data
     read_only: true
@@ -43,12 +43,18 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Not started by a plain `docker compose up`. Bring it up with:
+  #   docker compose --profile identity up -d
   postgres:
     image: postgres:18-alpine
+    profiles: ["identity"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: hmm
-      POSTGRES_PASSWORD: ${HMM_POSTGRES_PASSWORD:?set HMM_POSTGRES_PASSWORD in .env}
+      # Compose interpolates variables for inactive profiles too, so this cannot be marked
+      # required without breaking a plain `docker compose up`. An empty value is safe: the
+      # Postgres image refuses to initialize without a password rather than starting open.
+      POSTGRES_PASSWORD: ${HMM_POSTGRES_PASSWORD:-}
       POSTGRES_DB: hmm_chat
       # Deterministic collation so index ordering cannot shift under a base-image upgrade.
       POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu"
