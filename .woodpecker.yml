@@ -1,0 +1,79 @@
+when:
+  - event: push
+    branch: main
+  - event: manual
+
+variables:
+  app: &app hmm-chat
+  registry: &registry registry.example.invalid
+  project: &project example-project
+  deploy_repo: &deploy_repo hype-comms/deployment-repository
+  deploy_branch: &deploy_branch main
+  target_cluster: &target_cluster production-cluster
+
+steps:
+  - name: check
+    image: node:24.18.0-bookworm
+    commands:
+      - npm ci
+      - npm run check
+
+  - name: build-push
+    image: gcr.io/kaniko-project/executor:v1.23.2-debug
+    environment:
+      DOCKER_CONFIG: /kaniko/.docker
+      HARBOR_USER:
+        from_secret: harbor_ci_user
+      HARBOR_PASS:
+        from_secret: harbor_ci_token
+      APP: *app
+      REGISTRY: *registry
+      PROJECT: *project
+    commands:
+      - echo "192.0.2.60 registry.example.invalid" >> /etc/hosts
+      - mkdir -p /kaniko/.docker
+      - |
+        set +x
+        cat > /kaniko/.docker/config.json <<EOF
+        {"auths":{"$${REGISTRY}":{"username":"$${HARBOR_USER}","password":"$${HARBOR_PASS}"}}}
+        EOF
+        set -x
+      - |
+        /kaniko/executor \
+          --context=dir://$${CI_WORKSPACE} \
+          --dockerfile=Dockerfile \
+          --destination=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA} \
+          --destination=$${REGISTRY}/$${PROJECT}/$${APP}:latest \
+          --cache=true \
+          --cache-repo=$${REGISTRY}/$${PROJECT}/cache
+
+  - name: promote-gitops
+    image: alpine/git:2.45.2
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      APP: *app
+      REGISTRY: *registry
+      PROJECT: *project
+      DEPLOY_REPO: *deploy_repo
+      DEPLOY_BRANCH: *deploy_branch
+      TARGET_CLUSTER: *target_cluster
+    commands:
+      - apk add --no-cache curl tar
+      - |
+        curl -sSL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz \
+          | tar -xz -C /usr/local/bin kustomize
+      - git clone --branch $${DEPLOY_BRANCH} https://woodpecker-ci:$${GITHUB_TOKEN}@github.com/$${DEPLOY_REPO}.git deploy-kit
+      - cd deploy-kit/clusters/$${TARGET_CLUSTER}/workloads/$${APP}
+      - kustomize edit set image $${APP}=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA}
+      - cd $${CI_WORKSPACE}/deploy-kit
+      - git config user.name "woodpecker-ci"
+      - git config user.email "woodpecker@$${REGISTRY}"
+      - git add clusters/$${TARGET_CLUSTER}/workloads/$${APP}/kustomization.yaml
+      - |
+        if git diff --cached --quiet; then
+          echo "No image change to promote"
+          exit 0
+        fi
+      - 'git commit -m "promote($${APP}): $${TARGET_CLUSTER} $${CI_COMMIT_SHA}"'
+      - git push origin HEAD:$${DEPLOY_BRANCH}
