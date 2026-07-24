@@ -2,8 +2,36 @@ import path from "node:path";
 
 export const APP_PROTOCOL = "app";
 export const APP_PROTOCOL_HOST = "bundle";
+export const AUTH_PROTOCOL_SCHEME = "hmm-chat";
 export const AUTH_PROTOCOL = "hmm-chat:";
 export const MAX_URL_LENGTH = 4_096;
+
+export interface ProtocolClientRegistration {
+  readonly scheme: typeof AUTH_PROTOCOL_SCHEME;
+  readonly executablePath?: string;
+  readonly arguments?: readonly string[];
+}
+
+export function createProtocolClientRegistration(
+  isPackaged: boolean,
+  executablePath: string,
+  argumentsList: readonly string[],
+): ProtocolClientRegistration {
+  if (isPackaged) {
+    return { scheme: AUTH_PROTOCOL_SCHEME };
+  }
+
+  const scriptArgument = argumentsList[1];
+  if (scriptArgument === undefined) {
+    return { scheme: AUTH_PROTOCOL_SCHEME };
+  }
+
+  return {
+    scheme: AUTH_PROTOCOL_SCHEME,
+    executablePath,
+    arguments: [path.resolve(scriptArgument)],
+  };
+}
 
 export function normalizeExternalHttpsUrl(value: string): string | null {
   if (value.length === 0 || value.length > MAX_URL_LENGTH) {

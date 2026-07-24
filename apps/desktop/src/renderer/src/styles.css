@@ -306,7 +306,7 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(380px, 100%);
+  width: min(460px, 100%);
   padding: 32px;
   background: #131a30;
   border: 1px solid #24304f;
@@ -320,6 +320,17 @@ h1 {
 .signin-card h1 {
   margin: 0;
   font-size: 1.35rem;
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.signin-form h2 {
+  margin: 4px 0;
+  font-size: 1rem;
 }
 
 .signin-lede {
@@ -367,10 +378,46 @@ h1 {
   cursor: not-allowed;
 }
 
+.signin-help {
+  margin: 0 0 4px;
+  color: #93a0c0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  color: #697794;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.signin-divider::before,
+.signin-divider::after {
+  flex: 1;
+  height: 1px;
+  background: #2c3960;
+  content: "";
+}
+
 .signin-error {
   margin: 8px 0 0;
   color: #ff9aa6;
   font-size: 0.85rem;
+}
+
+.signin-info {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  color: #c8f7e6;
+  background: rgb(145 232 200 / 10%);
+  border: 1px solid rgb(145 232 200 / 30%);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  line-height: 1.45;
 }
 
 .signout {

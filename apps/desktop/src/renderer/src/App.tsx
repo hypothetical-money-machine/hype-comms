@@ -33,14 +33,20 @@ function errorMessage(error: unknown, fallback: string): string {
 function SignIn({
   client,
   onSignedIn,
+  sessionMessage,
 }: {
   readonly client: DesktopApi;
   readonly onSignedIn: (state: ChatSessionState) => void;
+  readonly sessionMessage?: string;
 }) {
   const [name, setName] = useState("");
   const [accessCode, setAccessCode] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [email, setEmail] = useState("");
+  const [emailMessage, setEmailMessage] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [requestingLink, setRequestingLink] = useState(false);
   const nameInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -59,64 +65,127 @@ function SignIn({
     if (submitting) return;
 
     setSubmitting(true);
-    setError(null);
+    setAccessError(null);
     try {
       onSignedIn(await client.signIn({ name: name.trim(), accessCode }));
     } catch (caught) {
-      setError(errorMessage(caught, "Sign-in failed"));
+      setAccessError(errorMessage(caught, "Sign-in failed"));
       setAccessCode("");
     } finally {
       setSubmitting(false);
     }
   };
 
+  const requestLink = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (requestingLink) return;
+
+    setRequestingLink(true);
+    setEmailError(null);
+    setEmailMessage(null);
+    try {
+      const delivery = await client.requestMagicLink(email);
+      setEmailMessage(
+        delivery.status === "email-sent"
+          ? "Check your email for a sign-in link. HMM Chat is waiting—open the link to continue."
+          : `${delivery.message}. Open the sign-in link an administrator sent you; HMM Chat is waiting for it.`,
+      );
+    } catch (caught) {
+      setEmailError(errorMessage(caught, "Could not request a sign-in link"));
+    } finally {
+      setRequestingLink(false);
+    }
+  };
+
   const canSubmit = name.trim().length > 0 && accessCode.length > 0 && !submitting;
+  const canRequestLink = email.trim().length > 0 && !requestingLink;
+  const visibleAccessError = accessError ?? sessionMessage;
 
   return (
     <main className="signin-shell">
-      <form className="signin-card" onSubmit={(event) => void submit(event)}>
+      <section className="signin-card">
         <div className="workspace-mark" aria-hidden="true">
           H
         </div>
         <h1>HMM Chat</h1>
-        <p className="signin-lede">Enter the workspace access code to join #welcome.</p>
+        <p className="signin-lede">Sign in to join #welcome.</p>
 
-        <label htmlFor="signin-name">Display name</label>
-        <input
-          ref={nameInput}
-          id="signin-name"
-          type="text"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          maxLength={80}
-          autoComplete="off"
-          spellCheck={false}
-          disabled={submitting}
-          required
-        />
+        <form className="signin-form" onSubmit={(event) => void submit(event)}>
+          <h2>Use the shared access code</h2>
 
-        <label htmlFor="signin-code">Access code</label>
-        <input
-          id="signin-code"
-          type="password"
-          value={accessCode}
-          onChange={(event) => setAccessCode(event.target.value)}
-          maxLength={256}
-          autoComplete="off"
-          disabled={submitting}
-          required
-        />
+          <label htmlFor="signin-name">Display name</label>
+          <input
+            ref={nameInput}
+            id="signin-name"
+            type="text"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            maxLength={80}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={submitting}
+            required
+          />
 
-        {error !== null && (
-          <p className="signin-error" role="alert">
-            {error}
-          </p>
-        )}
+          <label htmlFor="signin-code">Access code</label>
+          <input
+            id="signin-code"
+            type="password"
+            value={accessCode}
+            onChange={(event) => setAccessCode(event.target.value)}
+            maxLength={256}
+            autoComplete="off"
+            disabled={submitting}
+            required
+          />
 
-        <button type="submit" disabled={!canSubmit}>
-          {submitting ? "Signing in…" : "Sign in"}
-        </button>
-      </form>
+          {visibleAccessError !== null && visibleAccessError !== undefined && (
+            <p className="signin-error" role="alert">
+              {visibleAccessError}
+            </p>
+          )}
+
+          <button type="submit" disabled={!canSubmit}>
+            {submitting ? "Signing in…" : "Sign in with access code"}
+          </button>
+        </form>
+
+        <div className="signin-divider" aria-hidden="true">
+          <span>or</span>
+        </div>
+
+        <form className="signin-form" onSubmit={(event) => void requestLink(event)}>
+          <h2>Use your email</h2>
+          <p className="signin-help">Request a link, then open it to finish signing in here.</p>
+
+          <label htmlFor="signin-email">Email address</label>
+          <input
+            id="signin-email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            maxLength={320}
+            autoComplete="email"
+            disabled={requestingLink}
+            required
+          />
+
+          {emailMessage !== null && (
+            <p className="signin-info" role="status">
+              {emailMessage}
+            </p>
+          )}
+          {emailError !== null && (
+            <p className="signin-error" role="alert">
+              {emailError}
+            </p>
+          )}
+
+          <button type="submit" disabled={!canRequestLink}>
+            {requestingLink ? "Requesting link…" : "Email me a sign-in link"}
+          </button>
+        </form>
+      </section>
     </main>
   );
 }
@@ -235,7 +304,7 @@ export function App({ client }: AppProps) {
   }
 
   if (session.status === "signed-out") {
-    return <SignIn client={client} onSignedIn={handleSignedIn} />;
+    return <SignIn client={client} onSignedIn={handleSignedIn} sessionMessage={session.message} />;
   }
 
   return (
@@ -261,6 +330,9 @@ export function App({ client }: AppProps) {
 
         <footer>
           <strong>{session.name}</strong>
+          <span>
+            {session.method === "email" ? `Signed in as ${session.email}` : "Using access code"}
+          </span>
           <span>{status}</span>
           <span className={`server-status ${serverStatus}`}>
             <span className="status-dot" aria-hidden="true" />
@@ -279,7 +351,7 @@ export function App({ client }: AppProps) {
         <header className="conversation-header">
           <div>
             <h2># welcome</h2>
-            <p>Shared access-code chat. History is kept on the server.</p>
+            <p>Workspace chat. History is kept on the server.</p>
           </div>
         </header>
 

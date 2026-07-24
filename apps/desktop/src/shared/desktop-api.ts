@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatSessionState } from "@hmm-chat/contracts";
+import type { ChatMessage, ChatSessionState, MagicLinkDeliveryState } from "@hmm-chat/contracts";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
@@ -20,6 +20,7 @@ export interface ChatTransport {
   readonly getSuggestedName: () => Promise<string>;
   readonly getSessionState: () => Promise<ChatSessionState>;
   readonly signIn: (request: SignInRequest) => Promise<ChatSessionState>;
+  readonly requestMagicLink: (email: string) => Promise<MagicLinkDeliveryState>;
   readonly signOut: () => Promise<ChatSessionState>;
   readonly onSessionChanged: (listener: (state: ChatSessionState) => void) => () => void;
   readonly getWelcomeMessages: () => Promise<readonly ChatMessage[]>;

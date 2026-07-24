@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   chatSignInRequestSchema,
   messageBodySchema,
+  requestMagicLinkSchema,
   type ChatMessage,
   type ChatSessionState,
 } from "@hmm-chat/contracts";
@@ -14,15 +15,20 @@ import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import type { NotificationAction, ServerStatus } from "../shared/desktop-api";
+import {
+  parseAuthCallbackToken,
+  processAuthCallback,
+  type AuthCallbackOutcome,
+} from "./auth-callback";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { ChatTransport } from "./chat-transport";
 import { resolveSuggestedName } from "./suggested-name";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
+  createProtocolClientRegistration,
   findAuthCallbackUrl,
   isTrustedRendererUrl,
-  normalizeAuthCallbackUrl,
   normalizeDevelopmentServerUrl,
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
@@ -48,6 +54,9 @@ let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
 const pendingNotificationActions: NotificationAction[] = [];
 const pendingWelcomeMessages: ChatMessage[] = [];
+const pendingAuthCallbackUrls: string[] = [];
+let authCallbacksReady = false;
+let drainingAuthCallbacks = false;
 // Only a hint for the sign-in form. The server derives the real author from the session.
 const suggestedName = app.isPackaged ? "" : resolveSuggestedName(process.argv, process.env);
 if (!app.isPackaged && suggestedName !== "") {
@@ -269,6 +278,30 @@ function registerIpcHandlers(): void {
     return (await chatSession?.signOut()) ?? { status: "signed-out" };
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRequestMagicLink);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionRequestMagicLink, async (event, request: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted magic-link IPC sender");
+    }
+    if (chatSession === null) {
+      throw new Error("Chat is not configured");
+    }
+
+    const parsed = requestMagicLinkSchema.safeParse(request);
+    if (!parsed.success) {
+      throw new Error("Enter a valid email address");
+    }
+
+    try {
+      return await chatSession.requestMagicLink(parsed.data);
+    } catch (error) {
+      throw new Error(
+        error instanceof ChatSessionError ? error.message : "Could not request a sign-in link",
+        { cause: error },
+      );
+    }
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeHistory);
   ipcMain.handle(DESKTOP_CHANNELS.welcomeHistory, async (event) => {
     if (!isTrustedIpcSender(event)) {
@@ -359,13 +392,43 @@ function focusMainWindow(): void {
   mainWindow.focus();
 }
 
-function handleAuthCallback(value: string): void {
-  if (normalizeAuthCallbackUrl(value) === null) {
+async function drainPendingAuthCallbacks(): Promise<void> {
+  if (!authCallbacksReady || chatSession === null || drainingAuthCallbacks) {
     return;
   }
 
-  // M1 exchanges the callback code here in main. Callback URLs and credentials must never
-  // cross the preload boundary; until that flow exists, a valid callback only focuses the app.
+  drainingAuthCallbacks = true;
+  try {
+    while (pendingAuthCallbackUrls.length > 0) {
+      const value = pendingAuthCallbackUrls.shift();
+      if (value === undefined) {
+        continue;
+      }
+
+      const currentSession = chatSession;
+      const outcome: AuthCallbackOutcome = await processAuthCallback(value, async (token) => {
+        await currentSession.exchangeMagicLink(token);
+      });
+      if (outcome === "succeeded") {
+        focusMainWindow();
+      }
+    }
+  } finally {
+    drainingAuthCallbacks = false;
+    if (pendingAuthCallbackUrls.length > 0) {
+      void drainPendingAuthCallbacks();
+    }
+  }
+}
+
+function handleAuthCallback(value: string): boolean {
+  if (parseAuthCallbackToken(value) === null) {
+    return false;
+  }
+
+  pendingAuthCallbackUrls.push(value);
+  void drainPendingAuthCallbacks();
+  return true;
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -375,16 +438,16 @@ if (!hasSingleInstanceLock) {
 } else {
   app.on("second-instance", (_event, commandLine) => {
     const callbackUrl = findAuthCallbackUrl(commandLine);
-    if (callbackUrl !== null) {
-      handleAuthCallback(callbackUrl);
+    if (callbackUrl === null || !handleAuthCallback(callbackUrl)) {
+      focusMainWindow();
     }
-    focusMainWindow();
   });
 
   app.on("open-url", (event, url) => {
     event.preventDefault();
-    handleAuthCallback(url);
-    focusMainWindow();
+    if (!handleAuthCallback(url)) {
+      focusMainWindow();
+    }
   });
 
   app.on("certificate-error", (event, _webContents, _url, _error, _certificate, callback) => {
@@ -405,7 +468,8 @@ if (!hasSingleInstanceLock) {
 
       chatSession = new ChatSession({
         apiOrigin: __HMM_CHAT_API_ORIGIN__,
-        session: session.defaultSession,
+        cookies: session.defaultSession.cookies,
+        request: (url, init) => net.fetch(url, init),
       });
       chatTransport = new ChatTransport({
         session: chatSession,
@@ -416,8 +480,22 @@ if (!hasSingleInstanceLock) {
 
       registerIpcHandlers();
 
-      if (app.isPackaged) {
-        app.setAsDefaultProtocolClient("hmm-chat");
+      const protocolRegistration = createProtocolClientRegistration(
+        app.isPackaged,
+        process.execPath,
+        process.argv,
+      );
+      if (
+        protocolRegistration.executablePath === undefined ||
+        protocolRegistration.arguments === undefined
+      ) {
+        app.setAsDefaultProtocolClient(protocolRegistration.scheme);
+      } else {
+        app.setAsDefaultProtocolClient(
+          protocolRegistration.scheme,
+          protocolRegistration.executablePath,
+          [...protocolRegistration.arguments],
+        );
       }
 
       await createMainWindow();
@@ -429,6 +507,8 @@ if (!hasSingleInstanceLock) {
       if (initialCallbackUrl !== null) {
         handleAuthCallback(initialCallbackUrl);
       }
+      authCallbacksReady = true;
+      await drainPendingAuthCallbacks();
 
       app.on("activate", () => {
         if (BrowserWindow.getAllWindows().length === 0) {

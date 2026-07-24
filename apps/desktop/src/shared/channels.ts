@@ -3,6 +3,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   serverStatus: "desktop:server-status",
   sessionState: "chat:session-state",
   sessionSignIn: "chat:session-sign-in",
+  sessionRequestMagicLink: "chat:session-request-magic-link",
   sessionSignOut: "chat:session-sign-out",
   sessionChanged: "chat:session-changed",
   suggestedName: "chat:suggested-name",

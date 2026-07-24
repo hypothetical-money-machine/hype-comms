@@ -54,6 +54,18 @@ export function createSessionUrl(apiOrigin: string): string {
   return new URL("/v1/chat/session", apiOrigin).href;
 }
 
+export function createIdentitySessionUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/session", apiOrigin).href;
+}
+
+export function createCurrentUserUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/me", apiOrigin).href;
+}
+
+export function createMagicLinkUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/magic-link", apiOrigin).href;
+}
+
 export function createWelcomeMessagesUrl(apiOrigin: string): string {
   return new URL("/v1/chat/welcome/messages", apiOrigin).href;
 }

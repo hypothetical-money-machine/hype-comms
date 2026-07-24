@@ -121,12 +121,37 @@ describe("transport contracts", () => {
     expect(chatSessionStateSchema.parse({ status: "signed-out" })).toEqual({
       status: "signed-out",
     });
-    expect(chatSessionStateSchema.parse({ status: "signed-in", name: "Morgan" })).toEqual({
+    expect(
+      chatSessionStateSchema.parse({
+        status: "signed-in",
+        method: "access-code",
+        name: "Morgan",
+      }),
+    ).toEqual({
       status: "signed-in",
+      method: "access-code",
       name: "Morgan",
     });
+    expect(
+      chatSessionStateSchema.parse({
+        status: "signed-in",
+        method: "email",
+        name: "Morgan",
+        email: "MORGAN@example.com",
+      }),
+    ).toEqual({
+      status: "signed-in",
+      method: "email",
+      name: "Morgan",
+      email: "morgan@example.com",
+    });
     expect(() =>
-      chatSessionStateSchema.parse({ status: "signed-in", name: "Morgan", accessCode: "x" }),
+      chatSessionStateSchema.parse({
+        status: "signed-in",
+        method: "access-code",
+        name: "Morgan",
+        accessCode: "x",
+      }),
     ).toThrow();
     expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
   });

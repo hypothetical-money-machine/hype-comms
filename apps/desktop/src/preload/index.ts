@@ -5,7 +5,9 @@ import {
   chatHistorySchema,
   chatMessageSchema,
   chatSessionStateSchema,
+  magicLinkDeliveryStateSchema,
   messageBodySchema,
+  requestMagicLinkSchema,
   type ChatMessage,
   type ChatSessionState,
 } from "@hmm-chat/contracts";
@@ -67,6 +69,12 @@ const desktopApi: DesktopApi = Object.freeze({
         accessCode: String(request.accessCode),
       }),
     ),
+  requestMagicLink: async (email: string) => {
+    const request = requestMagicLinkSchema.parse({ email });
+    return magicLinkDeliveryStateSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionRequestMagicLink, request),
+    );
+  },
   signOut: async () =>
     chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionSignOut)),
   onSessionChanged: (listener: (state: ChatSessionState) => void) =>

@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   createSessionUrl,
+  createCurrentUserUrl,
+  createIdentitySessionUrl,
+  createMagicLinkUrl,
   createWelcomeMessagesUrl,
   createWelcomeRealtimeUrl,
   createServerHealthUrl,
@@ -14,6 +17,7 @@ import {
 } from "../shared/api-origin";
 import { PRODUCTION_CONTENT_SECURITY_POLICY } from "../shared/security-policy";
 import {
+  createProtocolClientRegistration,
   findAuthCallbackUrl,
   isTrustedRendererUrl,
   normalizeAuthCallbackUrl,
@@ -94,6 +98,24 @@ describe("authentication callback validation", () => {
   });
 });
 
+describe("authentication protocol registration", () => {
+  it("keeps packaged registration on the scheme-only Electron path", () => {
+    expect(
+      createProtocolClientRegistration(true, "/Applications/HMM Chat", ["/Applications/HMM Chat"]),
+    ).toEqual({ scheme: "hmm-chat" });
+  });
+
+  it("registers an unpackaged Electron executable with its app script", () => {
+    expect(
+      createProtocolClientRegistration(false, "/opt/electron", ["/opt/electron", "./apps/desktop"]),
+    ).toEqual({
+      scheme: "hmm-chat",
+      executablePath: "/opt/electron",
+      arguments: [path.resolve("./apps/desktop")],
+    });
+  });
+});
+
 describe("resolveRendererAssetPath", () => {
   const rendererRoot = path.join(path.sep, "application", "dist", "renderer");
 
@@ -143,6 +165,15 @@ describe("API origin validation", () => {
     );
     expect(createSessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
       "https://chat-api.example.invalid/v1/chat/session",
+    );
+    expect(createIdentitySessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "https://chat-api.example.invalid/v1/auth/session",
+    );
+    expect(createCurrentUserUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "https://chat-api.example.invalid/v1/auth/me",
+    );
+    expect(createMagicLinkUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "https://chat-api.example.invalid/v1/auth/magic-link",
     );
     expect(createWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
       "http://127.0.0.1:3000/v1/chat/welcome/messages",
