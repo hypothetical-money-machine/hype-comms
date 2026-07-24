@@ -68,6 +68,45 @@ npm run dev:join -- --name Alex
 Run one process at a time with `npm run dev:server` or set `HMM_CHAT_NAME` and run
 `npm run dev:desktop`.
 
+## Weekend dogfood deployment
+
+The server can run as a container for a small, access-code-protected dogfood deployment. This
+path is deliberately temporary: it predates the M1 invitation and session work in
+[ROADMAP.md](ROADMAP.md) and is expected to be deleted rather than grown.
+
+```bash
+cp .env.example .env
+# set HMM_DOGFOOD_ACCESS_CODE, e.g. openssl rand -base64 24
+docker compose up --build -d
+```
+
+Compose refuses to start without `HMM_DOGFOOD_ACCESS_CODE`, so there is no insecure default. The
+container publishes only on `127.0.0.1`, expecting a reverse proxy or tunnel on the same host to
+terminate TLS. It runs as a non-root user with a read-only root filesystem and all capabilities
+dropped.
+
+`HMM_PUBLIC_API_URL` must be HTTPS when `NODE_ENV=production`, and it also decides whether session
+cookies carry `Secure`. Chat history and the session signing key live in the `chat-data` volume at
+`/data`; deleting that volume clears history and signs everyone out.
+
+Verify a built image end to end, including persistence across a restart:
+
+```bash
+docker build -t hmm-chat-server:smoke --target runtime .
+scripts/smoke-container.sh hmm-chat-server:smoke
+```
+
+### Dogfood authentication model
+
+Everyone shares one access code. Signing in issues an HTTP-only, `SameSite=Strict` cookie signed
+with a 32-byte key generated on first boot and stored in the SQLite database, so restarts do not
+sign users out and knowing the access code is not enough to forge a session for another name.
+Rotating the access code invalidates every outstanding session. Failed sign-in attempts are
+throttled per client address.
+
+Because the access code is shared, this gives no per-person identity, revocation, or audit trail.
+It suits two cofounders behind a private URL and nothing beyond that.
+
 ## Verification
 
 ```bash

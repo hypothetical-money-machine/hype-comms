@@ -1,0 +1,43 @@
+# Single-service deployment for the weekend dogfood server.
+#
+# Copy .env.example to .env and set HMM_DOGFOOD_ACCESS_CODE before starting. The access code is
+# required: compose refuses to start rather than falling back to an insecure default.
+#
+#   docker compose up --build -d
+#
+# The published port is bound to loopback so the service is reachable only by a reverse proxy or
+# tunnel running on the same host, never directly from the LAN.
+
+services:
+  server:
+    build:
+      context: .
+      target: runtime
+    image: hmm-chat-server:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HMM_BIND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: ${HMM_NODE_ENV:-production}
+      HMM_HOST: 0.0.0.0
+      HMM_PORT: "3000"
+      HMM_LOG_LEVEL: ${HMM_LOG_LEVEL:-info}
+      # The public URL is what users reach through the tunnel. It must be HTTPS in production and
+      # it also decides whether session cookies carry the Secure attribute.
+      HMM_PUBLIC_API_URL: ${HMM_PUBLIC_API_URL:-https://chat.hypemm.com}
+      HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-https://chat.hypemm.com}
+      HMM_DOGFOOD_ENABLED: "true"
+      HMM_DOGFOOD_ACCESS_CODE: ${HMM_DOGFOOD_ACCESS_CODE:?set HMM_DOGFOOD_ACCESS_CODE in .env}
+      HMM_DOGFOOD_DATA_PATH: /data/hmm-chat.sqlite
+    volumes:
+      - chat-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  chat-data:
