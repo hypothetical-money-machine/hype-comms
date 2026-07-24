@@ -4,6 +4,7 @@ import {
   deviceSessionSchema,
   entityIdSchema,
   invitationSchema,
+  magicLinkTokenSchema,
   magicLinkRequestedSchema,
   requestMagicLinkSchema,
   sessionTokenSchema,
@@ -17,6 +18,13 @@ import { ApiError } from "../../errors.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
 const COOKIE_NAME = "hmm_session";
+const MAGIC_LINK_PAGE_HEADERS = {
+  "cache-control": "no-store, no-cache, must-revalidate",
+  pragma: "no-cache",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+} as const;
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
@@ -73,6 +81,76 @@ function setSessionCookie(reply: FastifyReply, session: RedeemedSession, secure:
     sessionCookie(session.token, secure, { expiresAt: session.expiresAt }),
   );
 }
+
+function escapeHtml(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) =>
+      (
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }) as const
+      )[character as "&" | "<" | ">" | '"' | "'"],
+  );
+}
+
+function magicLinkPage(target: string): string {
+  const escapedTarget = escapeHtml(target);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="0; url=${escapedTarget}">
+  <title>Open HMM Chat</title>
+</head>
+<body>
+  <main>
+    <h1>Open HMM Chat</h1>
+    <p>Continue in the desktop app to finish signing in.</p>
+    <p><a href="${escapedTarget}">Open HMM Chat</a></p>
+  </main>
+</body>
+</html>`;
+}
+
+function invalidMagicLinkPage(): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Invalid sign-in link</title></head>
+<body><main><p>This link is not valid.</p></main></body>
+</html>`;
+}
+
+export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
+  app.get("/auth/magic-link", async (request, reply) => {
+    const query =
+      typeof request.query === "object" && request.query !== null && "token" in request.query
+        ? request.query.token
+        : undefined;
+    const result = magicLinkTokenSchema.safeParse(query);
+    const contentSecurityPolicy =
+      "default-src 'none'; style-src 'none'; img-src 'none'; script-src 'none'; " +
+      "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+
+    void reply.headers({
+      ...MAGIC_LINK_PAGE_HEADERS,
+      "content-security-policy": contentSecurityPolicy,
+      "content-type": "text/html; charset=utf-8",
+    });
+    if (!result.success) {
+      return reply.code(400).send(invalidMagicLinkPage());
+    }
+
+    const target = new URL("hmm-chat://auth/callback");
+    target.searchParams.set("token", result.data);
+    return reply.code(200).send(magicLinkPage(target.toString()));
+  });
+};
 
 export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app,

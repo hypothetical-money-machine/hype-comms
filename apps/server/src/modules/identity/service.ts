@@ -20,6 +20,8 @@ import type { EmailSender } from "./email.js";
 import type { IdentityRepository, IdentityUser } from "./repository.js";
 import { hashToken, issueToken } from "./tokens.js";
 
+/** displayNameSchema's upper bound, which is narrower than userSchema.displayName's. */
+const DISPLAY_NAME_MAX_LENGTH = 80;
 const MAGIC_LINK_TTL_MS = 15 * 60 * 1_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_ACTIVE_MEMBERS = 25;
@@ -70,7 +72,10 @@ function usernameBase(email: Email): string {
 
 function displayName(email: Email): string {
   const localPart = email.slice(0, email.lastIndexOf("@"));
-  return localPart.trim().slice(0, 120) || "Member";
+  // Clamped to displayNameSchema's 80 rather than userSchema's 120. The chat channel identifies an
+  // author with the narrower schema, so a longer name would store fine and then fail validation on
+  // every chat request. A valid address can carry a local part well past 80 characters.
+  return localPart.trim().slice(0, DISPLAY_NAME_MAX_LENGTH) || "Member";
 }
 
 export class IdentityService {

@@ -5,15 +5,18 @@ import {
   chatMessageEventSchema,
   chatSignInRequestSchema,
   chatIdentitySchema,
+  sessionTokenSchema,
   type ChatIdentity,
 } from "@hmm-chat/contracts";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
 import { SignInThrottle } from "../../throttle.js";
+import type { IdentityService } from "../identity/service.js";
 import { ChatMessageConflictError, type ChatStore } from "./store.js";
 
 const COOKIE_NAME = "hmm_chat_session";
+const IDENTITY_COOKIE_NAME = "hmm_session";
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
 
 interface ChatRoutesOptions {
@@ -22,6 +25,7 @@ interface ChatRoutesOptions {
   readonly store: ChatStore;
   readonly cookieSecure: boolean;
   readonly throttle?: SignInThrottle;
+  readonly identityService?: IdentityService;
 }
 
 function equalSecrets(left: string, right: string): boolean {
@@ -58,18 +62,18 @@ function sessionCookie(token: string, secure: boolean, maxAgeSeconds: number): s
   ].join("; ");
 }
 
-function cookieValue(request: FastifyRequest): string | undefined {
+function cookieValue(request: FastifyRequest, cookieName: string): string | undefined {
   const cookie = request.headers.cookie;
   if (cookie === undefined) return undefined;
   for (const part of cookie.split(";")) {
     const [name, ...value] = part.trim().split("=");
-    if (name === COOKIE_NAME) return value.join("=");
+    if (name === cookieName) return value.join("=");
   }
   return undefined;
 }
 
 function verifySession(request: FastifyRequest, signingKey: Buffer): ChatIdentity {
-  const token = cookieValue(request);
+  const token = cookieValue(request, COOKIE_NAME);
   if (token === undefined) throw new ApiError(401, "UNAUTHORIZED", "Sign in to continue");
   const [payload, signature, extra] = token.split(".");
   if (payload === undefined || signature === undefined || extra !== undefined) {
@@ -96,9 +100,42 @@ function verifySession(request: FastifyRequest, signingKey: Buffer): ChatIdentit
   }
 }
 
+async function resolveChatCaller(
+  request: FastifyRequest,
+  signingKey: Buffer,
+  identityService?: IdentityService,
+): Promise<ChatIdentity> {
+  if (cookieValue(request, COOKIE_NAME) !== undefined) {
+    return verifySession(request, signingKey);
+  }
+
+  const identityCookie = cookieValue(request, IDENTITY_COOKIE_NAME);
+  if (identityService !== undefined && identityCookie !== undefined) {
+    const token = sessionTokenSchema.safeParse(identityCookie);
+    if (token.success) {
+      const currentUser = await identityService.authenticate(token.data);
+      if (currentUser !== null) {
+        // A user display name may be up to 120 characters, but a chat author name may only be 80.
+        // Truncating keeps a long name cosmetically wrong instead of failing every chat request
+        // with a schema error the caller can do nothing about.
+        return chatIdentitySchema.parse({ name: currentUser.user.displayName.slice(0, 80) });
+      }
+    }
+  }
+
+  throw new ApiError(401, "UNAUTHORIZED", "Sign in to continue");
+}
+
 export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
   app,
-  { accessCode, allowedOrigins, store, cookieSecure, throttle = new SignInThrottle() },
+  {
+    accessCode,
+    allowedOrigins,
+    store,
+    cookieSecure,
+    throttle = new SignInThrottle(),
+    identityService,
+  },
 ) => {
   const signingKey = deriveSigningKey(store.sessionKey, accessCode);
 
@@ -129,11 +166,11 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
 
   app.get("/chat/session", async (request) => verifySession(request, signingKey));
   app.get("/chat/welcome/messages", async (request) => {
-    verifySession(request, signingKey);
+    await resolveChatCaller(request, signingKey, identityService);
     return store.history();
   });
   app.post("/chat/welcome/messages", async (request, reply) => {
-    const session = verifySession(request, signingKey);
+    const session = await resolveChatCaller(request, signingKey, identityService);
     const result = createChatMessageRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid message");
     try {
@@ -156,7 +193,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRoutesOptions> = async (
         if (origin === undefined || !allowedOrigins.has(origin)) {
           throw new ApiError(403, "FORBIDDEN", "Origin is not allowed");
         }
-        verifySession(request, signingKey);
+        await resolveChatCaller(request, signingKey, identityService);
       },
     },
     (socket) => {

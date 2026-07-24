@@ -7,7 +7,7 @@ import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import { chatRoutes } from "./modules/chat/routes.js";
 import type { ChatStore } from "./modules/chat/store.js";
-import { identityRoutes } from "./modules/identity/routes.js";
+import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
@@ -86,6 +86,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           accessCode: options.chat.accessCode,
           store: options.chat.store,
           cookieSecure: options.cookieSecure ?? true,
+          ...(options.identity === undefined ? {} : { identityService: options.identity.service }),
           ...(options.chat.throttle === undefined ? {} : { throttle: options.chat.throttle }),
         });
       }
@@ -98,6 +99,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
     { prefix: "/v1" },
   );
+
+  if (options.identity !== undefined) {
+    await app.register(identityLandingRoutes);
+  }
 
   if (options.chat !== undefined) {
     app.addHook("onClose", async () => options.chat?.store.close());
