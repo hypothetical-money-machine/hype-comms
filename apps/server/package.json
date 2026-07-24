@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "prebuild": "npm run build --workspace @hmm-chat/contracts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs",
     "predev": "npm run build --workspace @hmm-chat/contracts",
     "dev": "tsx watch src/main.ts",
+    "migrate": "tsx src/db/migrate.ts",
     "start": "node dist/main.js",
     "pretest": "npm run build --workspace @hmm-chat/contracts",
     "test": "vitest run",
