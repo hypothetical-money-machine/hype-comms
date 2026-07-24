@@ -15,6 +15,7 @@ import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
 import { DogfoodChatStore } from "../src/modules/dogfood/store.js";
+import { SignInThrottle } from "../src/modules/dogfood/throttle.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -36,6 +37,21 @@ describe("operational routes", () => {
     expect(health.json()).toEqual({ status: "ok" });
     expect(ready.statusCode).toBe(200);
     expect(ready.json()).toEqual({ status: "ready", checks: { server: "ok" } });
+  });
+
+  it("answers malformed bodies with 400 rather than an internal error", async () => {
+    const app = await buildApp({ enableDevelopmentChat: true });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/development/welcome/messages",
+      headers: { "content-type": "application/json" },
+      payload: "not json",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("BAD_REQUEST");
   });
 
   it("returns the stable error envelope for unknown routes", async () => {
@@ -301,5 +317,131 @@ describe("weekend dogfood chat", () => {
       type: "dogfood.welcome_message_created",
       message: { authorName: "Alex", body: "Realtime dogfood" },
     });
+  });
+});
+
+describe("dogfood session security", () => {
+  async function signIn(app: Awaited<ReturnType<typeof buildApp>>, name: string, code: string) {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/session",
+      payload: { name, accessCode: code },
+    });
+    return {
+      response,
+      cookie: response.cookies.find(({ name: cookieName }) => cookieName === "hmm_chat_session"),
+    };
+  }
+
+  it("rejects a cookie signed by a different server secret", async () => {
+    const app = await buildApp({
+      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(":memory:") },
+    });
+    const other = await buildApp({
+      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(":memory:") },
+    });
+    apps.push(app, other);
+
+    const { cookie } = await signIn(other, "Morgan", "weekend-secret-code");
+    const replayed = await app.inject({
+      method: "GET",
+      url: "/v1/dogfood/session",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+    });
+
+    expect(cookie).toBeDefined();
+    expect(replayed.statusCode).toBe(401);
+  });
+
+  it("invalidates existing sessions when the access code is rotated", async () => {
+    const store = new DogfoodChatStore(":memory:");
+    const before = await buildApp({ dogfoodChat: { accessCode: "original-access-code", store } });
+    apps.push(before);
+    const { cookie } = await signIn(before, "Morgan", "original-access-code");
+
+    const after = await buildApp({ dogfoodChat: { accessCode: "rotated-access-code", store } });
+    apps.push(after);
+    const replayed = await after.inject({
+      method: "GET",
+      url: "/v1/dogfood/session",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+    });
+
+    expect(cookie).toBeDefined();
+    expect(replayed.statusCode).toBe(401);
+  });
+
+  it("reuses the persisted signing key so restarts do not sign users out", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-store-"));
+    const filename = path.join(directory, "chat.sqlite");
+
+    const first = await buildApp({
+      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(filename) },
+    });
+    apps.push(first);
+    const { cookie } = await signIn(first, "Morgan", "weekend-secret-code");
+    await first.close();
+
+    const second = await buildApp({
+      dogfoodChat: { accessCode: "weekend-secret-code", store: new DogfoodChatStore(filename) },
+    });
+    apps.push(second);
+    const restored = await second.inject({
+      method: "GET",
+      url: "/v1/dogfood/session",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+    });
+    await rm(directory, { recursive: true, force: true });
+
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json()).toEqual({ name: "Morgan" });
+  });
+
+  it("omits Secure when the deployment is not served over HTTPS", async () => {
+    const secure = await buildApp({
+      dogfoodChat: {
+        accessCode: "weekend-secret-code",
+        store: new DogfoodChatStore(":memory:"),
+        cookieSecure: true,
+      },
+    });
+    const insecure = await buildApp({
+      dogfoodChat: {
+        accessCode: "weekend-secret-code",
+        store: new DogfoodChatStore(":memory:"),
+        cookieSecure: false,
+      },
+    });
+    apps.push(secure, insecure);
+
+    const overHttps = await signIn(secure, "Morgan", "weekend-secret-code");
+    const overHttp = await signIn(insecure, "Morgan", "weekend-secret-code");
+
+    expect(String(overHttps.response.headers["set-cookie"])).toContain("Secure");
+    expect(String(overHttp.response.headers["set-cookie"])).not.toContain("Secure");
+    expect(String(overHttp.response.headers["set-cookie"])).toContain("HttpOnly");
+  });
+
+  it("throttles repeated failed sign-in attempts", async () => {
+    const app = await buildApp({
+      dogfoodChat: {
+        accessCode: "weekend-secret-code",
+        store: new DogfoodChatStore(":memory:"),
+        throttle: new SignInThrottle({ maxFailures: 2, windowMs: 60_000 }),
+      },
+    });
+    apps.push(app);
+
+    const first = await signIn(app, "Morgan", "wrong-access-code");
+    const second = await signIn(app, "Morgan", "wrong-access-code");
+    const blocked = await signIn(app, "Morgan", "wrong-access-code");
+    const correctButBlocked = await signIn(app, "Morgan", "weekend-secret-code");
+
+    expect(first.response.statusCode).toBe(401);
+    expect(second.response.statusCode).toBe(401);
+    expect(blocked.response.statusCode).toBe(429);
+    expect(apiErrorEnvelopeSchema.parse(blocked.response.json()).error.code).toBe("RATE_LIMITED");
+    expect(blocked.response.headers["retry-after"]).toBeDefined();
+    expect(correctButBlocked.response.statusCode).toBe(429);
   });
 });

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,8 @@ import {
 } from "@hmm-chat/contracts";
 
 const MAX_MESSAGES = 200;
+const SESSION_KEY_NAME = "session_signing_key";
+const SESSION_KEY_BYTES = 32;
 
 export class DogfoodMessageConflictError extends Error {
   constructor() {
@@ -27,6 +29,14 @@ export interface DogfoodMessageResult {
 export class DogfoodChatStore {
   readonly #database: DatabaseSync;
   readonly #listeners = new Set<(message: DogfoodMessage) => void>();
+  #closed = false;
+  /**
+   * Server-held secret used to sign session cookies. It is generated on first boot and persisted
+   * beside the messages so that restarts do not sign every user out. Keeping it out of the
+   * configuration is deliberate: the access code is shared between users, so signing with the
+   * access code would let any user who knows it mint a cookie for any other user's name.
+   */
+  readonly sessionKey: Buffer;
 
   constructor(filename: string) {
     if (filename !== ":memory:") {
@@ -42,7 +52,31 @@ export class DogfoodChatStore {
         body TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS dogfood_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
+    this.sessionKey = this.#ensureSessionKey();
+  }
+
+  #ensureSessionKey(): Buffer {
+    const existing = this.#database
+      .prepare(`SELECT value FROM dogfood_metadata WHERE key = ?`)
+      .get(SESSION_KEY_NAME);
+    if (existing !== undefined && typeof existing.value === "string") {
+      const decoded = Buffer.from(existing.value, "base64");
+      if (decoded.byteLength === SESSION_KEY_BYTES) return decoded;
+    }
+
+    const created = randomBytes(SESSION_KEY_BYTES);
+    this.#database
+      .prepare(
+        `INSERT INTO dogfood_metadata (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(SESSION_KEY_NAME, created.toString("base64"));
+    return created;
   }
 
   history(): DogfoodHistory {
@@ -105,6 +139,9 @@ export class DogfoodChatStore {
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#listeners.clear();
     this.#database.close();
   }
 }

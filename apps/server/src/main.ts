@@ -13,6 +13,7 @@ async function main(): Promise<void> {
       ? {
           accessCode: config.dogfood.accessCode,
           store: new DogfoodChatStore(config.dogfood.dataPath),
+          cookieSecure: config.dogfood.cookieSecure,
         }
       : undefined;
   const app = await buildApp({
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
     allowedOrigins: config.allowedOrigins,
     enableDevelopmentChat: config.nodeEnv !== "production",
     ...(dogfoodChat === undefined ? {} : { dogfoodChat }),
+    ...(config.webRoot === undefined ? {} : { webRoot: config.webRoot }),
   });
 
   const shutdown = installGracefulShutdown({

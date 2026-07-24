@@ -17,6 +17,7 @@ const rawConfigSchema = z
     dogfoodEnabled: z.enum(["true", "false"]).default("false"),
     dogfoodAccessCode: optionalString(z.string().min(16)),
     dogfoodDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
+    webRoot: optionalString(z.string().min(1)),
   })
   .strict();
 
@@ -53,7 +54,14 @@ export interface ServerConfig {
     readonly enabled: boolean;
     readonly accessCode?: string;
     readonly dataPath: string;
+    /**
+     * Session cookies carry `Secure` only when the public URL is HTTPS. Browsers silently discard
+     * `Secure` cookies delivered over plain HTTP, which would make sign-in fail with no visible
+     * error during loopback testing.
+     */
+    readonly cookieSecure: boolean;
   };
+  readonly webRoot?: string;
 }
 
 export class ConfigError extends Error {
@@ -141,6 +149,8 @@ export function loadConfig(
         ? {}
         : { accessCode: result.data.dogfoodAccessCode }),
       dataPath: result.data.dogfoodDataPath,
+      cookieSecure: parsedPublicApiUrl.protocol === "https:",
     },
+    ...(result.data.webRoot === undefined ? {} : { webRoot: result.data.webRoot }),
   };
 }

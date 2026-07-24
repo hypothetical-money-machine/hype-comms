@@ -9,6 +9,7 @@ import { developmentChatRoutes } from "./modules/development/routes.js";
 import { DevelopmentWelcomeStore } from "./modules/development/welcome-store.js";
 import { dogfoodRoutes } from "./modules/dogfood/routes.js";
 import type { DogfoodChatStore } from "./modules/dogfood/store.js";
+import type { SignInThrottle } from "./modules/dogfood/throttle.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -23,6 +24,8 @@ export interface BuildAppOptions {
   readonly dogfoodChat?: {
     readonly accessCode: string;
     readonly store: DogfoodChatStore;
+    readonly cookieSecure?: boolean;
+    readonly throttle?: SignInThrottle;
   };
   readonly webRoot?: string;
 }
@@ -87,6 +90,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
           allowedOrigins,
           accessCode: options.dogfoodChat.accessCode,
           store: options.dogfoodChat.store,
+          cookieSecure: options.dogfoodChat.cookieSecure ?? true,
+          ...(options.dogfoodChat.throttle === undefined
+            ? {}
+            : { throttle: options.dogfoodChat.throttle }),
         });
       }
     },
