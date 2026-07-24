@@ -34,4 +34,20 @@ describe("loadConfig", () => {
       loadConfig({ NODE_ENV: "production", HMM_PUBLIC_API_URL: "http://api.example.com" }),
     ).toThrow(ConfigError);
   });
+
+  it("requires a strong access code when weekend dogfood mode is enabled", () => {
+    expect(() => loadConfig({ HMM_DOGFOOD_ENABLED: "true" })).toThrow(ConfigError);
+    expect(
+      loadConfig({
+        HMM_DOGFOOD_ENABLED: "true",
+        HMM_DOGFOOD_ACCESS_CODE: "a-secure-weekend-access-code",
+      }),
+    ).toMatchObject({
+      dogfood: {
+        enabled: true,
+        accessCode: "a-secure-weekend-access-code",
+        dataPath: "/data/hmm-chat.sqlite",
+      },
+    });
+  });
 });

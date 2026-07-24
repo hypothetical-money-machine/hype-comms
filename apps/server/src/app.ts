@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyServerOptions } from "fastify";
 
@@ -6,6 +7,8 @@ import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import { developmentChatRoutes } from "./modules/development/routes.js";
 import { DevelopmentWelcomeStore } from "./modules/development/welcome-store.js";
+import { dogfoodRoutes } from "./modules/dogfood/routes.js";
+import type { DogfoodChatStore } from "./modules/dogfood/store.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -17,6 +20,11 @@ export interface BuildAppOptions {
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
   readonly enableDevelopmentChat?: boolean;
   readonly developmentWelcomeStore?: DevelopmentWelcomeStore;
+  readonly dogfoodChat?: {
+    readonly accessCode: string;
+    readonly store: DogfoodChatStore;
+  };
+  readonly webRoot?: string;
 }
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -45,6 +53,22 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
   });
   await app.register(websocket);
+  if (options.webRoot !== undefined) {
+    await app.register(fastifyStatic, {
+      root: options.webRoot,
+      setHeaders(reply) {
+        void reply.header(
+          "content-security-policy",
+          "default-src 'self'; connect-src 'self' wss:; img-src 'self' data:; " +
+            "style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; " +
+            "frame-ancestors 'none'; form-action 'self'",
+        );
+        void reply.header("referrer-policy", "no-referrer");
+        void reply.header("x-content-type-options", "nosniff");
+        void reply.header("x-frame-options", "DENY");
+      },
+    });
+  }
   await app.register(systemRoutes, { lifecycle });
   await app.register(
     async (v1) => {
@@ -58,9 +82,20 @@ export async function buildApp(options: BuildAppOptions = {}) {
           store: options.developmentWelcomeStore ?? new DevelopmentWelcomeStore(),
         });
       }
+      if (options.dogfoodChat !== undefined) {
+        await v1.register(dogfoodRoutes, {
+          allowedOrigins,
+          accessCode: options.dogfoodChat.accessCode,
+          store: options.dogfoodChat.store,
+        });
+      }
     },
     { prefix: "/v1" },
   );
+
+  if (options.dogfoodChat !== undefined) {
+    app.addHook("onClose", async () => options.dogfoodChat?.store.close());
+  }
 
   lifecycle.markReady();
   return app;

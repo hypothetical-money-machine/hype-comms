@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",
+    "@fastify/static": "10.1.2",
     "@fastify/websocket": "11.3.0",
     "@hmm-chat/contracts": "*",
     "fastify": "5.10.0",

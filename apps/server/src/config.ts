@@ -14,6 +14,9 @@ const rawConfigSchema = z
     shutdownTimeoutMs: z.coerce.number().int().min(100).max(60_000).default(10_000),
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
+    dogfoodEnabled: z.enum(["true", "false"]).default("false"),
+    dogfoodAccessCode: optionalString(z.string().min(16)),
+    dogfoodDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
   })
   .strict();
 
@@ -46,6 +49,11 @@ export interface ServerConfig {
   readonly shutdownTimeoutMs: number;
   readonly allowedOrigins: readonly string[];
   readonly publicApiUrl: string;
+  readonly dogfood: {
+    readonly enabled: boolean;
+    readonly accessCode?: string;
+    readonly dataPath: string;
+  };
 }
 
 export class ConfigError extends Error {
@@ -66,12 +74,19 @@ export function loadConfig(
     shutdownTimeoutMs: env.HMM_SHUTDOWN_TIMEOUT_MS,
     allowedOrigins: env.HMM_ALLOWED_ORIGINS,
     publicApiUrl: env.HMM_PUBLIC_API_URL,
+    dogfoodEnabled: env.HMM_DOGFOOD_ENABLED,
+    dogfoodAccessCode: env.HMM_DOGFOOD_ACCESS_CODE,
+    dogfoodDataPath: env.HMM_DOGFOOD_DATA_PATH,
   });
 
   if (!result.success) {
     throw new ConfigError(
       result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
     );
+  }
+
+  if (result.data.dogfoodEnabled === "true" && result.data.dogfoodAccessCode === undefined) {
+    throw new ConfigError(["dogfoodAccessCode: Required when dogfood mode is enabled"]);
   }
 
   const defaultOrigins =
@@ -120,5 +135,12 @@ export function loadConfig(
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,
+    dogfood: {
+      enabled: result.data.dogfoodEnabled === "true",
+      ...(result.data.dogfoodAccessCode === undefined
+        ? {}
+        : { accessCode: result.data.dogfoodAccessCode }),
+      dataPath: result.data.dogfoodDataPath,
+    },
   };
 }

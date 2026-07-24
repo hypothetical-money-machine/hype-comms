@@ -1,4 +1,7 @@
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   apiErrorEnvelopeSchema,
@@ -11,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
+import { DogfoodChatStore } from "../src/modules/dogfood/store.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -61,6 +65,24 @@ describe("operational routes", () => {
     expect(allowed.headers["access-control-allow-origin"]).toBe("app://bundle");
     expect(allowed.headers["access-control-allow-credentials"]).toBeUndefined();
     expect(rejected.statusCode).toBe(403);
+  });
+});
+
+describe("dogfood web client", () => {
+  it("serves the browser client without exposing server files", async () => {
+    const webRoot = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-web-"));
+    await writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>HMM Chat</title>");
+    const app = await buildApp({ webRoot });
+    apps.push(app);
+
+    const root = await app.inject({ method: "GET", url: "/" });
+    const traversal = await app.inject({ method: "GET", url: "/../package.json" });
+    await rm(webRoot, { recursive: true, force: true });
+
+    expect(root.statusCode).toBe(200);
+    expect(root.body).toContain("HMM Chat");
+    expect(root.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(traversal.statusCode).toBe(404);
   });
 });
 
@@ -193,5 +215,91 @@ describe("development welcome channel", () => {
     expect(invalid.statusCode).toBe(400);
     expect(apiErrorEnvelopeSchema.parse(invalid.json()).error.code).toBe("BAD_REQUEST");
     expect(absent.statusCode).toBe(404);
+  });
+});
+
+describe("weekend dogfood chat", () => {
+  it("requires the access code, derives authors from the session, and persists history", async () => {
+    const store = new DogfoodChatStore(":memory:");
+    const app = await buildApp({
+      allowedOrigins: ["https://chat.hypemm.com"],
+      dogfoodChat: { accessCode: "weekend-secret", store },
+    });
+    apps.push(app);
+
+    const denied = await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/session",
+      payload: { name: "Morgan", accessCode: "wrong-secret" },
+    });
+    const signedIn = await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/session",
+      payload: { name: "Morgan", accessCode: "weekend-secret" },
+    });
+    const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/welcome/messages",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+      payload: {
+        clientMessageId: "10000000-0000-4000-8000-000000000020",
+        body: "Dogfood hello",
+      },
+    });
+    const history = await app.inject({
+      method: "GET",
+      url: "/v1/dogfood/welcome/messages",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+    });
+
+    expect(denied.statusCode).toBe(401);
+    expect(signedIn.statusCode).toBe(204);
+    expect(cookie).toBeDefined();
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ authorName: "Morgan", body: "Dogfood hello" });
+    expect(history.json()).toMatchObject({ messages: [{ authorName: "Morgan" }] });
+  });
+
+  it("broadcasts messages to authenticated same-origin websocket clients", async () => {
+    const store = new DogfoodChatStore(":memory:");
+    const app = await buildApp({
+      allowedOrigins: ["https://chat.hypemm.com"],
+      dogfoodChat: { accessCode: "weekend-secret", store },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const signedIn = await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/session",
+      payload: { name: "Alex", accessCode: "weekend-secret" },
+    });
+    const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/dogfood/welcome/realtime`,
+      {
+        headers: { cookie: `hmm_chat_session=${cookie?.value ?? ""}` },
+        origin: "https://chat.hypemm.com",
+      },
+    );
+    await once(socket, "open");
+
+    const messagePromise = once(socket, "message");
+    await app.inject({
+      method: "POST",
+      url: "/v1/dogfood/welcome/messages",
+      cookies: { hmm_chat_session: cookie?.value ?? "" },
+      payload: {
+        clientMessageId: "10000000-0000-4000-8000-000000000021",
+        body: "Realtime dogfood",
+      },
+    });
+    const [data] = await messagePromise;
+    socket.close();
+
+    expect(JSON.parse(data.toString())).toMatchObject({
+      type: "dogfood.welcome_message_created",
+      message: { authorName: "Alex", body: "Realtime dogfood" },
+    });
   });
 });
