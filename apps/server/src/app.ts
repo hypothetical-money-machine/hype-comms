@@ -27,6 +27,8 @@ export interface BuildAppOptions {
   };
   readonly identity?: {
     readonly service: IdentityService;
+    /** False when links are issued by an administrator, which disables self-service requests. */
+    readonly selfServiceMagicLink?: boolean;
   };
   readonly webRoot?: string;
 }
@@ -94,6 +96,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         await v1.register(identityRoutes, {
           service: options.identity.service,
           cookieSecure: options.cookieSecure ?? true,
+          selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
         });
       }
     },

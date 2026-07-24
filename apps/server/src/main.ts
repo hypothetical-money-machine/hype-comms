@@ -7,7 +7,12 @@ import { createPool } from "./db/pool.js";
 import { Lifecycle } from "./lifecycle.js";
 import { createLoggerOptions } from "./logging.js";
 import { ChatStore } from "./modules/chat/store.js";
-import { ConsoleEmailSender, SmtpEmailSender, type EmailSender } from "./modules/identity/email.js";
+import {
+  ConsoleEmailSender,
+  ManualEmailSender,
+  SmtpEmailSender,
+  type EmailSender,
+} from "./modules/identity/email.js";
 import { IdentityRepository } from "./modules/identity/repository.js";
 import { IdentityService } from "./modules/identity/service.js";
 import { installGracefulShutdown } from "./shutdown.js";
@@ -17,7 +22,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const lifecycle = new Lifecycle();
   let pool: Pool | undefined;
-  let identity: { readonly service: IdentityService } | undefined;
+  let identity:
+    { readonly service: IdentityService; readonly selfServiceMagicLink: boolean } | undefined;
 
   try {
     if (config.database !== undefined) {
@@ -30,9 +36,11 @@ async function main(): Promise<void> {
       });
 
       const emailSender: EmailSender =
-        config.smtp === undefined
-          ? new ConsoleEmailSender(config.nodeEnv)
-          : new SmtpEmailSender(config.smtp);
+        config.emailDelivery === "manual"
+          ? new ManualEmailSender()
+          : config.emailDelivery === "smtp" && config.smtp !== undefined
+            ? new SmtpEmailSender(config.smtp)
+            : new ConsoleEmailSender(config.nodeEnv);
       const service = new IdentityService(
         new IdentityRepository(databasePool),
         emailSender,
@@ -41,7 +49,7 @@ async function main(): Promise<void> {
         config.publicApiUrl,
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
-      identity = { service };
+      identity = { service, selfServiceMagicLink: config.emailDelivery !== "manual" };
     }
   } catch (error) {
     await pool?.end();

@@ -29,6 +29,13 @@ const MAGIC_LINK_PAGE_HEADERS = {
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
   readonly cookieSecure: boolean;
+  /**
+   * When false, sign-in links are issued by an administrator with the invite command. Requesting
+   * one over HTTP is refused rather than accepted and silently dropped, so nobody waits on an
+   * email that was never going to arrive. The refusal is identical for every address, so it
+   * reveals nothing about who is a member.
+   */
+  readonly selfServiceMagicLink?: boolean;
 }
 
 function sessionCookie(
@@ -154,9 +161,16 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
 
 export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app,
-  { service, cookieSecure },
+  { service, cookieSecure, selfServiceMagicLink = true },
 ) => {
   app.post("/auth/magic-link", async (request, reply) => {
+    if (!selfServiceMagicLink) {
+      throw new ApiError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Sign-in links are issued by an administrator",
+      );
+    }
     const result = requestMagicLinkSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid magic-link request");
     const response = await service.requestMagicLink(result.data.email, request.ip, request.log);

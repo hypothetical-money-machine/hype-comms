@@ -104,12 +104,40 @@ container publishes only on `127.0.0.1`, expecting a reverse proxy or tunnel on 
 terminate TLS. It runs as a non-root user with a read-only root filesystem and all capabilities
 dropped.
 
-Postgres backs the M1 identity model and is still being built, so it sits behind an opt-in compose
-profile. A plain `docker compose up` runs the chat server alone. To bring up the identity database,
-set `HMM_POSTGRES_PASSWORD` and `HMM_DATABASE_URL` in `.env` and run
-`docker compose --profile identity up -d`. The server registers identity features only when
-`HMM_DATABASE_URL` is set. Apply migrations with
-`npm run migrate --workspace @hmm-chat/server`.
+## Running the identity model without an email provider
+
+Identity features register only when `HMM_DATABASE_URL` is set. The server applies its own
+migrations at boot, so no separate migration step is needed for a normal deploy.
+
+Magic-link sign-in normally needs SMTP. To run a real deployment before choosing an email
+provider, set `HMM_EMAIL_DELIVERY=manual`: an administrator issues sign-in links with the invite
+command and passes them along privately. In that mode `POST /v1/auth/magic-link` is refused with a
+503 rather than accepted and silently dropped, so nobody waits on an email that was never going to
+arrive. The refusal is identical for every address, so it reveals nothing about who is a member.
+
+Required environment for an identity deployment:
+
+```bash
+HMM_DATABASE_URL=postgres://…      # enables identity
+HMM_EMAIL_DELIVERY=manual          # or configure HMM_SMTP_URL and HMM_EMAIL_FROM
+HMM_OWNER_EMAIL=you@example.com    # seeded once, on first boot
+```
+
+Invite someone, then send them the printed link over a private channel:
+
+```bash
+# in a container, where only the compiled output exists
+npm run invite:dist --workspace @hmm-chat/server -- --email them@example.com
+
+# from a source checkout
+npm run invite --workspace @hmm-chat/server -- --email them@example.com
+```
+
+Re-running for the same address reuses the pending invitation and issues a fresh link, which is
+what you want when the previous one expired. Links last 15 minutes; invitations last 7 days.
+
+With compose, Postgres sits behind an opt-in profile: set `HMM_POSTGRES_PASSWORD` and
+`HMM_DATABASE_URL` in `.env`, then `docker compose --profile identity up -d`.
 
 `HMM_PUBLIC_API_URL` must be HTTPS when `NODE_ENV=production`, and it also decides whether session
 cookies carry `Secure`. Chat history and the session signing key live in the `chat-data` volume at

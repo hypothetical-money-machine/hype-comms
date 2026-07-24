@@ -34,6 +34,20 @@ export class ConsoleEmailSender implements EmailSender {
   }
 }
 
+/**
+ * Used when sign-in links are delivered by an administrator instead of by email — the operator
+ * runs the invite command and passes the link along privately. It refuses to be called rather
+ * than discarding a link silently: with manual delivery the self-service endpoint is disabled, so
+ * reaching this sender means something is wired wrong.
+ */
+export class ManualEmailSender implements EmailSender {
+  async sendMagicLink(): Promise<void> {
+    throw new Error(
+      "Email delivery is set to manual. Issue sign-in links with the invite command instead.",
+    );
+  }
+}
+
 export interface SmtpEmailSenderOptions {
   readonly url: string;
   readonly from: string;

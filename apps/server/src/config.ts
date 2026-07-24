@@ -24,6 +24,7 @@ const rawConfigSchema = z
     databasePoolSize: z.coerce.number().int().min(1).max(100).default(10),
     smtpUrl: optionalString(z.url()),
     emailFrom: optionalString(z.string().min(1)),
+    emailDelivery: z.enum(["smtp", "console", "manual"]).optional(),
     ownerEmail: optionalString(emailSchema),
     workspaceName: z.string().trim().min(1).max(120).default("HMM Chat"),
     workspaceSlug: z
@@ -89,6 +90,13 @@ export interface ServerConfig {
     readonly url: string;
     readonly from: string;
   };
+  /**
+   * How sign-in links reach people. `manual` means an administrator issues them with the invite
+   * command and passes them along privately, which lets a real deployment run before an email
+   * provider exists. Self-service link requests are refused in that mode rather than accepted and
+   * silently dropped.
+   */
+  readonly emailDelivery: "smtp" | "console" | "manual";
   readonly owner?: {
     readonly email: Email;
     readonly workspaceName: string;
@@ -120,6 +128,7 @@ export function loadConfig(
     databaseUrl: env.HMM_DATABASE_URL,
     databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
     smtpUrl: env.HMM_SMTP_URL,
+    emailDelivery: env.HMM_EMAIL_DELIVERY,
     emailFrom: env.HMM_EMAIL_FROM,
     ownerEmail: env.HMM_OWNER_EMAIL,
     workspaceName: env.HMM_WORKSPACE_NAME,
@@ -137,6 +146,33 @@ export function loadConfig(
   }
   if ((result.data.smtpUrl === undefined) !== (result.data.emailFrom === undefined)) {
     throw new ConfigError(["smtp: HMM_SMTP_URL and HMM_EMAIL_FROM must be configured together"]);
+  }
+
+  const hasSmtp = result.data.smtpUrl !== undefined && result.data.emailFrom !== undefined;
+  // Only identity sends email, so a chat-only deployment never has to choose a delivery mode.
+  const identityEnabled = result.data.databaseUrl !== undefined;
+  const emailDelivery =
+    result.data.emailDelivery ??
+    (hasSmtp
+      ? "smtp"
+      : result.data.nodeEnv !== "production"
+        ? "console"
+        : identityEnabled
+          ? undefined
+          : "manual");
+  if (emailDelivery === undefined) {
+    throw new ConfigError([
+      "emailDelivery: Configure HMM_SMTP_URL and HMM_EMAIL_FROM, or set " +
+        "HMM_EMAIL_DELIVERY=manual to issue sign-in links with the invite command",
+    ]);
+  }
+  if (emailDelivery === "smtp" && !hasSmtp) {
+    throw new ConfigError(["emailDelivery: smtp requires HMM_SMTP_URL and HMM_EMAIL_FROM"]);
+  }
+  if (emailDelivery === "console" && result.data.nodeEnv === "production") {
+    throw new ConfigError([
+      "emailDelivery: console writes a live credential to the log and is not allowed in production",
+    ]);
   }
 
   const defaultOrigins =
@@ -200,6 +236,7 @@ export function loadConfig(
     ...(result.data.smtpUrl === undefined || result.data.emailFrom === undefined
       ? {}
       : { smtp: { url: result.data.smtpUrl, from: result.data.emailFrom } }),
+    emailDelivery,
     ...(result.data.ownerEmail === undefined
       ? {}
       : {
