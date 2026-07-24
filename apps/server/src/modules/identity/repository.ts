@@ -336,6 +336,16 @@ export class IdentityRepository {
     return firstOrNull(result, mapWorkspace);
   }
 
+  async findFirstWorkspace(): Promise<Workspace | null> {
+    const result = await this.#database.query<WorkspaceRow>(
+      `SELECT id, name, slug, created_by, created_at, updated_at
+         FROM workspaces
+        ORDER BY created_at, id
+        LIMIT 1`,
+    );
+    return firstOrNull(result, mapWorkspace);
+  }
+
   async findWorkspaceBySlug(slug: string): Promise<Workspace | null> {
     const result = await this.#database.query<WorkspaceRow>(
       `SELECT id, name, slug, created_by, created_at, updated_at
@@ -411,6 +421,18 @@ export class IdentityRepository {
         ORDER BY created_at, workspace_id
         LIMIT 1`,
       [userId],
+    );
+    return firstOrNull(result, mapMembership);
+  }
+
+  async findActiveOwnerMembership(workspaceId: EntityId): Promise<WorkspaceMembership | null> {
+    const result = await this.#database.query<MembershipRow>(
+      `SELECT workspace_id, user_id, role, status, created_at, updated_at
+         FROM workspace_memberships
+        WHERE workspace_id = $1 AND role = 'owner' AND status = 'active'
+        ORDER BY created_at, user_id
+        LIMIT 1`,
+      [workspaceId],
     );
     return firstOrNull(result, mapMembership);
   }
