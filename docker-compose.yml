@@ -24,8 +24,10 @@ services:
       HMM_LOG_LEVEL: ${HMM_LOG_LEVEL:-info}
       # The public URL is what users reach through the tunnel. It must be HTTPS in production and
       # it also decides whether session cookies carry the Secure attribute.
-      HMM_PUBLIC_API_URL: ${HMM_PUBLIC_API_URL:-https://chat.hypemm.com}
-      HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-https://chat.hypemm.com}
+      HMM_PUBLIC_API_URL: ${HMM_PUBLIC_API_URL:-https://chat-api.example.invalid}
+      # The desktop client's renderer origins, not the API hostname. The websocket route
+      # rejects any Origin not listed here.
+      HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
       HMM_CHAT_ENABLED: "true"
       HMM_CHAT_ACCESS_CODE: ${HMM_CHAT_ACCESS_CODE:?set HMM_CHAT_ACCESS_CODE in .env}
       HMM_CHAT_DATA_PATH: /data/hmm-chat.sqlite

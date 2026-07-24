@@ -16,7 +16,7 @@ describe("loadConfig", () => {
   it("uses the pilot API and packaged renderer origins in production", () => {
     expect(loadConfig({ NODE_ENV: "production" })).toMatchObject({
       allowedOrigins: ["app://bundle"],
-      publicApiUrl: "https://api.chat.hypemm.com",
+      publicApiUrl: "https://chat-api.example.invalid",
       cookieSecure: true,
     });
   });

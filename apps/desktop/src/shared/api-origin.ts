@@ -1,5 +1,5 @@
 export const DEFAULT_DEVELOPMENT_API_ORIGIN = "http://127.0.0.1:3000";
-export const DEFAULT_PRODUCTION_API_ORIGIN = "https://api.chat.hypemm.com";
+export const DEFAULT_PRODUCTION_API_ORIGIN = "https://chat-api.example.invalid";
 
 function parseBareOrigin(value: string): URL | null {
   try {

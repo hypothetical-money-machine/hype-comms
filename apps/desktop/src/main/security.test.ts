@@ -139,24 +139,24 @@ describe("API origin validation", () => {
       DEFAULT_PRODUCTION_API_ORIGIN,
     );
     expect(createServerHealthUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://api.chat.hypemm.com/livez",
+      "https://chat-api.example.invalid/livez",
     );
     expect(createSessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://api.chat.hypemm.com/v1/chat/session",
+      "https://chat-api.example.invalid/v1/chat/session",
     );
     expect(createWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
       "http://127.0.0.1:3000/v1/chat/welcome/messages",
     );
     expect(createWelcomeRealtimeUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "wss://api.chat.hypemm.com/v1/chat/welcome/realtime",
+      "wss://chat-api.example.invalid/v1/chat/welcome/realtime",
     );
   });
 
   it.each([
-    "http://api.chat.hypemm.com",
-    "https://user:secret@api.chat.hypemm.com",
-    "https://api.chat.hypemm.com/v1",
-    "https://api.chat.hypemm.com?tenant=hmm",
+    "http://chat-api.example.invalid",
+    "https://user:secret@chat-api.example.invalid",
+    "https://chat-api.example.invalid/v1",
+    "https://chat-api.example.invalid?tenant=hmm",
     "not a URL",
   ])("rejects production API configuration that is not a safe HTTPS origin: %s", (origin) => {
     expect(normalizeProductionApiOrigin(origin)).toBeNull();
@@ -166,13 +166,13 @@ describe("API origin validation", () => {
     "http://0.0.0.0:3000",
     "http://example.com:3000",
     "http://127.0.0.1:3000/v1",
-    "https://user:secret@chat.hypemm.com",
+    "https://user:secret@chat-api.example.invalid",
     "not a URL",
   ])("rejects development API configuration that is not loopback HTTP or HTTPS: %s", (origin) => {
     expect(normalizeDevelopmentApiOrigin(origin)).toBeNull();
   });
 
-  it.each(["https://127.0.0.1:3000", "https://chat.hypemm.com"])(
+  it.each(["https://127.0.0.1:3000", "https://chat-api.example.invalid"])(
     "lets a development build reach an HTTPS deployment: %s",
     (origin) => {
       expect(normalizeDevelopmentApiOrigin(origin)).toBe(origin);

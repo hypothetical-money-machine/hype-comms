@@ -174,7 +174,7 @@ describe("chat channel", () => {
   it("requires the access code, derives authors from the session, and persists history", async () => {
     const store = new ChatStore(":memory:");
     const app = await buildApp({
-      allowedOrigins: ["https://chat.hypemm.com"],
+      allowedOrigins: ["app://bundle"],
       chat: { accessCode: "weekend-secret", store },
     });
     apps.push(app);
@@ -216,7 +216,7 @@ describe("chat channel", () => {
   it("broadcasts messages to authenticated same-origin websocket clients", async () => {
     const store = new ChatStore(":memory:");
     const app = await buildApp({
-      allowedOrigins: ["https://chat.hypemm.com"],
+      allowedOrigins: ["app://bundle"],
       chat: { accessCode: "weekend-secret", store },
     });
     apps.push(app);
@@ -231,7 +231,7 @@ describe("chat channel", () => {
       `${address.replace("http://", "ws://")}/v1/chat/welcome/realtime`,
       {
         headers: { cookie: `hmm_chat_session=${cookie?.value ?? ""}` },
-        origin: "https://chat.hypemm.com",
+        origin: "app://bundle",
       },
     );
     await once(socket, "open");

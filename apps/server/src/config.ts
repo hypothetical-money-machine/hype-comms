@@ -157,7 +157,7 @@ export function loadConfig(
   const publicApiUrl =
     result.data.publicApiUrl ??
     (result.data.nodeEnv === "production"
-      ? "https://api.chat.hypemm.com"
+      ? "https://chat-api.example.invalid"
       : `http://127.0.0.1:${result.data.port}`);
   const publicApiResult = configuredOriginSchema.safeParse(publicApiUrl);
 

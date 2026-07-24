@@ -38,8 +38,8 @@ start_container() {
     --read-only --tmpfs /tmp --cap-drop ALL \
     --env NODE_ENV=production \
     --env HMM_HOST=0.0.0.0 \
-    --env HMM_PUBLIC_API_URL=https://chat.hypemm.com \
-    --env HMM_ALLOWED_ORIGINS=https://chat.hypemm.com \
+    --env HMM_PUBLIC_API_URL=https://chat-api.example.invalid \
+    --env HMM_ALLOWED_ORIGINS=app://bundle \
     --env HMM_CHAT_ENABLED=true \
     --env HMM_CHAT_ACCESS_CODE="$ACCESS_CODE" \
     "$IMAGE" >/dev/null

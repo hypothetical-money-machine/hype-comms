@@ -80,7 +80,7 @@ loopback HTTP origin or any HTTPS origin, so it can be aimed at a real deploymen
 
 ```bash
 npm run dev:server                                   # not needed when using a remote server
-HMM_CHAT_API_ORIGIN=https://chat.hypemm.com npm run dev:desktop
+HMM_CHAT_API_ORIGIN=https://chat-api.example.invalid npm run dev:desktop
 ```
 
 The origin is read when the client is built, so restart `dev:desktop` after changing it. Plain
