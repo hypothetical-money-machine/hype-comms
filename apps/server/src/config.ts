@@ -18,6 +18,8 @@ const rawConfigSchema = z
     chatAccessCode: optionalString(z.string().min(16)),
     chatDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
     webRoot: optionalString(z.string().min(1)),
+    databaseUrl: optionalString(z.string().min(1)),
+    databasePoolSize: z.coerce.number().int().min(1).max(100).default(10),
   })
   .strict();
 
@@ -62,6 +64,14 @@ export interface ServerConfig {
     readonly cookieSecure: boolean;
   };
   readonly webRoot?: string;
+  /**
+   * Identity storage. Postgres backs the M1 identity model; the access-code chat path predates it
+   * and still uses SQLite. Identity features register only when a database URL is configured.
+   */
+  readonly database?: {
+    readonly url: string;
+    readonly poolSize: number;
+  };
 }
 
 export class ConfigError extends Error {
@@ -85,6 +95,8 @@ export function loadConfig(
     chatEnabled: env.HMM_CHAT_ENABLED,
     chatAccessCode: env.HMM_CHAT_ACCESS_CODE,
     chatDataPath: env.HMM_CHAT_DATA_PATH,
+    databaseUrl: env.HMM_DATABASE_URL,
+    databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
   });
 
   if (!result.success) {
@@ -152,5 +164,8 @@ export function loadConfig(
       cookieSecure: parsedPublicApiUrl.protocol === "https:",
     },
     ...(result.data.webRoot === undefined ? {} : { webRoot: result.data.webRoot }),
+    ...(result.data.databaseUrl === undefined
+      ? {}
+      : { database: { url: result.data.databaseUrl, poolSize: result.data.databasePoolSize } }),
   };
 }
