@@ -24,3 +24,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+.dev-data/

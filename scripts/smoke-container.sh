@@ -126,9 +126,9 @@ for _ in $(seq 1 12); do
 done
 [ "$THROTTLED" = true ] || fail "sign-in was never throttled"
 
-echo "==> confirms the development routes are absent in production"
+echo "==> confirms the removed unauthenticated routes stay gone"
 [ "$(status_of "${BASE}/v1/development/welcome/messages")" = "404" ] \
-  || fail "unauthenticated development routes are exposed in production"
+  || fail "the unauthenticated development routes are reachable"
 
 echo
 echo "PASS: container smoke test"

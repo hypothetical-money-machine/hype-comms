@@ -56,10 +56,15 @@ npm ci
 npm run dev -- --name Morgan
 ```
 
-The temporary development identity is supplied by `--name`. The `#welcome` channel works
-across connected clients, but its in-memory history resets whenever the server restarts.
-With the first client still running, open a second terminal and join the same local channel
-under another identity:
+Development runs the same authenticated path as a deployment: the client opens a sign-in screen
+and the server derives every message author from the session. `--name` only pre-fills the sign-in
+form. The local access code is printed on startup and is also the fixed value
+`local-development-access-code`.
+
+History is persisted to `.dev-data/hmm-chat.sqlite`, which is git-ignored. Delete that directory
+to start from an empty channel.
+
+With the first client still running, open a second terminal and join as another person:
 
 ```bash
 npm run dev:join -- --name Alex
@@ -67,6 +72,20 @@ npm run dev:join -- --name Alex
 
 Run one process at a time with `npm run dev:server` or set `HMM_CHAT_NAME` and run
 `npm run dev:desktop`.
+
+### Pointing the desktop client at a deployment
+
+`HMM_CHAT_API_ORIGIN` selects the server the client talks to. A development build accepts a
+loopback HTTP origin or any HTTPS origin, so it can be aimed at a real deployment:
+
+```bash
+npm run dev:server                                   # not needed when using a remote server
+HMM_CHAT_API_ORIGIN=https://chat.hypemm.com npm run dev:desktop
+```
+
+The origin is read when the client is built, so restart `dev:desktop` after changing it. Plain
+HTTP to a non-loopback host is rejected: that is the case where the access code and session cookie
+would cross the network in the clear.
 
 ## Weekend dogfood deployment
 
@@ -104,8 +123,15 @@ sign users out and knowing the access code is not enough to forge a session for 
 Rotating the access code invalidates every outstanding session. Failed sign-in attempts are
 throttled per client address.
 
+The desktop client holds the session entirely in the Electron main process. The access code is
+passed over IPC only for the duration of a sign-in call and is never stored; the cookie lives in
+Electron's cookie jar, which the packaged app encrypts through the `enableCookieEncryption` fuse.
+Renderer code can observe whether a session exists and under what name, and nothing more.
+
 Because the access code is shared, this gives no per-person identity, revocation, or audit trail.
-It suits two cofounders behind a private URL and nothing beyond that.
+It suits two cofounders behind a private URL and nothing beyond that. Replacing it with the
+invitation and rotating-session model in M1 should not require changing the transport or IPC
+shape, only the sign-in call itself.
 
 ## Verification
 

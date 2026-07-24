@@ -1,4 +1,4 @@
-import type { DevelopmentIdentity, DevelopmentWelcomeMessage } from "@hmm-chat/contracts";
+import type { DogfoodMessage, DogfoodSessionState } from "@hmm-chat/contracts";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
@@ -9,12 +9,22 @@ export interface NotificationAction {
 
 export type ServerStatus = "reachable" | "unreachable";
 
+export interface SignInRequest {
+  readonly name: string;
+  readonly accessCode: string;
+}
+
 export interface ChatTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
-  readonly getIdentity: () => Promise<DevelopmentIdentity>;
-  readonly getWelcomeMessages: () => Promise<readonly DevelopmentWelcomeMessage[]>;
-  readonly sendWelcomeMessage: (body: string) => Promise<DevelopmentWelcomeMessage>;
-  readonly onWelcomeMessage: (listener: (message: DevelopmentWelcomeMessage) => void) => () => void;
+  /** Name to pre-fill on the sign-in form. Empty when the app has no hint to offer. */
+  readonly getSuggestedName: () => Promise<string>;
+  readonly getSessionState: () => Promise<DogfoodSessionState>;
+  readonly signIn: (request: SignInRequest) => Promise<DogfoodSessionState>;
+  readonly signOut: () => Promise<DogfoodSessionState>;
+  readonly onSessionChanged: (listener: (state: DogfoodSessionState) => void) => () => void;
+  readonly getWelcomeMessages: () => Promise<readonly DogfoodMessage[]>;
+  readonly sendWelcomeMessage: (body: string) => Promise<DogfoodMessage>;
+  readonly onWelcomeMessage: (listener: (message: DogfoodMessage) => void) => () => void;
 }
 
 export interface DesktopApi extends ChatTransport {

@@ -3,8 +3,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  createDevelopmentWelcomeMessagesUrl,
-  createDevelopmentWelcomeRealtimeUrl,
+  createSessionUrl,
+  createWelcomeMessagesUrl,
+  createWelcomeRealtimeUrl,
   createServerHealthUrl,
   DEFAULT_DEVELOPMENT_API_ORIGIN,
   DEFAULT_PRODUCTION_API_ORIGIN,
@@ -140,11 +141,14 @@ describe("API origin validation", () => {
     expect(createServerHealthUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
       "https://api.chat.hypemm.com/livez",
     );
-    expect(createDevelopmentWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
-      "http://127.0.0.1:3000/v1/development/welcome/messages",
+    expect(createSessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "https://api.chat.hypemm.com/v1/dogfood/session",
     );
-    expect(createDevelopmentWelcomeRealtimeUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "wss://api.chat.hypemm.com/v1/development/welcome/realtime",
+    expect(createWelcomeMessagesUrl(DEFAULT_DEVELOPMENT_API_ORIGIN)).toBe(
+      "http://127.0.0.1:3000/v1/dogfood/welcome/messages",
+    );
+    expect(createWelcomeRealtimeUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
+      "wss://api.chat.hypemm.com/v1/dogfood/welcome/realtime",
     );
   });
 
@@ -159,11 +163,19 @@ describe("API origin validation", () => {
   });
 
   it.each([
-    "https://127.0.0.1:3000",
     "http://0.0.0.0:3000",
     "http://example.com:3000",
     "http://127.0.0.1:3000/v1",
-  ])("rejects development API configuration that is not loopback HTTP: %s", (origin) => {
+    "https://user:secret@chat.hypemm.com",
+    "not a URL",
+  ])("rejects development API configuration that is not loopback HTTP or HTTPS: %s", (origin) => {
     expect(normalizeDevelopmentApiOrigin(origin)).toBeNull();
   });
+
+  it.each(["https://127.0.0.1:3000", "https://chat.hypemm.com"])(
+    "lets a development build reach an HTTPS deployment: %s",
+    (origin) => {
+      expect(normalizeDevelopmentApiOrigin(origin)).toBe(origin);
+    },
+  );
 });

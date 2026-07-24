@@ -1,11 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import {
-  developmentIdentitySchema,
-  developmentWelcomeHistorySchema,
-  developmentWelcomeMessageSchema,
+  displayNameSchema,
+  dogfoodHistorySchema,
+  dogfoodMessageSchema,
+  dogfoodSessionStateSchema,
   messageBodySchema,
-  type DevelopmentWelcomeMessage,
+  type DogfoodMessage,
+  type DogfoodSessionState,
 } from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -14,6 +16,7 @@ import type {
   DesktopPlatform,
   NotificationAction,
   ServerStatus,
+  SignInRequest,
 } from "../shared/desktop-api";
 
 function subscribe<T>(
@@ -51,24 +54,42 @@ const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
-  getIdentity: async () =>
-    developmentIdentitySchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.identity)),
+  getSuggestedName: async () => {
+    const name: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.suggestedName);
+    return typeof name === "string" ? name : "";
+  },
+  getSessionState: async () =>
+    dogfoodSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
+  signIn: async (request: SignInRequest) =>
+    dogfoodSessionStateSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionSignIn, {
+        name: displayNameSchema.parse(request.name),
+        accessCode: String(request.accessCode),
+      }),
+    ),
+  signOut: async () =>
+    dogfoodSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionSignOut)),
+  onSessionChanged: (listener: (state: DogfoodSessionState) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.sessionChanged,
+      listener,
+      (value): value is DogfoodSessionState => dogfoodSessionStateSchema.safeParse(value).success,
+    ),
   getWelcomeMessages: async () => {
     const messages: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeHistory);
-    return developmentWelcomeHistorySchema.parse({ messages }).messages;
+    return dogfoodHistorySchema.parse({ messages }).messages;
   },
   sendWelcomeMessage: async (body: string) => {
     const validatedBody = messageBodySchema.parse(body);
-    return developmentWelcomeMessageSchema.parse(
+    return dogfoodMessageSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeSend, validatedBody),
     );
   },
-  onWelcomeMessage: (listener: (message: DevelopmentWelcomeMessage) => void) =>
+  onWelcomeMessage: (listener: (message: DogfoodMessage) => void) =>
     subscribe(
       DESKTOP_CHANNELS.welcomeMessage,
       listener,
-      (value): value is DevelopmentWelcomeMessage =>
-        developmentWelcomeMessageSchema.safeParse(value).success,
+      (value): value is DogfoodMessage => dogfoodMessageSchema.safeParse(value).success,
     ),
   onNotificationAction: (listener: (action: NotificationAction) => void) =>
     subscribe(DESKTOP_CHANNELS.notificationAction, listener, isNotificationAction),

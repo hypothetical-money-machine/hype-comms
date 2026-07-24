@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import type { DevelopmentIdentity, DevelopmentWelcomeMessage } from "@hmm-chat/contracts";
+import type { DogfoodMessage, DogfoodSessionState } from "@hmm-chat/contracts";
 
 import type { DesktopApi, ServerStatus } from "../../shared/desktop-api";
 
@@ -10,9 +10,9 @@ interface AppProps {
 }
 
 function mergeMessages(
-  current: readonly DevelopmentWelcomeMessage[],
-  incoming: readonly DevelopmentWelcomeMessage[],
-): DevelopmentWelcomeMessage[] {
+  current: readonly DogfoodMessage[],
+  incoming: readonly DogfoodMessage[],
+): DogfoodMessage[] {
   const messages = new Map(current.map((message) => [message.id, message]));
   for (const message of incoming) {
     messages.set(message.id, message);
@@ -23,18 +23,110 @@ function mergeMessages(
 }
 
 function messageTime(createdAt: string): string {
-  return new Date(createdAt).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return new Date(createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message !== "" ? error.message : fallback;
+}
+
+function SignIn({
+  client,
+  onSignedIn,
+}: {
+  readonly client: DesktopApi;
+  readonly onSignedIn: (state: DogfoodSessionState) => void;
+}) {
+  const [name, setName] = useState("");
+  const [accessCode, setAccessCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const nameInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    void client.getSuggestedName().then((suggested) => {
+      if (active && suggested !== "") setName(suggested);
+    });
+    nameInput.current?.focus();
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      onSignedIn(await client.signIn({ name: name.trim(), accessCode }));
+    } catch (caught) {
+      setError(errorMessage(caught, "Sign-in failed"));
+      setAccessCode("");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const canSubmit = name.trim().length > 0 && accessCode.length > 0 && !submitting;
+
+  return (
+    <main className="signin-shell">
+      <form className="signin-card" onSubmit={(event) => void submit(event)}>
+        <div className="workspace-mark" aria-hidden="true">
+          H
+        </div>
+        <h1>HMM Chat</h1>
+        <p className="signin-lede">Enter the workspace access code to join #welcome.</p>
+
+        <label htmlFor="signin-name">Display name</label>
+        <input
+          ref={nameInput}
+          id="signin-name"
+          type="text"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          maxLength={80}
+          autoComplete="off"
+          spellCheck={false}
+          disabled={submitting}
+          required
+        />
+
+        <label htmlFor="signin-code">Access code</label>
+        <input
+          id="signin-code"
+          type="password"
+          value={accessCode}
+          onChange={(event) => setAccessCode(event.target.value)}
+          maxLength={256}
+          autoComplete="off"
+          disabled={submitting}
+          required
+        />
+
+        {error !== null && (
+          <p className="signin-error" role="alert">
+            {error}
+          </p>
+        )}
+
+        <button type="submit" disabled={!canSubmit}>
+          {submitting ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </main>
+  );
 }
 
 export function App({ client }: AppProps) {
   const [version, setVersion] = useState<string>("…");
   const [status, setStatus] = useState<string>("Connecting to #welcome…");
   const [serverStatus, setServerStatus] = useState<ServerStatus>("unreachable");
-  const [identity, setIdentity] = useState<DevelopmentIdentity | null>(null);
-  const [messages, setMessages] = useState<DevelopmentWelcomeMessage[]>([]);
+  const [session, setSession] = useState<DogfoodSessionState | null>(null);
+  const [messages, setMessages] = useState<DogfoodMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const messageList = useRef<HTMLDivElement>(null);
@@ -42,40 +134,58 @@ export function App({ client }: AppProps) {
 
   useEffect(() => {
     let active = true;
-    let historyRetry: ReturnType<typeof setTimeout> | undefined;
-    const stopWelcomeListener = client.onWelcomeMessage((message) => {
-      setMessages((current) => mergeMessages(current, [message]));
-      setServerStatus("reachable");
-    });
-    const stopNotificationListener = client.onNotificationAction((action) => {
-      setStatus(`Open channel ${action.channelId}`);
+    const stopSessionListener = client.onSessionChanged((next) => {
+      setSession(next);
+      if (next.status === "signed-out") setMessages([]);
     });
 
     void client.getAppVersion().then((appVersion) => {
       if (active) setVersion(appVersion);
     });
-    void client.getServerStatus().then((nextServerStatus) => {
-      if (active) setServerStatus(nextServerStatus);
+    void client.getServerStatus().then((next) => {
+      if (active) setServerStatus(next);
     });
-    void client.getIdentity().then((nextIdentity) => {
-      if (active) setIdentity(nextIdentity);
+    void client
+      .getSessionState()
+      .then((next) => {
+        if (active) setSession(next);
+      })
+      .catch(() => {
+        if (active) setSession({ status: "signed-out" });
+      });
+
+    return () => {
+      active = false;
+      stopSessionListener();
+    };
+  }, [client]);
+
+  const signedIn = session?.status === "signed-in";
+
+  useEffect(() => {
+    if (!signedIn) return () => undefined;
+
+    let active = true;
+    let historyRetry: ReturnType<typeof setTimeout> | undefined;
+    const stopWelcomeListener = client.onWelcomeMessage((message) => {
+      setMessages((current) => mergeMessages(current, [message]));
+      setServerStatus("reachable");
     });
+
     const loadHistory = (): void => {
       void client
         .getWelcomeMessages()
         .then((history) => {
-          if (active) {
-            setMessages((current) => mergeMessages(history, current));
-            setServerStatus("reachable");
-            setStatus("#welcome is live");
-          }
+          if (!active) return;
+          setMessages((current) => mergeMessages(history, current));
+          setServerStatus("reachable");
+          setStatus("#welcome is live");
         })
         .catch((error: unknown) => {
-          if (active) {
-            setServerStatus("unreachable");
-            setStatus(error instanceof Error ? error.message : "Could not load #welcome");
-            historyRetry = setTimeout(loadHistory, 1_000);
-          }
+          if (!active) return;
+          setServerStatus("unreachable");
+          setStatus(errorMessage(error, "Could not load #welcome"));
+          historyRetry = setTimeout(loadHistory, 2_000);
         });
     };
     loadHistory();
@@ -84,22 +194,22 @@ export function App({ client }: AppProps) {
       active = false;
       if (historyRetry !== undefined) clearTimeout(historyRetry);
       stopWelcomeListener();
-      stopNotificationListener();
     };
-  }, [client]);
+  }, [client, signedIn]);
 
   useEffect(() => {
     const list = messageList.current;
-    if (list !== null) {
-      list.scrollTop = list.scrollHeight;
-    }
+    if (list !== null) list.scrollTop = list.scrollHeight;
   }, [messages]);
 
   useEffect(() => {
-    if (identity !== null && !sending) {
-      messageInput.current?.focus();
-    }
-  }, [identity, sending]);
+    if (signedIn && !sending) messageInput.current?.focus();
+  }, [signedIn, sending]);
+
+  const handleSignedIn = useCallback((next: DogfoodSessionState) => {
+    setSession(next);
+    setStatus("Connecting to #welcome…");
+  }, []);
 
   const sendMessage = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -114,11 +224,19 @@ export function App({ client }: AppProps) {
       setServerStatus("reachable");
       setStatus("#welcome is live");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Message failed to send");
+      setStatus(errorMessage(error, "Message failed to send"));
     } finally {
       setSending(false);
     }
   };
+
+  if (session === null) {
+    return <main className="signin-shell" aria-busy="true" />;
+  }
+
+  if (session.status === "signed-out") {
+    return <SignIn client={client} onSignedIn={handleSignedIn} />;
+  }
 
   return (
     <main className="shell">
@@ -142,7 +260,7 @@ export function App({ client }: AppProps) {
         </nav>
 
         <footer>
-          <strong>{identity?.name ?? "Loading identity…"}</strong>
+          <strong>{session.name}</strong>
           <span>{status}</span>
           <span className={`server-status ${serverStatus}`}>
             <span className="status-dot" aria-hidden="true" />
@@ -151,6 +269,9 @@ export function App({ client }: AppProps) {
           <span>
             v{version} · {client.platform}
           </span>
+          <button className="signout" type="button" onClick={() => void client.signOut()}>
+            Sign out
+          </button>
         </footer>
       </section>
 
@@ -158,7 +279,7 @@ export function App({ client }: AppProps) {
         <header className="conversation-header">
           <div>
             <h2># welcome</h2>
-            <p>Temporary in-memory chat while authentication and persistence are built.</p>
+            <p>Shared access-code chat. History is kept on the server.</p>
           </div>
         </header>
 
@@ -169,7 +290,7 @@ export function App({ client }: AppProps) {
                 #
               </div>
               <h2>Welcome to HMM Chat</h2>
-              <p>Send the first message. History lasts until the development server restarts.</p>
+              <p>Send the first message.</p>
             </div>
           ) : (
             messages.map((message) => (
@@ -199,15 +320,12 @@ export function App({ client }: AppProps) {
             type="text"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder={`Message #welcome as ${identity?.name ?? "…"}`}
-            disabled={identity === null || sending}
+            placeholder={`Message #welcome as ${session.name}`}
+            disabled={sending}
             maxLength={4_000}
             autoComplete="off"
           />
-          <button
-            type="submit"
-            disabled={identity === null || sending || draft.trim().length === 0}
-          >
+          <button type="submit" disabled={sending || draft.trim().length === 0}>
             {sending ? "Sending…" : "Send"}
           </button>
         </form>

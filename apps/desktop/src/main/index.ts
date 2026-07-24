@@ -3,9 +3,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  developmentIdentitySchema,
+  dogfoodSessionRequestSchema,
   messageBodySchema,
-  type DevelopmentWelcomeMessage,
+  type DogfoodMessage,
+  type DogfoodSessionState,
 } from "@hmm-chat/contracts";
 import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
@@ -13,7 +14,9 @@ import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import type { NotificationAction, ServerStatus } from "../shared/desktop-api";
-import { resolveDevelopmentIdentity } from "./development-identity";
+import { ChatSession, ChatSessionError } from "./chat-session";
+import { ChatTransport } from "./chat-transport";
+import { resolveSuggestedName } from "./suggested-name";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -24,7 +27,7 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
-import { WelcomeTransport } from "./welcome-transport";
+const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -44,27 +47,15 @@ let rendererReady = false;
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
 const pendingNotificationActions: NotificationAction[] = [];
-const pendingWelcomeMessages: DevelopmentWelcomeMessage[] = [];
-const developmentIdentity = resolveDevelopmentIdentity(
-  process.argv,
-  process.env,
-  app.isPackaged ? "Guest" : undefined,
-);
-if (!app.isPackaged) {
-  const identityProfile = createHash("sha256")
-    .update(developmentIdentity.name)
-    .digest("hex")
-    .slice(0, 16);
+const pendingWelcomeMessages: DogfoodMessage[] = [];
+// Only a hint for the sign-in form. The server derives the real author from the session.
+const suggestedName = app.isPackaged ? "" : resolveSuggestedName(process.argv, process.env);
+if (!app.isPackaged && suggestedName !== "") {
+  const identityProfile = createHash("sha256").update(suggestedName).digest("hex").slice(0, 16);
   app.setPath("userData", path.join(app.getPath("userData"), `development-${identityProfile}`));
 }
-const welcomeTransport = app.isPackaged
-  ? null
-  : new WelcomeTransport({
-      apiOrigin: __HMM_CHAT_API_ORIGIN__,
-      identity: developmentIdentity,
-      rendererOrigin: "http://127.0.0.1:5173",
-      onMessage: deliverWelcomeMessage,
-    });
+let chatSession: ChatSession | null = null;
+let chatTransport: ChatTransport | null = null;
 
 function sendToRenderer(channel: string, payload: unknown): boolean {
   if (mainWindow === null || mainWindow.isDestroyed() || !rendererReady) {
@@ -82,13 +73,25 @@ export function deliverNotificationAction(action: NotificationAction): void {
   }
 }
 
-function deliverWelcomeMessage(message: DevelopmentWelcomeMessage): void {
+function deliverWelcomeMessage(message: DogfoodMessage): void {
   if (!sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message)) {
     pendingWelcomeMessages.push(message);
   }
 }
 
+function deliverSessionState(state: DogfoodSessionState): void {
+  sendToRenderer(DESKTOP_CHANNELS.sessionChanged, state);
+  if (state.status === "signed-in") {
+    chatTransport?.start();
+  } else {
+    chatTransport?.stop();
+  }
+}
+
 function flushPendingRendererEvents(): void {
+  if (chatSession !== null) {
+    sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
+  }
   while (pendingNotificationActions.length > 0) {
     const action = pendingNotificationActions.shift();
     if (action !== undefined) {
@@ -217,12 +220,53 @@ function registerIpcHandlers(): void {
     return request;
   });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.identity);
-  ipcMain.handle(DESKTOP_CHANNELS.identity, (event) => {
+  ipcMain.removeHandler(DESKTOP_CHANNELS.suggestedName);
+  ipcMain.handle(DESKTOP_CHANNELS.suggestedName, (event) => {
     if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted identity IPC sender");
+      throw new Error("Untrusted suggested-name IPC sender");
     }
-    return developmentIdentitySchema.parse(developmentIdentity);
+    return suggestedName;
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionState, (event): DogfoodSessionState => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted session-state IPC sender");
+    }
+    return chatSession?.state ?? { status: "signed-out" };
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignIn);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionSignIn, async (event, request: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted sign-in IPC sender");
+    }
+    if (chatSession === null) {
+      throw new Error("Chat is not configured");
+    }
+
+    const parsed = dogfoodSessionRequestSchema.safeParse(request);
+    if (!parsed.success) {
+      throw new Error("Enter a name and an access code");
+    }
+
+    try {
+      return await chatSession.signIn(parsed.data);
+    } catch (error) {
+      // Only the message crosses IPC. The cause stays in the main process, so a transport error
+      // carrying request details can never reach renderer code.
+      throw new Error(error instanceof ChatSessionError ? error.message : "Sign-in failed", {
+        cause: error,
+      });
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignOut);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionSignOut, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted sign-out IPC sender");
+    }
+    return (await chatSession?.signOut()) ?? { status: "signed-out" };
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeHistory);
@@ -230,7 +274,7 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted welcome-history IPC sender");
     }
-    return (await welcomeTransport?.getMessages()) ?? [];
+    return (await chatTransport?.getMessages()) ?? [];
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeSend);
@@ -238,10 +282,10 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted welcome-send IPC sender");
     }
-    if (welcomeTransport === null) {
-      throw new Error("Temporary welcome chat is available only in development");
+    if (chatTransport === null) {
+      throw new Error("Chat is not configured");
     }
-    return welcomeTransport.sendMessage(messageBodySchema.parse(body));
+    return chatTransport.sendMessage(messageBodySchema.parse(body));
   });
 }
 
@@ -358,14 +402,28 @@ if (!hasSingleInstanceLock) {
       const rendererRoot = path.join(__dirname, "../renderer");
       lockDownSession(session.defaultSession);
       await installBundledRendererProtocol(rendererRoot);
+
+      chatSession = new ChatSession({
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        session: session.defaultSession,
+      });
+      chatTransport = new ChatTransport({
+        session: chatSession,
+        rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
+        onMessage: deliverWelcomeMessage,
+      });
+      chatSession.subscribe(deliverSessionState);
+
       registerIpcHandlers();
-      welcomeTransport?.start();
 
       if (app.isPackaged) {
         app.setAsDefaultProtocolClient("hmm-chat");
       }
 
       await createMainWindow();
+
+      // Restores a session left over from a previous run; the cookie outlives the process.
+      await chatSession.restore();
 
       const initialCallbackUrl = findAuthCallbackUrl(process.argv);
       if (initialCallbackUrl !== null) {
@@ -394,6 +452,6 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
-    welcomeTransport?.stop();
+    chatTransport?.stop();
   });
 }

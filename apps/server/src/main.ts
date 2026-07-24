@@ -20,7 +20,6 @@ async function main(): Promise<void> {
     logger: createLoggerOptions(config),
     lifecycle,
     allowedOrigins: config.allowedOrigins,
-    enableDevelopmentChat: config.nodeEnv !== "production",
     ...(dogfoodChat === undefined ? {} : { dogfoodChat }),
     ...(config.webRoot === undefined ? {} : { webRoot: config.webRoot }),
   });

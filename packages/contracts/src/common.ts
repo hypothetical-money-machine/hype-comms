@@ -19,9 +19,18 @@ const operationKeySchema = z
 export const clientMessageIdSchema = entityIdSchema;
 export const idempotencyKeySchema = operationKeySchema;
 
+/** Human-facing display name. Control characters are rejected so names cannot forge UI lines. */
+export const displayNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .refine((name) => !/[\p{Cc}\p{Cf}]/u.test(name), "Name cannot contain control characters");
+
 export type EntityId = z.infer<typeof entityIdSchema>;
 export type IsoDateTime = z.infer<typeof isoDateTimeSchema>;
 export type Sequence = z.infer<typeof sequenceSchema>;
 export type EntityVersion = z.infer<typeof entityVersionSchema>;
 export type ClientMessageId = z.infer<typeof clientMessageIdSchema>;
 export type IdempotencyKey = z.infer<typeof idempotencyKeySchema>;
+export type DisplayName = z.infer<typeof displayNameSchema>;

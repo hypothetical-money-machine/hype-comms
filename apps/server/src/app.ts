@@ -5,8 +5,6 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
-import { developmentChatRoutes } from "./modules/development/routes.js";
-import { DevelopmentWelcomeStore } from "./modules/development/welcome-store.js";
 import { dogfoodRoutes } from "./modules/dogfood/routes.js";
 import type { DogfoodChatStore } from "./modules/dogfood/store.js";
 import type { SignInThrottle } from "./modules/dogfood/throttle.js";
@@ -19,8 +17,6 @@ export interface BuildAppOptions {
   readonly lifecycle?: Lifecycle;
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
-  readonly enableDevelopmentChat?: boolean;
-  readonly developmentWelcomeStore?: DevelopmentWelcomeStore;
   readonly dogfoodChat?: {
     readonly accessCode: string;
     readonly store: DogfoodChatStore;
@@ -79,12 +75,6 @@ export async function buildApp(options: BuildAppOptions = {}) {
         allowedOrigins,
         consumeTicket: options.consumeRealtimeTicket ?? denyRealtimeTickets,
       });
-      if (options.enableDevelopmentChat === true) {
-        await v1.register(developmentChatRoutes, {
-          allowedOrigins,
-          store: options.developmentWelcomeStore ?? new DevelopmentWelcomeStore(),
-        });
-      }
       if (options.dogfoodChat !== undefined) {
         await v1.register(dogfoodRoutes, {
           allowedOrigins,

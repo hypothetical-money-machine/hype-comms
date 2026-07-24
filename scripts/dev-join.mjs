@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 
+import { describeDevelopmentAccess } from "./development-chat.mjs";
 import { developmentNameUsage, parseDevelopmentName } from "./development-name.mjs";
 
 const name = parseDevelopmentName(process.argv.slice(2));
@@ -10,6 +11,7 @@ if (name === null) {
   );
   process.exitCode = 1;
 } else {
+  process.stdout.write(`${describeDevelopmentAccess()}\n`);
   const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
   const electronPath = require("electron");
   if (typeof electronPath !== "string") {

@@ -294,3 +294,98 @@ h1 {
     grid-template-columns: 60px 228px minmax(0, 1fr);
   }
 }
+
+.signin-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.signin-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(380px, 100%);
+  padding: 32px;
+  background: #131a30;
+  border: 1px solid #24304f;
+  border-radius: 14px;
+}
+
+.signin-card .workspace-mark {
+  margin-bottom: 8px;
+}
+
+.signin-card h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.signin-lede {
+  margin: 0 0 12px;
+  color: #93a0c0;
+  font-size: 0.9rem;
+}
+
+.signin-card label {
+  color: #93a0c0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.signin-card input {
+  padding: 10px 12px;
+  color: inherit;
+  background: #0b1020;
+  border: 1px solid #2c3960;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.signin-card input:focus-visible {
+  outline: 2px solid #5b7cfa;
+  outline-offset: 1px;
+}
+
+.signin-card button {
+  margin-top: 16px;
+  padding: 10px 14px;
+  color: #f7f9ff;
+  background: #3d5afe;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.signin-card button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.signin-error {
+  margin: 8px 0 0;
+  color: #ff9aa6;
+  font-size: 0.85rem;
+}
+
+.signout {
+  margin-top: 10px;
+  padding: 6px 10px;
+  color: #93a0c0;
+  background: transparent;
+  border: 1px solid #2c3960;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.signout:hover {
+  color: #e8ecf7;
+  border-color: #3d5afe;
+}

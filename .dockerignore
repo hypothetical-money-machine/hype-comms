@@ -34,3 +34,4 @@ scripts
 .DS_Store
 .idea
 .vscode
+.dev-data
