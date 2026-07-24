@@ -49,7 +49,33 @@ The AppImage does not need the `libcrypt.so.1` compatibility layer to build. To 
 that artifact, run `npm run package:desktop:appimage` instead of `npm run package:desktop`.
 Artifacts land in `apps/desktop/release/`.
 
+## Joining the pilot
+
+If you just want to use HMM Chat against the running pilot server, this is the whole procedure.
+You do **not** need Docker, Postgres, a local server, or any of the local-development setup below.
+
+```bash
+fnm install 24.18.0 && fnm use 24.18.0    # the repository pins this; npm refuses other versions
+npm ci
+HMM_CHAT_API_ORIGIN=https://chat-api.example.invalid npm run dev:desktop
+```
+
+The client opens a sign-in screen offering two ways in:
+
+- **Sign-in link.** Ask an administrator to run the invite command for your email address. They
+  send you the link privately; opening it hands the token to this app and signs you in. This is the
+  real per-person identity: your own account, your own sessions, revocable per device.
+- **Access code.** The shared code that predates per-person accounts. Ask an administrator for it.
+  Everyone using it shares one credential, so prefer a sign-in link where you have one.
+
+The API origin is read when the client builds, so restart after changing it. A development build
+accepts a loopback HTTP origin or any HTTPS origin; plain HTTP to a remote host is refused, because
+that is the case where your credentials would cross the network in the clear.
+
 ## Development
+
+Everything below is for working **on** HMM Chat, and runs a server on your own machine. Skip it if
+you only want to use the pilot.
 
 ```bash
 npm ci
@@ -89,9 +115,8 @@ would cross the network in the clear.
 
 ## Container deployment
 
-The server can run as a container for a small, access-code-protected deployment. This
-path is deliberately temporary: it predates the M1 invitation and session work in
-[ROADMAP.md](ROADMAP.md) and is expected to be deleted rather than grown.
+The server runs as a container. The pilot deployment runs the identity model described below,
+alongside the shared access code that predates it.
 
 ```bash
 cp .env.example .env
@@ -152,21 +177,29 @@ scripts/smoke-container.sh hmm-chat-server:smoke
 
 ### Authentication model
 
-Everyone shares one access code. Signing in issues an HTTP-only, `SameSite=Strict` cookie signed
-with a 32-byte key generated on first boot and stored in the SQLite database, so restarts do not
-sign users out and knowing the access code is not enough to forge a session for another name.
-Rotating the access code invalidates every outstanding session. Failed sign-in attempts are
-throttled per client address.
+Two credentials are accepted while the pilot moves off the shared code. A request presenting both
+is treated as the access code.
 
-The desktop client holds the session entirely in the Electron main process. The access code is
-passed over IPC only for the duration of a sign-in call and is never stored; the cookie lives in
-Electron's cookie jar, which the packaged app encrypts through the `enableCookieEncryption` fuse.
-Renderer code can observe whether a session exists and under what name, and nothing more.
+**Sign-in links (per-person identity).** An owner invites an email address; redeeming a single-use
+link creates that person's own account and a rotating device session. Links last 15 minutes and
+burn on the first redemption attempt, invitations last 7 days, and sessions can be revoked per
+device. Only an owner may invite, the workspace is capped at 25 active members, and redeeming an
+invitation never lowers the privileges of a membership that is already active. Sign-in requests
+answer identically for invited, unknown, and rate-limited addresses, so the endpoint cannot be used
+to discover who is a member.
 
-Because the access code is shared, this gives no per-person identity, revocation, or audit trail.
-It suits two cofounders behind a private URL and nothing beyond that. Replacing it with the
-invitation and rotating-session model in M1 should not require changing the transport or IPC
-shape, only the sign-in call itself.
+**The shared access code (predates the above).** Signing in issues a cookie signed with a 32-byte
+key generated on first boot and stored beside the messages, so restarts do not sign anyone out and
+knowing the access code is not enough to forge a session under another name. Rotating the code
+invalidates every outstanding session. It gives no per-person identity, revocation, or audit trail,
+and exists only until everyone has moved to sign-in links.
+
+Either way the desktop client holds the session entirely in the Electron main process. A magic-link
+token and an access code both cross IPC only for the duration of a sign-in call and are never
+stored; cookies live in Electron's cookie jar, which the packaged app encrypts through the
+`enableCookieEncryption` fuse. Renderer code can observe whether a session exists, under what name,
+and by which method — and nothing more. Signing in one way clears the other credential, so a person
+is never authenticated two ways at once.
 
 ## Verification
 
