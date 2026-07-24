@@ -18,8 +18,10 @@ import {
   type WorkspaceMembership,
   type WorkspaceRole,
 } from "@hmm-chat/contracts";
-import type { Pool, QueryResult, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
+
+import { withTransaction } from "../../db/pool.js";
 
 interface UserRow extends QueryResultRow {
   readonly id: unknown;
@@ -83,6 +85,10 @@ interface DeviceSessionRow extends QueryResultRow {
 
 interface CountRow extends QueryResultRow {
   readonly count: unknown;
+}
+
+interface IdRow extends QueryResultRow {
+  readonly id: unknown;
 }
 
 const magicLinkRecordSchema = z
@@ -250,16 +256,31 @@ function firstOrNull<Row extends QueryResultRow, Output>(
   return row === undefined ? null : mapper(row);
 }
 
+function isPool(database: Pool | PoolClient): database is Pool {
+  return "totalCount" in database;
+}
+
 /** Typed persistence operations for the M1 identity model. */
 export class IdentityRepository {
-  readonly #pool: Pool;
+  readonly #database: Pool | PoolClient;
+  readonly #transactionPool: Pool | null;
 
-  constructor(pool: Pool) {
-    this.#pool = pool;
+  constructor(database: Pool | PoolClient) {
+    this.#database = database;
+    this.#transactionPool = isPool(database) ? database : null;
+  }
+
+  async transaction<T>(fn: (repository: IdentityRepository) => Promise<T>): Promise<T> {
+    if (this.#transactionPool === null) {
+      throw new Error("Nested identity transactions are not supported");
+    }
+    return withTransaction(this.#transactionPool, async (client) =>
+      fn(new IdentityRepository(client)),
+    );
   }
 
   async findUserById(id: EntityId): Promise<IdentityUser | null> {
-    const result = await this.#pool.query<UserRow>(
+    const result = await this.#database.query<UserRow>(
       `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE id = $1`,
@@ -270,7 +291,7 @@ export class IdentityRepository {
 
   async findUserByEmail(email: Email): Promise<IdentityUser | null> {
     const normalizedEmail = emailSchema.parse(email);
-    const result = await this.#pool.query<UserRow>(
+    const result = await this.#database.query<UserRow>(
       `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE email = $1`,
@@ -279,8 +300,18 @@ export class IdentityRepository {
     return firstOrNull(result, mapUser);
   }
 
+  async findUserByUsername(username: string): Promise<IdentityUser | null> {
+    const result = await this.#database.query<UserRow>(
+      `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
+         FROM users
+        WHERE username = $1`,
+      [username],
+    );
+    return firstOrNull(result, mapUser);
+  }
+
   async insertUser(input: InsertUserInput): Promise<IdentityUser> {
-    const result = await this.#pool.query<UserRow>(
+    const result = await this.#database.query<UserRow>(
       `INSERT INTO users (id, email, username, display_name, avatar_url)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, email, username, display_name, avatar_url, created_at, updated_at`,
@@ -296,7 +327,7 @@ export class IdentityRepository {
   }
 
   async findWorkspaceById(id: EntityId): Promise<Workspace | null> {
-    const result = await this.#pool.query<WorkspaceRow>(
+    const result = await this.#database.query<WorkspaceRow>(
       `SELECT id, name, slug, created_by, created_at, updated_at
          FROM workspaces
         WHERE id = $1`,
@@ -305,8 +336,30 @@ export class IdentityRepository {
     return firstOrNull(result, mapWorkspace);
   }
 
+  async findWorkspaceBySlug(slug: string): Promise<Workspace | null> {
+    const result = await this.#database.query<WorkspaceRow>(
+      `SELECT id, name, slug, created_by, created_at, updated_at
+         FROM workspaces
+        WHERE slug = $1`,
+      [slug],
+    );
+    return firstOrNull(result, mapWorkspace);
+  }
+
+  async lockWorkspace(id: EntityId): Promise<boolean> {
+    const result = await this.#database.query<IdRow>(
+      "SELECT id FROM workspaces WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+    return result.rows[0] !== undefined;
+  }
+
+  async lockPilotIdentity(): Promise<void> {
+    await this.#database.query("SELECT pg_advisory_xact_lock($1::bigint)", ["3247861932147782"]);
+  }
+
   async insertWorkspace(input: InsertWorkspaceInput): Promise<Workspace> {
-    const result = await this.#pool.query<WorkspaceRow>(
+    const result = await this.#database.query<WorkspaceRow>(
       `INSERT INTO workspaces (id, name, slug, created_by)
        VALUES ($1, $2, $3, $4)
        RETURNING id, name, slug, created_by, created_at, updated_at`,
@@ -316,7 +369,7 @@ export class IdentityRepository {
   }
 
   async countActiveMembers(workspaceId: EntityId): Promise<number> {
-    const result = await this.#pool.query<CountRow>(
+    const result = await this.#database.query<CountRow>(
       `SELECT count(*)::integer AS count
          FROM workspace_memberships
         WHERE workspace_id = $1 AND status = 'active'`,
@@ -326,7 +379,7 @@ export class IdentityRepository {
   }
 
   async upsertMembership(input: UpsertMembershipInput): Promise<WorkspaceMembership> {
-    const result = await this.#pool.query<MembershipRow>(
+    const result = await this.#database.query<MembershipRow>(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (workspace_id, user_id) DO UPDATE
@@ -341,7 +394,7 @@ export class IdentityRepository {
     workspaceId: EntityId,
     userId: EntityId,
   ): Promise<WorkspaceMembership | null> {
-    const result = await this.#pool.query<MembershipRow>(
+    const result = await this.#database.query<MembershipRow>(
       `SELECT workspace_id, user_id, role, status, created_at, updated_at
          FROM workspace_memberships
         WHERE workspace_id = $1 AND user_id = $2`,
@@ -350,8 +403,20 @@ export class IdentityRepository {
     return firstOrNull(result, mapMembership);
   }
 
+  async findActiveMembershipByUserId(userId: EntityId): Promise<WorkspaceMembership | null> {
+    const result = await this.#database.query<MembershipRow>(
+      `SELECT workspace_id, user_id, role, status, created_at, updated_at
+         FROM workspace_memberships
+        WHERE user_id = $1 AND status = 'active'
+        ORDER BY created_at, workspace_id
+        LIMIT 1`,
+      [userId],
+    );
+    return firstOrNull(result, mapMembership);
+  }
+
   async listActiveMembers(workspaceId: EntityId): Promise<WorkspaceMembership[]> {
-    const result = await this.#pool.query<MembershipRow>(
+    const result = await this.#database.query<MembershipRow>(
       `SELECT workspace_id, user_id, role, status, created_at, updated_at
          FROM workspace_memberships
         WHERE workspace_id = $1 AND status = 'active'
@@ -362,7 +427,7 @@ export class IdentityRepository {
   }
 
   async insertInvitation(input: InsertInvitationInput): Promise<Invitation> {
-    const result = await this.#pool.query<InvitationRow>(
+    const result = await this.#database.query<InvitationRow>(
       `INSERT INTO invitations
          (id, workspace_id, email, role, status, invited_by, expires_at)
        VALUES ($1, $2, $3, $4, 'pending', $5, $6)
@@ -381,7 +446,7 @@ export class IdentityRepository {
   }
 
   async findPendingInvitation(workspaceId: EntityId, email: Email): Promise<Invitation | null> {
-    const result = await this.#pool.query<InvitationRow>(
+    const result = await this.#database.query<InvitationRow>(
       `SELECT id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
               created_at, updated_at
          FROM invitations
@@ -391,8 +456,21 @@ export class IdentityRepository {
     return firstOrNull(result, mapInvitation);
   }
 
+  async findPendingInvitationByEmail(email: Email): Promise<Invitation | null> {
+    const result = await this.#database.query<InvitationRow>(
+      `SELECT id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
+              created_at, updated_at
+         FROM invitations
+        WHERE email = $1 AND status = 'pending'
+        ORDER BY created_at DESC, id
+        LIMIT 1`,
+      [emailSchema.parse(email)],
+    );
+    return firstOrNull(result, mapInvitation);
+  }
+
   async findInvitationById(id: EntityId): Promise<Invitation | null> {
-    const result = await this.#pool.query<InvitationRow>(
+    const result = await this.#database.query<InvitationRow>(
       `SELECT id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
               created_at, updated_at
          FROM invitations
@@ -403,10 +481,10 @@ export class IdentityRepository {
   }
 
   async markInvitationAccepted(id: EntityId, acceptedAt: IsoDateTime): Promise<Invitation | null> {
-    const result = await this.#pool.query<InvitationRow>(
+    const result = await this.#database.query<InvitationRow>(
       `UPDATE invitations
           SET status = 'accepted', accepted_at = $2, updated_at = now()
-        WHERE id = $1 AND status = 'pending'
+        WHERE id = $1 AND status = 'pending' AND expires_at > $2
         RETURNING id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
                   created_at, updated_at`,
       [id, acceptedAt],
@@ -415,7 +493,7 @@ export class IdentityRepository {
   }
 
   async markInvitationRevoked(id: EntityId): Promise<Invitation | null> {
-    const result = await this.#pool.query<InvitationRow>(
+    const result = await this.#database.query<InvitationRow>(
       `UPDATE invitations
           SET status = 'revoked', updated_at = now()
         WHERE id = $1 AND status = 'pending'
@@ -427,17 +505,17 @@ export class IdentityRepository {
   }
 
   async expireInvitations(expiredBefore: IsoDateTime): Promise<number> {
-    const result = await this.#pool.query(
+    const result = await this.#database.query(
       `UPDATE invitations
           SET status = 'expired', updated_at = now()
-        WHERE status = 'pending' AND expires_at < $1`,
+        WHERE status = 'pending' AND expires_at <= $1`,
       [expiredBefore],
     );
     return result.rowCount ?? 0;
   }
 
   async insertMagicLink(input: InsertMagicLinkInput): Promise<MagicLinkRecord> {
-    const result = await this.#pool.query<MagicLinkRow>(
+    const result = await this.#database.query<MagicLinkRow>(
       `INSERT INTO magic_link_tokens
          (id, token_hash, email, invitation_id, expires_at, created_at)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -455,7 +533,7 @@ export class IdentityRepository {
   }
 
   async findMagicLinkByTokenHash(tokenHash: Buffer): Promise<MagicLinkRecord | null> {
-    const result = await this.#pool.query<MagicLinkRow>(
+    const result = await this.#database.query<MagicLinkRow>(
       `SELECT id, email, invitation_id, expires_at, consumed_at, created_at
          FROM magic_link_tokens
         WHERE token_hash = $1`,
@@ -468,7 +546,7 @@ export class IdentityRepository {
     tokenHash: Buffer,
     consumedAt: IsoDateTime,
   ): Promise<ConsumeMagicLinkResult> {
-    const result = await this.#pool.query<MagicLinkRow>(
+    const result = await this.#database.query<MagicLinkRow>(
       `UPDATE magic_link_tokens
           SET consumed_at = $2
         WHERE token_hash = $1 AND consumed_at IS NULL
@@ -485,7 +563,7 @@ export class IdentityRepository {
   }
 
   async insertDeviceSession(input: InsertDeviceSessionInput): Promise<DeviceSession> {
-    const result = await this.#pool.query<DeviceSessionRow>(
+    const result = await this.#database.query<DeviceSessionRow>(
       `INSERT INTO device_sessions
          (id, user_id, token_hash, label, created_at, last_seen_at, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -504,7 +582,7 @@ export class IdentityRepository {
   }
 
   async findDeviceSessionByTokenHash(tokenHash: Buffer): Promise<DeviceSession | null> {
-    const result = await this.#pool.query<DeviceSessionRow>(
+    const result = await this.#database.query<DeviceSessionRow>(
       `SELECT id, user_id, label, created_at, last_seen_at, expires_at, revoked_at
          FROM device_sessions
         WHERE token_hash = $1 AND revoked_at IS NULL`,
@@ -518,10 +596,10 @@ export class IdentityRepository {
     nextTokenHash: Buffer,
     lastSeenAt: IsoDateTime,
   ): Promise<RotateDeviceSessionResult> {
-    const result = await this.#pool.query<DeviceSessionRow>(
+    const result = await this.#database.query<DeviceSessionRow>(
       `UPDATE device_sessions
           SET token_hash = $2, last_seen_at = $3
-        WHERE token_hash = $1 AND revoked_at IS NULL
+        WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $3
         RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
       [previousTokenHash, nextTokenHash, lastSeenAt],
     );
@@ -530,7 +608,7 @@ export class IdentityRepository {
   }
 
   async revokeDeviceSession(id: EntityId, revokedAt: IsoDateTime): Promise<DeviceSession | null> {
-    const result = await this.#pool.query<DeviceSessionRow>(
+    const result = await this.#database.query<DeviceSessionRow>(
       `UPDATE device_sessions
           SET revoked_at = $2
         WHERE id = $1 AND revoked_at IS NULL
@@ -540,8 +618,23 @@ export class IdentityRepository {
     return firstOrNull(result, mapDeviceSession);
   }
 
+  async revokeDeviceSessionForUser(
+    id: EntityId,
+    userId: EntityId,
+    revokedAt: IsoDateTime,
+  ): Promise<DeviceSession | null> {
+    const result = await this.#database.query<DeviceSessionRow>(
+      `UPDATE device_sessions
+          SET revoked_at = $3
+        WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+        RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
+      [id, userId, revokedAt],
+    );
+    return firstOrNull(result, mapDeviceSession);
+  }
+
   async revokeAllDeviceSessions(userId: EntityId, revokedAt: IsoDateTime): Promise<number> {
-    const result = await this.#pool.query(
+    const result = await this.#database.query(
       `UPDATE device_sessions
           SET revoked_at = $2
         WHERE user_id = $1 AND revoked_at IS NULL`,
@@ -551,7 +644,7 @@ export class IdentityRepository {
   }
 
   async listDeviceSessions(userId: EntityId): Promise<DeviceSession[]> {
-    const result = await this.#pool.query<DeviceSessionRow>(
+    const result = await this.#database.query<DeviceSessionRow>(
       `SELECT id, user_id, label, created_at, last_seen_at, expires_at, revoked_at
          FROM device_sessions
         WHERE user_id = $1

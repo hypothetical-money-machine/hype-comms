@@ -7,21 +7,26 @@ import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import { chatRoutes } from "./modules/chat/routes.js";
 import type { ChatStore } from "./modules/chat/store.js";
-import type { SignInThrottle } from "./modules/chat/throttle.js";
+import { identityRoutes } from "./modules/identity/routes.js";
+import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
+import type { SignInThrottle } from "./throttle.js";
 
 export interface BuildAppOptions {
   readonly logger?: FastifyServerOptions["logger"];
   readonly lifecycle?: Lifecycle;
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
+  readonly cookieSecure?: boolean;
   readonly chat?: {
     readonly accessCode: string;
     readonly store: ChatStore;
-    readonly cookieSecure?: boolean;
     readonly throttle?: SignInThrottle;
+  };
+  readonly identity?: {
+    readonly service: IdentityService;
   };
   readonly webRoot?: string;
 }
@@ -80,8 +85,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
           allowedOrigins,
           accessCode: options.chat.accessCode,
           store: options.chat.store,
-          cookieSecure: options.chat.cookieSecure ?? true,
+          cookieSecure: options.cookieSecure ?? true,
           ...(options.chat.throttle === undefined ? {} : { throttle: options.chat.throttle }),
+        });
+      }
+      if (options.identity !== undefined) {
+        await v1.register(identityRoutes, {
+          service: options.identity.service,
+          cookieSecure: options.cookieSecure ?? true,
         });
       }
     },

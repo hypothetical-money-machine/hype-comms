@@ -9,6 +9,7 @@ describe("loadConfig", () => {
       port: 3000,
       allowedOrigins: ["http://127.0.0.1:5173"],
       publicApiUrl: "http://127.0.0.1:3000",
+      cookieSecure: false,
     });
   });
 
@@ -16,6 +17,7 @@ describe("loadConfig", () => {
     expect(loadConfig({ NODE_ENV: "production" })).toMatchObject({
       allowedOrigins: ["app://bundle"],
       publicApiUrl: "https://api.chat.hypemm.com",
+      cookieSecure: true,
     });
   });
 
@@ -49,5 +51,32 @@ describe("loadConfig", () => {
         dataPath: "/data/hmm-chat.sqlite",
       },
     });
+  });
+
+  it("loads SMTP and owner seed settings only when configured", () => {
+    expect(
+      loadConfig({
+        HMM_SMTP_URL: "smtp://mail.example.com:2525",
+        HMM_EMAIL_FROM: "HMM Chat <chat@example.com>",
+        HMM_OWNER_EMAIL: "OWNER@EXAMPLE.COM",
+        HMM_WORKSPACE_NAME: "Pilot",
+        HMM_WORKSPACE_SLUG: "pilot",
+      }),
+    ).toMatchObject({
+      smtp: {
+        url: "smtp://mail.example.com:2525",
+        from: "HMM Chat <chat@example.com>",
+      },
+      owner: {
+        email: "owner@example.com",
+        workspaceName: "Pilot",
+        workspaceSlug: "pilot",
+      },
+    });
+  });
+
+  it("requires SMTP URL and sender address together", () => {
+    expect(() => loadConfig({ HMM_SMTP_URL: "smtp://mail.example.com:2525" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HMM_EMAIL_FROM: "chat@example.com" })).toThrow(ConfigError);
   });
 });

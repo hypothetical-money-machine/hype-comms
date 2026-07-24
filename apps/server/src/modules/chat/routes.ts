@@ -10,8 +10,8 @@ import {
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import { SignInThrottle } from "../../throttle.js";
 import { ChatMessageConflictError, type ChatStore } from "./store.js";
-import { SignInThrottle } from "./throttle.js";
 
 const COOKIE_NAME = "hmm_chat_session";
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60;

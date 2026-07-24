@@ -8,8 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
+import { Lifecycle } from "../src/lifecycle.js";
 import { ChatStore } from "../src/modules/chat/store.js";
-import { SignInThrottle } from "../src/modules/chat/throttle.js";
+import { SignInThrottle } from "../src/throttle.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -33,6 +34,20 @@ describe("operational routes", () => {
     expect(ready.json()).toEqual({ status: "ready", checks: { server: "ok" } });
   });
 
+  it("reports database readiness without changing the readiness response shape", async () => {
+    const lifecycle = new Lifecycle();
+    lifecycle.addCheck("database", () => false);
+    const app = await buildApp({ lifecycle });
+    apps.push(app);
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json()).toEqual({
+      status: "not_ready",
+      checks: { server: "ok", database: "failed" },
+    });
+  });
+
   it("answers malformed bodies with 400 rather than an internal error", async () => {
     const app = await buildApp();
     apps.push(app);
@@ -52,6 +67,15 @@ describe("operational routes", () => {
     const app = await buildApp();
     apps.push(app);
     const response = await app.inject({ method: "GET", url: "/v1/missing" });
+
+    expect(response.statusCode).toBe(404);
+    expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("NOT_FOUND");
+  });
+
+  it("does not register identity routes without a configured identity service", async () => {
+    const app = await buildApp();
+    apps.push(app);
+    const response = await app.inject({ method: "GET", url: "/v1/auth/me" });
 
     expect(response.statusCode).toBe(404);
     expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("NOT_FOUND");
@@ -311,17 +335,17 @@ describe("chat session security", () => {
 
   it("omits Secure when the deployment is not served over HTTPS", async () => {
     const secure = await buildApp({
+      cookieSecure: true,
       chat: {
         accessCode: "weekend-secret-code",
         store: new ChatStore(":memory:"),
-        cookieSecure: true,
       },
     });
     const insecure = await buildApp({
+      cookieSecure: false,
       chat: {
         accessCode: "weekend-secret-code",
         store: new ChatStore(":memory:"),
-        cookieSecure: false,
       },
     });
     apps.push(secure, insecure);

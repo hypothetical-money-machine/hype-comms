@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { emailSchema, type Email } from "@hmm-chat/contracts";
+
 const optionalString = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
 
@@ -20,6 +22,17 @@ const rawConfigSchema = z
     webRoot: optionalString(z.string().min(1)),
     databaseUrl: optionalString(z.string().min(1)),
     databasePoolSize: z.coerce.number().int().min(1).max(100).default(10),
+    smtpUrl: optionalString(z.url()),
+    emailFrom: optionalString(z.string().min(1)),
+    ownerEmail: optionalString(emailSchema),
+    workspaceName: z.string().trim().min(1).max(120).default("HMM Chat"),
+    workspaceSlug: z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .default("hmm-chat"),
   })
   .strict();
 
@@ -52,16 +65,16 @@ export interface ServerConfig {
   readonly shutdownTimeoutMs: number;
   readonly allowedOrigins: readonly string[];
   readonly publicApiUrl: string;
+  /**
+   * Session cookies carry `Secure` only when the public URL is HTTPS. Browsers silently discard
+   * `Secure` cookies delivered over plain HTTP, which would make sign-in fail with no visible
+   * error during loopback testing.
+   */
+  readonly cookieSecure: boolean;
   readonly chat: {
     readonly enabled: boolean;
     readonly accessCode?: string;
     readonly dataPath: string;
-    /**
-     * Session cookies carry `Secure` only when the public URL is HTTPS. Browsers silently discard
-     * `Secure` cookies delivered over plain HTTP, which would make sign-in fail with no visible
-     * error during loopback testing.
-     */
-    readonly cookieSecure: boolean;
   };
   readonly webRoot?: string;
   /**
@@ -71,6 +84,15 @@ export interface ServerConfig {
   readonly database?: {
     readonly url: string;
     readonly poolSize: number;
+  };
+  readonly smtp?: {
+    readonly url: string;
+    readonly from: string;
+  };
+  readonly owner?: {
+    readonly email: Email;
+    readonly workspaceName: string;
+    readonly workspaceSlug: string;
   };
 }
 
@@ -97,6 +119,11 @@ export function loadConfig(
     chatDataPath: env.HMM_CHAT_DATA_PATH,
     databaseUrl: env.HMM_DATABASE_URL,
     databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
+    smtpUrl: env.HMM_SMTP_URL,
+    emailFrom: env.HMM_EMAIL_FROM,
+    ownerEmail: env.HMM_OWNER_EMAIL,
+    workspaceName: env.HMM_WORKSPACE_NAME,
+    workspaceSlug: env.HMM_WORKSPACE_SLUG,
   });
 
   if (!result.success) {
@@ -107,6 +134,9 @@ export function loadConfig(
 
   if (result.data.chatEnabled === "true" && result.data.chatAccessCode === undefined) {
     throw new ConfigError(["chatAccessCode: Required when chat is enabled"]);
+  }
+  if ((result.data.smtpUrl === undefined) !== (result.data.emailFrom === undefined)) {
+    throw new ConfigError(["smtp: HMM_SMTP_URL and HMM_EMAIL_FROM must be configured together"]);
   }
 
   const defaultOrigins =
@@ -155,17 +185,29 @@ export function loadConfig(
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,
+    cookieSecure: parsedPublicApiUrl.protocol === "https:",
     chat: {
       enabled: result.data.chatEnabled === "true",
       ...(result.data.chatAccessCode === undefined
         ? {}
         : { accessCode: result.data.chatAccessCode }),
       dataPath: result.data.chatDataPath,
-      cookieSecure: parsedPublicApiUrl.protocol === "https:",
     },
     ...(result.data.webRoot === undefined ? {} : { webRoot: result.data.webRoot }),
     ...(result.data.databaseUrl === undefined
       ? {}
       : { database: { url: result.data.databaseUrl, poolSize: result.data.databasePoolSize } }),
+    ...(result.data.smtpUrl === undefined || result.data.emailFrom === undefined
+      ? {}
+      : { smtp: { url: result.data.smtpUrl, from: result.data.emailFrom } }),
+    ...(result.data.ownerEmail === undefined
+      ? {}
+      : {
+          owner: {
+            email: result.data.ownerEmail,
+            workspaceName: result.data.workspaceName,
+            workspaceSlug: result.data.workspaceSlug,
+          },
+        }),
   };
 }

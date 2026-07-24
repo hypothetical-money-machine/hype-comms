@@ -81,3 +81,4 @@ export type VerifyMagicLink = z.infer<typeof verifyMagicLinkSchema>;
 export type DeviceSession = z.infer<typeof deviceSessionSchema>;
 export type CurrentUser = z.infer<typeof currentUserSchema>;
 export type CreateInvitation = z.infer<typeof createInvitationSchema>;
+export type MagicLinkRequested = z.infer<typeof magicLinkRequestedSchema>;
