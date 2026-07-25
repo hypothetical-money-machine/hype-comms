@@ -1,0 +1,1909 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HMM Chat — Channel creation concepts</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        color: #e7eaf3;
+        background: #080b13;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 920px;
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 10% 0%, rgba(103, 88, 239, 0.12), transparent 30rem), #080b13;
+      }
+
+      button,
+      input,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      button:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid #8c80ff;
+        outline-offset: 2px;
+      }
+
+      .page {
+        width: min(1440px, calc(100% - 56px));
+        margin: 0 auto;
+        padding: 44px 0 72px;
+      }
+
+      .lab-header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 32px;
+        margin-bottom: 28px;
+      }
+
+      .kicker {
+        margin: 0 0 8px;
+        color: #9085ff;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 720px;
+        margin: 0;
+        font-size: clamp(30px, 4vw, 52px);
+        font-weight: 760;
+        letter-spacing: -0.04em;
+        line-height: 1.02;
+      }
+
+      .lede {
+        max-width: 620px;
+        margin: 14px 0 0;
+        color: #9ba6c2;
+        font-size: 15px;
+        line-height: 1.55;
+      }
+
+      .reset-button {
+        flex: none;
+        padding: 9px 12px;
+        border: 1px solid #30384f;
+        border-radius: 8px;
+        background: rgba(17, 22, 37, 0.85);
+        color: #b7c0d8;
+        cursor: pointer;
+      }
+
+      .reset-button:hover {
+        border-color: #4a5575;
+        color: #ffffff;
+      }
+
+      .concept-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        margin-bottom: 22px;
+      }
+
+      .concept-card {
+        position: relative;
+        min-width: 0;
+        padding: 18px;
+        border: 1px solid #242b3e;
+        border-radius: 14px;
+        background: rgba(15, 20, 34, 0.88);
+        cursor: pointer;
+        text-align: left;
+        transition:
+          border-color 140ms ease,
+          background 140ms ease,
+          transform 140ms ease;
+      }
+
+      .concept-card:hover {
+        transform: translateY(-2px);
+        border-color: #3f4864;
+        background: #12182a;
+      }
+
+      .concept-card.active {
+        border-color: #7567ef;
+        background: #151a30;
+        box-shadow: 0 0 0 1px rgba(117, 103, 239, 0.22);
+      }
+
+      .concept-number {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        margin-bottom: 16px;
+        place-items: center;
+        border-radius: 8px;
+        background: #242b43;
+        color: #c8c2ff;
+        font-size: 12px;
+        font-weight: 850;
+      }
+
+      .concept-card.active .concept-number {
+        background: #6758ef;
+        color: #ffffff;
+      }
+
+      .concept-card h2 {
+        margin: 0 0 6px;
+        font-size: 16px;
+      }
+
+      .concept-card p {
+        margin: 0;
+        color: #8995b2;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .recommended {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        padding: 4px 7px;
+        border: 1px solid rgba(118, 232, 197, 0.28);
+        border-radius: 999px;
+        background: rgba(77, 180, 149, 0.12);
+        color: #8be6c9;
+        font-size: 9px;
+        font-weight: 850;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .stage {
+        overflow: hidden;
+        border: 1px solid #242b3e;
+        border-radius: 18px;
+        background: #0b0f1a;
+        box-shadow: 0 30px 90px rgba(0, 0, 0, 0.36);
+      }
+
+      .stage-bar {
+        display: flex;
+        min-height: 52px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        border-bottom: 1px solid #242b3e;
+        background: #0d111d;
+      }
+
+      .window-controls {
+        display: flex;
+        gap: 7px;
+      }
+
+      .window-controls span {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #30384f;
+      }
+
+      .stage-label {
+        color: #7f8ba9;
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .stage-hint {
+        color: #59657f;
+        font-size: 11px;
+      }
+
+      .prototype {
+        display: none;
+      }
+
+      .prototype.active {
+        display: block;
+      }
+
+      .prototype-layout {
+        display: grid;
+        height: 680px;
+        grid-template-columns: 68px 284px minmax(0, 1fr);
+      }
+
+      .workspace-rail {
+        padding: 14px 13px;
+        border-right: 1px solid #202638;
+        background: #080b13;
+      }
+
+      .workspace-mark {
+        display: grid;
+        width: 42px;
+        height: 42px;
+        place-items: center;
+        border-radius: 12px;
+        background: linear-gradient(145deg, #7868ff, #4c3dd3);
+        color: #ffffff;
+        font-weight: 900;
+      }
+
+      .sidebar {
+        position: relative;
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        border-right: 1px solid #252b3d;
+        background: #111625;
+      }
+
+      .workspace-header {
+        display: flex;
+        min-height: 72px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 18px;
+        border-bottom: 1px solid #252b3d;
+      }
+
+      .eyebrow {
+        margin: 0 0 5px;
+        color: #76829f;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .workspace-header strong {
+        display: block;
+        max-width: 180px;
+        overflow: hidden;
+        font-size: 14px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .quiet-button {
+        padding: 6px 8px;
+        border: 1px solid #30384f;
+        border-radius: 7px;
+        background: transparent;
+        color: #aeb7cf;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .quiet-button:hover {
+        border-color: #4b5573;
+        color: #ffffff;
+      }
+
+      .channel-nav {
+        flex: 1;
+        padding: 14px 10px;
+        overflow-y: auto;
+      }
+
+      .nav-heading {
+        display: flex;
+        min-height: 32px;
+        align-items: center;
+        justify-content: space-between;
+        margin: 8px 8px 4px;
+        color: #7f8ba9;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .add-channel {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        place-items: center;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: #aeb7cf;
+        cursor: pointer;
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .add-channel:hover,
+      .add-channel[aria-expanded="true"] {
+        background: #252c43;
+        color: #ffffff;
+      }
+
+      .channel {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: space-between;
+        padding: 9px 10px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: #aeb7cf;
+        cursor: pointer;
+        font-size: 12px;
+        text-align: left;
+      }
+
+      .channel:hover {
+        background: #1a2031;
+        color: #f1f3f8;
+      }
+
+      .channel.active {
+        background: #252c43;
+        color: #ffffff;
+      }
+
+      .channel-icon {
+        display: inline-block;
+        width: 16px;
+        color: #6f7b98;
+        text-align: center;
+      }
+
+      .channel.active .channel-icon {
+        color: #b7afd9;
+      }
+
+      .direct-messages {
+        margin-top: 18px;
+      }
+
+      .presence-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        margin: 0 7px 1px 3px;
+        border-radius: 999px;
+        background: #50c69e;
+        box-shadow: 0 0 0 2px rgba(80, 198, 158, 0.13);
+      }
+
+      .member-list {
+        padding: 10px;
+        border-top: 1px solid #252b3d;
+      }
+
+      .member-list .nav-heading {
+        margin-top: 0;
+      }
+
+      .member {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 8px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: #aeb7cf;
+        cursor: pointer;
+        font-size: 11px;
+        text-align: left;
+      }
+
+      .member:hover {
+        background: #1a2031;
+        color: #ffffff;
+      }
+
+      .member .avatar {
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
+        font-size: 9px;
+      }
+
+      .channel.just-created {
+        animation: channel-arrival 700ms ease both;
+      }
+
+      @keyframes channel-arrival {
+        from {
+          opacity: 0;
+          transform: translateX(-8px);
+          background: rgba(103, 88, 239, 0.55);
+        }
+      }
+
+      .badge {
+        min-width: 19px;
+        padding: 2px 6px;
+        border-radius: 10px;
+        background: #6758ef;
+        color: #ffffff;
+        font-size: 10px;
+        font-weight: 800;
+        text-align: center;
+      }
+
+      .conversation-pane {
+        display: grid;
+        min-width: 0;
+        grid-template-rows: auto 1fr auto;
+        background: #0e1320;
+      }
+
+      .conversation-header {
+        display: flex;
+        min-height: 72px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 22px;
+        border-bottom: 1px solid #252b3d;
+      }
+
+      .conversation-header h3 {
+        margin: 0 0 5px;
+        font-size: 17px;
+      }
+
+      .conversation-header p {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        color: #7f8ba9;
+        font-size: 11px;
+      }
+
+      .connection-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: #50c69e;
+      }
+
+      .messages {
+        overflow-y: auto;
+        padding: 24px 28px;
+      }
+
+      .message {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr);
+        gap: 11px;
+        margin-bottom: 20px;
+      }
+
+      .avatar {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 10px;
+        background: #293149;
+        color: #dfe3ee;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .message header {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .message strong {
+        font-size: 12px;
+      }
+
+      .message time {
+        color: #697592;
+        font-size: 9px;
+      }
+
+      .message p {
+        margin: 4px 0 0;
+        color: #cbd2e5;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .empty-state {
+        display: grid;
+        height: 100%;
+        place-content: center;
+        color: #7f8ba9;
+        text-align: center;
+      }
+
+      .empty-state .empty-glyph {
+        display: grid;
+        width: 46px;
+        height: 46px;
+        margin: 0 auto 12px;
+        place-items: center;
+        border: 1px solid #2e3750;
+        border-radius: 14px;
+        background: #171d2c;
+        color: #9b92ee;
+        font-size: 21px;
+        font-weight: 700;
+      }
+
+      .empty-state h4 {
+        margin: 0 0 5px;
+        color: #d8ddeb;
+        font-size: 14px;
+      }
+
+      .empty-state p {
+        margin: 0;
+        font-size: 11px;
+      }
+
+      .composer {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 9px;
+        padding: 15px 22px 18px;
+        border-top: 1px solid #252b3d;
+      }
+
+      .composer input {
+        min-width: 0;
+      }
+
+      .composer .primary-button {
+        padding-inline: 16px;
+      }
+
+      .inspector {
+        display: none;
+      }
+
+      .inspector h3 {
+        margin: 0 0 7px;
+        font-size: 14px;
+      }
+
+      .inspector > p {
+        margin: 0 0 20px;
+        color: #8490ac;
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .inspector dl {
+        display: grid;
+        gap: 14px;
+        margin: 0;
+      }
+
+      .inspector dl div {
+        padding-top: 14px;
+        border-top: 1px solid #222a3d;
+      }
+
+      .inspector dt {
+        margin-bottom: 5px;
+        color: #687590;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .inspector dd {
+        margin: 0;
+        color: #c5ccdd;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid #303952;
+        border-radius: 8px;
+        outline: none;
+        background: #0c1120;
+        color: #f7f8fb;
+      }
+
+      input {
+        padding: 10px 11px;
+      }
+
+      textarea {
+        min-height: 78px;
+        padding: 10px 11px;
+        resize: vertical;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: #7768ff;
+        box-shadow: 0 0 0 3px rgba(119, 104, 255, 0.14);
+      }
+
+      input[aria-invalid="true"],
+      textarea[aria-invalid="true"] {
+        border-color: #d96f78;
+        box-shadow: 0 0 0 3px rgba(217, 111, 120, 0.12);
+      }
+
+      input::placeholder,
+      textarea::placeholder {
+        color: #56627d;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 7px;
+        color: #cbd2e5;
+        font-size: 11px;
+        font-weight: 680;
+      }
+
+      .field + .field {
+        margin-top: 16px;
+      }
+
+      .field-help {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 7px 0 0;
+        color: #697590;
+        font-size: 9px;
+        line-height: 1.4;
+      }
+
+      .slug-preview {
+        overflow: hidden;
+        color: #9287ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .slug-preview.empty {
+        color: #65708b;
+      }
+
+      .character-count {
+        color: #65708b;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .primary-button {
+        padding: 9px 13px;
+        border: 0;
+        border-radius: 8px;
+        background: #6758ef;
+        color: #ffffff;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 760;
+      }
+
+      .primary-button:hover {
+        background: #7769f6;
+      }
+
+      .primary-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      .secondary-button {
+        padding: 8px 11px;
+        border: 1px solid #30384f;
+        border-radius: 8px;
+        background: transparent;
+        color: #aeb7cf;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .button-row {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .form-error {
+        min-height: 16px;
+        margin: 10px 0 -6px;
+        color: #ff9a9a;
+        font-size: 10px;
+        line-height: 1.4;
+      }
+
+      .popover {
+        position: absolute;
+        z-index: 10;
+        top: 119px;
+        left: 184px;
+        width: 340px;
+        padding: 18px;
+        border: 1px solid #3a435e;
+        border-radius: 12px;
+        background: #151b2c;
+        box-shadow: 0 18px 55px rgba(0, 0, 0, 0.48);
+      }
+
+      .popover::before {
+        position: absolute;
+        top: -6px;
+        left: 51px;
+        width: 10px;
+        height: 10px;
+        border-top: 1px solid #3a435e;
+        border-left: 1px solid #3a435e;
+        background: #151b2c;
+        content: "";
+        transform: rotate(45deg);
+      }
+
+      .popover[hidden] {
+        display: none;
+      }
+
+      .popover-header {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 15px;
+      }
+
+      .popover-header h4,
+      .modal-header h4 {
+        margin: 0 0 4px;
+        font-size: 14px;
+      }
+
+      .popover-header p,
+      .modal-header p {
+        margin: 0;
+        color: #7f8ba9;
+        font-size: 10px;
+      }
+
+      .close-button {
+        display: grid;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        place-items: center;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: #7f8ba9;
+        cursor: pointer;
+        font-size: 17px;
+      }
+
+      .close-button:hover {
+        background: #242b40;
+        color: #ffffff;
+      }
+
+      .modal-layer {
+        position: absolute;
+        z-index: 20;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 40px;
+        background: rgba(5, 8, 14, 0.73);
+        backdrop-filter: blur(3px);
+      }
+
+      .modal-layer[hidden] {
+        display: none;
+      }
+
+      .modal {
+        width: min(530px, 100%);
+        overflow: hidden;
+        border: 1px solid #3a435e;
+        border-radius: 15px;
+        background: #151b2c;
+        box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        padding: 20px 22px 17px;
+        border-bottom: 1px solid #2b3349;
+      }
+
+      .modal-body {
+        padding: 21px 22px;
+      }
+
+      .modal-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 15px 22px;
+        border-top: 1px solid #2b3349;
+        background: #121727;
+      }
+
+      .modal-footer p {
+        margin: 0;
+        color: #6f7b96;
+        font-size: 9px;
+      }
+
+      .modal-footer .button-row {
+        flex: none;
+        margin: 0;
+      }
+
+      .advanced-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-top: 16px;
+      }
+
+      .visibility-card {
+        padding: 10px 11px;
+        border: 1px solid #303952;
+        border-radius: 8px;
+        background: #111727;
+      }
+
+      .visibility-card strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 10px;
+      }
+
+      .visibility-card span {
+        color: #74809b;
+        font-size: 9px;
+      }
+
+      .inline-create {
+        display: grid;
+        gap: 8px;
+        margin: 4px 5px 8px;
+        padding: 10px;
+        border: 1px solid #343d58;
+        border-radius: 9px;
+        background: #171d2f;
+      }
+
+      .inline-create[hidden] {
+        display: none;
+      }
+
+      .inline-input-wrap {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .inline-input-wrap span {
+        color: #7f8ba9;
+        font-size: 14px;
+      }
+
+      .inline-input-wrap input {
+        padding: 7px 8px;
+        font-size: 11px;
+      }
+
+      .inline-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .inline-actions small {
+        overflow: hidden;
+        color: #66728e;
+        font-size: 8px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .inline-meta {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .inline-meta .slug-preview {
+        max-width: 105px;
+        font-size: 8px;
+      }
+
+      .inline-error {
+        color: #ff9a9a !important;
+      }
+
+      .inline-actions div {
+        display: flex;
+        gap: 6px;
+      }
+
+      .inline-actions button {
+        padding: 5px 7px;
+        font-size: 9px;
+      }
+
+      .toast {
+        position: absolute;
+        z-index: 30;
+        right: 292px;
+        bottom: 22px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 10px 13px;
+        border: 1px solid rgba(118, 232, 197, 0.28);
+        border-radius: 9px;
+        background: #14251f;
+        color: #bdf4df;
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.38);
+        font-size: 10px;
+        transform: translateY(12px);
+        opacity: 0;
+        pointer-events: none;
+        transition:
+          opacity 180ms ease,
+          transform 180ms ease;
+      }
+
+      .toast.show {
+        transform: translateY(0);
+        opacity: 1;
+      }
+
+      .toast-check {
+        display: grid;
+        width: 18px;
+        height: 18px;
+        place-items: center;
+        border-radius: 999px;
+        background: #5ac7a5;
+        color: #0a1713;
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .spinner {
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        margin-right: 6px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #ffffff;
+        border-radius: 999px;
+        vertical-align: -2px;
+        animation: spin 600ms linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .prototype-shell {
+        position: relative;
+      }
+
+      .implementation-note {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 10px;
+        margin-top: 20px;
+        padding: 14px 16px;
+        border: 1px solid #222a3d;
+        border-radius: 11px;
+        background: rgba(13, 17, 29, 0.75);
+        color: #8792ad;
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .implementation-note code {
+        color: #afa7ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      .note-mark {
+        color: #7668ef;
+        font-weight: 900;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      @media (max-width: 1120px) {
+        .prototype-layout {
+          grid-template-columns: 58px 260px minmax(0, 1fr);
+        }
+
+        .toast {
+          right: 22px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="lab-header">
+        <div>
+          <p class="kicker">HMM Chat · interaction study</p>
+          <h1>Three ways to make a channel.</h1>
+          <p class="lede">
+            Each direction replaces the unsupported browser prompt with an in-renderer experience.
+            Choose a concept, click its <strong>+</strong>, and take it through creation.
+          </p>
+        </div>
+        <button class="reset-button" id="reset-demos" type="button">Reset all demos</button>
+      </header>
+
+      <nav class="concept-grid" aria-label="Channel creation concepts">
+        <button class="concept-card active" type="button" data-concept="popover">
+          <span class="recommended">Recommended</span>
+          <span class="concept-number">01</span>
+          <h2>Quick popover</h2>
+          <p>One decision, anchored in context. Fast without feeling improvised.</p>
+        </button>
+        <button class="concept-card" type="button" data-concept="modal">
+          <span class="concept-number">02</span>
+          <h2>Guided modal</h2>
+          <p>Room for topic, slug, and future privacy controls. Deliberate and extensible.</p>
+        </button>
+        <button class="concept-card" type="button" data-concept="inline">
+          <span class="concept-number">03</span>
+          <h2>Inline composer</h2>
+          <p>The shortest path from intent to channel. Lightweight and keyboard-forward.</p>
+        </button>
+      </nav>
+
+      <section class="stage" aria-label="Interactive prototype">
+        <header class="stage-bar">
+          <div class="window-controls" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <span class="stage-label" id="stage-label">Concept 01 · Quick popover</span>
+          <span class="stage-hint">Interactive prototype</span>
+        </header>
+
+        <article class="prototype active" data-prototype="popover">
+          <div class="prototype-shell">
+            <div class="prototype-layout">
+              <aside class="workspace-rail"><div class="workspace-mark">H</div></aside>
+              <aside class="sidebar">
+                <header class="workspace-header">
+                  <div>
+                    <p class="eyebrow">Workspace</p>
+                    <strong>Hypothetical Money Machine</strong>
+                  </div>
+                  <button class="quiet-button" type="button">Sign out</button>
+                </header>
+                <nav class="channel-nav" aria-label="Popover demo channels">
+                  <div class="nav-heading">
+                    <span>Channels</span>
+                    <button
+                      class="add-channel"
+                      type="button"
+                      data-open="popover"
+                      aria-expanded="true"
+                      aria-label="Create channel"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div class="channel-list" data-list="popover">
+                    <button class="channel active" type="button" data-channel-slug="general">
+                      <span><span class="channel-icon">#</span> General</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="product">
+                      <span><span class="channel-icon">#</span> Product</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="random">
+                      <span><span class="channel-icon">#</span> Random</span
+                      ><span class="badge">3</span>
+                    </button>
+                  </div>
+                  <div class="direct-messages">
+                    <p class="nav-heading">Direct messages</p>
+                    <button class="channel" type="button">
+                      <span><span class="presence-dot"></span>Dan Buck</span>
+                    </button>
+                  </div>
+                </nav>
+                <section class="member-list" aria-label="Members">
+                  <p class="nav-heading">Members</p>
+                  <button class="member" type="button">
+                    <span class="avatar">D</span><span>Dan Buck</span>
+                  </button>
+                </section>
+              </aside>
+              <section class="conversation-pane">
+                <header class="conversation-header">
+                  <div>
+                    <h3># General</h3>
+                    <p><span class="connection-dot"></span>connected</p>
+                  </div>
+                  <button class="quiet-button" type="button" data-archive="popover" hidden>
+                    Archive
+                  </button>
+                </header>
+                <div class="messages" data-messages="popover">
+                  <div class="message">
+                    <span class="avatar">M</span>
+                    <div>
+                      <header><strong>Morgan</strong><time>9:41 AM</time></header>
+                      <p>Channel creation is the last rough edge in this sidebar.</p>
+                    </div>
+                  </div>
+                  <div class="message">
+                    <span class="avatar">D</span>
+                    <div>
+                      <header><strong>Dan</strong><time>9:44 AM</time></header>
+                      <p>Let’s make the quick path feel intentional.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="composer">
+                  <input data-composer="popover" type="text" placeholder="Message # General" />
+                  <button class="primary-button" type="button" disabled>Send</button>
+                </div>
+              </section>
+              <aside class="inspector">
+                <h3>Quick popover</h3>
+                <p>Keeps attention in the sidebar and asks only for the required decision.</p>
+                <dl>
+                  <div>
+                    <dt>Best for</dt>
+                    <dd>Small teams creating channels occasionally.</dd>
+                  </div>
+                  <div>
+                    <dt>Completion</dt>
+                    <dd>Create, insert, select, and focus the composer.</dd>
+                  </div>
+                  <div>
+                    <dt>Tradeoff</dt>
+                    <dd>Topic and advanced settings happen after creation.</dd>
+                  </div>
+                </dl>
+              </aside>
+            </div>
+
+            <form class="popover" data-form="popover">
+              <div class="popover-header">
+                <div>
+                  <h4>Create a channel</h4>
+                  <p>Everyone in the workspace can find and join it.</p>
+                </div>
+                <button class="close-button" type="button" data-close="popover" aria-label="Close">
+                  ×
+                </button>
+              </div>
+              <div class="field">
+                <label for="popover-name">Channel name</label>
+                <input
+                  id="popover-name"
+                  name="name"
+                  type="text"
+                  maxlength="100"
+                  placeholder="e.g. launch planning"
+                  autocomplete="off"
+                />
+                <p class="field-help">
+                  <span class="character-count" data-count="popover">0 / 100</span>
+                  <span class="slug-preview empty" data-slug="popover">#channel-name</span>
+                </p>
+              </div>
+              <p class="form-error" data-error="popover" role="alert"></p>
+              <div class="button-row">
+                <button class="secondary-button" type="button" data-close="popover">Cancel</button>
+                <button class="primary-button" type="submit" data-submit="popover">Create</button>
+              </div>
+            </form>
+            <div class="toast" data-toast="popover" role="status">
+              <span class="toast-check">✓</span><span>Channel created and selected</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="prototype" data-prototype="modal">
+          <div class="prototype-shell">
+            <div class="prototype-layout">
+              <aside class="workspace-rail"><div class="workspace-mark">H</div></aside>
+              <aside class="sidebar">
+                <header class="workspace-header">
+                  <div>
+                    <p class="eyebrow">Workspace</p>
+                    <strong>Hypothetical Money Machine</strong>
+                  </div>
+                  <button class="quiet-button" type="button">Sign out</button>
+                </header>
+                <nav class="channel-nav" aria-label="Modal demo channels">
+                  <div class="nav-heading">
+                    <span>Channels</span>
+                    <button
+                      class="add-channel"
+                      type="button"
+                      data-open="modal"
+                      aria-expanded="true"
+                      aria-label="Create channel"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div class="channel-list" data-list="modal">
+                    <button class="channel active" type="button" data-channel-slug="general">
+                      <span><span class="channel-icon">#</span> General</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="product">
+                      <span><span class="channel-icon">#</span> Product</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="random">
+                      <span><span class="channel-icon">#</span> Random</span>
+                    </button>
+                  </div>
+                  <div class="direct-messages">
+                    <p class="nav-heading">Direct messages</p>
+                    <button class="channel" type="button">
+                      <span><span class="presence-dot"></span>Dan Buck</span>
+                    </button>
+                  </div>
+                </nav>
+                <section class="member-list" aria-label="Members">
+                  <p class="nav-heading">Members</p>
+                  <button class="member" type="button">
+                    <span class="avatar">D</span><span>Dan Buck</span>
+                  </button>
+                </section>
+              </aside>
+              <section class="conversation-pane">
+                <header class="conversation-header">
+                  <div>
+                    <h3># General</h3>
+                    <p><span class="connection-dot"></span>connected</p>
+                  </div>
+                  <button class="quiet-button" type="button" data-archive="modal" hidden>
+                    Archive
+                  </button>
+                </header>
+                <div class="messages" data-messages="modal">
+                  <div class="message">
+                    <span class="avatar">D</span>
+                    <div>
+                      <header><strong>Dan</strong><time>10:12 AM</time></header>
+                      <p>Some channels need a little context from day one.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="composer">
+                  <input data-composer="modal" type="text" placeholder="Message # General" />
+                  <button class="primary-button" type="button" disabled>Send</button>
+                </div>
+              </section>
+              <aside class="inspector">
+                <h3>Guided modal</h3>
+                <p>A focused surface that scales to richer channel settings later.</p>
+                <dl>
+                  <div>
+                    <dt>Best for</dt>
+                    <dd>Channels where purpose and naming deserve thought.</dd>
+                  </div>
+                  <div>
+                    <dt>Completion</dt>
+                    <dd>Clear validation, explicit action, selected result.</dd>
+                  </div>
+                  <div>
+                    <dt>Tradeoff</dt>
+                    <dd>More interruption and more fields than most creations need.</dd>
+                  </div>
+                </dl>
+              </aside>
+            </div>
+
+            <div
+              class="modal-layer"
+              data-layer="modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="modal-title"
+            >
+              <form class="modal" data-form="modal">
+                <header class="modal-header">
+                  <div>
+                    <h4 id="modal-title">Create a channel</h4>
+                    <p>Give the conversation a clear name and purpose.</p>
+                  </div>
+                  <button class="close-button" type="button" data-close="modal" aria-label="Close">
+                    ×
+                  </button>
+                </header>
+                <div class="modal-body">
+                  <div class="field">
+                    <label for="modal-name">Name</label>
+                    <input
+                      id="modal-name"
+                      name="name"
+                      type="text"
+                      maxlength="100"
+                      placeholder="launch-planning"
+                      autocomplete="off"
+                    />
+                    <p class="field-help">
+                      <span class="character-count" data-count="modal">0 / 100</span>
+                      <span class="slug-preview empty" data-slug="modal">#channel-name</span>
+                    </p>
+                  </div>
+                  <div class="field">
+                    <label for="modal-topic"
+                      >Topic <span aria-hidden="true">·</span> optional</label
+                    >
+                    <textarea
+                      id="modal-topic"
+                      name="topic"
+                      maxlength="250"
+                      placeholder="What belongs in this channel?"
+                    ></textarea>
+                    <p class="field-help">
+                      <span>Shown in channel details</span>
+                      <span class="character-count" data-topic-count>0 / 250</span>
+                    </p>
+                  </div>
+                  <div class="advanced-row">
+                    <div class="field">
+                      <label for="modal-slug">URL-safe name</label>
+                      <input
+                        id="modal-slug"
+                        name="slug"
+                        type="text"
+                        maxlength="100"
+                        placeholder="channel-name"
+                        autocomplete="off"
+                        data-generated="true"
+                      />
+                      <p class="field-help">
+                        <span>Generated from the name</span><span data-slug-mode>Automatic</span>
+                      </p>
+                    </div>
+                    <div>
+                      <label>Visibility</label>
+                      <div class="visibility-card">
+                        <strong>Workspace channel</strong>
+                        <span>Visible to every active member</span>
+                      </div>
+                    </div>
+                  </div>
+                  <p class="form-error" data-error="modal" role="alert"></p>
+                </div>
+                <footer class="modal-footer">
+                  <p>Enter to create · Esc to cancel</p>
+                  <div class="button-row">
+                    <button class="secondary-button" type="button" data-close="modal">
+                      Cancel
+                    </button>
+                    <button class="primary-button" type="submit" data-submit="modal">
+                      Create channel
+                    </button>
+                  </div>
+                </footer>
+              </form>
+            </div>
+            <div class="toast" data-toast="modal" role="status">
+              <span class="toast-check">✓</span><span>Channel created and selected</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="prototype" data-prototype="inline">
+          <div class="prototype-shell">
+            <div class="prototype-layout">
+              <aside class="workspace-rail"><div class="workspace-mark">H</div></aside>
+              <aside class="sidebar">
+                <header class="workspace-header">
+                  <div>
+                    <p class="eyebrow">Workspace</p>
+                    <strong>Hypothetical Money Machine</strong>
+                  </div>
+                  <button class="quiet-button" type="button">Sign out</button>
+                </header>
+                <nav class="channel-nav" aria-label="Inline demo channels">
+                  <div class="nav-heading">
+                    <span>Channels</span>
+                    <button
+                      class="add-channel"
+                      type="button"
+                      data-open="inline"
+                      aria-expanded="true"
+                      aria-label="Create channel"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <form class="inline-create" data-form="inline">
+                    <label class="sr-only" for="inline-name">Channel name</label>
+                    <div class="inline-input-wrap">
+                      <span aria-hidden="true">#</span>
+                      <input
+                        id="inline-name"
+                        name="name"
+                        type="text"
+                        maxlength="100"
+                        placeholder="new-channel"
+                        autocomplete="off"
+                      />
+                    </div>
+                    <div class="inline-actions">
+                      <span class="inline-meta">
+                        <small data-inline-status>Enter to create</small>
+                        <span class="slug-preview empty" data-slug="inline">#channel-name</span>
+                      </span>
+                      <div>
+                        <button class="secondary-button" type="button" data-close="inline">
+                          Esc
+                        </button>
+                        <button class="primary-button" type="submit" data-submit="inline">
+                          Add
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                  <div class="channel-list" data-list="inline">
+                    <button class="channel active" type="button" data-channel-slug="general">
+                      <span><span class="channel-icon">#</span> General</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="product">
+                      <span><span class="channel-icon">#</span> Product</span>
+                    </button>
+                    <button class="channel" type="button" data-channel-slug="random">
+                      <span><span class="channel-icon">#</span> Random</span
+                      ><span class="badge">3</span>
+                    </button>
+                  </div>
+                  <div class="direct-messages">
+                    <p class="nav-heading">Direct messages</p>
+                    <button class="channel" type="button">
+                      <span><span class="presence-dot"></span>Dan Buck</span>
+                    </button>
+                  </div>
+                </nav>
+                <section class="member-list" aria-label="Members">
+                  <p class="nav-heading">Members</p>
+                  <button class="member" type="button">
+                    <span class="avatar">D</span><span>Dan Buck</span>
+                  </button>
+                </section>
+              </aside>
+              <section class="conversation-pane">
+                <header class="conversation-header">
+                  <div>
+                    <h3># General</h3>
+                    <p><span class="connection-dot"></span>connected</p>
+                  </div>
+                  <button class="quiet-button" type="button" data-archive="inline" hidden>
+                    Archive
+                  </button>
+                </header>
+                <div class="messages" data-messages="inline">
+                  <div class="message">
+                    <span class="avatar">M</span>
+                    <div>
+                      <header><strong>Morgan</strong><time>11:03 AM</time></header>
+                      <p>I usually know the name already. Let me type it and keep moving.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="composer">
+                  <input data-composer="inline" type="text" placeholder="Message # General" />
+                  <button class="primary-button" type="button" disabled>Send</button>
+                </div>
+              </section>
+              <aside class="inspector">
+                <h3>Inline composer</h3>
+                <p>The channel list itself becomes the creation surface for a few seconds.</p>
+                <dl>
+                  <div>
+                    <dt>Best for</dt>
+                    <dd>Frequent, confident creators and keyboard-heavy use.</dd>
+                  </div>
+                  <div>
+                    <dt>Completion</dt>
+                    <dd>Enter adds and selects; Escape returns to browsing.</dd>
+                  </div>
+                  <div>
+                    <dt>Tradeoff</dt>
+                    <dd>Least room for explanation, topic, or richer settings.</dd>
+                  </div>
+                </dl>
+              </aside>
+            </div>
+            <div class="toast" data-toast="inline" role="status">
+              <span class="toast-check">✓</span><span>Channel created and selected</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <div class="implementation-note">
+        <span class="note-mark">↳</span>
+        <span>
+          React mapping: keep the network mutation in one shared
+          <code>useCreateChannel()</code> action; let <code>ChannelCreatePopover</code>,
+          <code>ChannelCreateDialog</code>, or <code>ChannelCreateInline</code> own only
+          presentation and temporary form state.
+        </span>
+      </div>
+    </main>
+
+    <script>
+      const conceptNames = {
+        popover: "Concept 01 · Quick popover",
+        modal: "Concept 02 · Guided modal",
+        inline: "Concept 03 · Inline composer",
+      };
+
+      function slugify(value) {
+        return value
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
+      }
+
+      function formFor(kind) {
+        return document.querySelector(`[data-form="${kind}"]`);
+      }
+
+      function nameInputFor(kind) {
+        return formFor(kind).elements.namedItem("name");
+      }
+
+      const existingSlugs = {
+        popover: new Set(["general", "product", "random"]),
+        modal: new Set(["general", "product", "random"]),
+        inline: new Set(["general", "product", "random"]),
+      };
+
+      const busyKinds = new Set();
+
+      function effectiveSlug(kind) {
+        const form = formFor(kind);
+        if (kind === "modal") return form.elements.namedItem("slug").value.trim();
+        return slugify(nameInputFor(kind).value);
+      }
+
+      function errorElementFor(kind) {
+        return kind === "inline"
+          ? document.querySelector("[data-inline-status]")
+          : document.querySelector(`[data-error="${kind}"]`);
+      }
+
+      function clearError(kind) {
+        const form = formFor(kind);
+        errorElementFor(kind).textContent = kind === "inline" ? "Enter to create" : "";
+        errorElementFor(kind).classList.remove("inline-error");
+        form
+          .querySelectorAll('[aria-invalid="true"]')
+          .forEach((field) => field.removeAttribute("aria-invalid"));
+      }
+
+      function showError(kind, message, field = nameInputFor(kind)) {
+        const error = errorElementFor(kind);
+        error.textContent = message;
+        error.classList.toggle("inline-error", kind === "inline");
+        field.setAttribute("aria-invalid", "true");
+        field.focus();
+      }
+
+      function updateSubmitAvailability(kind) {
+        if (busyKinds.has(kind)) return;
+        const submit = document.querySelector(`[data-submit="${kind}"]`);
+        submit.disabled = nameInputFor(kind).value.trim() === "" || effectiveSlug(kind) === "";
+      }
+
+      function updateDraftPresentation(kind) {
+        const nameInput = nameInputFor(kind);
+        const generatedSlug = slugify(nameInput.value);
+        const count = document.querySelector(`[data-count="${kind}"]`);
+        if (count) count.textContent = `${nameInput.value.length} / 100`;
+
+        if (kind === "modal") {
+          const slugInput = formFor(kind).elements.namedItem("slug");
+          if (slugInput.dataset.generated === "true") slugInput.value = generatedSlug;
+        }
+
+        const slug = effectiveSlug(kind);
+        const preview = document.querySelector(`[data-slug="${kind}"]`);
+        preview.textContent = `#${slug || "channel-name"}`;
+        preview.classList.toggle("empty", slug === "");
+        updateSubmitAvailability(kind);
+      }
+
+      function resetForm(kind) {
+        const form = formFor(kind);
+        form.reset();
+        if (kind === "modal") {
+          form.elements.namedItem("slug").dataset.generated = "true";
+          document.querySelector("[data-slug-mode]").textContent = "Automatic";
+        }
+        clearError(kind);
+        updateDraftPresentation(kind);
+      }
+
+      function setOpen(kind, open, returnFocus = true) {
+        const trigger = document.querySelector(`[data-open="${kind}"]`);
+        const surface =
+          kind === "modal" ? document.querySelector(`[data-layer="${kind}"]`) : formFor(kind);
+        surface.hidden = !open;
+        trigger.setAttribute("aria-expanded", String(open));
+        if (open) {
+          window.setTimeout(() => nameInputFor(kind).focus(), 0);
+        } else if (returnFocus) {
+          trigger.focus();
+        }
+      }
+
+      function setBusy(kind, busy) {
+        const submit = document.querySelector(`[data-submit="${kind}"]`);
+        const form = formFor(kind);
+        if (busy) busyKinds.add(kind);
+        else busyKinds.delete(kind);
+        submit.disabled = busy;
+        form.setAttribute("aria-busy", String(busy));
+        [...form.elements].forEach((element) => {
+          if (element !== submit) element.disabled = busy;
+        });
+        submit.innerHTML = busy
+          ? `<span class="spinner" aria-hidden="true"></span>Creating`
+          : kind === "modal"
+            ? "Create channel"
+            : kind === "inline"
+              ? "Add"
+              : "Create";
+        if (!busy) updateSubmitAvailability(kind);
+      }
+
+      function showToast(kind, displayName) {
+        const toast = document.querySelector(`[data-toast="${kind}"]`);
+        toast.querySelector("span:last-child").textContent = `# ${displayName} created`;
+        toast.classList.add("show");
+        window.setTimeout(() => toast.classList.remove("show"), 2200);
+      }
+
+      function selectCreatedChannel(kind, displayName) {
+        const prototype = document.querySelector(`[data-prototype="${kind}"]`);
+        const header = prototype.querySelector(".conversation-header");
+        header.querySelector("h3").textContent = `# ${displayName}`;
+        prototype.querySelector(`[data-archive="${kind}"]`).hidden = false;
+
+        prototype.querySelector(`[data-messages="${kind}"]`).innerHTML = `
+          <div class="empty-state">
+            <span class="empty-glyph" aria-hidden="true">#</span>
+            <h4>No messages yet</h4>
+            <p>Start the conversation.</p>
+          </div>
+        `;
+
+        const composer = prototype.querySelector(`[data-composer="${kind}"]`);
+        composer.value = "";
+        composer.placeholder = `Message # ${displayName}`;
+        window.setTimeout(() => composer.focus(), 0);
+      }
+
+      function addChannel(kind, displayName, slug) {
+        const list = document.querySelector(`[data-list="${kind}"]`);
+        list.querySelectorAll(".channel").forEach((channel) => channel.classList.remove("active"));
+        const channel = document.createElement("button");
+        channel.type = "button";
+        channel.className = "channel active just-created";
+        channel.dataset.channelSlug = slug;
+        channel.dataset.channelName = displayName;
+        channel.innerHTML = `<span><span class="channel-icon">#</span> ${displayName}</span>`;
+        list.append(channel);
+
+        [...list.children]
+          .sort((left, right) =>
+            left.textContent.trim().localeCompare(right.textContent.trim(), undefined, {
+              sensitivity: "base",
+            }),
+          )
+          .forEach((item) => list.append(item));
+
+        window.setTimeout(() => channel.classList.remove("just-created"), 800);
+      }
+
+      function submitExperience(kind) {
+        const form = formFor(kind);
+        const nameInput = nameInputFor(kind);
+        const displayName = nameInput.value.trim();
+        const slug = effectiveSlug(kind);
+        const slugInput = kind === "modal" ? form.elements.namedItem("slug") : nameInput;
+
+        clearError(kind);
+
+        if (displayName === "" || slug === "") {
+          showError(kind, "Enter a channel name.");
+          return;
+        }
+
+        if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+          showError(
+            kind,
+            "Use lowercase letters, numbers, and single hyphens for the URL-safe name.",
+            slugInput,
+          );
+          return;
+        }
+
+        if (existingSlugs[kind].has(slug)) {
+          showError(kind, "A channel with that URL-safe name already exists.", slugInput);
+          return;
+        }
+
+        setBusy(kind, true);
+        if (kind === "inline") errorElementFor(kind).textContent = "Creating…";
+
+        window.setTimeout(() => {
+          existingSlugs[kind].add(slug);
+          addChannel(kind, displayName, slug);
+          setBusy(kind, false);
+          resetForm(kind);
+          setOpen(kind, false, false);
+          selectCreatedChannel(kind, displayName);
+          showToast(kind, displayName);
+        }, 720);
+      }
+
+      document.querySelectorAll(".concept-card").forEach((card) => {
+        card.addEventListener("click", () => {
+          const concept = card.dataset.concept;
+          document
+            .querySelectorAll(".concept-card")
+            .forEach((candidate) => candidate.classList.toggle("active", candidate === card));
+          document
+            .querySelectorAll(".prototype")
+            .forEach((prototype) =>
+              prototype.classList.toggle("active", prototype.dataset.prototype === concept),
+            );
+          document.getElementById("stage-label").textContent = conceptNames[concept];
+        });
+      });
+
+      document.querySelectorAll("[data-open]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const kind = button.dataset.open;
+          const surface =
+            kind === "modal" ? document.querySelector(`[data-layer="${kind}"]`) : formFor(kind);
+          setOpen(kind, surface.hidden);
+        });
+      });
+
+      document.querySelectorAll("[data-close]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const kind = button.dataset.close;
+          if (busyKinds.has(kind)) return;
+          resetForm(kind);
+          setOpen(kind, false);
+        });
+      });
+
+      document.querySelectorAll("[data-form]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          submitExperience(form.dataset.form);
+        });
+      });
+
+      document.querySelectorAll('input[name="name"]').forEach((input) => {
+        input.addEventListener("input", () => {
+          const kind = input.closest("[data-form]").dataset.form;
+          clearError(kind);
+          updateDraftPresentation(kind);
+        });
+      });
+
+      const modalSlug = document.getElementById("modal-slug");
+      modalSlug.addEventListener("input", () => {
+        modalSlug.dataset.generated = "false";
+        document.querySelector("[data-slug-mode]").textContent = "Custom";
+        clearError("modal");
+        updateDraftPresentation("modal");
+      });
+
+      document.getElementById("modal-topic").addEventListener("input", (event) => {
+        document.querySelector("[data-topic-count]").textContent =
+          `${event.currentTarget.value.length} / 250`;
+      });
+
+      document.querySelectorAll("[data-composer]").forEach((composer) => {
+        composer.addEventListener("input", () => {
+          composer.nextElementSibling.disabled = composer.value.trim() === "";
+        });
+      });
+
+      document.querySelector('[data-layer="modal"]').addEventListener("click", (event) => {
+        if (event.target !== event.currentTarget || busyKinds.has("modal")) return;
+        resetForm("modal");
+        setOpen("modal", false);
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        const active = document.querySelector(".prototype.active");
+        if (!active) return;
+        const kind = active.dataset.prototype;
+        if (busyKinds.has(kind)) return;
+        resetForm(kind);
+        setOpen(kind, false);
+      });
+
+      document.getElementById("reset-demos").addEventListener("click", () => {
+        window.location.reload();
+      });
+
+      ["popover", "modal", "inline"].forEach((kind) => updateDraftPresentation(kind));
+    </script>
+  </body>
+</html>
