@@ -31,6 +31,44 @@ const SYNC_RESPONSE = {
   hasMore: false,
 } as const;
 
+const BOOTSTRAP_RESPONSE = {
+  currentUser: CURRENT_USER,
+  workspace: {
+    id: "10000000-0000-4000-8000-000000000002",
+    name: "HMM",
+    slug: "hmm",
+    createdBy: "10000000-0000-4000-8000-000000000001",
+    createdAt: NOW,
+    updatedAt: NOW,
+  },
+  members: [],
+  conversations: [
+    {
+      conversation: {
+        id: CONVERSATION_ID,
+        workspaceId: "10000000-0000-4000-8000-000000000002",
+        kind: "channel",
+        name: "General",
+        slug: "general",
+        topic: null,
+        isArchived: false,
+        createdBy: "10000000-0000-4000-8000-000000000001",
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [],
+      lastMessage: null,
+      unreadCount: 0,
+      mentionCount: 0,
+      readCursor: null,
+    },
+  ],
+  conversationsNextCursor: null,
+  conversationsHasMore: false,
+  syncCursor: "42",
+  featureFlags: { channels: true, directMessages: true, mentions: true },
+} as const;
+
 const SEND_OPERATION: SendMessageOperation = {
   conversationId: CONVERSATION_ID,
   idempotencyKey: CLIENT_MESSAGE_ID,
@@ -86,6 +124,15 @@ function createTransport(request: SessionFetch): {
 function transportAnswering(response: () => Response | Promise<Response>): WorkspaceTransport {
   return createTransport(async () => response()).transport;
 }
+
+describe("WorkspaceTransport bootstrap compatibility", () => {
+  it("treats a pre-pagination bootstrap response as one complete conversation page", async () => {
+    const { conversationsNextCursor, conversationsHasMore, ...legacyBootstrap } = BOOTSTRAP_RESPONSE;
+    const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
+
+    await expect(transport.bootstrap()).resolves.toEqual(BOOTSTRAP_RESPONSE);
+  });
+});
 
 describe("WorkspaceTransport sync classification", () => {
   it("accepts a well-formed sync page", async () => {

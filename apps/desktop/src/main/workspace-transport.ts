@@ -48,6 +48,25 @@ function isNetworkFailure(error: unknown): boolean {
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
+/**
+ * The deployed API can be briefly older than the desktop client during a rolling upgrade. Before
+ * conversation pagination existed, bootstrap returned the complete conversation list without
+ * page metadata. Preserve that response's meaning while still validating every other field
+ * strictly; current servers always send the two metadata fields themselves.
+ */
+function withLegacyBootstrapPagination(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+
+  const candidate = payload as Record<string, unknown>;
+  return {
+    ...candidate,
+    conversationsNextCursor:
+      candidate.conversationsNextCursor === undefined ? null : candidate.conversationsNextCursor,
+    conversationsHasMore:
+      candidate.conversationsHasMore === undefined ? false : candidate.conversationsHasMore,
+  };
+}
+
 type SendPermanentReason = Extract<SendAttemptResult, { status: "permanent" }>["reason"];
 type SyncPermanentReason = Extract<SyncAttemptResult, { status: "permanent" }>["reason"];
 
@@ -93,7 +112,9 @@ export class WorkspaceTransport {
 
   async bootstrap(): Promise<WorkspaceBootstrapResponse> {
     const response = await this.session.fetch(this.#url("/v1/bootstrap").href, { method: "GET" });
-    return workspaceBootstrapResponseSchema.parse(await this.#payload(response));
+    return workspaceBootstrapResponseSchema.parse(
+      withLegacyBootstrapPagination(await this.#payload(response)),
+    );
   }
 
   async members(): Promise<ListMembersResponse> {
