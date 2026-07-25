@@ -1,6 +1,10 @@
 export const DESKTOP_CHANNELS = Object.freeze({
   appVersion: "desktop:app-version",
   serverStatus: "desktop:server-status",
+  updateState: "desktop:update-state",
+  updateCheck: "desktop:update-check",
+  updateInstall: "desktop:update-install",
+  updateChanged: "desktop:update-changed",
   sessionState: "chat:session-state",
   sessionRequestMagicLink: "chat:session-request-magic-link",
   sessionSignOut: "chat:session-sign-out",

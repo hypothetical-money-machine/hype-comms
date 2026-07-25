@@ -12,6 +12,8 @@ import {
   sendMessageRequestSchema,
   syncQuerySchema,
   systemConnectedEventSchema,
+  updateStateSchema,
+  updateVersionSchema,
   userSchema,
 } from "../src/index.js";
 
@@ -144,6 +146,30 @@ describe("transport contracts", () => {
       }),
     ).toThrow();
     expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
+  });
+
+  it("keeps update state bounded and free of updater diagnostics", () => {
+    expect(updateStateSchema.parse({ status: "downloading", percentage: 42 })).toEqual({
+      status: "downloading",
+      percentage: 42,
+    });
+    expect(updateStateSchema.parse({ status: "ready", version: "1.2.3-beta.1" })).toEqual({
+      status: "ready",
+      version: "1.2.3-beta.1",
+    });
+    expect(() => updateStateSchema.parse({ status: "downloading", percentage: 42.5 })).toThrow();
+    expect(() =>
+      updateStateSchema.parse({ status: "error", message: "Raw updater failure" }),
+    ).toThrow();
+    expect(() =>
+      updateStateSchema.parse({
+        status: "error",
+        message: "Update failed",
+        feedUrl: "https://updates.example/private",
+      }),
+    ).toThrow();
+    expect(() => updateVersionSchema.parse("../unsigned/app.zip")).toThrow();
+    expect(() => updateVersionSchema.parse("1".repeat(65))).toThrow();
   });
 
   it("validates the stable API error envelope", () => {

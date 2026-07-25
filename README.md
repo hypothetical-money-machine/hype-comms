@@ -118,6 +118,73 @@ are AES-256-GCM encrypted through a bounded Electron-main API using a data key p
 `safeStorage`. Linux falls back to a clearly labeled memory-only mode when Electron reports the
 insecure `basic_text` backend.
 
+## Desktop releases and updates
+
+Packaged production clients read a public, flat update feed at
+`https://updates.hypemm.com/desktop`. The feed contains `latest-mac.yml`, `latest.yml`,
+`latest-linux.yml`, and the versioned installers those files name. Its URL is baked into the
+package: there is intentionally no runtime setting that could redirect an installed client to a
+different update server. Object storage is only the origin; clients need no bucket credential, and
+the read path is deliberately unauthenticated because a packaged app cannot hold a secret.
+
+To cut a release:
+
+1. Change `apps/desktop/package.json` to the intended version and update the lockfile, without
+   creating a tag yet.
+2. Run `npm run check` and the native package verification appropriate to the machine.
+3. Land that focused version change, then create and push `v<version>` at the exact revision. The
+   release workflow rejects a tag whose value does not exactly match the desktop package version.
+
+The workflow packages on native macOS, Windows, and Ubuntu runners with `--publish never`, verifies
+the ASAR, update configuration, and Electron fuses, and then copies the results to the
+S3-compatible bucket described below. The pilot serves this from a self-hosted S3-compatible storage instance on
+the example-project cluster; any S3-compatible endpoint works, and the bucket is addressed by path.
+
+The endpoint, bucket, and region are not secret and are repository **variables**:
+
+- `GARAGE_S3_ENDPOINT`
+- `GARAGE_S3_BUCKET`
+- `GARAGE_S3_REGION`
+
+Only the key pair is a repository **secret**, and it is scoped to read and write that one bucket:
+
+- `GARAGE_ACCESS_KEY_ID`
+- `GARAGE_SECRET_ACCESS_KEY`
+
+Treat that key pair as equivalent to code execution on every pilot machine: whoever can write the
+bucket controls what every installed client downloads and runs next.
+
+Artifacts are uploaded under the bucket's `desktop/` prefix with long-lived immutable caching.
+Each `latest*.yml` is uploaded only after its referenced artifacts and uses `Cache-Control:
+no-cache`; this ordering keeps a polling client from seeing a pointer to a file that is not there
+yet. The workflow never deletes old files. To withdraw a bad release, re-upload the previous
+platform metadata files last. That stops clients that have not updated from taking the bad build;
+because downgrades are deliberately disabled, clients already running it need a newer forward-fix
+release.
+
+macOS signing is ready but inactive until a Developer ID Application certificate exists. Add these
+two repository secrets to sign a release:
+
+- `HMM_MACOS_CSC_LINK` (the base64-encoded Developer ID certificate)
+- `HMM_MACOS_CSC_KEY_PASSWORD`
+
+Notarization is enabled when the signed job also has all three of:
+
+- `HMM_MACOS_APPLE_API_KEY_BASE64` (the base64-encoded App Store Connect API private key)
+- `HMM_MACOS_APPLE_API_KEY_ID`
+- `HMM_MACOS_APPLE_API_ISSUER`
+
+Without the certificate secrets the macOS job fails at its verification step and publishes nothing,
+which is deliberate: an unsigned macOS build cannot auto-update at all, because Squirrel.Mac will
+not apply an update it cannot match to the running app's code signature. A red macOS job therefore
+means "no macOS build shipped", while Windows and Linux still publish normally.
+
+Windows installers are not signed. The update mechanism still works — `electron-updater` skips
+Authenticode verification when no publisher name is recorded — but that means a Windows update is
+protected by HTTPS and the manifest checksum rather than by a signature independent of the
+transport. macOS is protected by Developer ID and notarization in addition to those. Closing that
+gap needs a Windows code-signing certificate.
+
 ## Verification
 
 ```bash
@@ -141,6 +208,27 @@ npm run verify:desktop-package
 
 Generated `dist/`, `release/`, coverage, databases, credentials, and installers are never
 committed.
+
+## Continuous integration
+
+Two systems run against this repository, split by what each can physically build.
+
+**Woodpecker** (`.woodpecker.yml`) owns the server. On a push to `main` it runs `npm run check`,
+builds the service image with kaniko, pushes it to the Harbor registry, and updates the
+`deployment-repository` GitOps repository so Argo CD rolls it out to the `production-cluster` cluster. It runs
+on the example-project, which is where the registry, the cluster, and the database already live.
+
+**GitHub Actions** (`.github/workflows/`) owns repository checks and the desktop client:
+
+- `ci.yml` runs `npm run check` on every pull request and push to `main`.
+- `desktop-package-smoke.yml` packages unsigned artifacts on macOS, Windows, and Ubuntu.
+- `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
+
+The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,
+and Windows installers on Windows. GitHub provides those runners; the example-project does not.
+
+Note that `npm run check` currently runs in both systems on a push to `main`. That duplication is
+harmless but not free, and is worth collapsing if CI minutes or feedback latency start to matter.
 
 ## Scope
 

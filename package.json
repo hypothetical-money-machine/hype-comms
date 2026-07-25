@@ -33,7 +33,8 @@
     "start:server": "npm run start --workspace @hmm-chat/server",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "verify:desktop-package": "node scripts/verify-desktop-package.mjs"
+    "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
+    "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

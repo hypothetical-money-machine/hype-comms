@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -13,9 +14,11 @@ import {
   sequenceSchema,
   type ChatSessionState,
   type ProductRealtimeEvent,
+  type UpdateState,
 } from "@hmm-chat/contracts";
 import { app, BrowserWindow, ipcMain, net, protocol, safeStorage, session, shell } from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
+import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -44,6 +47,7 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
+import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 
 protocol.registerSchemesAsPrivileged([
@@ -76,6 +80,61 @@ let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
+let updateController: UpdateController | null = null;
+
+function createUpdateSource(): UpdateSource {
+  return {
+    configure(configuration: UpdateSourceConfiguration): void {
+      autoUpdater.autoDownload = configuration.autoDownload;
+      autoUpdater.autoInstallOnAppQuit = configuration.autoInstallOnAppQuit;
+      autoUpdater.allowDowngrade = configuration.allowDowngrade;
+      autoUpdater.allowPrerelease = configuration.allowPrerelease;
+    },
+    onCheckingForUpdate(listener) {
+      autoUpdater.on("checking-for-update", listener);
+      return () => autoUpdater.off("checking-for-update", listener);
+    },
+    onUpdateAvailable(listener) {
+      autoUpdater.on("update-available", listener);
+      return () => autoUpdater.off("update-available", listener);
+    },
+    onUpdateNotAvailable(listener) {
+      autoUpdater.on("update-not-available", listener);
+      return () => autoUpdater.off("update-not-available", listener);
+    },
+    onDownloadProgress(listener) {
+      autoUpdater.on("download-progress", listener);
+      return () => autoUpdater.off("download-progress", listener);
+    },
+    onUpdateDownloaded(listener) {
+      autoUpdater.on("update-downloaded", listener);
+      return () => autoUpdater.off("update-downloaded", listener);
+    },
+    onUpdateCancelled(listener) {
+      autoUpdater.on("update-cancelled", listener);
+      return () => autoUpdater.off("update-cancelled", listener);
+    },
+    onError(listener) {
+      autoUpdater.on("error", listener);
+      return () => autoUpdater.off("error", listener);
+    },
+    checkForUpdates: () => autoUpdater.checkForUpdates(),
+    quitAndInstall: (isSilent, isForceRunAfter) =>
+      autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
+  };
+}
+
+function hasMacDeveloperIdSignature(): boolean {
+  if (process.platform !== "darwin") {
+    return true;
+  }
+
+  const result = spawnSync("/usr/bin/codesign", ["--display", "--verbose=4", process.execPath], {
+    encoding: "utf8",
+  });
+  const signingDetails = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  return result.status === 0 && /^Authority=Developer ID Application:/mu.test(signingDetails);
+}
 
 function sendToRenderer(channel: string, payload: unknown): boolean {
   if (mainWindow === null || mainWindow.isDestroyed() || !rendererReady) {
@@ -109,9 +168,16 @@ function deliverSessionState(state: ChatSessionState): void {
   }
 }
 
+function deliverUpdateState(state: UpdateState): void {
+  sendToRenderer(DESKTOP_CHANNELS.updateChanged, state);
+}
+
 function flushPendingRendererEvents(): void {
   if (chatSession !== null) {
     sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
+  }
+  if (updateController !== null) {
+    sendToRenderer(DESKTOP_CHANNELS.updateChanged, updateController.state);
   }
   while (pendingNotificationActions.length > 0) {
     const action = pendingNotificationActions.shift();
@@ -233,6 +299,30 @@ function registerIpcHandlers(): void {
 
     serverStatusRequest = request;
     return request;
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.updateState);
+  ipcMain.handle(DESKTOP_CHANNELS.updateState, (event): UpdateState => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted update-state IPC sender");
+    }
+    return updateController?.state ?? { status: "unsupported" };
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.updateCheck);
+  ipcMain.handle(DESKTOP_CHANNELS.updateCheck, async (event): Promise<void> => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted update-check IPC sender");
+    }
+    await updateController?.checkNow();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.updateInstall);
+  ipcMain.handle(DESKTOP_CHANNELS.updateInstall, (event): void => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted update-install IPC sender");
+    }
+    updateController?.quitAndInstall();
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
@@ -572,6 +662,16 @@ if (!hasSingleInstanceLock) {
         userDataPath: app.getPath("userData"),
       });
       chatSession.subscribe(deliverSessionState);
+      updateController = new UpdateController({
+        updater: createUpdateSource(),
+        isPackaged: app.isPackaged,
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        platform: process.platform,
+        ...(process.env.APPIMAGE === undefined ? {} : { appImagePath: process.env.APPIMAGE }),
+        hasMacDeveloperIdSignature:
+          !app.isPackaged || process.platform !== "darwin" || hasMacDeveloperIdSignature(),
+      });
+      updateController.subscribe(deliverUpdateState);
 
       registerIpcHandlers();
 
@@ -628,5 +728,6 @@ if (!hasSingleInstanceLock) {
 
   app.on("before-quit", () => {
     workspaceRealtime?.stop();
+    updateController?.dispose();
   });
 }

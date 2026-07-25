@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>HMM Chat — Downloads</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --ink: #14172a;
+        --muted: #5b6079;
+        --line: #e2e5f0;
+        --accent: #3b5bdb;
+        --accent-ink: #ffffff;
+        --note-bg: #fff8e6;
+        --note-line: #f0d9a0;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b1020;
+          --card: #141a30;
+          --ink: #e8ebf7;
+          --muted: #99a0bd;
+          --line: #262d47;
+          --accent: #6a8bff;
+          --accent-ink: #0b1020;
+          --note-bg: #2a2415;
+          --note-line: #4a4028;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 2.5rem 1.25rem 4rem;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          Helvetica,
+          Arial,
+          sans-serif;
+      }
+      main {
+        max-width: 46rem;
+        margin: 0 auto;
+      }
+      header {
+        margin-bottom: 2rem;
+      }
+      h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.9rem;
+        letter-spacing: -0.02em;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0;
+      }
+      .release {
+        margin-top: 0.75rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        margin-bottom: 0.85rem;
+      }
+      .card.suggested {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+      }
+      .card h2 {
+        margin: 0 0 0.15rem;
+        font-size: 1.05rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .tag {
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-radius: 999px;
+        padding: 0.12rem 0.5rem;
+      }
+      .card p {
+        margin: 0.3rem 0 0.85rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      a.dl {
+        display: inline-block;
+        padding: 0.5rem 0.9rem;
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        text-decoration: none;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      a.dl.secondary {
+        background: transparent;
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      a.dl:hover {
+        opacity: 0.9;
+      }
+      .note {
+        background: var(--note-bg);
+        border: 1px solid var(--note-line);
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        font-size: 0.88rem;
+        margin-top: 2rem;
+      }
+      .note strong {
+        display: block;
+        margin-bottom: 0.25rem;
+      }
+      code {
+        background: color-mix(in srgb, var(--ink) 10%, transparent);
+        padding: 0.1rem 0.35rem;
+        border-radius: 4px;
+        font-size: 0.85em;
+      }
+      footer {
+        margin-top: 2.5rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      #status {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>HMM Chat</h1>
+        <p class="sub">Desktop client for the Hypothetical Money Machine pilot.</p>
+        <p class="release" id="release"></p>
+      </header>
+
+      <div id="status">Loading the current release…</div>
+      <div id="platforms" hidden></div>
+
+      <div class="note">
+        <strong>You need an invitation to sign in.</strong>
+        Installing the client is not enough — ask the workspace owner to send you a sign-in link.
+        Opening that link hands the token to the app and signs you in.
+      </div>
+
+      <footer>
+        Private pilot build. Updates install automatically once you are running a packaged client.
+      </footer>
+    </main>
+
+    <script>
+      // The manifests are the source of truth for what has been published, so this page never
+      // goes stale and never needs regenerating for a new release.
+      const FEED = "desktop/";
+      const MANIFESTS = ["latest-mac.yml", "latest.yml", "latest-linux.yml"];
+
+      const PLATFORMS = [
+        {
+          id: "mac",
+          title: "macOS",
+          match: (f) => f.endsWith(".dmg"),
+          label: (f) => (f.includes("arm64") ? "Apple silicon" : "Intel"),
+          note: "Signed and notarized. Updates install themselves from here on.",
+          detect: (ua) => ua.includes("mac"),
+        },
+        {
+          id: "win",
+          title: "Windows",
+          match: (f) => f.endsWith(".exe"),
+          label: () => "Installer (x64)",
+          note: "Windows may warn that the publisher is unverified on first install — choose More info, then Run anyway. Updates after that are silent.",
+          detect: (ua) => ua.includes("win"),
+        },
+        {
+          id: "linux",
+          title: "Linux",
+          match: (f) => f.endsWith(".AppImage") || f.endsWith(".deb"),
+          label: (f) => (f.endsWith(".AppImage") ? "AppImage (recommended)" : "Debian package"),
+          note: "Choose the AppImage — it is the only Linux build that updates itself. Keep it somewhere stable such as ~/Applications, since it replaces its own file. On Arch you may need fuse2.",
+          detect: (ua) => ua.includes("linux") || ua.includes("x11"),
+        },
+      ];
+
+      function parseManifest(text) {
+        const version = text.match(/^version:\s*['"]?([^'"\n\r]+)/m);
+        const date = text.match(/^releaseDate:\s*['"]?([^'"\n\r]+)/m);
+        const files = [...text.matchAll(/^\s*-?\s*url:\s*['"]?([^'"\n\r]+)/gm)].map((m) =>
+          m[1].trim(),
+        );
+        return {
+          version: version ? version[1].trim() : null,
+          releaseDate: date ? date[1].trim() : null,
+          files,
+        };
+      }
+
+      async function load() {
+        const results = await Promise.all(
+          MANIFESTS.map((name) =>
+            fetch(FEED + name, { cache: "no-store" })
+              .then((r) => (r.ok ? r.text() : null))
+              .catch(() => null),
+          ),
+        );
+
+        const parsed = results.filter(Boolean).map(parseManifest);
+        const files = [...new Set(parsed.flatMap((p) => p.files))];
+        const status = document.getElementById("status");
+
+        if (files.length === 0) {
+          status.textContent =
+            "No release has been published yet. Check back once the first build ships.";
+          return;
+        }
+
+        const version = parsed.find((p) => p.version)?.version;
+        const date = parsed
+          .map((p) => p.releaseDate)
+          .filter(Boolean)
+          .sort()
+          .pop();
+        const release = document.getElementById("release");
+        if (version) {
+          release.textContent =
+            "Version " +
+            version +
+            (date
+              ? " · released " +
+                new Date(date).toLocaleDateString(undefined, {
+                  year: "numeric",
+                  month: "long",
+                  day: "numeric",
+                })
+              : "");
+        }
+
+        const ua = navigator.userAgent.toLowerCase();
+        const container = document.getElementById("platforms");
+
+        for (const platform of PLATFORMS) {
+          const matches = files.filter(platform.match).sort();
+          if (matches.length === 0) continue;
+
+          const card = document.createElement("div");
+          card.className = "card" + (platform.detect(ua) ? " suggested" : "");
+
+          const heading = document.createElement("h2");
+          heading.textContent = platform.title;
+          if (platform.detect(ua)) {
+            const tag = document.createElement("span");
+            tag.className = "tag";
+            tag.textContent = "your system";
+            heading.appendChild(tag);
+          }
+          card.appendChild(heading);
+
+          const note = document.createElement("p");
+          note.textContent = platform.note;
+          card.appendChild(note);
+
+          const links = document.createElement("div");
+          links.className = "links";
+          matches.forEach((file, index) => {
+            const link = document.createElement("a");
+            link.className = "dl" + (index > 0 ? " secondary" : "");
+            link.href = FEED + file;
+            link.textContent = platform.label(file);
+            link.setAttribute("download", "");
+            links.appendChild(link);
+          });
+          card.appendChild(links);
+          container.appendChild(card);
+        }
+
+        status.hidden = true;
+        container.hidden = false;
+      }
+
+      load().catch(() => {
+        document.getElementById("status").textContent =
+          "Could not load the release list. Try refreshing.";
+      });
+    </script>
+  </body>
+</html>

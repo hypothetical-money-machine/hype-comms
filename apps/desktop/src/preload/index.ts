@@ -20,6 +20,7 @@ import {
   sendMessageOperationSchema,
   sequenceSchema,
   syncAttemptResultSchema,
+  updateStateSchema,
   workspaceBootstrapResponseSchema,
   type ChatSessionState,
   type CacheDecryptBatchRequest,
@@ -29,6 +30,7 @@ import {
   type DirectConversationRequest,
   type ProductRealtimeEvent,
   type SendMessageOperation,
+  type UpdateState,
 } from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -74,6 +76,20 @@ if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
 const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
+  getUpdateState: async () =>
+    updateStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.updateState)),
+  checkForUpdates: async () => {
+    await ipcRenderer.invoke(DESKTOP_CHANNELS.updateCheck);
+  },
+  restartToInstallUpdate: async () => {
+    await ipcRenderer.invoke(DESKTOP_CHANNELS.updateInstall);
+  },
+  onUpdateStateChanged: (listener: (state: UpdateState) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.updateChanged,
+      listener,
+      (value): value is UpdateState => updateStateSchema.safeParse(value).success,
+    ),
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
   getSessionState: async () =>
     chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),

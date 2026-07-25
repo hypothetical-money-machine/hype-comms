@@ -48,6 +48,7 @@
   "dependencies": {
     "@hmm-chat/contracts": "*",
     "dexie": "4.4.4",
+    "electron-updater": "6.8.9",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "ws": "^8.18.0"
@@ -72,6 +73,12 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.hypemm.com/desktop"
+      }
+    ],
     "files": [
       "dist/**/*",
       "package.json"
@@ -87,6 +94,9 @@
     "mac": {
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true,
       "target": [
         {
           "target": "dmg",

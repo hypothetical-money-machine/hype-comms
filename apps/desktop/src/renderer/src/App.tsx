@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import type { ChatSessionState, Message, User } from "@hmm-chat/contracts";
+import type { ChatSessionState, Message, UpdateState, User } from "@hmm-chat/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { WorkspaceRuntime, type WorkspaceRuntimeState } from "./workspace-runtime";
@@ -18,6 +18,67 @@ function messageTime(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function UpdateControl({ client }: { readonly client: DesktopApi }) {
+  const [update, setUpdate] = useState<UpdateState | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const stopUpdateListener = client.onUpdateStateChanged(setUpdate);
+    void client
+      .getUpdateState()
+      .then((state) => {
+        if (active) setUpdate(state);
+      })
+      .catch(() => {
+        if (active) setUpdate({ status: "unsupported" });
+      });
+
+    return () => {
+      active = false;
+      stopUpdateListener();
+    };
+  }, [client]);
+
+  if (update === null || update.status === "idle" || update.status === "unsupported") {
+    return null;
+  }
+
+  let message: string;
+  switch (update.status) {
+    case "checking":
+      message = "Checking for updates…";
+      break;
+    case "available":
+      message = "Update found";
+      break;
+    case "downloading":
+      message = `Downloading update — ${update.percentage}%`;
+      break;
+    case "ready":
+      message = `Update ${update.version} ready`;
+      break;
+    case "error":
+      message = update.message;
+      break;
+  }
+
+  return (
+    <div className={`update-control ${update.status}`} role="status" aria-live="polite">
+      <span>{message}</span>
+      {update.status === "ready" && (
+        <button type="button" onClick={() => void client.restartToInstallUpdate()}>
+          Restart
+        </button>
+      )}
+      {update.status === "error" && (
+        <button type="button" onClick={() => void client.checkForUpdates()}>
+          Retry
+        </button>
+      )}
+    </div>
+  );
 }
 
 function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage?: string }) {
@@ -69,6 +130,8 @@ function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage
           </button>
         </form>
         {status !== "" && <p className="signin-status">{status}</p>}
+
+        <UpdateControl client={client} />
       </section>
     </main>
   );
@@ -347,6 +410,8 @@ export function App({ client }: AppProps) {
               </button>
             ))}
         </section>
+
+        <UpdateControl client={client} />
       </aside>
 
       <section className="conversation-pane">

@@ -1,4 +1,4 @@
-import { access, readdir } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import { listPackage } from "@electron/asar";
@@ -9,6 +9,8 @@ const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/preload/index.js",
   "/dist/renderer/index.html",
+  "/node_modules/electron-updater/package.json",
+  "/node_modules/electron-updater/out/main.js",
 ];
 const expectedFuses = new Map([
   [FuseV1Options.RunAsNode, FuseState.DISABLE],
@@ -56,6 +58,33 @@ async function executableForAsar(asarPath) {
   return executablePath;
 }
 
+async function verifyUpdateConfiguration(asarPath) {
+  const updateConfigurationPath = path.join(path.dirname(asarPath), "app-update.yml");
+  const updateConfiguration = await readFile(updateConfigurationPath, "utf8");
+  const urlLine = updateConfiguration
+    .split(/\r?\n/u)
+    .find((line) => line.trimStart().startsWith("url:"));
+  if (urlLine === undefined) {
+    throw new Error(`${updateConfigurationPath} has no update feed URL`);
+  }
+
+  const value = urlLine.slice(urlLine.indexOf(":") + 1).trim();
+  const unquotedValue =
+    (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))
+      ? value.slice(1, -1)
+      : value;
+
+  let updateUrl;
+  try {
+    updateUrl = new URL(unquotedValue);
+  } catch {
+    throw new Error(`${updateConfigurationPath} has an invalid update feed URL`);
+  }
+  if (updateUrl.protocol !== "https:") {
+    throw new Error(`${updateConfigurationPath} update feed must use HTTPS`);
+  }
+}
+
 const asarPaths = await collectFiles(releaseRoot, "app.asar");
 if (asarPaths.length === 0) {
   throw new Error(`No packaged app.asar found under ${releaseRoot}`);
@@ -73,6 +102,8 @@ for (const asarPath of asarPaths) {
     throw new Error(`${asarPath} has no bundled renderer assets`);
   }
 
+  await verifyUpdateConfiguration(asarPath);
+
   const executablePath = await executableForAsar(asarPath);
   const fuseWire = await getCurrentFuseWire(executablePath);
   for (const [fuse, expectedState] of expectedFuses) {
@@ -85,5 +116,5 @@ for (const asarPath of asarPaths) {
 }
 
 console.log(
-  `Verified renderer contents and Electron fuses in ${asarPaths.length} packaged app(s).`,
+  `Verified updater configuration, ASAR contents, and Electron fuses in ${asarPaths.length} packaged app(s).`,
 );

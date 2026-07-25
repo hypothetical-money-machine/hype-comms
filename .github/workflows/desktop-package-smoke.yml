@@ -61,10 +61,21 @@ jobs:
       - name: Verify packaged application contents and fuses
         run: npm run verify:desktop-package
 
+      # Only the distributable installers. `release/*` also matches the unpacked application
+      # directories, which uploaded ~1,500 files and over a gigabyte per macOS run and exhausted
+      # the artifact storage quota. Packaging is verified by the step above; these uploads exist
+      # only so a reviewer can try a branch build, so they expire quickly.
+      # Convenience only, so it must not gate the job. Packaging correctness is asserted by
+      # verify:desktop-package above; a storage quota problem is not a packaging regression.
       - name: Upload package smoke artifact
+        continue-on-error: true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: hmm-chat-${{ runner.os }}-${{ runner.arch }}
-          path: apps/desktop/release/*
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 2

@@ -16,6 +16,7 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  UpdateState,
   WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
@@ -40,6 +41,10 @@ export interface SessionTransport {
 export interface DesktopApi extends SessionTransport {
   readonly platform: DesktopPlatform;
   readonly getAppVersion: () => Promise<string>;
+  readonly getUpdateState: () => Promise<UpdateState>;
+  readonly checkForUpdates: () => Promise<void>;
+  readonly restartToInstallUpdate: () => Promise<void>;
+  readonly onUpdateStateChanged: (listener: (state: UpdateState) => void) => () => void;
   readonly onNotificationAction: (listener: (action: NotificationAction) => void) => () => void;
   readonly initializeCacheCrypto: (scope: CacheScope) => Promise<CacheCryptoStatus>;
   readonly encryptCacheRecords: (

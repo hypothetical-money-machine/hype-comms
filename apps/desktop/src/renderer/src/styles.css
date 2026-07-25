@@ -400,3 +400,50 @@ button:disabled {
   color: #ff9a9a;
   font-size: 12px;
 }
+
+.update-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  color: #93a0c0;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.update-control.downloading,
+.update-control.ready {
+  color: #c8f7e6;
+}
+
+.update-control.error {
+  color: #ff9aa6;
+}
+
+.update-control button,
+.signin-card .update-control button {
+  flex: none;
+  margin: 0;
+  padding: 4px 8px;
+  color: #dce3f4;
+  background: transparent;
+  border: 1px solid #3b4b73;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-control button:hover,
+.signin-card .update-control button:hover {
+  color: #0b1020;
+  background: #91e8c8;
+  border-color: #91e8c8;
+}
+
+.signin-card > .update-control {
+  justify-content: space-between;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #2c3960;
+}
