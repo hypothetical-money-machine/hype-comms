@@ -187,16 +187,29 @@ gap needs a Windows code-signing certificate.
 
 ## Verification
 
+Use the fast inner-loop check while iterating. It runs formatting, linting, typechecking, and
+tests, but leaves production builds to the full gate:
+
+```bash
+npm run check:fast
+```
+
+Before opening a pull request, run the complete gate:
+
 ```bash
 npm run check
 ```
 
-To include real PostgreSQL repository and migration tests:
+Five server suites covering authorization, invitations, sessions, membership roles, workspace
+access, and migrations silently skip when `HMM_TEST_DATABASE_URL` is absent. Run them against a
+disposable PostgreSQL 18 container with:
 
 ```bash
-HMM_TEST_DATABASE_URL=postgres://hmm:password@127.0.0.1:5432/hmm_chat_test \
-  npm test --workspace @hmm-chat/server
+npm run test:db
 ```
+
+The command lets Docker assign a free loopback port, waits for PostgreSQL readiness, and removes
+the container after success, failure, or interruption.
 
 Desktop packaging remains local until M4:
 

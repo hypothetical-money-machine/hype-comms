@@ -21,9 +21,10 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "dev": "node --env-file-if-exists=.env.local scripts/dev.mjs",
     "dev:join": "node --env-file-if-exists=.env.local scripts/dev-join.mjs",
-    "dev:desktop": "npm run dev --workspace @hmm-chat/desktop",
+    "dev:desktop": "node scripts/check-renderer-port.mjs && npm run dev --workspace @hmm-chat/desktop",
     "dev:server": "npm run dev --workspace @hmm-chat/server",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -32,6 +33,7 @@
     "package:desktop:appimage": "npm run package:linux:appimage --workspace @hmm-chat/desktop",
     "start:server": "npm run start --workspace @hmm-chat/server",
     "test": "npm run test --workspaces --if-present",
+    "test:db": "scripts/test-database.sh",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs"
