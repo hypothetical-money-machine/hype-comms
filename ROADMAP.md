@@ -79,6 +79,10 @@ coordinated two-client cutover acceptance remains to be run.
   reconcile optimistic messages with the canonical server result.
 - Expose clear pending, retrying, permanently failed, offline, reconnecting, and stale-cache
   states. A failed send is never silently discarded.
+- Refresh an active magic-link device session before its 30-day expiry. Electron main
+  atomically rotates the session credential and renews its expiry without exposing it to the
+  renderer; an authenticated request may trigger at most one refresh-and-retry, and revocation
+  or renewal failure pauses delivery for sign-in instead of looping or discarding the outbox.
 
 Exit gate:
 
@@ -90,6 +94,9 @@ Exit gate:
   expired cursor triggers a safe snapshot rebuild while unsent outbox entries survive.
 - Authorization tests prove that a non-participant cannot fetch, sync, search, or receive a
   DM, including by guessing identifiers.
+- A client active near session expiry renews without interrupting realtime or duplicating a
+  send. Expired, revoked, reused, and concurrently refreshed credentials fail closed, and a
+  failed renewal leaves queued sends intact for the next successful sign-in.
 
 ## M3 — Collaboration-complete pilot
 
