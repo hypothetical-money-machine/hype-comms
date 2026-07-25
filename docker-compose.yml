@@ -47,7 +47,7 @@ services:
       - no-new-privileges:true
 
   postgres:
-    image: postgres:18-alpine
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: hmm

@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-POSTGRES_IMAGE="postgres:18-alpine"
+POSTGRES_IMAGE="${HMM_TEST_POSTGRES_IMAGE:-postgres:16-alpine}"
 POSTGRES_USER="hmm"
 POSTGRES_PASSWORD="hmm-test-password"
 POSTGRES_DATABASE="hmm_chat_test"
@@ -50,7 +50,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> starting disposable PostgreSQL 18"
+echo "==> starting disposable PostgreSQL ($POSTGRES_IMAGE)"
 docker run --detach >/dev/null \
     --name "$CONTAINER_NAME" \
     --publish "127.0.0.1::5432" \

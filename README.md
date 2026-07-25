@@ -32,7 +32,7 @@ docs               Architecture, milestone sign-offs, and cutover notes
 
 - Node.js 24.18.x
 - npm 11.16.x
-- PostgreSQL 18, normally through Docker Compose
+- PostgreSQL 16, normally through Docker Compose
 
 Install exactly from the lockfile:
 
@@ -162,8 +162,8 @@ platform metadata files last. That stops clients that have not updated from taki
 because downgrades are deliberately disabled, clients already running it need a newer forward-fix
 release.
 
-macOS signing is ready but inactive until a Developer ID Application certificate exists. Add these
-two repository secrets to sign a release:
+macOS signing is configured. A Developer ID Application certificate signs the build from these
+two repository secrets:
 
 - `HMM_MACOS_CSC_LINK` (the base64-encoded Developer ID certificate)
 - `HMM_MACOS_CSC_KEY_PASSWORD`
@@ -202,7 +202,7 @@ npm run check
 
 Five server suites covering authorization, invitations, sessions, membership roles, workspace
 access, and migrations silently skip when `HMM_TEST_DATABASE_URL` is absent. Run them against a
-disposable PostgreSQL 18 container with:
+disposable PostgreSQL container matching the deployed major version with:
 
 ```bash
 npm run test:db
@@ -210,6 +210,15 @@ npm run test:db
 
 The command lets Docker assign a free loopback port, waits for PostgreSQL readiness, and removes
 the container after success, failure, or interruption.
+
+The image defaults to the major version the pilot deploys, currently PostgreSQL 16, so the tests
+exercise what production actually runs. Compose uses the same version for the same reason. Set
+`HMM_TEST_POSTGRES_IMAGE` to check a different major version before proposing an upgrade, and
+change both together with the deployment rather than letting them drift apart.
+
+`test:db` is unaffected by this because its container is disposable, but a Compose volume already
+initialised by a different major version will refuse to start, reporting incompatible database
+files. Recreate it with `docker compose down -v` — that discards local development data only.
 
 Desktop packaging remains local until M4:
 
