@@ -4,7 +4,7 @@ import { entityIdSchema } from "./common.js";
 import { userSchema } from "./entities.js";
 import { emailSchema } from "./identity.js";
 
-export const chatSessionStateSchema = z.union([
+export const chatSessionStateSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("signed-out"),
@@ -19,6 +19,17 @@ export const chatSessionStateSchema = z.union([
       email: emailSchema,
       userId: userSchema.shape.id,
       workspaceId: entityIdSchema,
+    })
+    .strict(),
+  /**
+   * The stored credential could not be checked because the service was unreachable or failing.
+   * The device session is deliberately preserved, so this is never a sign-out.
+   */
+  z
+    .object({
+      status: z.literal("session-unavailable"),
+      reason: z.enum(["server_unreachable", "server_error"]),
+      message: z.string().trim().min(1).max(300),
     })
     .strict(),
 ]);

@@ -141,8 +141,21 @@ export const syncAttemptResultSchema = z.discriminatedUnion("status", [
       reason: z.enum(["cursor_expired", "server_reset"]),
     })
     .strict(),
-  z.object({ status: z.literal("retryable") }).strict(),
+  z
+    .object({
+      status: z.literal("retryable"),
+      reason: z.enum(["network", "rate_limited", "server"]),
+      retryAfterMs: z.number().int().nonnegative().max(86_400_000).nullable(),
+    })
+    .strict(),
   z.object({ status: z.literal("authentication_required") }).strict(),
+  /** Retrying cannot help: the request or the response is wrong, so the UI must surface it. */
+  z
+    .object({
+      status: z.literal("permanent"),
+      reason: z.enum(["validation", "forbidden", "not_found", "invalid_response"]),
+    })
+    .strict(),
 ]);
 
 export type CacheStore = z.infer<typeof cacheStoreSchema>;

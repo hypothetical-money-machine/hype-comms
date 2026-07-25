@@ -15,6 +15,17 @@ export const realtimeTicketSchema = z
   .max(2_048)
   .regex(/^[A-Za-z0-9._~-]+$/);
 
+/**
+ * Single source of truth for the realtime connection state that crosses IPC. Main, preload,
+ * and the renderer all validate against this schema instead of re-declaring the literals.
+ */
+export const realtimeConnectionStateSchema = z.enum([
+  "connecting",
+  "live",
+  "offline",
+  "reconnecting",
+]);
+
 export const realtimeEventTypeSchema = z
   .string()
   .min(1)
@@ -54,6 +65,7 @@ export const systemErrorEventSchema = realtimeEventEnvelopeSchema.extend({
   payload: apiErrorEnvelopeSchema,
 });
 
+export type RealtimeConnectionState = z.infer<typeof realtimeConnectionStateSchema>;
 export type RealtimeEventEnvelope = z.infer<typeof realtimeEventEnvelopeSchema>;
 export type RealtimeDeliverySemantics = z.infer<typeof realtimeDeliverySemanticsSchema>;
 export type RealtimeTicket = z.infer<typeof realtimeTicketSchema>;

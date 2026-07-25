@@ -27,6 +27,13 @@ export const paginationCursorSchema = z
   .max(512)
   .regex(/^[A-Za-z0-9_-]+$/);
 
+/**
+ * Conversation listing is cursor-paginated so a workspace can never outgrow the wire contract.
+ * Array caps below use the maximum page size, so a validated response is always representable.
+ */
+export const CONVERSATION_PAGE_DEFAULT_LIMIT = 50;
+export const CONVERSATION_PAGE_MAX_LIMIT = 100;
+
 export const conversationSummarySchema = z
   .object({
     conversation: conversationSchema,
@@ -43,7 +50,9 @@ export const workspaceBootstrapResponseSchema = z
     currentUser: currentUserSchema,
     workspace: workspaceSchema,
     members: z.array(userSchema).max(25),
-    conversations: z.array(conversationSummarySchema).max(500),
+    conversations: z.array(conversationSummarySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
+    conversationsNextCursor: paginationCursorSchema.nullable(),
+    conversationsHasMore: z.boolean(),
     syncCursor: sequenceSchema,
     featureFlags: z
       .object({
@@ -55,15 +64,45 @@ export const workspaceBootstrapResponseSchema = z
   })
   .strict();
 
+/**
+ * The desktop cache's aggregate view: bootstrap plus every conversation page the client has
+ * already fetched. It is deliberately not a wire response, so its conversation bound is the
+ * local cache limit rather than one server page.
+ */
+export const workspaceSnapshotSchema = z
+  .object({
+    currentUser: currentUserSchema,
+    workspace: workspaceSchema,
+    members: z.array(userSchema).max(25),
+    conversations: z.array(conversationSummarySchema).max(5_000),
+    syncCursor: sequenceSchema,
+    featureFlags: workspaceBootstrapResponseSchema.shape.featureFlags,
+  })
+  .strict();
+
 export const listMembersResponseSchema = z
   .object({
     members: z.array(userSchema).max(25),
   })
   .strict();
 
+export const listConversationsQuerySchema = z
+  .object({
+    after: paginationCursorSchema.optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(CONVERSATION_PAGE_MAX_LIMIT)
+      .default(CONVERSATION_PAGE_DEFAULT_LIMIT),
+  })
+  .strict();
+
 export const listConversationsResponseSchema = z
   .object({
-    conversations: z.array(conversationSummarySchema).max(500),
+    conversations: z.array(conversationSummarySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
+    nextCursor: paginationCursorSchema.nullable(),
+    hasMore: z.boolean(),
   })
   .strict();
 
@@ -254,7 +293,9 @@ export const productRealtimeEventSchema = z.union([
 export type PaginationCursor = z.infer<typeof paginationCursorSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type WorkspaceBootstrapResponse = z.infer<typeof workspaceBootstrapResponseSchema>;
+export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
 export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
+export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
 export type ArchiveChannelRequest = z.infer<typeof archiveChannelRequestSchema>;
