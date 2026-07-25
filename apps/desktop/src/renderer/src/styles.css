@@ -1,6 +1,6 @@
 :root {
-  color: #e8ecf7;
-  background: #0b1020;
+  color: #e7eaf3;
+  background: #090d18;
   font-family:
     Inter,
     ui-sans-serif,
@@ -17,12 +17,11 @@
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
-  min-width: 100%;
-  min-height: 100%;
+body {
   margin: 0;
+  min-width: 960px;
+  min-height: 640px;
+  overflow: hidden;
 }
 
 button,
@@ -30,251 +29,8 @@ input {
   font: inherit;
 }
 
-.shell {
-  display: grid;
-  grid-template-columns: 72px 264px minmax(0, 1fr);
-  min-height: 100vh;
-  background: radial-gradient(circle at 78% 12%, rgb(61 78 130 / 18%), transparent 31rem), #0b1020;
-}
-
-.workspace-rail {
-  display: flex;
-  justify-content: center;
-  padding-top: 20px;
-  background: #080c17;
-  border-right: 1px solid #202943;
-}
-
-.workspace-mark,
-.empty-mark {
-  display: grid;
-  place-items: center;
-  color: #0b1020;
-  background: #91e8c8;
-  font-weight: 800;
-}
-
-.workspace-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-}
-
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  padding: 26px 18px 18px;
-  background: rgb(14 20 38 / 90%);
-  border-right: 1px solid #202943;
-}
-
-.sidebar header {
-  padding: 0 10px 25px;
-}
-
-.eyebrow,
-.nav-label {
-  margin: 0 0 7px;
-  color: #7f8ba8;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-h1,
-h2,
-p {
-  margin-top: 0;
-}
-
-h1 {
-  margin-bottom: 0;
-  font-size: 1.3rem;
-}
-
-.nav-label {
-  padding: 0 10px;
-}
-
-.channel {
-  width: 100%;
-  padding: 9px 11px;
-  color: #b9c1d5;
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  text-align: left;
-}
-
-.channel span {
-  margin-right: 8px;
-  color: #73809f;
-}
-
-.channel.active {
-  color: #f7f9ff;
-  background: #202b49;
-}
-
-.sidebar footer {
-  display: grid;
-  gap: 5px;
-  margin-top: auto;
-  padding: 14px 10px 0;
-  color: #737f9b;
-  border-top: 1px solid #202943;
-  font-size: 0.72rem;
-}
-
-.sidebar footer strong {
-  color: #dce3f4;
-  font-size: 0.8rem;
-}
-
-.server-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  background: #ef8f8f;
-  border-radius: 50%;
-}
-
-.server-status.reachable .status-dot {
-  background: #91e8c8;
-}
-
-.conversation {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  min-width: 0;
-  min-height: 100vh;
-}
-
-.conversation-header {
-  padding: 19px 28px;
-  border-bottom: 1px solid #202943;
-}
-
-.conversation-header h2 {
-  margin-bottom: 4px;
-  font-size: 1.05rem;
-}
-
-.conversation-header p {
-  margin-bottom: 0;
-  color: #7f8ba8;
-  font-size: 0.8rem;
-}
-
-.empty-state {
-  align-self: center;
-  max-width: 520px;
-  margin: 0 auto;
-  padding: 48px;
-  text-align: center;
-}
-
-.message-list {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 22px 28px;
-}
-
-.message {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 12px;
-  padding: 9px 0;
-}
-
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  color: #0b1020;
-  background: #91e8c8;
-  border-radius: 11px;
-  font-size: 0.85rem;
-  font-weight: 800;
-}
-
-.message header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 3px;
-}
-
-.message time {
-  color: #6f7b97;
-  font-size: 0.7rem;
-}
-
-.message p {
-  margin-bottom: 0;
-  color: #d2d8e8;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.empty-mark {
-  width: 54px;
-  height: 54px;
-  margin: 0 auto 20px;
-  border-radius: 17px;
-  font-size: 1.4rem;
-}
-
-.empty-state h2 {
-  margin-bottom: 10px;
-  font-size: 1.55rem;
-}
-
-.empty-state p {
-  color: #8f9ab5;
-  line-height: 1.6;
-}
-
-.composer {
-  display: flex;
-  gap: 10px;
-  margin: 0 26px 24px;
-  padding: 10px;
-  background: #111a30;
-  border: 1px solid #293554;
-  border-radius: 12px;
-}
-
-.composer input {
-  flex: 1;
-  padding: 7px 9px;
-  color: #94a0bc;
-  background: transparent;
-  border: 0;
-  outline: 0;
-}
-
-.composer button {
-  padding: 8px 14px;
-  color: #66718a;
-  background: #1d2943;
-  border: 0;
-  border-radius: 8px;
-}
-
-.composer button:not(:disabled) {
-  color: #0b1020;
-  background: #91e8c8;
-  cursor: pointer;
+button {
+  color: inherit;
 }
 
 .sr-only {
@@ -289,150 +45,358 @@ h1 {
   border: 0;
 }
 
-@media (max-width: 1050px) {
-  .shell {
-    grid-template-columns: 60px 228px minmax(0, 1fr);
-  }
+.eyebrow {
+  margin: 0 0 6px;
+  color: #8d99b7;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .signin-shell {
   display: grid;
-  place-items: center;
   min-height: 100vh;
-  padding: 32px;
+  place-items: center;
+  padding: 48px;
+  background:
+    radial-gradient(circle at 15% 15%, rgba(105, 87, 255, 0.22), transparent 38%),
+    radial-gradient(circle at 85% 80%, rgba(51, 199, 183, 0.14), transparent 34%), #090d18;
 }
 
 .signin-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: min(460px, 100%);
-  padding: 32px;
-  background: #131a30;
-  border: 1px solid #24304f;
-  border-radius: 14px;
+  width: min(440px, 100%);
+  padding: 40px;
+  border: 1px solid #252c41;
+  border-radius: 18px;
+  background: rgba(16, 22, 38, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
 }
 
-.signin-card .workspace-mark {
-  margin-bottom: 8px;
+.brand-mark,
+.workspace-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 24px;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #7868ff, #4c3dd3);
+  color: white;
+  font-weight: 900;
 }
 
 .signin-card h1 {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 30px;
 }
 
-.signin-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.signin-lede,
+.signin-status {
+  color: #aeb7cf;
+  line-height: 1.55;
 }
 
-.signin-form h2 {
-  margin: 4px 0;
-  font-size: 1rem;
-}
-
-.signin-lede {
-  margin: 0 0 12px;
-  color: #93a0c0;
-  font-size: 0.9rem;
+.signin-card form {
+  display: grid;
+  gap: 10px;
+  margin-top: 28px;
 }
 
 .signin-card label {
-  color: #93a0c0;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: #cbd2e5;
+  font-size: 13px;
+  font-weight: 650;
 }
 
-.signin-card input {
-  padding: 10px 12px;
-  color: inherit;
-  background: #0b1020;
-  border: 1px solid #2c3960;
-  border-radius: 8px;
-  font: inherit;
+input {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #303952;
+  border-radius: 9px;
+  outline: none;
+  background: #0c1120;
+  color: #f7f8fb;
 }
 
-.signin-card input:focus-visible {
-  outline: 2px solid #5b7cfa;
-  outline-offset: 1px;
+input:focus {
+  border-color: #7768ff;
+  box-shadow: 0 0 0 3px rgba(119, 104, 255, 0.16);
 }
 
-.signin-card button {
-  margin-top: 16px;
-  padding: 10px 14px;
-  color: #f7f9ff;
-  background: #3d5afe;
+.signin-card button,
+.composer > button {
+  padding: 12px 18px;
   border: 0;
-  border-radius: 8px;
-  font: inherit;
-  font-weight: 600;
+  border-radius: 9px;
+  background: #6758ef;
+  font-weight: 750;
   cursor: pointer;
 }
 
-.signin-card button:disabled {
-  opacity: 0.55;
+button:disabled {
   cursor: not-allowed;
+  opacity: 0.5;
 }
 
-.signin-help {
-  margin: 0 0 4px;
-  color: #93a0c0;
-  font-size: 0.82rem;
-  line-height: 1.45;
+.shell {
+  display: grid;
+  height: 100vh;
+  grid-template-columns: 68px 284px minmax(0, 1fr);
+  background: #0b0f1a;
 }
 
-.signin-divider {
+.workspace-rail {
+  padding: 14px 13px;
+  border-right: 1px solid #202638;
+  background: #080b13;
+}
+
+.workspace-mark {
+  width: 42px;
+  height: 42px;
+  margin: 0;
+}
+
+.sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border-right: 1px solid #252b3d;
+  background: #111625;
+}
+
+.workspace-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 12px 0;
-  color: #697794;
-  font-size: 0.75rem;
-  text-transform: uppercase;
+  justify-content: space-between;
+  padding: 20px 18px 16px;
+  border-bottom: 1px solid #252b3d;
 }
 
-.signin-divider::before,
-.signin-divider::after {
-  flex: 1;
-  height: 1px;
-  background: #2c3960;
-  content: "";
+.workspace-header h1 {
+  max-width: 170px;
+  margin: 0;
+  overflow: hidden;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.signin-error {
-  margin: 8px 0 0;
-  color: #ff9aa6;
-  font-size: 0.85rem;
-}
-
-.signin-info {
-  margin: 8px 0 0;
-  padding: 10px 12px;
-  color: #c8f7e6;
-  background: rgb(145 232 200 / 10%);
-  border: 1px solid rgb(145 232 200 / 30%);
-  border-radius: 8px;
-  font-size: 0.85rem;
-  line-height: 1.45;
-}
-
-.signout {
-  margin-top: 10px;
-  padding: 6px 10px;
-  color: #93a0c0;
+.quiet-button {
+  padding: 7px 9px;
+  border: 1px solid #30384f;
+  border-radius: 7px;
   background: transparent;
-  border: 1px solid #2c3960;
-  border-radius: 6px;
-  font: inherit;
-  font-size: 0.8rem;
+  color: #aeb7cf;
   cursor: pointer;
 }
 
-.signout:hover {
-  color: #e8ecf7;
-  border-color: #3d5afe;
+.sidebar nav {
+  flex: 1;
+  padding: 14px 10px;
+  overflow-y: auto;
+}
+
+.nav-heading {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 10px 8px 4px;
+  color: #7f8ba9;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.nav-heading button {
+  border: 0;
+  background: transparent;
+  color: #aeb7cf;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.conversation,
+.member-list button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #aeb7cf;
+  cursor: pointer;
+  text-align: left;
+}
+
+.conversation:hover,
+.member-list button:hover {
+  background: #1a2031;
+  color: #f1f3f8;
+}
+
+.conversation.active {
+  background: #252c43;
+  color: white;
+}
+
+.badge {
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: #6758ef;
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.member-list {
+  max-height: 220px;
+  padding: 0 10px 14px;
+  overflow-y: auto;
+  border-top: 1px solid #252b3d;
+}
+
+.member-list button {
+  justify-content: flex-start;
+  gap: 9px;
+}
+
+.conversation-pane {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #0e1320;
+}
+
+.conversation-header {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid #252b3d;
+}
+
+.conversation-header h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.conversation-header p {
+  margin: 0;
+  color: #7f8ba9;
+  font-size: 12px;
+}
+
+.message-list {
+  overflow-y: auto;
+  padding: 22px 28px;
+}
+
+.load-older {
+  display: block;
+  margin: 0 auto 18px;
+  padding: 7px 12px;
+  border: 1px solid #30384f;
+  border-radius: 7px;
+  background: transparent;
+  color: #aeb7cf;
+  cursor: pointer;
+}
+
+.message {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 11px;
+  padding: 9px 0;
+}
+
+.avatar {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: #293149;
+  color: #dfe3ee;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.message header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.message header strong {
+  font-size: 14px;
+}
+
+.message header time,
+.message header span {
+  color: #737f9d;
+  font-size: 11px;
+}
+
+.message p {
+  margin: 4px 0 0;
+  color: #d8ddeb;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pending-message {
+  opacity: 0.72;
+}
+
+.message-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-actions button {
+  padding: 4px 8px;
+  border: 1px solid #3a435e;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.empty-state {
+  display: grid;
+  min-height: 100%;
+  place-content: center;
+  color: #7f8ba9;
+  text-align: center;
+}
+
+.empty-state h3 {
+  margin-bottom: 0;
+  color: #d8ddeb;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 16px 22px 20px;
+  border-top: 1px solid #252b3d;
+}
+
+.composer-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #ff9a9a;
+  font-size: 12px;
 }

@@ -1,7 +1,5 @@
 import {
   apiErrorEnvelopeSchema,
-  chatIdentitySchema,
-  chatSignInRequestSchema,
   currentUserSchema,
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
@@ -15,10 +13,8 @@ import {
   createCurrentUserUrl,
   createIdentitySessionUrl,
   createMagicLinkUrl,
-  createSessionUrl,
 } from "../shared/api-origin";
 
-const ACCESS_CODE_COOKIE_NAME = "hmm_chat_session";
 const IDENTITY_COOKIE_NAME = "hmm_session";
 const REQUEST_TIMEOUT_MS = 10_000;
 export const INVALID_MAGIC_LINK_MESSAGE = "This sign-in link is invalid or has expired";
@@ -55,17 +51,13 @@ async function readErrorMessage(response: Response, fallback: string): Promise<s
 }
 
 /**
- * Owns both supported chat credentials inside the main process.
- *
- * Access codes and magic-link tokens exist only for the duration of their sign-in calls. Cookies
- * live in Electron's main-process cookie jar, encrypted in packaged builds, and the renderer only
- * receives the credential-free state defined in the contracts package.
+ * Owns the magic-link session inside the main process. Cookies live in Electron's main-process
+ * cookie jar, encrypted in packaged builds, and the renderer receives only credential-free state.
  */
 export class ChatSession {
   readonly #apiOrigin: string;
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
-  readonly #accessSessionUrl: string;
   readonly #identitySessionUrl: string;
   readonly #currentUserUrl: string;
   readonly #magicLinkUrl: string;
@@ -77,7 +69,6 @@ export class ChatSession {
     this.#apiOrigin = options.apiOrigin;
     this.#cookies = options.cookies;
     this.#request = options.request;
-    this.#accessSessionUrl = createSessionUrl(options.apiOrigin);
     this.#identitySessionUrl = createIdentitySessionUrl(options.apiOrigin);
     this.#currentUserUrl = createCurrentUserUrl(options.apiOrigin);
     this.#magicLinkUrl = createMagicLinkUrl(options.apiOrigin);
@@ -110,7 +101,7 @@ export class ChatSession {
     return result;
   }
 
-  /** Restores identity first, then the legacy access-code session. The first success wins. */
+  /** Restores the invited member identity from Electron's protected cookie jar. */
   restore(): Promise<ChatSessionState> {
     return this.#runMutation(() => this.#restore());
   }
@@ -120,78 +111,22 @@ export class ChatSession {
       const identityResponse = await this.#fetch(this.#currentUserUrl, { method: "GET" });
       if (identityResponse.ok) {
         const identity = currentUserSchema.parse(await identityResponse.json());
-        await this.#clearCookie(ACCESS_CODE_COOKIE_NAME);
         this.#setState({
           status: "signed-in",
           method: "email",
           name: identity.user.displayName,
           email: identity.email,
+          userId: identity.user.id,
+          workspaceId: identity.workspaceId,
         });
         return this.#state;
       }
     } catch {
-      // Try the access-code session next.
+      // Stay signed out when the stored credential cannot be restored.
     }
 
-    try {
-      const accessResponse = await this.#fetch(this.#accessSessionUrl, { method: "GET" });
-      if (accessResponse.ok) {
-        const session = chatIdentitySchema.parse(await accessResponse.json());
-        await this.#clearCookie(IDENTITY_COOKIE_NAME);
-        this.#setState({
-          status: "signed-in",
-          method: "access-code",
-          name: session.name,
-        });
-        return this.#state;
-      }
-    } catch {
-      // Stay signed out when neither stored credential can be restored.
-    }
-
-    await Promise.all([
-      this.#clearCookie(ACCESS_CODE_COOKIE_NAME),
-      this.#clearCookie(IDENTITY_COOKIE_NAME),
-    ]);
+    await this.#clearCookie(IDENTITY_COOKIE_NAME);
     this.#setState({ status: "signed-out" });
-    return this.#state;
-  }
-
-  signIn(input: { name: string; accessCode: string }): Promise<ChatSessionState> {
-    return this.#runMutation(() => this.#signIn(input));
-  }
-
-  async #signIn(input: { name: string; accessCode: string }): Promise<ChatSessionState> {
-    const request = chatSignInRequestSchema.parse(input);
-    await this.#discardIdentitySession();
-
-    let response: Response;
-    try {
-      response = await this.#fetch(this.#accessSessionUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(request),
-      });
-    } catch {
-      throw new ChatSessionError("Could not reach the chat server");
-    }
-
-    if (!response.ok) {
-      throw new ChatSessionError(
-        await readErrorMessage(
-          response,
-          response.status === 429
-            ? "Too many sign-in attempts. Try again later."
-            : "Name or access code is invalid",
-        ),
-      );
-    }
-
-    this.#setState({
-      status: "signed-in",
-      method: "access-code",
-      name: request.name,
-    });
     return this.#state;
   }
 
@@ -232,8 +167,6 @@ export class ChatSession {
       return this.#rejectMagicLink();
     }
 
-    await this.#discardAccessSession();
-
     let response: Response;
     try {
       response = await this.#fetch(this.#identitySessionUrl, {
@@ -256,6 +189,8 @@ export class ChatSession {
         method: "email",
         name: identity.user.displayName,
         email: identity.email,
+        userId: identity.user.id,
+        workspaceId: identity.workspaceId,
       });
       return this.#state;
     } catch {
@@ -274,43 +209,10 @@ export class ChatSession {
   }
 
   async #signOut(): Promise<ChatSessionState> {
-    await Promise.all([
-      this.#deleteSession(this.#accessSessionUrl),
-      this.#deleteSession(this.#identitySessionUrl),
-    ]);
-    await Promise.all([
-      this.#clearCookie(ACCESS_CODE_COOKIE_NAME),
-      this.#clearCookie(IDENTITY_COOKIE_NAME),
-    ]);
-    this.#setState({ status: "signed-out" });
-    return this.#state;
-  }
-
-  /** Cookie header for the websocket, which is opened by `ws` rather than Electron's stack. */
-  async cookieHeader(): Promise<string | null> {
-    const preferredNames =
-      this.#state.status === "signed-in" && this.#state.method === "access-code"
-        ? [ACCESS_CODE_COOKIE_NAME, IDENTITY_COOKIE_NAME]
-        : [IDENTITY_COOKIE_NAME, ACCESS_CODE_COOKIE_NAME];
-
-    for (const name of preferredNames) {
-      const cookies = await this.#cookies.get({ url: this.#apiOrigin, name });
-      const cookie = cookies[0];
-      if (cookie !== undefined) {
-        return `${cookie.name}=${cookie.value}`;
-      }
-    }
-    return null;
-  }
-
-  async #discardIdentitySession(): Promise<void> {
     await this.#deleteSession(this.#identitySessionUrl);
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
-  }
-
-  async #discardAccessSession(): Promise<void> {
-    await this.#deleteSession(this.#accessSessionUrl);
-    await this.#clearCookie(ACCESS_CODE_COOKIE_NAME);
+    this.#setState({ status: "signed-out" });
+    return this.#state;
   }
 
   async #deleteSession(url: string): Promise<void> {

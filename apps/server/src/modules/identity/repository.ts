@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   deviceSessionSchema,
   emailSchema,
@@ -397,6 +399,15 @@ export class IdentityRepository {
        RETURNING workspace_id, user_id, role, status, created_at, updated_at`,
       [input.workspaceId, input.userId, input.role, input.status],
     );
+    if (input.role === "owner" && input.status === "active") {
+      await this.#database.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, topic, created_by)
+         VALUES ($1, $2, 'channel', 'General', 'general', 'Workspace-wide conversation', $3)
+         ON CONFLICT (workspace_id, slug) DO NOTHING`,
+        [randomUUID(), input.workspaceId, input.userId],
+      );
+    }
     return mapMembership(result.rows[0] as MembershipRow);
   }
 

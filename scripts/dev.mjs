@@ -1,25 +1,23 @@
 import concurrently from "concurrently";
 
-import { describeDevelopmentAccess, DEVELOPMENT_SERVER_ENV } from "./development-chat.mjs";
-import { developmentNameUsage, parseDevelopmentName } from "./development-name.mjs";
+import { developmentProfileUsage, parseDevelopmentProfile } from "./development-profile.mjs";
 
 function fail(message) {
-  process.stderr.write(`${message}\nUsage: npm run dev -- ${developmentNameUsage}\n`);
+  process.stderr.write(`${message}\nUsage: npm run dev -- ${developmentProfileUsage}\n`);
   process.exitCode = 1;
 }
 
-const name = parseDevelopmentName(process.argv.slice(2));
-if (name === null) {
-  fail("A valid temporary chat identity is required.");
+const profile = parseDevelopmentProfile(process.argv.slice(2));
+if (profile === null) {
+  fail("The development profile must be a lowercase slug.");
 } else {
-  process.stdout.write(`${describeDevelopmentAccess()}\n`);
   const { result } = concurrently(
     [
-      { command: "npm run dev:server", name: "server", env: { ...DEVELOPMENT_SERVER_ENV } },
+      { command: "npm run dev:server", name: "server" },
       {
         command: "npm run dev:desktop",
         name: "desktop",
-        env: { HMM_CHAT_NAME: name },
+        env: profile === "" ? {} : { HMM_DESKTOP_PROFILE: profile },
       },
     ],
     {

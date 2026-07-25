@@ -1,28 +1,39 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  chatSignInRequestSchema,
-  messageBodySchema,
+  cacheDecryptBatchRequestSchema,
+  cacheEncryptBatchRequestSchema,
+  cacheScopeSchema,
+  createChannelRequestSchema,
+  directConversationRequestSchema,
+  entityIdSchema,
   requestMagicLinkSchema,
-  type ChatMessage,
+  sendMessageOperationSchema,
+  sequenceSchema,
   type ChatSessionState,
+  type ProductRealtimeEvent,
 } from "@hmm-chat/contracts";
-import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from "electron";
+import { app, BrowserWindow, ipcMain, net, protocol, safeStorage, session, shell } from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
 
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
-import type { NotificationAction, ServerStatus } from "../shared/desktop-api";
+import type {
+  NotificationAction,
+  RealtimeConnectionState,
+  ServerStatus,
+} from "../shared/desktop-api";
 import {
   parseAuthCallbackToken,
   processAuthCallback,
   type AuthCallbackOutcome,
 } from "./auth-callback";
 import { ChatSession, ChatSessionError } from "./chat-session";
-import { ChatTransport } from "./chat-transport";
-import { resolveSuggestedName } from "./suggested-name";
+import { CacheCrypto } from "./cache-crypto";
+import { resolveDevelopmentProfile } from "./development-profile";
+import { WorkspaceRealtime } from "./workspace-realtime";
+import { WorkspaceTransport } from "./workspace-transport";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -53,18 +64,18 @@ let rendererReady = false;
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
 const pendingNotificationActions: NotificationAction[] = [];
-const pendingWelcomeMessages: ChatMessage[] = [];
 const pendingAuthCallbackUrls: string[] = [];
 let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
-// Only a hint for the sign-in form. The server derives the real author from the session.
-const suggestedName = app.isPackaged ? "" : resolveSuggestedName(process.argv, process.env);
-if (!app.isPackaged && suggestedName !== "") {
-  const identityProfile = createHash("sha256").update(suggestedName).digest("hex").slice(0, 16);
-  app.setPath("userData", path.join(app.getPath("userData"), `development-${identityProfile}`));
+const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
+if (developmentProfile !== "") {
+  app.setPath("userData", path.join(app.getPath("userData"), `development-${developmentProfile}`));
 }
 let chatSession: ChatSession | null = null;
-let chatTransport: ChatTransport | null = null;
+let workspaceTransport: WorkspaceTransport | null = null;
+let workspaceRealtime: WorkspaceRealtime | null = null;
+let cacheCrypto: CacheCrypto | null = null;
+let realtimeState: RealtimeConnectionState = "offline";
 
 function sendToRenderer(channel: string, payload: unknown): boolean {
   if (mainWindow === null || mainWindow.isDestroyed() || !rendererReady) {
@@ -82,18 +93,19 @@ export function deliverNotificationAction(action: NotificationAction): void {
   }
 }
 
-function deliverWelcomeMessage(message: ChatMessage): void {
-  if (!sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message)) {
-    pendingWelcomeMessages.push(message);
-  }
+function deliverWorkspaceEvent(event: ProductRealtimeEvent): void {
+  sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, event);
+}
+
+function deliverRealtimeState(state: RealtimeConnectionState): void {
+  realtimeState = state;
+  sendToRenderer(DESKTOP_CHANNELS.realtimeStateChanged, state);
 }
 
 function deliverSessionState(state: ChatSessionState): void {
   sendToRenderer(DESKTOP_CHANNELS.sessionChanged, state);
-  if (state.status === "signed-in") {
-    chatTransport?.start();
-  } else {
-    chatTransport?.stop();
+  if (state.status === "signed-out") {
+    workspaceRealtime?.stop();
   }
 }
 
@@ -105,12 +117,6 @@ function flushPendingRendererEvents(): void {
     const action = pendingNotificationActions.shift();
     if (action !== undefined) {
       sendToRenderer(DESKTOP_CHANNELS.notificationAction, action);
-    }
-  }
-  while (pendingWelcomeMessages.length > 0) {
-    const message = pendingWelcomeMessages.shift();
-    if (message !== undefined) {
-      sendToRenderer(DESKTOP_CHANNELS.welcomeMessage, message);
     }
   }
 }
@@ -229,45 +235,12 @@ function registerIpcHandlers(): void {
     return request;
   });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.suggestedName);
-  ipcMain.handle(DESKTOP_CHANNELS.suggestedName, (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted suggested-name IPC sender");
-    }
-    return suggestedName;
-  });
-
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
   ipcMain.handle(DESKTOP_CHANNELS.sessionState, (event): ChatSessionState => {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted session-state IPC sender");
     }
     return chatSession?.state ?? { status: "signed-out" };
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignIn);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionSignIn, async (event, request: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted sign-in IPC sender");
-    }
-    if (chatSession === null) {
-      throw new Error("Chat is not configured");
-    }
-
-    const parsed = chatSignInRequestSchema.safeParse(request);
-    if (!parsed.success) {
-      throw new Error("Enter a name and an access code");
-    }
-
-    try {
-      return await chatSession.signIn(parsed.data);
-    } catch (error) {
-      // Only the message crosses IPC. The cause stays in the main process, so a transport error
-      // carrying request details can never reach renderer code.
-      throw new Error(error instanceof ChatSessionError ? error.message : "Sign-in failed", {
-        cause: error,
-      });
-    }
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignOut);
@@ -302,23 +275,136 @@ function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeHistory);
-  ipcMain.handle(DESKTOP_CHANNELS.welcomeHistory, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted welcome-history IPC sender");
-    }
-    return (await chatTransport?.getMessages()) ?? [];
+  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoInitialize);
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event, scope: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache initialization sender");
+    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    return cacheCrypto.initialize(cacheScopeSchema.parse(scope));
   });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.welcomeSend);
-  ipcMain.handle(DESKTOP_CHANNELS.welcomeSend, async (event, body: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted welcome-send IPC sender");
+  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoEncrypt);
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoEncrypt, (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache encryption sender");
+    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    return cacheCrypto.encrypt(cacheEncryptBatchRequestSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoDecrypt);
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoDecrypt, (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache decryption sender");
+    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    return cacheCrypto.decrypt(cacheDecryptBatchRequestSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoReset);
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoReset, async (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache reset sender");
+    await cacheCrypto?.clear();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceBootstrap);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceBootstrap, async (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace bootstrap sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.bootstrap();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessagesList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessagesList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace history sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    if (typeof input !== "object" || input === null || !("conversationId" in input)) {
+      throw new Error("Invalid workspace history request");
     }
-    if (chatTransport === null) {
-      throw new Error("Chat is not configured");
+    const request = input as {
+      readonly conversationId: unknown;
+      readonly before?: unknown;
+      readonly limit?: unknown;
+    };
+    return workspaceTransport.history({
+      conversationId: entityIdSchema.parse(request.conversationId),
+      ...(typeof request.before === "string" ? { before: request.before } : {}),
+      ...(typeof request.limit === "number" ? { limit: request.limit } : {}),
+    });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSend);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSend, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace send sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.send(sendMessageOperationSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelCreate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelCreate, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel creation sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.createChannel(createChannelRequestSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelArchive);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelArchive, async (event, id: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel archive sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.archiveChannel(entityIdSchema.parse(id), { isArchived: true });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceDirectCreate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceDirectCreate, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted direct conversation sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.createDirectConversation(
+      directConversationRequestSchema.parse(input),
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReadAdvance);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceReadAdvance, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted read-cursor sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !("conversationId" in input) ||
+      !("lastReadMessageId" in input)
+    ) {
+      throw new Error("Invalid read-cursor request");
     }
-    return chatTransport.sendMessage(messageBodySchema.parse(body));
+    return workspaceTransport.advanceRead(
+      entityIdSchema.parse(input.conversationId),
+      entityIdSchema.parse(input.lastReadMessageId),
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceSync);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceSync, async (event, after: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace sync sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.sync(sequenceSchema.parse(after));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStart);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStart, (event, after: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime start sender");
+    workspaceRealtime?.start(sequenceSchema.parse(after));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStop);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStop, (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime stop sender");
+    workspaceRealtime?.stop();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge, (event, cursor: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime acknowledgement sender");
+    workspaceRealtime?.acknowledge(sequenceSchema.parse(cursor));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.realtimeStateGet);
+  ipcMain.handle(DESKTOP_CHANNELS.realtimeStateGet, (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime state sender");
+    return realtimeState;
   });
 }
 
@@ -471,10 +557,19 @@ if (!hasSingleInstanceLock) {
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
       });
-      chatTransport = new ChatTransport({
-        session: chatSession,
+      workspaceTransport = new WorkspaceTransport(__HMM_CHAT_API_ORIGIN__, chatSession);
+      workspaceRealtime = new WorkspaceRealtime({
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
-        onMessage: deliverWelcomeMessage,
+        transport: workspaceTransport,
+        onEvent: deliverWorkspaceEvent,
+        onState: deliverRealtimeState,
+      });
+      cacheCrypto = new CacheCrypto({
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        platform: process.platform,
+        safeStorage,
+        userDataPath: app.getPath("userData"),
       });
       chatSession.subscribe(deliverSessionState);
 
@@ -532,6 +627,6 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
-    chatTransport?.stop();
+    workspaceRealtime?.stop();
   });
 }

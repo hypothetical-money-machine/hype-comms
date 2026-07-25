@@ -38,13 +38,18 @@ async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void>
 describeWithPostgres("runMigrations", () => {
   it("applies migrations cleanly and is idempotent", async () => {
     await withFreshSchema(async (pool) => {
-      await expect(runMigrations(pool)).resolves.toEqual({ applied: ["0001_identity.sql"] });
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0001_identity.sql", "0002_conversation_core.sql"],
+      });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
 
       const result = await pool.query<{ filename: string }>(
         "SELECT filename FROM schema_migrations",
       );
-      expect(result.rows).toEqual([{ filename: "0001_identity.sql" }]);
+      expect(result.rows).toEqual([
+        { filename: "0001_identity.sql" },
+        { filename: "0002_conversation_core.sql" },
+      ]);
     });
   });
 

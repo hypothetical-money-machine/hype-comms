@@ -16,9 +16,6 @@ const rawConfigSchema = z
     shutdownTimeoutMs: z.coerce.number().int().min(100).max(60_000).default(10_000),
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
-    chatEnabled: z.enum(["true", "false"]).default("false"),
-    chatAccessCode: optionalString(z.string().min(16)),
-    chatDataPath: z.string().min(1).default("/data/hmm-chat.sqlite"),
     webRoot: optionalString(z.string().min(1)),
     databaseUrl: optionalString(z.string().min(1)),
     databasePoolSize: z.coerce.number().int().min(1).max(100).default(10),
@@ -72,15 +69,10 @@ export interface ServerConfig {
    * error during loopback testing.
    */
   readonly cookieSecure: boolean;
-  readonly chat: {
-    readonly enabled: boolean;
-    readonly accessCode?: string;
-    readonly dataPath: string;
-  };
   readonly webRoot?: string;
   /**
-   * Identity storage. Postgres backs the M1 identity model; the access-code chat path predates it
-   * and still uses SQLite. Identity features register only when a database URL is configured.
+   * PostgreSQL backs identity and the M2 conversation core. Product features register only when
+   * a database URL is configured.
    */
   readonly database?: {
     readonly url: string;
@@ -122,9 +114,6 @@ export function loadConfig(
     shutdownTimeoutMs: env.HMM_SHUTDOWN_TIMEOUT_MS,
     allowedOrigins: env.HMM_ALLOWED_ORIGINS,
     publicApiUrl: env.HMM_PUBLIC_API_URL,
-    chatEnabled: env.HMM_CHAT_ENABLED,
-    chatAccessCode: env.HMM_CHAT_ACCESS_CODE,
-    chatDataPath: env.HMM_CHAT_DATA_PATH,
     databaseUrl: env.HMM_DATABASE_URL,
     databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
     smtpUrl: env.HMM_SMTP_URL,
@@ -141,15 +130,11 @@ export function loadConfig(
     );
   }
 
-  if (result.data.chatEnabled === "true" && result.data.chatAccessCode === undefined) {
-    throw new ConfigError(["chatAccessCode: Required when chat is enabled"]);
-  }
   if ((result.data.smtpUrl === undefined) !== (result.data.emailFrom === undefined)) {
     throw new ConfigError(["smtp: HMM_SMTP_URL and HMM_EMAIL_FROM must be configured together"]);
   }
 
   const hasSmtp = result.data.smtpUrl !== undefined && result.data.emailFrom !== undefined;
-  // Only identity sends email, so a chat-only deployment never has to choose a delivery mode.
   const identityEnabled = result.data.databaseUrl !== undefined;
   const emailDelivery =
     result.data.emailDelivery ??
@@ -173,6 +158,9 @@ export function loadConfig(
     throw new ConfigError([
       "emailDelivery: console writes a live credential to the log and is not allowed in production",
     ]);
+  }
+  if (result.data.nodeEnv === "production" && result.data.databaseUrl === undefined) {
+    throw new ConfigError(["databaseUrl: PostgreSQL is required in production"]);
   }
 
   const defaultOrigins =
@@ -222,13 +210,6 @@ export function loadConfig(
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,
     cookieSecure: parsedPublicApiUrl.protocol === "https:",
-    chat: {
-      enabled: result.data.chatEnabled === "true",
-      ...(result.data.chatAccessCode === undefined
-        ? {}
-        : { accessCode: result.data.chatAccessCode }),
-      dataPath: result.data.chatDataPath,
-    },
     ...(result.data.webRoot === undefined ? {} : { webRoot: result.data.webRoot }),
     ...(result.data.databaseUrl === undefined
       ? {}

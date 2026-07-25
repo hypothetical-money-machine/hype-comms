@@ -2,13 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   apiErrorEnvelopeSchema,
+  conversationSummarySchema,
   conversationSchema,
-  createChatMessageRequestSchema,
   displayNameSchema,
-  chatMessageEventSchema,
   chatSessionStateSchema,
   messageSchema,
+  messageHistoryQuerySchema,
+  sendMessageOperationSchema,
   sendMessageRequestSchema,
+  syncQuerySchema,
   systemConnectedEventSchema,
   userSchema,
 } from "../src/index.js";
@@ -82,39 +84,31 @@ describe("entity contracts", () => {
 });
 
 describe("transport contracts", () => {
-  it("validates display names and welcome messages", () => {
+  it("validates display names and conversation summaries", () => {
     expect(displayNameSchema.parse("  Morgan  ")).toBe("Morgan");
     expect(() => displayNameSchema.parse("Morgan\nAdmin")).toThrow();
 
-    // The create request carries no author: the server derives it from the session.
-    expect(() =>
-      createChatMessageRequestSchema.parse({
-        clientMessageId: MESSAGE_ID,
-        authorName: "Morgan",
-        body: "Hello, welcome channel!",
-      }),
-    ).toThrow();
-
     expect(
-      createChatMessageRequestSchema.parse({
-        clientMessageId: MESSAGE_ID,
-        body: "Hello, welcome channel!",
-      }),
-    ).toMatchObject({ body: "Hello, welcome channel!" });
-
-    expect(
-      chatMessageEventSchema.parse({
-        version: 1,
-        type: "chat.welcome_message_created",
-        message: {
-          id: MESSAGE_ID,
-          clientMessageId: MESSAGE_ID,
-          authorName: "Morgan",
-          body: "Hello, welcome channel!",
+      conversationSummarySchema.parse({
+        conversation: {
+          id: CONVERSATION_ID,
+          workspaceId: WORKSPACE_ID,
+          kind: "channel",
+          name: "General",
+          slug: "general",
+          topic: null,
+          isArchived: false,
+          createdBy: USER_ID,
           createdAt: NOW,
+          updatedAt: NOW,
         },
+        participantIds: [],
+        lastMessage: null,
+        unreadCount: 0,
+        mentionCount: 0,
+        readCursor: null,
       }),
-    ).toMatchObject({ type: "chat.welcome_message_created" });
+    ).toMatchObject({ conversation: { slug: "general" } });
   });
 
   it("keeps the session state discriminated and free of credentials", () => {
@@ -124,33 +118,29 @@ describe("transport contracts", () => {
     expect(
       chatSessionStateSchema.parse({
         status: "signed-in",
-        method: "access-code",
-        name: "Morgan",
-      }),
-    ).toEqual({
-      status: "signed-in",
-      method: "access-code",
-      name: "Morgan",
-    });
-    expect(
-      chatSessionStateSchema.parse({
-        status: "signed-in",
         method: "email",
         name: "Morgan",
         email: "MORGAN@example.com",
+        userId: USER_ID,
+        workspaceId: WORKSPACE_ID,
       }),
     ).toEqual({
       status: "signed-in",
       method: "email",
       name: "Morgan",
       email: "morgan@example.com",
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
     });
     expect(() =>
       chatSessionStateSchema.parse({
         status: "signed-in",
-        method: "access-code",
+        method: "email",
         name: "Morgan",
-        accessCode: "x",
+        email: "morgan@example.com",
+        userId: USER_ID,
+        workspaceId: WORKSPACE_ID,
+        token: "x",
       }),
     ).toThrow();
     expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
@@ -167,6 +157,15 @@ describe("transport contracts", () => {
         },
       }),
     ).toMatchObject({ error: { code: "BAD_REQUEST" } });
+  });
+
+  it("coerces bounded HTTP query parameters from URL strings", () => {
+    expect(messageHistoryQuerySchema.parse({ limit: "25" })).toEqual({ limit: 25 });
+    expect(syncQuerySchema.parse({ after: "4", limit: "100" })).toEqual({
+      after: "4",
+      limit: 100,
+    });
+    expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
   });
 
   it("validates the initial realtime handshake event", () => {
@@ -232,6 +231,36 @@ describe("transport contracts", () => {
         clientMessageId: "message-1",
         mentionedUserIds: [],
         attachmentIds: [],
+      }),
+    ).toThrow();
+
+    expect(
+      sendMessageOperationSchema.parse({
+        conversationId: CONVERSATION_ID,
+        idempotencyKey: MESSAGE_ID,
+        message: {
+          threadRootId: null,
+          body: "Hello",
+          bodyFormat: "hmm_markdown_v1",
+          clientMessageId: MESSAGE_ID,
+          mentionedUserIds: [],
+          attachmentIds: [],
+        },
+      }),
+    ).toMatchObject({ conversationId: CONVERSATION_ID });
+
+    expect(() =>
+      sendMessageOperationSchema.parse({
+        conversationId: CONVERSATION_ID,
+        idempotencyKey: USER_ID,
+        message: {
+          threadRootId: null,
+          body: "Hello",
+          bodyFormat: "hmm_markdown_v1",
+          clientMessageId: MESSAGE_ID,
+          mentionedUserIds: [],
+          attachmentIds: [],
+        },
       }),
     ).toThrow();
   });

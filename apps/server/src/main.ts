@@ -6,7 +6,6 @@ import { runMigrations } from "./db/migrate.js";
 import { createPool } from "./db/pool.js";
 import { Lifecycle } from "./lifecycle.js";
 import { createLoggerOptions } from "./logging.js";
-import { ChatStore } from "./modules/chat/store.js";
 import {
   ConsoleEmailSender,
   ManualEmailSender,
@@ -17,13 +16,19 @@ import { IdentityRepository } from "./modules/identity/repository.js";
 import { IdentityService } from "./modules/identity/service.js";
 import { installGracefulShutdown } from "./shutdown.js";
 import { SignInThrottle } from "./throttle.js";
+import { RealtimeEventHub } from "./modules/realtime/hub.js";
+import { WorkspaceRepository } from "./modules/workspace/repository.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const lifecycle = new Lifecycle();
   let pool: Pool | undefined;
+  let startedRealtimeHub: RealtimeEventHub | undefined;
   let identity:
     { readonly service: IdentityService; readonly selfServiceMagicLink: boolean } | undefined;
+  let workspace:
+    | { readonly repository: WorkspaceRepository; readonly realtimeHub: RealtimeEventHub }
+    | undefined;
 
   try {
     if (config.database !== undefined) {
@@ -50,19 +55,18 @@ async function main(): Promise<void> {
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
       identity = { service, selfServiceMagicLink: config.emailDelivery !== "manual" };
+      const repository = new WorkspaceRepository(databasePool);
+      const realtimeHub = new RealtimeEventHub(databasePool);
+      await realtimeHub.start();
+      startedRealtimeHub = realtimeHub;
+      workspace = { repository, realtimeHub };
     }
   } catch (error) {
+    await startedRealtimeHub?.close();
     await pool?.end();
     throw error;
   }
 
-  const chat =
-    config.chat.enabled && config.chat.accessCode !== undefined
-      ? {
-          accessCode: config.chat.accessCode,
-          store: new ChatStore(config.chat.dataPath),
-        }
-      : undefined;
   let app: Awaited<ReturnType<typeof buildApp>>;
   try {
     app = await buildApp({
@@ -70,15 +74,29 @@ async function main(): Promise<void> {
       lifecycle,
       allowedOrigins: config.allowedOrigins,
       cookieSecure: config.cookieSecure,
-      ...(chat === undefined ? {} : { chat }),
       ...(identity === undefined ? {} : { identity }),
+      ...(workspace === undefined ? {} : { workspace }),
       ...(config.webRoot === undefined ? {} : { webRoot: config.webRoot }),
     });
     if (pool !== undefined) {
       const databasePool = pool;
       app.addHook("onClose", async () => databasePool.end());
     }
+    if (workspace !== undefined) {
+      const repository = workspace.repository;
+      const maintenance = setInterval(
+        () => {
+          void repository.deleteExpiredState().catch((error: unknown) => {
+            app.log.error({ err: error }, "Workspace retention cleanup failed");
+          });
+        },
+        60 * 60 * 1_000,
+      );
+      maintenance.unref();
+      app.addHook("onClose", async () => clearInterval(maintenance));
+    }
   } catch (error) {
+    await startedRealtimeHub?.close();
     await pool?.end();
     throw error;
   }

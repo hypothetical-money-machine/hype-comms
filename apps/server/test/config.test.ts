@@ -14,7 +14,13 @@ describe("loadConfig", () => {
   });
 
   it("uses the pilot API and packaged renderer origins in production", () => {
-    expect(loadConfig({ NODE_ENV: "production" })).toMatchObject({
+    expect(
+      loadConfig({
+        NODE_ENV: "production",
+        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
+        HMM_EMAIL_DELIVERY: "manual",
+      }),
+    ).toMatchObject({
       allowedOrigins: ["app://bundle"],
       publicApiUrl: "https://chat-api.example.invalid",
       cookieSecure: true,
@@ -37,18 +43,19 @@ describe("loadConfig", () => {
     ).toThrow(ConfigError);
   });
 
-  it("requires a strong access code when chat mode is enabled", () => {
-    expect(() => loadConfig({ HMM_CHAT_ENABLED: "true" })).toThrow(ConfigError);
+  it("requires PostgreSQL in production and exposes its bounded pool configuration", () => {
+    expect(() => loadConfig({ NODE_ENV: "production" })).toThrow(ConfigError);
     expect(
       loadConfig({
-        HMM_CHAT_ENABLED: "true",
-        HMM_CHAT_ACCESS_CODE: "a-secure-weekend-access-code",
+        NODE_ENV: "production",
+        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
+        HMM_DATABASE_POOL_SIZE: "7",
+        HMM_EMAIL_DELIVERY: "manual",
       }),
     ).toMatchObject({
-      chat: {
-        enabled: true,
-        accessCode: "a-secure-weekend-access-code",
-        dataPath: "/data/hmm-chat.sqlite",
+      database: {
+        url: "postgres://hmm:secret@postgres/hmm_chat",
+        poolSize: 7,
       },
     });
   });

@@ -1,405 +1,479 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import type { ChatMessage, ChatSessionState } from "@hmm-chat/contracts";
+import type { ChatSessionState, Message, User } from "@hmm-chat/contracts";
 
-import type { DesktopApi, ServerStatus } from "../../shared/desktop-api";
+import type { DesktopApi } from "../../shared/desktop-api";
+import { WorkspaceRuntime, type WorkspaceRuntimeState } from "./workspace-runtime";
 
 interface AppProps {
   readonly client: DesktopApi;
-}
-
-function mergeMessages(
-  current: readonly ChatMessage[],
-  incoming: readonly ChatMessage[],
-): ChatMessage[] {
-  const messages = new Map(current.map((message) => [message.id, message]));
-  for (const message of incoming) {
-    messages.set(message.id, message);
-  }
-  return [...messages.values()].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
-  );
-}
-
-function messageTime(createdAt: string): string {
-  return new Date(createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
 }
 
-function SignIn({
-  client,
-  onSignedIn,
-  sessionMessage,
-}: {
-  readonly client: DesktopApi;
-  readonly onSignedIn: (state: ChatSessionState) => void;
-  readonly sessionMessage?: string;
-}) {
-  const [name, setName] = useState("");
-  const [accessCode, setAccessCode] = useState("");
-  const [accessError, setAccessError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [email, setEmail] = useState("");
-  const [emailMessage, setEmailMessage] = useState<string | null>(null);
-  const [emailError, setEmailError] = useState<string | null>(null);
-  const [requestingLink, setRequestingLink] = useState(false);
-  const nameInput = useRef<HTMLInputElement>(null);
+function messageTime(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
 
-  useEffect(() => {
-    let active = true;
-    void client.getSuggestedName().then((suggested) => {
-      if (active && suggested !== "") setName(suggested);
-    });
-    nameInput.current?.focus();
-    return () => {
-      active = false;
-    };
-  }, [client]);
+function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage?: string }) {
+  const [email, setEmail] = useState("");
+  const [requesting, setRequesting] = useState(false);
+  const [status, setStatus] = useState(sessionMessage ?? "");
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (submitting) return;
-
-    setSubmitting(true);
-    setAccessError(null);
-    try {
-      onSignedIn(await client.signIn({ name: name.trim(), accessCode }));
-    } catch (caught) {
-      setAccessError(errorMessage(caught, "Sign-in failed"));
-      setAccessCode("");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const requestLink = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    if (requestingLink) return;
-
-    setRequestingLink(true);
-    setEmailError(null);
-    setEmailMessage(null);
+    if (requesting || email.trim() === "") return;
+    setRequesting(true);
+    setStatus("");
     try {
       const delivery = await client.requestMagicLink(email);
-      setEmailMessage(
+      setStatus(
         delivery.status === "email-sent"
-          ? "Check your email for a sign-in link. HMM Chat is waiting—open the link to continue."
-          : `${delivery.message}. Open the sign-in link an administrator sent you; HMM Chat is waiting for it.`,
+          ? "Check your email, then open the HMM Chat sign-in link."
+          : `${delivery.message} Open the private sign-in link an administrator sends you.`,
       );
-    } catch (caught) {
-      setEmailError(errorMessage(caught, "Could not request a sign-in link"));
+    } catch (error) {
+      setStatus(errorMessage(error, "Could not request a sign-in link"));
     } finally {
-      setRequestingLink(false);
+      setRequesting(false);
     }
   };
-
-  const canSubmit = name.trim().length > 0 && accessCode.length > 0 && !submitting;
-  const canRequestLink = email.trim().length > 0 && !requestingLink;
-  const visibleAccessError = accessError ?? sessionMessage;
 
   return (
     <main className="signin-shell">
       <section className="signin-card">
-        <div className="workspace-mark" aria-hidden="true">
+        <div className="brand-mark" aria-hidden="true">
           H
         </div>
-        <h1>HMM Chat</h1>
-        <p className="signin-lede">Sign in to join #welcome.</p>
-
-        <form className="signin-form" onSubmit={(event) => void submit(event)}>
-          <h2>Use the shared access code</h2>
-
-          <label htmlFor="signin-name">Display name</label>
+        <p className="eyebrow">Hypothetical Money Machine</p>
+        <h1>Private workspace chat</h1>
+        <p className="signin-lede">Sign in with the email address invited to this workspace.</p>
+        <form onSubmit={(event) => void submit(event)}>
+          <label htmlFor="email">Email address</label>
           <input
-            ref={nameInput}
-            id="signin-name"
-            type="text"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            maxLength={80}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={submitting}
-            required
-          />
-
-          <label htmlFor="signin-code">Access code</label>
-          <input
-            id="signin-code"
-            type="password"
-            value={accessCode}
-            onChange={(event) => setAccessCode(event.target.value)}
-            maxLength={256}
-            autoComplete="off"
-            disabled={submitting}
-            required
-          />
-
-          {visibleAccessError !== null && visibleAccessError !== undefined && (
-            <p className="signin-error" role="alert">
-              {visibleAccessError}
-            </p>
-          )}
-
-          <button type="submit" disabled={!canSubmit}>
-            {submitting ? "Signing in…" : "Sign in with access code"}
-          </button>
-        </form>
-
-        <div className="signin-divider" aria-hidden="true">
-          <span>or</span>
-        </div>
-
-        <form className="signin-form" onSubmit={(event) => void requestLink(event)}>
-          <h2>Use your email</h2>
-          <p className="signin-help">Request a link, then open it to finish signing in here.</p>
-
-          <label htmlFor="signin-email">Email address</label>
-          <input
-            id="signin-email"
+            id="email"
             type="email"
+            autoComplete="email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            maxLength={320}
-            autoComplete="email"
-            disabled={requestingLink}
+            placeholder="you@example.com"
             required
           />
-
-          {emailMessage !== null && (
-            <p className="signin-info" role="status">
-              {emailMessage}
-            </p>
-          )}
-          {emailError !== null && (
-            <p className="signin-error" role="alert">
-              {emailError}
-            </p>
-          )}
-
-          <button type="submit" disabled={!canRequestLink}>
-            {requestingLink ? "Requesting link…" : "Email me a sign-in link"}
+          <button type="submit" disabled={requesting || email.trim() === ""}>
+            {requesting ? "Requesting link…" : "Email me a sign-in link"}
           </button>
         </form>
+        {status !== "" && <p className="signin-status">{status}</p>}
       </section>
     </main>
   );
 }
 
+function Avatar({ user }: { user: User | undefined }) {
+  return (
+    <span className="avatar" aria-hidden="true">
+      {(user?.displayName ?? "?").slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+function MessageRow({
+  message,
+  members,
+}: {
+  readonly message: Message;
+  readonly members: readonly User[];
+}) {
+  const author = members.find((member) => member.id === message.authorId);
+  return (
+    <article className="message">
+      <Avatar user={author} />
+      <div>
+        <header>
+          <strong>{author?.displayName ?? "Former member"}</strong>
+          <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
+        </header>
+        <p>{message.body}</p>
+      </div>
+    </article>
+  );
+}
+
 export function App({ client }: AppProps) {
-  const [version, setVersion] = useState<string>("…");
-  const [status, setStatus] = useState<string>("Connecting to #welcome…");
-  const [serverStatus, setServerStatus] = useState<ServerStatus>("unreachable");
+  const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
+  const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
+  const [composerError, setComposerError] = useState("");
+  const [signingOut, setSigningOut] = useState(false);
   const messageList = useRef<HTMLDivElement>(null);
-  const messageInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
     let active = true;
-    const stopSessionListener = client.onSessionChanged((next) => {
+    const unsubscribe = client.onSessionChanged((next) => {
+      if (!active) return;
       setSession(next);
-      if (next.status === "signed-out") setMessages([]);
+      if (next.status === "signed-in" && next.method === "email") {
+        void runtime.start(next);
+      } else {
+        void runtime.stop();
+      }
     });
-
-    void client.getAppVersion().then((appVersion) => {
-      if (active) setVersion(appVersion);
+    void client.getSessionState().then((next) => {
+      if (!active) return;
+      setSession(next);
+      if (next.status === "signed-in" && next.method === "email") {
+        void runtime.start(next);
+      }
     });
-    void client.getServerStatus().then((next) => {
-      if (active) setServerStatus(next);
-    });
-    void client
-      .getSessionState()
-      .then((next) => {
-        if (active) setSession(next);
-      })
-      .catch(() => {
-        if (active) setSession({ status: "signed-out" });
-      });
-
     return () => {
       active = false;
-      stopSessionListener();
+      unsubscribe();
+      void runtime.stop();
     };
-  }, [client]);
+  }, [client, runtime]);
 
-  const signedIn = session?.status === "signed-in";
-
-  useEffect(() => {
-    if (!signedIn) return () => undefined;
-
-    let active = true;
-    let historyRetry: ReturnType<typeof setTimeout> | undefined;
-    const stopWelcomeListener = client.onWelcomeMessage((message) => {
-      setMessages((current) => mergeMessages(current, [message]));
-      setServerStatus("reachable");
-    });
-
-    const loadHistory = (): void => {
-      void client
-        .getWelcomeMessages()
-        .then((history) => {
-          if (!active) return;
-          setMessages((current) => mergeMessages(history, current));
-          setServerStatus("reachable");
-          setStatus("#welcome is live");
-        })
-        .catch((error: unknown) => {
-          if (!active) return;
-          setServerStatus("unreachable");
-          setStatus(errorMessage(error, "Could not load #welcome"));
-          historyRetry = setTimeout(loadHistory, 2_000);
-        });
-    };
-    loadHistory();
-
-    return () => {
-      active = false;
-      if (historyRetry !== undefined) clearTimeout(historyRetry);
-      stopWelcomeListener();
-    };
-  }, [client, signedIn]);
+  const bootstrap = runtimeState.bootstrap;
+  const selectedSummary = bootstrap?.conversations.find(
+    (summary) => summary.conversation.id === runtimeState.selectedConversationId,
+  );
+  const messages = runtimeState.messages.filter(
+    (message) => message.conversationId === runtimeState.selectedConversationId,
+  );
+  const pending = runtimeState.outbox.filter(
+    (item) => item.operation.conversationId === runtimeState.selectedConversationId,
+  );
 
   useEffect(() => {
     const list = messageList.current;
     if (list !== null) list.scrollTop = list.scrollHeight;
-  }, [messages]);
+  }, [messages.length, pending.length, runtimeState.selectedConversationId]);
 
-  useEffect(() => {
-    if (signedIn && !sending) messageInput.current?.focus();
-  }, [signedIn, sending]);
-
-  const handleSignedIn = useCallback((next: ChatSessionState) => {
-    setSession(next);
-    setStatus("Connecting to #welcome…");
-  }, []);
-
-  const sendMessage = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+  const send = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const body = draft.trim();
-    if (body.length === 0 || sending) return;
-
-    setSending(true);
+    const conversationId = runtimeState.selectedConversationId;
+    if (body === "" || conversationId === null || bootstrap === null) return;
+    const mentionedUserIds = bootstrap.members
+      .filter((member) => {
+        const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
+      })
+      .map((member) => member.id);
     try {
-      const message = await client.sendWelcomeMessage(body);
-      setMessages((current) => mergeMessages(current, [message]));
+      await runtime.sendMessage(conversationId, body, mentionedUserIds);
       setDraft("");
-      setServerStatus("reachable");
-      setStatus("#welcome is live");
+      setComposerError("");
     } catch (error) {
-      setStatus(errorMessage(error, "Message failed to send"));
-    } finally {
-      setSending(false);
+      setComposerError(errorMessage(error, "Could not queue the message"));
     }
   };
 
-  if (session === null) {
-    return <main className="signin-shell" aria-busy="true" />;
+  const createChannel = useCallback(async () => {
+    const name = window.prompt("Channel name");
+    if (name === null || name.trim() === "") return;
+    const slug = name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    if (slug === "") return;
+    try {
+      await runtime.createChannel(name.trim(), slug);
+    } catch (error) {
+      setComposerError(errorMessage(error, "Could not create the channel"));
+    }
+  }, [runtime]);
+
+  const startDirectMessage = useCallback(
+    async (memberId: string) => {
+      try {
+        await runtime.createDirectConversation(memberId);
+      } catch (error) {
+        setComposerError(errorMessage(error, "Could not start the direct message"));
+      }
+    },
+    [runtime],
+  );
+
+  const signOut = async (): Promise<void> => {
+    if (
+      runtimeState.outbox.length > 0 &&
+      !window.confirm("Pending messages have not been delivered. Sign out and discard them?")
+    ) {
+      return;
+    }
+    setSigningOut(true);
+    try {
+      await runtime.stop();
+      await runtime.resetLocalCache();
+      await client.signOut();
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
+  if (session === null) return <main className="signin-shell" aria-busy="true" />;
+  if (session.status === "signed-out") {
+    return <SignIn client={client} sessionMessage={session.message} />;
+  }
+  if (session.method !== "email") {
+    return (
+      <main className="signin-shell">
+        <section className="signin-card">
+          <h1>Member sign-in required</h1>
+          <p>M2 conversations require an invited magic-link identity.</p>
+          <button type="button" onClick={() => void client.signOut()}>
+            Continue to member sign-in
+          </button>
+        </section>
+      </main>
+    );
+  }
+  if (bootstrap === null) {
+    return (
+      <main className="signin-shell">
+        <section className="signin-card">
+          <h1>
+            {runtimeState.error === null ? "Loading your workspace…" : "Workspace unavailable"}
+          </h1>
+          <p>
+            {runtimeState.error ?? "Restoring encrypted history and checking for new messages."}
+          </p>
+          {runtimeState.error !== null && (
+            <button type="button" onClick={() => void runtime.start(session)}>
+              Retry
+            </button>
+          )}
+        </section>
+      </main>
+    );
   }
 
-  if (session.status === "signed-out") {
-    return <SignIn client={client} onSignedIn={handleSignedIn} sessionMessage={session.message} />;
-  }
+  const channels = bootstrap.conversations.filter(
+    (summary) => summary.conversation.kind === "channel",
+  );
+  const directMessages = bootstrap.conversations.filter(
+    (summary) => summary.conversation.kind === "direct_message",
+  );
+  const currentUserId = bootstrap.currentUser.user.id;
 
   return (
     <main className="shell">
-      <aside className="workspace-rail" aria-label="Workspaces">
-        <div className="workspace-mark" aria-hidden="true">
-          H
-        </div>
+      <aside className="workspace-rail" aria-label="Workspace">
+        <div className="workspace-mark">H</div>
       </aside>
 
-      <section className="sidebar" aria-label="Channel navigation">
-        <header>
-          <p className="eyebrow">Hypothetical Money Machine</p>
-          <h1>HMM Chat</h1>
+      <aside className="sidebar">
+        <header className="workspace-header">
+          <div>
+            <p className="eyebrow">Workspace</p>
+            <h1>{bootstrap.workspace.name}</h1>
+          </div>
+          <button className="quiet-button" type="button" onClick={() => void signOut()}>
+            {signingOut ? "…" : "Sign out"}
+          </button>
         </header>
 
-        <nav aria-label="Channels">
-          <p className="nav-label">Channels</p>
-          <button className="channel active" type="button">
-            <span aria-hidden="true">#</span> welcome
-          </button>
+        <nav aria-label="Conversations">
+          <div className="nav-heading">
+            <span>Channels</span>
+            <button type="button" onClick={() => void createChannel()} aria-label="Create channel">
+              +
+            </button>
+          </div>
+          {channels.map((summary) => (
+            <button
+              className={
+                summary.conversation.id === runtimeState.selectedConversationId
+                  ? "conversation active"
+                  : "conversation"
+              }
+              type="button"
+              key={summary.conversation.id}
+              onClick={() => runtime.selectConversation(summary.conversation.id)}
+            >
+              <span>
+                # {summary.conversation.name}
+                {summary.conversation.isArchived ? " (archived)" : ""}
+              </span>
+              {(summary.unreadCount > 0 || summary.mentionCount > 0) && (
+                <span className="badge">{summary.mentionCount || summary.unreadCount}</span>
+              )}
+            </button>
+          ))}
+
+          <div className="nav-heading">
+            <span>Direct messages</span>
+          </div>
+          {directMessages.map((summary) => (
+            <button
+              className={
+                summary.conversation.id === runtimeState.selectedConversationId
+                  ? "conversation active"
+                  : "conversation"
+              }
+              type="button"
+              key={summary.conversation.id}
+              onClick={() => runtime.selectConversation(summary.conversation.id)}
+            >
+              <span>● {runtime.conversationName(summary)}</span>
+              {(summary.unreadCount > 0 || summary.mentionCount > 0) && (
+                <span className="badge">{summary.mentionCount || summary.unreadCount}</span>
+              )}
+            </button>
+          ))}
         </nav>
 
-        <footer>
-          <strong>{session.name}</strong>
-          <span>
-            {session.method === "email" ? `Signed in as ${session.email}` : "Using access code"}
-          </span>
-          <span>{status}</span>
-          <span className={`server-status ${serverStatus}`}>
-            <span className="status-dot" aria-hidden="true" />
-            Server {serverStatus}
-          </span>
-          <span>
-            v{version} · {client.platform}
-          </span>
-          <button className="signout" type="button" onClick={() => void client.signOut()}>
-            Sign out
-          </button>
-        </footer>
-      </section>
+        <section className="member-list" aria-label="Members">
+          <p className="nav-heading">Members</p>
+          {bootstrap.members
+            .filter((member) => member.id !== currentUserId)
+            .map((member) => (
+              <button
+                type="button"
+                key={member.id}
+                onClick={() => void startDirectMessage(member.id)}
+              >
+                <Avatar user={member} />
+                <span>{member.displayName}</span>
+              </button>
+            ))}
+        </section>
+      </aside>
 
-      <section className="conversation" aria-label="Conversation">
+      <section className="conversation-pane">
         <header className="conversation-header">
           <div>
-            <h2># welcome</h2>
-            <p>Workspace chat. History is kept on the server.</p>
+            <h2>
+              {selectedSummary === undefined
+                ? "Choose a conversation"
+                : runtime.conversationName(selectedSummary)}
+            </h2>
+            <p>
+              {runtimeState.connection}
+              {runtimeState.stale ? " · cached state may be stale" : ""}
+              {runtimeState.cacheMode === "memory_only" ? " · memory-only cache" : ""}
+            </p>
           </div>
+          {selectedSummary?.conversation.kind === "channel" &&
+            selectedSummary.conversation.slug !== "general" &&
+            !selectedSummary.conversation.isArchived &&
+            bootstrap.currentUser.role === "owner" && (
+              <button
+                className="quiet-button"
+                type="button"
+                onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
+              >
+                Archive
+              </button>
+            )}
         </header>
 
         <div className="message-list" ref={messageList} aria-live="polite">
-          {messages.length === 0 ? (
+          {runtimeState.selectedConversationId !== null &&
+            runtime.hasOlder(runtimeState.selectedConversationId) && (
+              <button
+                className="load-older"
+                type="button"
+                onClick={() => {
+                  const conversationId = runtimeState.selectedConversationId;
+                  if (conversationId !== null) void runtime.loadOlder(conversationId);
+                }}
+              >
+                Load older messages
+              </button>
+            )}
+          {messages.length === 0 && pending.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-mark" aria-hidden="true">
-                #
-              </div>
-              <h2>Welcome to HMM Chat</h2>
-              <p>Send the first message.</p>
+              <h3>No messages yet</h3>
+              <p>Start the conversation.</p>
             </div>
           ) : (
             messages.map((message) => (
-              <article className="message" key={message.id}>
-                <div className="avatar" aria-hidden="true">
-                  {message.authorName.slice(0, 1).toUpperCase()}
-                </div>
-                <div>
-                  <header>
-                    <strong>{message.authorName}</strong>
-                    <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
-                  </header>
-                  <p>{message.body}</p>
-                </div>
-              </article>
+              <MessageRow key={message.id} message={message} members={bootstrap.members} />
             ))
           )}
+          {pending.map((item) => (
+            <article
+              className="message pending-message"
+              key={item.operation.message.clientMessageId}
+            >
+              <Avatar user={bootstrap.currentUser.user} />
+              <div>
+                <header>
+                  <strong>{bootstrap.currentUser.user.displayName}</strong>
+                  <span>{item.status.replaceAll("_", " ")}</span>
+                </header>
+                <p>{item.operation.message.body}</p>
+                {item.status === "permanent_failure" && (
+                  <div className="message-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraft(item.operation.message.body);
+                        void runtime.discardMessage(item.operation.message.clientMessageId);
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runtime.retryMessage(item.operation.message.clientMessageId)
+                      }
+                    >
+                      Retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runtime.discardMessage(item.operation.message.clientMessageId)
+                      }
+                    >
+                      Discard
+                    </button>
+                  </div>
+                )}
+              </div>
+            </article>
+          ))}
         </div>
 
-        <form className="composer" onSubmit={(event) => void sendMessage(event)}>
+        <form className="composer" onSubmit={(event) => void send(event)}>
           <label className="sr-only" htmlFor="message">
-            Message #welcome
+            Message
           </label>
           <input
-            ref={messageInput}
             id="message"
-            type="text"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder={`Message #welcome as ${session.name}`}
-            disabled={sending}
+            placeholder={
+              selectedSummary === undefined
+                ? "Choose a conversation"
+                : `Message ${runtime.conversationName(selectedSummary)}`
+            }
+            disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
             maxLength={4_000}
-            autoComplete="off"
           />
-          <button type="submit" disabled={sending || draft.trim().length === 0}>
-            {sending ? "Sending…" : "Send"}
+          <button
+            type="submit"
+            disabled={
+              draft.trim() === "" ||
+              selectedSummary === undefined ||
+              selectedSummary.conversation.isArchived
+            }
+          >
+            Send
           </button>
+          {composerError !== "" && <p className="composer-error">{composerError}</p>}
         </form>
       </section>
     </main>

@@ -1,15 +1,34 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import {
-  displayNameSchema,
-  chatHistorySchema,
-  chatMessageSchema,
+  advanceReadCursorResponseSchema,
+  cacheCryptoStatusSchema,
+  cacheDecryptBatchRequestSchema,
+  cacheDecryptBatchResponseSchema,
+  cacheEncryptBatchRequestSchema,
+  cacheEncryptBatchResponseSchema,
+  cacheScopeSchema,
+  conversationMutationResponseSchema,
+  createChannelRequestSchema,
+  directConversationRequestSchema,
   chatSessionStateSchema,
   magicLinkDeliveryStateSchema,
-  messageBodySchema,
+  messageHistoryResponseSchema,
+  productRealtimeEventSchema,
   requestMagicLinkSchema,
-  type ChatMessage,
+  sendAttemptResultSchema,
+  sendMessageOperationSchema,
+  sequenceSchema,
+  syncAttemptResultSchema,
+  workspaceBootstrapResponseSchema,
   type ChatSessionState,
+  type CacheDecryptBatchRequest,
+  type CacheEncryptBatchRequest,
+  type CacheScope,
+  type CreateChannelRequest,
+  type DirectConversationRequest,
+  type ProductRealtimeEvent,
+  type SendMessageOperation,
 } from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -17,8 +36,8 @@ import type {
   DesktopApi,
   DesktopPlatform,
   NotificationAction,
+  RealtimeConnectionState,
   ServerStatus,
-  SignInRequest,
 } from "../shared/desktop-api";
 
 function subscribe<T>(
@@ -56,19 +75,8 @@ const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
-  getSuggestedName: async () => {
-    const name: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.suggestedName);
-    return typeof name === "string" ? name : "";
-  },
   getSessionState: async () =>
     chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
-  signIn: async (request: SignInRequest) =>
-    chatSessionStateSchema.parse(
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionSignIn, {
-        name: displayNameSchema.parse(request.name),
-        accessCode: String(request.accessCode),
-      }),
-    ),
   requestMagicLink: async (email: string) => {
     const request = requestMagicLinkSchema.parse({ email });
     return magicLinkDeliveryStateSchema.parse(
@@ -83,24 +91,120 @@ const desktopApi: DesktopApi = Object.freeze({
       listener,
       (value): value is ChatSessionState => chatSessionStateSchema.safeParse(value).success,
     ),
-  getWelcomeMessages: async () => {
-    const messages: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeHistory);
-    return chatHistorySchema.parse({ messages }).messages;
-  },
-  sendWelcomeMessage: async (body: string) => {
-    const validatedBody = messageBodySchema.parse(body);
-    return chatMessageSchema.parse(
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.welcomeSend, validatedBody),
-    );
-  },
-  onWelcomeMessage: (listener: (message: ChatMessage) => void) =>
-    subscribe(
-      DESKTOP_CHANNELS.welcomeMessage,
-      listener,
-      (value): value is ChatMessage => chatMessageSchema.safeParse(value).success,
-    ),
   onNotificationAction: (listener: (action: NotificationAction) => void) =>
     subscribe(DESKTOP_CHANNELS.notificationAction, listener, isNotificationAction),
+  initializeCacheCrypto: async (scope: CacheScope) =>
+    cacheCryptoStatusSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.cacheCryptoInitialize,
+        cacheScopeSchema.parse(scope),
+      ),
+    ),
+  encryptCacheRecords: async (input: CacheEncryptBatchRequest) =>
+    cacheEncryptBatchResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.cacheCryptoEncrypt,
+        cacheEncryptBatchRequestSchema.parse(input),
+      ),
+    ),
+  decryptCacheRecords: async (input: CacheDecryptBatchRequest) =>
+    cacheDecryptBatchResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.cacheCryptoDecrypt,
+        cacheDecryptBatchRequestSchema.parse(input),
+      ),
+    ),
+  resetCacheCrypto: async () => {
+    await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoReset);
+  },
+  getWorkspaceBootstrap: async () =>
+    workspaceBootstrapResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceBootstrap),
+    ),
+  getConversationMessages: async (input: {
+    readonly conversationId: string;
+    readonly before?: string;
+    readonly limit?: number;
+  }) =>
+    messageHistoryResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessagesList, input),
+    ),
+  sendConversationMessage: async (input: SendMessageOperation) =>
+    sendAttemptResultSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceMessageSend,
+        sendMessageOperationSchema.parse(input),
+      ),
+    ),
+  createChannel: async (input: CreateChannelRequest) =>
+    conversationMutationResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceChannelCreate,
+        createChannelRequestSchema.parse(input),
+      ),
+    ),
+  archiveChannel: async (conversationId: string) =>
+    conversationMutationResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelArchive, conversationId),
+    ),
+  createDirectConversation: async (input: DirectConversationRequest) =>
+    conversationMutationResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceDirectCreate,
+        directConversationRequestSchema.parse(input),
+      ),
+    ),
+  advanceReadCursor: async (conversationId: string, lastReadMessageId: string) =>
+    advanceReadCursorResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReadAdvance, {
+        conversationId,
+        lastReadMessageId,
+      }),
+    ),
+  syncWorkspace: async (after: string) =>
+    syncAttemptResultSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceSync, sequenceSchema.parse(after)),
+    ),
+  startWorkspaceRealtime: async (after: string) => {
+    await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceRealtimeStart, sequenceSchema.parse(after));
+  },
+  stopWorkspaceRealtime: async () => {
+    await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceRealtimeStop);
+  },
+  acknowledgeWorkspaceEvent: async (cursor: string) => {
+    await ipcRenderer.invoke(
+      DESKTOP_CHANNELS.workspaceRealtimeAcknowledge,
+      sequenceSchema.parse(cursor),
+    );
+  },
+  getRealtimeState: async () => {
+    const state: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.realtimeStateGet);
+    if (
+      state !== "connecting" &&
+      state !== "live" &&
+      state !== "offline" &&
+      state !== "reconnecting"
+    ) {
+      throw new Error("Invalid realtime state");
+    }
+    return state;
+  },
+  onRealtimeStateChanged: (listener: (state: RealtimeConnectionState) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.realtimeStateChanged,
+      listener,
+      (value): value is RealtimeConnectionState =>
+        value === "connecting" ||
+        value === "live" ||
+        value === "offline" ||
+        value === "reconnecting",
+    ),
+  onWorkspaceEvent: (listener: (event: ProductRealtimeEvent) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.workspaceEvent,
+      listener,
+      (value): value is ProductRealtimeEvent => productRealtimeEventSchema.safeParse(value).success,
+    ),
 });
 
 contextBridge.exposeInMainWorld("hmmChat", desktopApi);

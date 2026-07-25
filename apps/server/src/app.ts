@@ -5,14 +5,14 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
-import { chatRoutes } from "./modules/chat/routes.js";
-import type { ChatStore } from "./modules/chat/store.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
+import type { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
-import type { SignInThrottle } from "./throttle.js";
+import type { WorkspaceRepository } from "./modules/workspace/repository.js";
+import { workspaceRoutes } from "./modules/workspace/routes.js";
 
 export interface BuildAppOptions {
   readonly logger?: FastifyServerOptions["logger"];
@@ -20,15 +20,14 @@ export interface BuildAppOptions {
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
   readonly cookieSecure?: boolean;
-  readonly chat?: {
-    readonly accessCode: string;
-    readonly store: ChatStore;
-    readonly throttle?: SignInThrottle;
-  };
   readonly identity?: {
     readonly service: IdentityService;
     /** False when links are issued by an administrator, which disables self-service requests. */
     readonly selfServiceMagicLink?: boolean;
+  };
+  readonly workspace?: {
+    readonly repository: WorkspaceRepository;
+    readonly realtimeHub: RealtimeEventHub;
   };
   readonly webRoot?: string;
 }
@@ -76,27 +75,45 @@ export async function buildApp(options: BuildAppOptions = {}) {
     });
   }
   await app.register(systemRoutes, { lifecycle });
+  const consumeWorkspaceTicket: ConsumeRealtimeTicket | undefined =
+    options.workspace === undefined
+      ? undefined
+      : async ({ ticket }) => {
+          const principal = await options.workspace?.repository.consumeRealtimeTicket(ticket);
+          if (principal === null || principal === undefined) {
+            throw new ApiError(401, "UNAUTHORIZED", "Realtime ticket is invalid or expired");
+          }
+          return {
+            userId: principal.userId,
+            workspaceId: principal.workspaceId,
+          };
+        };
   await app.register(
     async (v1) => {
       await v1.register(realtimeRoutes, {
         allowedOrigins,
-        consumeTicket: options.consumeRealtimeTicket ?? denyRealtimeTickets,
+        consumeTicket:
+          options.consumeRealtimeTicket ?? consumeWorkspaceTicket ?? denyRealtimeTickets,
+        ...(options.workspace === undefined
+          ? {}
+          : {
+              loadEvents: (principal, after) =>
+                options.workspace!.repository.syncPrincipal(principal, after, 100),
+              subscribe: (workspaceId, listener) =>
+                options.workspace!.realtimeHub.subscribe(workspaceId, listener),
+            }),
       });
-      if (options.chat !== undefined) {
-        await v1.register(chatRoutes, {
-          allowedOrigins,
-          accessCode: options.chat.accessCode,
-          store: options.chat.store,
-          cookieSecure: options.cookieSecure ?? true,
-          ...(options.identity === undefined ? {} : { identityService: options.identity.service }),
-          ...(options.chat.throttle === undefined ? {} : { throttle: options.chat.throttle }),
-        });
-      }
       if (options.identity !== undefined) {
         await v1.register(identityRoutes, {
           service: options.identity.service,
           cookieSecure: options.cookieSecure ?? true,
           selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
+        });
+      }
+      if (options.identity !== undefined && options.workspace !== undefined) {
+        await v1.register(workspaceRoutes, {
+          identityService: options.identity.service,
+          repository: options.workspace.repository,
         });
       }
     },
@@ -107,8 +124,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
     await app.register(identityLandingRoutes);
   }
 
-  if (options.chat !== undefined) {
-    app.addHook("onClose", async () => options.chat?.store.close());
+  if (options.workspace !== undefined) {
+    app.addHook("onClose", async () => options.workspace?.realtimeHub.close());
   }
 
   lifecycle.markReady();

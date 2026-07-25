@@ -1,29 +1,28 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 
-import { describeDevelopmentAccess } from "./development-chat.mjs";
-import { developmentNameUsage, parseDevelopmentName } from "./development-name.mjs";
+import { developmentProfileUsage, parseDevelopmentProfile } from "./development-profile.mjs";
 
-const name = parseDevelopmentName(process.argv.slice(2));
-if (name === null) {
+const profile = parseDevelopmentProfile(process.argv.slice(2));
+if (profile === null || profile === "") {
   process.stderr.write(
-    `A valid temporary chat identity is required.\nUsage: npm run dev:join -- ${developmentNameUsage}\n`,
+    `A non-empty development profile is required.\n` +
+      `Usage: npm run dev:join -- ${developmentProfileUsage}\n`,
   );
   process.exitCode = 1;
 } else {
-  process.stdout.write(`${describeDevelopmentAccess()}\n`);
   const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
   const electronPath = require("electron");
   if (typeof electronPath !== "string") {
     throw new TypeError("Electron executable path is unavailable");
   }
 
-  const child = spawn(electronPath, ["apps/desktop", `--name=${name}`], {
+  const child = spawn(electronPath, ["apps/desktop"], {
     cwd: new URL("..", import.meta.url),
     env: {
       ...process.env,
       ELECTRON_RENDERER_URL: "http://127.0.0.1:5173",
-      HMM_CHAT_NAME: name,
+      HMM_DESKTOP_PROFILE: profile,
     },
     stdio: "inherit",
   });

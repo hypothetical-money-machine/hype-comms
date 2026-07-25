@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 
 import {
   apiErrorEnvelopeSchema,
@@ -11,12 +10,10 @@ import {
 } from "@hmm-chat/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
-import { ChatStore } from "../src/modules/chat/store.js";
 import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -317,113 +314,6 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(missing.body).toBe(malformed.body);
     expect(malformed.body).toContain("This link is not valid.");
     expect(malformed.body).not.toContain("not-a-token");
-  });
-
-  it("uses identity display names for chat and preserves access-code session priority", async () => {
-    await seedOwner("Morgan@example.com");
-    const identitySession = await signIn("Morgan@example.com");
-    const app = await buildApp({
-      cookieSecure: false,
-      chat: { accessCode: "weekend-secret", store: new ChatStore(":memory:") },
-      identity: { service },
-    });
-
-    const identityMessage = await app.inject({
-      method: "POST",
-      url: "/v1/chat/welcome/messages",
-      cookies: { hmm_session: identitySession.token },
-      payload: {
-        clientMessageId: "10000000-0000-4000-8000-000000000030",
-        body: "Identity hello",
-      },
-    });
-    const accessSignIn = await app.inject({
-      method: "POST",
-      url: "/v1/chat/session",
-      payload: { name: "Access Name", accessCode: "weekend-secret" },
-    });
-    const accessCookie = accessSignIn.cookies.find(({ name }) => name === "hmm_chat_session");
-    const accessMessage = await app.inject({
-      method: "POST",
-      url: "/v1/chat/welcome/messages",
-      cookies: {
-        hmm_chat_session: accessCookie?.value ?? "",
-        hmm_session: "invalid-identity-token",
-      },
-      payload: {
-        clientMessageId: "10000000-0000-4000-8000-000000000031",
-        body: "Access hello",
-      },
-    });
-    await app.close();
-
-    expect(identityMessage.statusCode).toBe(201);
-    expect(identityMessage.json()).toMatchObject({
-      authorName: "morgan",
-      body: "Identity hello",
-    });
-    expect(accessSignIn.statusCode).toBe(204);
-    expect(accessMessage.statusCode).toBe(201);
-    expect(accessMessage.json()).toMatchObject({
-      authorName: "Access Name",
-      body: "Access hello",
-    });
-  });
-
-  it("rejects an expired identity cookie from chat", async () => {
-    await seedOwner();
-    const session = await signIn("owner@example.com");
-    const app = await buildApp({
-      chat: { accessCode: "weekend-secret", store: new ChatStore(":memory:") },
-      identity: { service },
-    });
-    nowMs += 31 * 24 * 60 * 60_000;
-
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/chat/welcome/messages",
-      cookies: { hmm_session: session.token },
-    });
-    await app.close();
-
-    expect(response.statusCode).toBe(401);
-    expect(apiErrorEnvelopeSchema.parse(response.json()).error).toMatchObject({
-      code: "UNAUTHORIZED",
-      message: "Sign in to continue",
-    });
-  });
-
-  it("accepts identity sessions on chat websockets while still enforcing Origin", async () => {
-    await seedOwner();
-    const session = await signIn("owner@example.com");
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      chat: { accessCode: "weekend-secret", store: new ChatStore(":memory:") },
-      identity: { service },
-    });
-    const rejected = await app.inject({
-      method: "GET",
-      url: "/v1/chat/welcome/realtime",
-      headers: {
-        connection: "upgrade",
-        upgrade: "websocket",
-        origin: "https://evil.example",
-        cookie: `hmm_session=${session.token}`,
-      },
-    });
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/chat/welcome/realtime`,
-      {
-        headers: { cookie: `hmm_session=${session.token}` },
-        origin: "app://bundle",
-      },
-    );
-    await once(socket, "open");
-    socket.close();
-    await app.close();
-
-    expect(rejected.statusCode).toBe(403);
   });
 
   it("burns an expired magic link on its first attempted redemption", async () => {

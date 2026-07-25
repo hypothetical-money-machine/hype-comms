@@ -34,6 +34,11 @@ export interface RedeemedSession {
 
 export type RefreshedSession = RedeemedSession;
 
+export interface AuthenticatedIdentity {
+  readonly currentUser: CurrentUser;
+  readonly sessionId: EntityId;
+}
+
 export interface SeedOwnerInput {
   readonly email: Email;
   readonly workspaceName: string;
@@ -175,10 +180,15 @@ export class IdentityService {
   }
 
   async authenticate(sessionToken: string): Promise<CurrentUser | null> {
+    return (await this.authenticateContext(sessionToken))?.currentUser ?? null;
+  }
+
+  async authenticateContext(sessionToken: string): Promise<AuthenticatedIdentity | null> {
     const now = this.#clock();
     const session = await this.#repository.findDeviceSessionByTokenHash(hashToken(sessionToken));
     if (session === null || isExpired(session.expiresAt, now)) return null;
-    return this.#currentUser(session.userId);
+    const currentUser = await this.#currentUser(session.userId);
+    return currentUser === null ? null : { currentUser, sessionId: session.id };
   }
 
   async refreshSession(sessionToken: string): Promise<RefreshedSession> {

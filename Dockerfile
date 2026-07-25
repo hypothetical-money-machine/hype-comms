@@ -44,8 +44,7 @@ RUN npm ci --omit=dev --include-workspace-root \
 FROM base AS runtime
 ENV NODE_ENV=production \
     HMM_HOST=0.0.0.0 \
-    HMM_PORT=3000 \
-    HMM_CHAT_DATA_PATH=/data/hmm-chat.sqlite
+    HMM_PORT=3000
 
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=production-deps /app/package.json ./package.json
@@ -53,10 +52,6 @@ COPY --from=build /app/packages/contracts/package.json ./packages/contracts/pack
 COPY --from=build /app/packages/contracts/dist ./packages/contracts/dist
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist
-
-# The SQLite database lives on a mounted volume. Creating the directory here with the runtime
-# user's ownership lets Docker seed a fresh named volume with the correct permissions.
-RUN mkdir -p /data && chown -R node:node /data
 
 USER node
 EXPOSE 3000

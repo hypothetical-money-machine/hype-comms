@@ -23,8 +23,8 @@ function parseBareOrigin(value: string): URL | null {
 
 /**
  * Development builds may talk to a loopback server over plain HTTP, or to any HTTPS deployment.
- * Plain HTTP to a non-loopback host stays rejected: that is the case where an access code and a
- * session cookie would cross the network in the clear.
+ * Plain HTTP to a non-loopback host stays rejected so session cookies and message data never cross
+ * the network without transport encryption.
  */
 export function normalizeDevelopmentApiOrigin(value: string): string | null {
   const url = parseBareOrigin(value);
@@ -50,10 +50,6 @@ export function createServerHealthUrl(apiOrigin: string): string {
   return new URL("/livez", apiOrigin).href;
 }
 
-export function createSessionUrl(apiOrigin: string): string {
-  return new URL("/v1/chat/session", apiOrigin).href;
-}
-
 export function createIdentitySessionUrl(apiOrigin: string): string {
   return new URL("/v1/auth/session", apiOrigin).href;
 }
@@ -64,14 +60,4 @@ export function createCurrentUserUrl(apiOrigin: string): string {
 
 export function createMagicLinkUrl(apiOrigin: string): string {
   return new URL("/v1/auth/magic-link", apiOrigin).href;
-}
-
-export function createWelcomeMessagesUrl(apiOrigin: string): string {
-  return new URL("/v1/chat/welcome/messages", apiOrigin).href;
-}
-
-export function createWelcomeRealtimeUrl(apiOrigin: string): string {
-  const url = new URL("/v1/chat/welcome/realtime", apiOrigin);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.href;
 }

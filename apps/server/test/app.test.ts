@@ -9,8 +9,6 @@ import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
 import { Lifecycle } from "../src/lifecycle.js";
-import { ChatStore } from "../src/modules/chat/store.js";
-import { SignInThrottle } from "../src/throttle.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -54,7 +52,7 @@ describe("operational routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/chat/session",
+      url: "/v1/auth/magic-links",
       headers: { "content-type": "application/json" },
       payload: "not json",
     });
@@ -131,7 +129,7 @@ describe("realtime route", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/v1/realtime?ticket=${"a".repeat(32)}`,
+      url: `/v1/realtime?ticket=${"a".repeat(32)}&after=0`,
       headers: {
         connection: "upgrade",
         upgrade: "websocket",
@@ -147,7 +145,6 @@ describe("realtime route", () => {
     const consumeTicket = vi.fn().mockResolvedValue({
       userId: "10000000-0000-4000-8000-000000000001",
       workspaceId: "10000000-0000-4000-8000-000000000002",
-      workspaceSequence: "9",
     });
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
@@ -156,7 +153,7 @@ describe("realtime route", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}`,
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
       { origin: "app://bundle" },
     );
 
@@ -167,217 +164,5 @@ describe("realtime route", () => {
     expect(event.workspaceSequence).toBe("9");
     expect(event.delivery).toBe("at_least_once");
     expect(consumeTicket).toHaveBeenCalledOnce();
-  });
-});
-
-describe("chat channel", () => {
-  it("requires the access code, derives authors from the session, and persists history", async () => {
-    const store = new ChatStore(":memory:");
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      chat: { accessCode: "weekend-secret", store },
-    });
-    apps.push(app);
-
-    const denied = await app.inject({
-      method: "POST",
-      url: "/v1/chat/session",
-      payload: { name: "Morgan", accessCode: "wrong-secret" },
-    });
-    const signedIn = await app.inject({
-      method: "POST",
-      url: "/v1/chat/session",
-      payload: { name: "Morgan", accessCode: "weekend-secret" },
-    });
-    const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/chat/welcome/messages",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-      payload: {
-        clientMessageId: "10000000-0000-4000-8000-000000000020",
-        body: "Chat hello",
-      },
-    });
-    const history = await app.inject({
-      method: "GET",
-      url: "/v1/chat/welcome/messages",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-    });
-
-    expect(denied.statusCode).toBe(401);
-    expect(signedIn.statusCode).toBe(204);
-    expect(cookie).toBeDefined();
-    expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({ authorName: "Morgan", body: "Chat hello" });
-    expect(history.json()).toMatchObject({ messages: [{ authorName: "Morgan" }] });
-  });
-
-  it("broadcasts messages to authenticated same-origin websocket clients", async () => {
-    const store = new ChatStore(":memory:");
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      chat: { accessCode: "weekend-secret", store },
-    });
-    apps.push(app);
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const signedIn = await app.inject({
-      method: "POST",
-      url: "/v1/chat/session",
-      payload: { name: "Alex", accessCode: "weekend-secret" },
-    });
-    const cookie = signedIn.cookies.find(({ name }) => name === "hmm_chat_session");
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/chat/welcome/realtime`,
-      {
-        headers: { cookie: `hmm_chat_session=${cookie?.value ?? ""}` },
-        origin: "app://bundle",
-      },
-    );
-    await once(socket, "open");
-
-    const messagePromise = once(socket, "message");
-    await app.inject({
-      method: "POST",
-      url: "/v1/chat/welcome/messages",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-      payload: {
-        clientMessageId: "10000000-0000-4000-8000-000000000021",
-        body: "Realtime chat",
-      },
-    });
-    const [data] = await messagePromise;
-    socket.close();
-
-    expect(JSON.parse(data.toString())).toMatchObject({
-      type: "chat.welcome_message_created",
-      message: { authorName: "Alex", body: "Realtime chat" },
-    });
-  });
-});
-
-describe("chat session security", () => {
-  async function signIn(app: Awaited<ReturnType<typeof buildApp>>, name: string, code: string) {
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/chat/session",
-      payload: { name, accessCode: code },
-    });
-    return {
-      response,
-      cookie: response.cookies.find(({ name: cookieName }) => cookieName === "hmm_chat_session"),
-    };
-  }
-
-  it("rejects a cookie signed by a different server secret", async () => {
-    const app = await buildApp({
-      chat: { accessCode: "weekend-secret-code", store: new ChatStore(":memory:") },
-    });
-    const other = await buildApp({
-      chat: { accessCode: "weekend-secret-code", store: new ChatStore(":memory:") },
-    });
-    apps.push(app, other);
-
-    const { cookie } = await signIn(other, "Morgan", "weekend-secret-code");
-    const replayed = await app.inject({
-      method: "GET",
-      url: "/v1/chat/session",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-    });
-
-    expect(cookie).toBeDefined();
-    expect(replayed.statusCode).toBe(401);
-  });
-
-  it("invalidates existing sessions when the access code is rotated", async () => {
-    const store = new ChatStore(":memory:");
-    const before = await buildApp({ chat: { accessCode: "original-access-code", store } });
-    apps.push(before);
-    const { cookie } = await signIn(before, "Morgan", "original-access-code");
-
-    const after = await buildApp({ chat: { accessCode: "rotated-access-code", store } });
-    apps.push(after);
-    const replayed = await after.inject({
-      method: "GET",
-      url: "/v1/chat/session",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-    });
-
-    expect(cookie).toBeDefined();
-    expect(replayed.statusCode).toBe(401);
-  });
-
-  it("reuses the persisted signing key so restarts do not sign users out", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-store-"));
-    const filename = path.join(directory, "chat.sqlite");
-
-    const first = await buildApp({
-      chat: { accessCode: "weekend-secret-code", store: new ChatStore(filename) },
-    });
-    apps.push(first);
-    const { cookie } = await signIn(first, "Morgan", "weekend-secret-code");
-    await first.close();
-
-    const second = await buildApp({
-      chat: { accessCode: "weekend-secret-code", store: new ChatStore(filename) },
-    });
-    apps.push(second);
-    const restored = await second.inject({
-      method: "GET",
-      url: "/v1/chat/session",
-      cookies: { hmm_chat_session: cookie?.value ?? "" },
-    });
-    await rm(directory, { recursive: true, force: true });
-
-    expect(restored.statusCode).toBe(200);
-    expect(restored.json()).toEqual({ name: "Morgan" });
-  });
-
-  it("omits Secure when the deployment is not served over HTTPS", async () => {
-    const secure = await buildApp({
-      cookieSecure: true,
-      chat: {
-        accessCode: "weekend-secret-code",
-        store: new ChatStore(":memory:"),
-      },
-    });
-    const insecure = await buildApp({
-      cookieSecure: false,
-      chat: {
-        accessCode: "weekend-secret-code",
-        store: new ChatStore(":memory:"),
-      },
-    });
-    apps.push(secure, insecure);
-
-    const overHttps = await signIn(secure, "Morgan", "weekend-secret-code");
-    const overHttp = await signIn(insecure, "Morgan", "weekend-secret-code");
-
-    expect(String(overHttps.response.headers["set-cookie"])).toContain("Secure");
-    expect(String(overHttp.response.headers["set-cookie"])).not.toContain("Secure");
-    expect(String(overHttp.response.headers["set-cookie"])).toContain("HttpOnly");
-  });
-
-  it("throttles repeated failed sign-in attempts", async () => {
-    const app = await buildApp({
-      chat: {
-        accessCode: "weekend-secret-code",
-        store: new ChatStore(":memory:"),
-        throttle: new SignInThrottle({ maxFailures: 2, windowMs: 60_000 }),
-      },
-    });
-    apps.push(app);
-
-    const first = await signIn(app, "Morgan", "wrong-access-code");
-    const second = await signIn(app, "Morgan", "wrong-access-code");
-    const blocked = await signIn(app, "Morgan", "wrong-access-code");
-    const correctButBlocked = await signIn(app, "Morgan", "weekend-secret-code");
-
-    expect(first.response.statusCode).toBe(401);
-    expect(second.response.statusCode).toBe(401);
-    expect(blocked.response.statusCode).toBe(429);
-    expect(apiErrorEnvelopeSchema.parse(blocked.response.json()).error.code).toBe("RATE_LIMITED");
-    expect(blocked.response.headers["retry-after"]).toBeDefined();
-    expect(correctButBlocked.response.statusCode).toBe(429);
   });
 });

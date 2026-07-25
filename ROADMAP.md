@@ -35,34 +35,40 @@ Exit gate:
 - The prototype tag can be checked out and the new `main` history contains no Go runtime
   dependency.
 
-## M1 — Private access and hosted vertical slice
+## M1 — Private-access local vertical slice
 
-Deploy an invite-only path from email to an authenticated desktop session.
+Complete an invite-only path from email to an authenticated local desktop session. Hosted
+infrastructure is intentionally deferred until the product path is useful.
 
-- Provision Cloudflare as the public DNS/WAF/TLS edge and AWS for the Fastify service,
-  PostgreSQL, private attachment/update storage, email delivery, keys, secrets, logs, and
-  backups.
+Status: implemented; formal acceptance is recorded in
+[`docs/milestones/m1-signoff.md`](docs/milestones/m1-signoff.md).
+
 - Seed one owner for one workspace. Add owner-managed, email-bound invitations, single-use
   magic links, rotating sessions, logout, device-session revocation, and the 25-active-member
   limit.
+- Run the service against PostgreSQL and keep authenticated networking and credentials in
+  Electron main behind validated IPC.
 - Store access credentials only in the Electron main process; persist refresh credentials
   with `safeStorage` and require an OS credential store.
-- Deliver a minimal authenticated workspace/member view through the production API and
-  realtime connection.
+- Deliver a minimal authenticated workspace/member view through the local API.
 
 Exit gate:
 
-- An owner can invite two fresh addresses, and each person can sign in from a packaged app,
-  restart it, refresh a session, and log out. Expired, reused, revoked, uninvited, and
-  over-capacity attempts fail without leaking account existence.
-- Full-strict TLS works at both network hops; RDS, S3, snapshots, and log storage are
-  encrypted with managed keys; no public database or object bucket exists.
-- Alerts cover API health, authentication failures, database capacity, and email delivery;
-  a point-in-time database restore has been rehearsed in a non-production environment.
+- An owner and member can complete the magic-link path, restart the app, restore a session,
+  and log out. Expired, reused, revoked, uninvited, and over-capacity attempts fail without
+  leaking account existence.
+- PostgreSQL migrations are repeatable and checksum-protected, and authentication remains
+  fail-closed when its dependencies are unavailable.
+- Hosted infrastructure, alerting, disaster recovery, and signed package acceptance remain
+  explicit M4 gates.
 
 ## M2 — Reliable conversation core
 
 Make ordinary text chat dependable before adding breadth.
+
+Status: implementation in progress. The PostgreSQL conversation core, ordered sync, ticketed
+realtime, encrypted IndexedDB cache, and persistent restart-safe outbox are implemented; the
+coordinated two-client cutover acceptance remains to be run.
 
 - Add workspace-visible channels and unique 1:1 direct conversations, recent paginated
   history, and server-authoritative unread/mention counters.
@@ -112,6 +118,9 @@ Exit gate:
 
 Harden, release, and operate the build for real users.
 
+- Provision Cloudflare as the public DNS/WAF/TLS edge and AWS for the Fastify service,
+  PostgreSQL, private attachment/update storage, email delivery, keys, secrets, logs, and
+  backups.
 - Build signed/notarized macOS artifacts for Apple silicon and Intel, signed Windows 11 x64
   installers, and checksum/GPG-signed Linux x64 AppImage and Debian packages.
 - Publish release metadata only from a protected workflow. Require an authenticated update

@@ -1,7 +1,6 @@
-# Single-service deployment for the chat server.
+# PostgreSQL-backed deployment for the authenticated chat server.
 #
-# Copy .env.example to .env and set HMM_CHAT_ACCESS_CODE before starting. The access code is
-# required: compose refuses to start rather than falling back to an insecure default.
+# Copy .env.example to .env and set every required value before starting.
 #
 #   docker compose up --build -d
 #
@@ -28,15 +27,17 @@ services:
       # The desktop client's renderer origins, not the API hostname. The websocket route
       # rejects any Origin not listed here.
       HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
-      HMM_CHAT_ENABLED: "true"
-      HMM_CHAT_ACCESS_CODE: ${HMM_CHAT_ACCESS_CODE:?set HMM_CHAT_ACCESS_CODE in .env}
-      HMM_CHAT_DATA_PATH: /data/hmm-chat.sqlite
-      # Identity storage. Empty by default: the M1 identity model is still being built and the
-      # server registers those features only when this is set. Set it in .env and start Postgres
-      # with `docker compose --profile identity up -d` once identity routes exist.
-      HMM_DATABASE_URL: ${HMM_DATABASE_URL:-}
-    volumes:
-      - chat-data:/data
+      HMM_DATABASE_URL: ${HMM_DATABASE_URL:?set HMM_DATABASE_URL in .env}
+      HMM_DATABASE_POOL_SIZE: ${HMM_DATABASE_POOL_SIZE:-10}
+      HMM_EMAIL_DELIVERY: ${HMM_EMAIL_DELIVERY:-manual}
+      HMM_SMTP_URL: ${HMM_SMTP_URL:-}
+      HMM_EMAIL_FROM: ${HMM_EMAIL_FROM:-}
+      HMM_OWNER_EMAIL: ${HMM_OWNER_EMAIL:-}
+      HMM_WORKSPACE_NAME: ${HMM_WORKSPACE_NAME:-HMM Chat}
+      HMM_WORKSPACE_SLUG: ${HMM_WORKSPACE_SLUG:-hmm-chat}
+    depends_on:
+      postgres:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp
@@ -45,18 +46,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # Not started by a plain `docker compose up`. Bring it up with:
-  #   docker compose --profile identity up -d
   postgres:
     image: postgres:18-alpine
-    profiles: ["identity"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: hmm
-      # Compose interpolates variables for inactive profiles too, so this cannot be marked
-      # required without breaking a plain `docker compose up`. An empty value is safe: the
-      # Postgres image refuses to initialize without a password rather than starting open.
-      POSTGRES_PASSWORD: ${HMM_POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD: ${HMM_POSTGRES_PASSWORD:?set HMM_POSTGRES_PASSWORD in .env}
       POSTGRES_DB: hmm_chat
       # Deterministic collation so index ordering cannot shift under a base-image upgrade.
       POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu"
@@ -70,8 +65,10 @@ services:
       start_period: 20s
     security_opt:
       - no-new-privileges:true
-    # Not published: only the server reaches Postgres, over the compose network.
+    # Loopback publication supports host-side migrations and integration tests without making the
+    # database reachable from the LAN.
+    ports:
+      - "127.0.0.1:${HMM_POSTGRES_BIND_PORT:-5432}:5432"
 
 volumes:
-  chat-data:
   postgres-data:

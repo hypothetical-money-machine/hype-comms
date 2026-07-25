@@ -1,4 +1,3 @@
-import type { Sequence } from "@hmm-chat/contracts";
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
@@ -6,7 +5,6 @@ import { ApiError } from "../../errors.js";
 export interface RealtimePrincipal {
   readonly userId: string;
   readonly workspaceId: string;
-  readonly workspaceSequence: Sequence;
 }
 
 export interface ConsumeRealtimeTicketInput {

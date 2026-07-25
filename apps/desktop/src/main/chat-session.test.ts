@@ -65,11 +65,10 @@ function createSession(request: SessionFetch, cookies = new MemoryCookies()): Ch
 }
 
 describe("ChatSession restore", () => {
-  it("prefers an identity session and removes a competing access-code cookie", async () => {
+  it("restores the invited member identity without exposing its cookie", async () => {
     const requests: string[] = [];
     const cookies = new MemoryCookies();
     cookies.values.set("hmm_session", "identity-cookie");
-    cookies.values.set("hmm_chat_session", "access-cookie");
     const session = createSession(async (url, init) => {
       requests.push(`${init.method} ${url}`);
       if (url.endsWith("/v1/auth/me")) return jsonResponse(CURRENT_USER);
@@ -81,64 +80,31 @@ describe("ChatSession restore", () => {
       method: "email",
       name: "Morgan",
       email: "morgan@example.com",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
     });
     expect(requests).toEqual(["GET https://chat.example/v1/auth/me"]);
-    expect(cookies.removals).toContain("hmm_chat_session");
-    await expect(session.cookieHeader()).resolves.toBe("hmm_session=identity-cookie");
   });
 
-  it("falls back to the access-code session after identity restore is rejected", async () => {
+  it("clears a rejected identity session instead of falling back to shared access", async () => {
     const requests: string[] = [];
     const cookies = new MemoryCookies();
     cookies.values.set("hmm_session", "expired-identity");
-    cookies.values.set("hmm_chat_session", "access-cookie");
     const session = createSession(async (url, init) => {
       requests.push(`${init.method} ${url}`);
-      return url.endsWith("/v1/auth/me")
-        ? jsonResponse({ error: "unauthorized" }, 401)
-        : jsonResponse({ name: "Morgan" });
+      return jsonResponse({ error: "unauthorized" }, 401);
     }, cookies);
 
-    await expect(session.restore()).resolves.toEqual({
-      status: "signed-in",
-      method: "access-code",
-      name: "Morgan",
-    });
-    expect(requests).toEqual([
-      "GET https://chat.example/v1/auth/me",
-      "GET https://chat.example/v1/chat/session",
-    ]);
+    await expect(session.restore()).resolves.toEqual({ status: "signed-out" });
+    expect(requests).toEqual(["GET https://chat.example/v1/auth/me"]);
     expect(cookies.removals).toContain("hmm_session");
-    await expect(session.cookieHeader()).resolves.toBe("hmm_chat_session=access-cookie");
   });
 });
 
-describe("ChatSession credential switching", () => {
-  it("clears identity before posting an access-code sign-in", async () => {
+describe("ChatSession lifecycle", () => {
+  it("exchanges a magic link for the invited member identity", async () => {
     const events: string[] = [];
     const cookies = new MemoryCookies(events);
-    cookies.values.set("hmm_session", "identity-cookie");
-    const session = createSession(async (url, init) => {
-      events.push(`${init.method} ${new URL(url).pathname}`);
-      return emptyResponse();
-    }, cookies);
-
-    await expect(session.signIn({ name: "Morgan", accessCode: "shared" })).resolves.toEqual({
-      status: "signed-in",
-      method: "access-code",
-      name: "Morgan",
-    });
-    expect(events).toEqual([
-      "DELETE /v1/auth/session",
-      "remove hmm_session",
-      "POST /v1/chat/session",
-    ]);
-  });
-
-  it("clears access-code authentication before exchanging a magic link", async () => {
-    const events: string[] = [];
-    const cookies = new MemoryCookies(events);
-    cookies.values.set("hmm_chat_session", "access-cookie");
     const session = createSession(async (url, init) => {
       events.push(`${init.method} ${new URL(url).pathname}`);
       return url.endsWith("/v1/auth/session") ? jsonResponse(CURRENT_USER) : emptyResponse();
@@ -149,40 +115,35 @@ describe("ChatSession credential switching", () => {
       method: "email",
       name: "Morgan",
       email: "morgan@example.com",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
     });
-    expect(events).toEqual([
-      "DELETE /v1/chat/session",
-      "remove hmm_chat_session",
-      "POST /v1/auth/session",
-    ]);
+    expect(events).toEqual(["POST /v1/auth/session"]);
   });
 
-  it("clears both credential cookies on sign-out", async () => {
+  it("clears the identity cookie on sign-out", async () => {
     const cookies = new MemoryCookies();
     cookies.values.set("hmm_session", "identity-cookie");
-    cookies.values.set("hmm_chat_session", "access-cookie");
     const session = createSession(async () => emptyResponse(), cookies);
 
     await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
-    expect(cookies.removals).toEqual(expect.arrayContaining(["hmm_session", "hmm_chat_session"]));
+    expect(cookies.removals).toEqual(["hmm_session"]);
   });
 });
 
 describe("ChatSession magic links", () => {
   it("publishes only a generic, token-free state and error after a failed exchange", async () => {
-    const session = createSession(async (url) =>
-      url.endsWith("/v1/chat/session")
-        ? emptyResponse()
-        : jsonResponse(
-            {
-              error: {
-                code: "UNAUTHORIZED",
-                message: `Rejected ${TOKEN}`,
-                requestId: "request-1",
-              },
-            },
-            401,
-          ),
+    const session = createSession(async () =>
+      jsonResponse(
+        {
+          error: {
+            code: "UNAUTHORIZED",
+            message: `Rejected ${TOKEN}`,
+            requestId: "request-1",
+          },
+        },
+        401,
+      ),
     );
 
     let caught: unknown;

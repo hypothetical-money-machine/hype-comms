@@ -13,7 +13,7 @@ export interface SignInThrottleOptions {
 }
 
 /**
- * Fixed-window throttle for access-code sign-in attempts.
+ * Fixed-window throttle for authentication attempts.
  *
  * Only failures are counted, so a correct code never consumes budget. State is per-process and
  * in-memory: it is deliberately scoped to the single-replica deployment and resets on
