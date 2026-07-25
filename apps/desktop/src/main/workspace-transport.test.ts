@@ -127,7 +127,10 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
 
 describe("WorkspaceTransport bootstrap compatibility", () => {
   it("treats a pre-pagination bootstrap response as one complete conversation page", async () => {
-    const { conversationsNextCursor, conversationsHasMore, ...legacyBootstrap } = BOOTSTRAP_RESPONSE;
+    // A pre-pagination server omitted both conversation-page fields entirely.
+    const legacyBootstrap: Record<string, unknown> = { ...BOOTSTRAP_RESPONSE };
+    delete legacyBootstrap.conversationsNextCursor;
+    delete legacyBootstrap.conversationsHasMore;
     const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
 
     await expect(transport.bootstrap()).resolves.toEqual(BOOTSTRAP_RESPONSE);

@@ -45,14 +45,44 @@ interface SessionCookie {
  */
 type IdentityProbe =
   | { readonly status: "identified"; readonly identity: CurrentUser }
-  /** `401`: the credential may still be recoverable by exactly one rotation. */
+  /** `401`, this endpoint's only credential refusal; one rotation may still recover it. */
   | { readonly status: "expired" }
-  /** `403`: the service rejected the credential outright. */
-  | { readonly status: "rejected" }
   /** The request never completed: offline, no server yet, or the request timeout. */
   | { readonly status: "unreachable" }
-  /** The service answered, but not usefully: `5xx`, an unexpected status, or an invalid body. */
+  /** The service answered, but not usefully: `403`, `5xx`, an odd status, or an invalid body. */
   | { readonly status: "failed" };
+
+/** The credential-preserving state published when no verdict on the credential was reached. */
+type SessionUnavailableState = Extract<ChatSessionState, { status: "session-unavailable" }>;
+
+/**
+ * Whether an unsuccessful response is this service refusing the credential or token that produced
+ * it. Only a `401` is: both the identity endpoint (`requireAuthenticatedIdentity`) and the
+ * magic-link exchange answer `401` when they reject what was supplied. Every other status comes
+ * from somewhere else and a still-valid credential survives it — a `403` from an allowed-origin,
+ * workspace, proxy, or gateway check; a `409` when the workspace is at capacity; a `404` or `405`
+ * from a partial deploy or rollback; a `408` or `429` from a slow or rate-limited edge; any `5xx`.
+ * Discarding the stored credential on one of those would sign a working device out for good.
+ */
+function isCredentialRefusal(status: number): boolean {
+  return status === 401;
+}
+
+/** Neither outcome is a verdict on the credential, so both keep it and invite a retry. */
+function unavailableState(status: "unreachable" | "failed"): SessionUnavailableState {
+  if (status === "unreachable") {
+    return {
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    };
+  }
+  return {
+    status: "session-unavailable",
+    reason: "server_error",
+    message: SESSION_SERVER_ERROR_MESSAGE,
+  };
+}
 
 export interface SessionCookieStore {
   readonly get: (filter: {
@@ -153,28 +183,16 @@ export class ChatSession {
         await this.#scheduleRenewal();
         return this.#state;
       }
-      case "expired":
-      case "rejected": {
-        // The only outcome that discards a stored credential: the service rejected it.
+      case "expired": {
+        // The only outcome that discards a stored credential: the service refused it.
         this.#stopRenewal();
         await this.#clearCookie(IDENTITY_COOKIE_NAME);
         this.#setState({ status: "signed-out" });
         return this.#state;
       }
-      case "unreachable": {
-        this.#setState({
-          status: "session-unavailable",
-          reason: "server_unreachable",
-          message: SESSION_UNREACHABLE_MESSAGE,
-        });
-        return this.#state;
-      }
       default: {
-        this.#setState({
-          status: "session-unavailable",
-          reason: "server_error",
-          message: SESSION_SERVER_ERROR_MESSAGE,
-        });
+        // Unreachable or answering unusably. Neither says the credential is bad, so it stays.
+        this.#setState(unavailableState(probe.status));
         return this.#state;
       }
     }
@@ -190,9 +208,11 @@ export class ChatSession {
       return { status: "unreachable" };
     }
 
-    if (response.status === 401) return { status: "expired" };
-    if (response.status === 403) return { status: "rejected" };
-    if (!response.ok) return { status: "failed" };
+    // `401` is the only refusal this endpoint has (`requireAuthenticatedIdentity`); a `403` here
+    // comes from an origin or gateway check, and every other status is just a failure.
+    if (!response.ok) {
+      return isCredentialRefusal(response.status) ? { status: "expired" } : { status: "failed" };
+    }
 
     let body: unknown;
     try {
@@ -263,18 +283,27 @@ export class ChatSession {
         body: JSON.stringify({ token: parsed.data }),
       });
     } catch {
-      return this.#rejectMagicLink();
+      // Offline or timed out. The link may still be good, and the stored credential certainly is.
+      return this.#failMagicLink("unreachable");
     }
 
     if (!response.ok) {
-      return this.#rejectMagicLink();
+      // Only a refusal of the supplied link discards the credential, and this endpoint refuses one
+      // with a `401`. Every other status refuses the *request*, not the link: a `409` when the
+      // workspace is at capacity, a `404` or `405` mid-deploy or rollback, a `408` or `429` from a
+      // slow or rate-limited edge, a `403` from an origin or gateway check, a `5xx` from the
+      // service. None of them says anything about the credential in the jar, so that one stays.
+      return isCredentialRefusal(response.status)
+        ? this.#rejectMagicLink()
+        : this.#failMagicLink("failed");
     }
 
     let identity: CurrentUser;
     try {
       identity = currentUserSchema.parse(await response.json());
     } catch {
-      return this.#rejectMagicLink();
+      // The exchange may well have succeeded; a body this device cannot read is not a refusal.
+      return this.#failMagicLink("failed");
     }
 
     this.#applySignedIn(identity);
@@ -282,11 +311,22 @@ export class ChatSession {
     return this.#state;
   }
 
+  /** The service refused the link: the only exchange outcome that discards the credential. */
   async #rejectMagicLink(): Promise<never> {
     this.#stopRenewal();
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     this.#setState({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
+  }
+
+  /**
+   * Reports an exchange that reached no verdict. The stored credential and any armed renewal are
+   * left untouched, so a retry can still recover the session this device already had.
+   */
+  #failMagicLink(status: "unreachable" | "failed"): never {
+    const state = unavailableState(status);
+    this.#setState(state);
+    throw new ChatSessionError(state.message);
   }
 
   signOut(): Promise<ChatSessionState> {

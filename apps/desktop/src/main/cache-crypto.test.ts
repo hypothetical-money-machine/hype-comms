@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "
 import os from "node:os";
 import path from "node:path";
 
-import type { CacheEncryptBatchRequest } from "@hmm-chat/contracts";
+import type { CacheEncryptBatchRequest, CacheScope } from "@hmm-chat/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -104,6 +104,20 @@ function record(recordId: string, plaintext: string): CacheEncryptBatchRequest {
   return { items: [{ store: "outbox", recordId, schemaVersion: 1, plaintext }] };
 }
 
+/** A wrapped key file for `keyScope`, exactly as `FakeSafeStorage` would have written it. */
+function storedKeyBytes(keyScope: CacheScope, fill: number): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      apiOrigin: API_ORIGIN,
+      scope: keyScope,
+      keyVersion: 1,
+      dataKey: Buffer.alloc(32, fill).toString("base64url"),
+    }),
+    "utf8",
+  );
+}
+
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
@@ -192,6 +206,49 @@ describe("CacheCrypto", () => {
     await expect(later.initialize(scope)).resolves.toMatchObject({ mode: "persistent" });
   });
 
+  it("never deletes a key file that turns out to hold another member's scope", async () => {
+    const directory = await scratchDirectory();
+    await cryptoIn(directory).initialize(scope);
+    const keyPath = await onlyKeyPath(directory);
+    // Only a truncated-digest collision or a tampered file puts a foreign scope at this path, and
+    // either way the file may be the only copy of that member's key.
+    const foreignBytes = storedKeyBytes(secondScope, 9);
+    await writeFile(keyPath, foreignBytes);
+
+    const reopened = cryptoIn(directory);
+    await expect(reopened.initialize(scope)).resolves.toEqual({
+      mode: "memory_only",
+      scope,
+      reason: "key_unavailable",
+    });
+    expect((await readFile(keyPath)).equals(foreignBytes)).toBe(true);
+  });
+
+  it("never deletes another member's key file when the local cache is reset", async () => {
+    const directory = await scratchDirectory();
+    await cryptoIn(directory).initialize(scope);
+    const keyPath = await onlyKeyPath(directory);
+    const foreignBytes = storedKeyBytes(secondScope, 9);
+    await writeFile(keyPath, foreignBytes);
+
+    const reopened = cryptoIn(directory);
+    await expect(reopened.initialize(scope)).resolves.toMatchObject({
+      mode: "memory_only",
+      reason: "key_unavailable",
+    });
+
+    // `cache:crypto-reset` from the renderer lands here. It must not finish the deletion that the
+    // scope_mismatch above deliberately refused, however often the member resets their cache.
+    await reopened.clear();
+    await reopened.clear();
+
+    expect((await readFile(keyPath)).equals(foreignBytes)).toBe(true);
+    // The reset still leaves this instance with no usable key material of its own.
+    expect(() => reopened.encrypt(record("outbox-1", "no key"))).toThrow(
+      CacheCryptoUnavailableError,
+    );
+  });
+
   it("recovers memory-only when the credential store cannot unwrap the stored key", async () => {
     const directory = await scratchDirectory();
     await cryptoIn(directory).initialize(scope);
@@ -226,16 +283,7 @@ describe("CacheCrypto", () => {
     const cacheDirectory = path.join(directory, "cache");
     await mkdir(cacheDirectory, { recursive: true });
     const legacyPath = path.join(cacheDirectory, LEGACY_KEY_FILE_NAME);
-    const legacyBytes = Buffer.from(
-      JSON.stringify({
-        version: 1,
-        apiOrigin: API_ORIGIN,
-        scope,
-        keyVersion: 1,
-        dataKey: Buffer.alloc(32, 7).toString("base64url"),
-      }),
-      "utf8",
-    );
+    const legacyBytes = storedKeyBytes(scope, 7);
     await writeFile(legacyPath, legacyBytes);
 
     const other = cryptoIn(directory);

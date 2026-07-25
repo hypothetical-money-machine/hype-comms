@@ -166,6 +166,12 @@ export class CacheCrypto {
   readonly #safeStorage: SafeStorageAdapter;
   #dataKey: Buffer | null = null;
   #scope: CacheScope | null = null;
+  /**
+   * Whether the file at the current scope's key path is this scope's own. Only a scope that read or
+   * wrote that file owns it. A `scope_mismatch` found somebody else's key there and deliberately
+   * left it alone, so `clear()` must not finish the deletion `initialize` refused.
+   */
+  #ownsStoredKey = false;
 
   constructor(options: {
     readonly apiOrigin: string;
@@ -183,6 +189,8 @@ export class CacheCrypto {
     if (!this.#isProtectedStorageAvailable()) {
       this.#dataKey = null;
       this.#scope = scope;
+      // Nothing on disk was read or written, so this instance owns no key file.
+      this.#ownsStoredKey = false;
       return { mode: "memory_only", scope, reason: "credential_store_unavailable" };
     }
 
@@ -192,11 +200,19 @@ export class CacheCrypto {
       if (loaded.status === "loaded") return this.#adopt(scope, loaded.key);
     } catch (error) {
       if (!(error instanceof CacheKeyCorruptError)) throw error;
-      // The file at this path only ever holds this scope's key, so discarding it cannot destroy
-      // another member's cache. Report memory-only rather than locking this member out of the app.
-      await rm(keyPath, { force: true }).catch(() => undefined);
+      // Every reason but one describes this scope's own unusable file, and discarding that cannot
+      // destroy another member's cache. A `scope_mismatch` says the opposite — the file holds
+      // somebody else's key, reachable only by a digest collision or tampering — and it may be the
+      // only copy of it, so it is left in place. Either way, report memory-only rather than locking
+      // this member out of the app.
+      if (error.reason !== "scope_mismatch") {
+        await rm(keyPath, { force: true }).catch(() => undefined);
+      }
       this.#dataKey = null;
       this.#scope = scope;
+      // No key of this scope's own is on disk: either it was just discarded, or the file at this
+      // path belongs to another member and must survive a later `clear()`.
+      this.#ownsStoredKey = false;
       return { mode: "memory_only", scope, reason: "key_unavailable" };
     }
 
@@ -212,9 +228,13 @@ export class CacheCrypto {
     this.#dataKey?.fill(0);
     this.#dataKey = null;
     const scope = this.#scope;
+    const ownedStoredKey = this.#ownsStoredKey;
     this.#scope = null;
-    // Only the signed-in scope's key is removed; other members on this OS account keep theirs.
-    if (scope !== null) await rm(this.#scopeKeyPath(scope), { force: true });
+    this.#ownsStoredKey = false;
+    // In-memory key material is always dropped, but only a key file this instance established
+    // ownership of is unlinked: other members on this OS account keep theirs, and a foreign file
+    // left in place by a `scope_mismatch` is never this reset's to destroy.
+    if (scope !== null && ownedStoredKey) await rm(this.#scopeKeyPath(scope), { force: true });
   }
 
   encrypt(input: CacheEncryptBatchRequest): CacheEncryptBatchResponse {
@@ -289,10 +309,16 @@ export class CacheCrypto {
     return { key: this.#dataKey, scope: this.#scope };
   }
 
+  /**
+   * Takes a key as this scope's own. Every caller has just proven the file at this scope's key path
+   * holds this scope's key — loaded from it, migrated into it, or freshly written to it — so this
+   * instance owns that file and `clear()` may remove it.
+   */
   #adopt(scope: CacheScope, key: Buffer): CacheCryptoStatus {
     if (this.#dataKey !== null && this.#dataKey !== key) this.#dataKey.fill(0);
     this.#dataKey = key;
     this.#scope = scope;
+    this.#ownsStoredKey = true;
     return { mode: "persistent", scope, keyVersion: 1 };
   }
 

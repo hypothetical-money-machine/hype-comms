@@ -86,6 +86,12 @@ function rotations(requests: readonly string[]): number {
   return requests.filter((request) => request === `POST ${SESSION_REFRESH_URL}`).length;
 }
 
+/** Anything short of a refusal by the service must leave the stored credential in the jar. */
+function expectPreservedCredential(cookies: MemoryCookies): void {
+  expect(cookies.removals).toEqual([]);
+  expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+}
+
 describe("ChatSession restore", () => {
   it("restores the invited member identity without exposing its cookie", async () => {
     const requests: string[] = [];
@@ -155,6 +161,26 @@ describe("ChatSession restore", () => {
     });
     expect(cookies.removals).toEqual([]);
     expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+  });
+
+  it("keeps the stored credential when an origin or gateway check answers 403", async () => {
+    const requests: string[] = [];
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url, init) => {
+      requests.push(`${init.method} ${url}`);
+      return jsonResponse({ error: "forbidden" }, 403);
+    }, cookies);
+
+    await expect(session.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_error",
+      message: SESSION_SERVER_ERROR_MESSAGE,
+    });
+    // The identity endpoint answers 401 when it refuses a credential, so a 403 is never its
+    // verdict: it comes from the allowed-origin check, a proxy, or a gateway. No rotation is
+    // attempted either, because nothing suggests the credential has lapsed.
+    expect(requests).toEqual([`GET ${CURRENT_USER_URL}`]);
+    expectPreservedCredential(cookies);
   });
 
   it("keeps the stored credential when the device is offline at launch", async () => {
@@ -265,6 +291,125 @@ describe("ChatSession magic links", () => {
     expect(JSON.stringify(session.state)).not.toContain(TOKEN);
     expect(caught instanceof Error ? caught.message : "").not.toContain(TOKEN);
   });
+
+  it("discards the stored credential when the service refuses the link with 401", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async () => jsonResponse({ error: "unauthorized" }, 401),
+      cookies,
+    );
+
+    // The one exchange outcome that is a verdict on the link, and so on the jar.
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
+    expect(session.state).toEqual({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
+    expect(cookies.removals).toEqual(["hmm_session"]);
+  });
+
+  it("keeps the stored credential when the exchange cannot reach the server", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async () => {
+      throw new TypeError("fetch failed");
+    }, cookies);
+
+    // Clicking a sign-in link while offline must not sign an already-signed-in device out.
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+    expect(session.state).toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    });
+    expectPreservedCredential(cookies);
+  });
+
+  it("keeps the stored credential when the exchange fails with a server error", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async () => jsonResponse({ error: "boom" }, 500), cookies);
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+    expect(session.state).toEqual({
+      status: "session-unavailable",
+      reason: "server_error",
+      message: SESSION_SERVER_ERROR_MESSAGE,
+    });
+    expectPreservedCredential(cookies);
+  });
+
+  it("keeps the stored credential when the exchange returns an unparseable body", async () => {
+    const cookies = storedIdentityCookies();
+    // A proxy or gateway notice answered in place of the exchange: not a refusal of the link.
+    const session = createSession(async () => new Response("not json"), cookies);
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+    expect(session.state).toEqual({
+      status: "session-unavailable",
+      reason: "server_error",
+      message: SESSION_SERVER_ERROR_MESSAGE,
+    });
+    expectPreservedCredential(cookies);
+  });
+
+  it("keeps the stored credential when the exchange response fails its schema", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async () => jsonResponse({ user: { id: "not-a-uuid" }, role: "member" }),
+      cookies,
+    );
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+    expect(session.state).toEqual({
+      status: "session-unavailable",
+      reason: "server_error",
+      message: SESSION_SERVER_ERROR_MESSAGE,
+    });
+    expectPreservedCredential(cookies);
+  });
+
+  it("keeps the stored credential when the workspace answers 409 at capacity", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async () =>
+        jsonResponse(
+          {
+            error: {
+              code: "CONFLICT",
+              message: "The workspace is at capacity",
+              requestId: "request-1",
+            },
+          },
+          409,
+        ),
+      cookies,
+    );
+
+    // `POST /v1/auth/session` answers 409 when the workspace is full. That refuses the request,
+    // never the link, so the credential this device already holds is untouched.
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+    expect(session.state).toEqual({
+      status: "session-unavailable",
+      reason: "server_error",
+      message: SESSION_SERVER_ERROR_MESSAGE,
+    });
+    expectPreservedCredential(cookies);
+  });
+
+  // A tunnelled or proxied deployment answers these on the exchange path without the service ever
+  // refusing the link: 404 or 405 during a partial deploy or rollback, 408 or 429 when slow or
+  // rate-limited, 400, 410, or 413 from an edge that rewrote or aged out the request.
+  it.each([400, 404, 405, 408, 410, 413, 429])(
+    "keeps the stored credential when the exchange is refused with %i",
+    async (status) => {
+      const cookies = storedIdentityCookies();
+      const session = createSession(async () => jsonResponse({ error: "nope" }, status), cookies);
+
+      await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
+      expect(session.state).toEqual({
+        status: "session-unavailable",
+        reason: "server_error",
+        message: SESSION_SERVER_ERROR_MESSAGE,
+      });
+      expectPreservedCredential(cookies);
+    },
+  );
 
   it("returns manual administrator delivery as information instead of an error", async () => {
     const session = createSession(async () =>
