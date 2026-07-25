@@ -67,7 +67,7 @@ found the corresponding hole:
 - **Renderer-facing updater errors are an allowlist of three strings**, enforced by a Zod `refine`
   in `packages/contracts/src/update.ts`. Raw electron-updater messages embed feed URLs and local
   paths and must not cross IPC.
-- **`scripts/verify-macos-release.mjs` must keep gating the release.** electron-builder only *warns*
+- **`scripts/verify-macos-release.mjs` must keep gating the release.** electron-builder only _warns_
   when signing or notarization is skipped, so without this a release can go green having shipped an
   unsigned build.
 - Renderer stays unprivileged; every external, IPC, and realtime boundary keeps its strict Zod
