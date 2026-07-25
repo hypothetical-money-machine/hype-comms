@@ -139,9 +139,14 @@ button:disabled {
   opacity: 0.5;
 }
 
+/* The single implicit row is auto-sized, so without an explicit track it grows to
+   the sidebar's and timeline's full content height instead of staying at 100vh.
+   That pushes the composer off-screen and leaves the inner overflow containers
+   with nothing to scroll, since `body` clips the excess. */
 .shell {
   display: grid;
   height: 100vh;
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 68px 284px minmax(0, 1fr);
   background: #0b0f1a;
 }
@@ -446,4 +451,33 @@ button:disabled {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid #2c3960;
+}
+
+/* macOS defaults to overlay scrollbars, which stay invisible until a scroll
+   gesture and leave the sidebar and timeline with no scroll affordance at rest.
+   Styling these pseudo-elements opts Chromium into classic, always-visible bars
+   on every scroll container. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: #30384f;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a435e;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
