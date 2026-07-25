@@ -9,7 +9,15 @@ import {
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
-import type { ConsumeRealtimeTicket, RealtimePrincipal } from "./auth.js";
+import type {
+  ConsumeRealtimeTicket,
+  RealtimePrincipal,
+  RevalidateRealtimePrincipal,
+} from "./auth.js";
+
+/** Close code telling the client to re-authenticate rather than reconnect with a stale session. */
+export const REALTIME_SESSION_REVOKED_CLOSE_CODE = 4401;
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -23,11 +31,13 @@ interface RealtimeRoutesOptions {
   consumeTicket: ConsumeRealtimeTicket;
   loadEvents?: (principal: RealtimePrincipal, after: string) => Promise<SyncResponse>;
   subscribe?: (workspaceId: string, listener: () => void) => () => void;
+  /** Re-checks the device session and membership of an already-connected socket. */
+  revalidate?: RevalidateRealtimePrincipal;
 }
 
 export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
   app,
-  { allowedOrigins, consumeTicket, loadEvents, subscribe },
+  { allowedOrigins, consumeTicket, loadEvents, subscribe, revalidate },
 ) => {
   app.decorateRequest("realtimePrincipal", null);
   app.decorateRequest("realtimeCursor", null);
@@ -155,28 +165,49 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       const unsubscribe = subscribe?.(principal.workspaceId, () => {
         void flush();
       });
+      const revalidatePrincipal = (): void => {
+        if (revalidate === undefined) return;
+        void revalidate(principal).then(
+          (result) => {
+            if (result.status === "valid" || closed || socket.readyState !== 1) return;
+            request.log.warn(
+              { reason: result.reason, userId: principal.userId },
+              "Closing a realtime socket whose session is no longer authorized",
+            );
+            socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
+          },
+          (error: unknown) => {
+            // A transient database failure must not sign a healthy device out.
+            request.log.error({ err: error }, "Realtime session revalidation failed");
+          },
+        );
+      };
+
       const heartbeat = setInterval(() => {
         if (!pongReceived) {
           socket.terminate();
           return;
         }
+        revalidatePrincipal();
         pongReceived = false;
         socket.ping();
-      }, 30_000);
+      }, HEARTBEAT_INTERVAL_MS);
+      heartbeat.unref();
+
+      let tornDown = false;
+      const teardown = (): void => {
+        if (tornDown) return;
+        tornDown = true;
+        closed = true;
+        clearInterval(heartbeat);
+        unsubscribe?.();
+      };
 
       socket.on("pong", () => {
         pongReceived = true;
       });
-      socket.once("close", () => {
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe?.();
-      });
-      socket.once("error", () => {
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe?.();
-      });
+      socket.once("close", teardown);
+      socket.once("error", teardown);
       void flush();
     },
   );
