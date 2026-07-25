@@ -624,17 +624,26 @@ export class IdentityRepository {
     return firstOrNull(result, mapDeviceSession);
   }
 
+  /**
+   * Rotation is also the renewal point of the sliding refresh window: `expiresAt`, when given,
+   * moves the stored expiry forward, and omitting it leaves the expiry untouched. The guard is
+   * evaluated against the pre-update row, so a revoked or already-expired session is still refused
+   * and no renewal can bring one back to life.
+   */
   async rotateDeviceSession(
     previousTokenHash: Buffer,
     nextTokenHash: Buffer,
     lastSeenAt: IsoDateTime,
+    expiresAt?: IsoDateTime,
   ): Promise<RotateDeviceSessionResult> {
     const result = await this.#database.query<DeviceSessionRow>(
       `UPDATE device_sessions
-          SET token_hash = $2, last_seen_at = $3
+          SET token_hash = $2,
+              last_seen_at = $3,
+              expires_at = coalesce($4::timestamptz, expires_at)
         WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $3
         RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
-      [previousTokenHash, nextTokenHash, lastSeenAt],
+      [previousTokenHash, nextTokenHash, lastSeenAt, expiresAt ?? null],
     );
     const session = firstOrNull(result, mapDeviceSession);
     return session === null ? { status: "unavailable" } : { status: "rotated", session };

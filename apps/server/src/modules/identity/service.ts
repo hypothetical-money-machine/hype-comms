@@ -197,8 +197,18 @@ export class IdentityService {
     const session = await this.#repository.findDeviceSessionByTokenHash(previousHash);
     if (session === null || isExpired(session.expiresAt, now)) throw unauthenticated();
 
+    // The refresh credential is a sliding window, not a countdown to a fixed date: every rotation
+    // moves the expiry a full TTL past now, so a device that keeps refreshing never has to redeem
+    // another sign-in link. Rotation still refuses a revoked or already-expired session, so this
+    // cannot revive one, and it stays a 30-day window for a device that goes quiet.
     const next = issueToken();
-    const rotated = await this.#repository.rotateDeviceSession(previousHash, next.hash, iso(now));
+    const renewedExpiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+    const rotated = await this.#repository.rotateDeviceSession(
+      previousHash,
+      next.hash,
+      iso(now),
+      iso(renewedExpiresAt),
+    );
     if (rotated.status !== "rotated" || isExpired(rotated.session.expiresAt, now)) {
       throw unauthenticated();
     }

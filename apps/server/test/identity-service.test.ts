@@ -356,6 +356,91 @@ describeWithPostgres("IdentityService and identity routes", () => {
     });
   });
 
+  it("slides the session expiry on refresh so an active device is never signed out", async () => {
+    await seedOwner();
+    const session = await signIn("owner@example.com");
+    nowMs += 29 * 24 * 60 * 60_000;
+    const renewed = await service.refreshSession(session.token);
+    const renewedAt = nowMs;
+    // Day 31 of this device's life: past the original expiry, two days into the renewed window.
+    nowMs += 2 * 24 * 60 * 60_000;
+
+    expect(Date.parse(session.expiresAt)).toBe(initialNow + 30 * 24 * 60 * 60_000);
+    expect(Date.parse(renewed.expiresAt)).toBe(renewedAt + 30 * 24 * 60 * 60_000);
+    expect(await service.authenticate(renewed.token)).toMatchObject({
+      email: "owner@example.com",
+      role: "owner",
+    });
+    // A second renewal has to slide the window again, or the device only ever buys one extension.
+    await expect(service.refreshSession(renewed.token)).resolves.toMatchObject({
+      expiresAt: new Date(nowMs + 30 * 24 * 60 * 60_000).toISOString(),
+    });
+  });
+
+  it("re-issues the session cookie against the renewed expiry on refresh", async () => {
+    await seedOwner();
+    const session = await signIn("owner@example.com");
+    const app = await buildApp({ cookieSecure: false, identity: { service } });
+    nowMs += 29 * 24 * 60 * 60_000;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/session/refresh",
+      headers: { cookie: `hmm_session=${session.token}` },
+    });
+    await app.close();
+    const cookie = response.cookies.find(({ name }) => name === "hmm_session");
+
+    expect(response.statusCode).toBe(204);
+    expect(cookie?.value).not.toBe(session.token);
+    expect(cookie?.expires?.getTime() ?? 0).toBe(nowMs + 30 * 24 * 60 * 60_000);
+  });
+
+  it("refuses to renew a revoked or already expired session back into a live one", async () => {
+    await seedOwner();
+    const revoked = await signIn("owner@example.com", "127.0.0.1");
+    const stale = await signIn("owner@example.com", "127.0.0.2");
+    const revokedRecord = await repository.findDeviceSessionByTokenHash(hashToken(revoked.token));
+    const staleRecord = await repository.findDeviceSessionByTokenHash(hashToken(stale.token));
+    if (revokedRecord === null || staleRecord === null) throw new Error("Session was not created");
+    await repository.revokeDeviceSession(revokedRecord.id, new Date(nowMs).toISOString());
+
+    await expect(service.refreshSession(revoked.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+    const revokedRotation = await repository.rotateDeviceSession(
+      hashToken(revoked.token),
+      Buffer.alloc(32, 7),
+      new Date(nowMs).toISOString(),
+      new Date(nowMs + 30 * 24 * 60 * 60_000).toISOString(),
+    );
+
+    nowMs += 31 * 24 * 60 * 60_000;
+    await expect(service.refreshSession(stale.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+    const staleRotation = await repository.rotateDeviceSession(
+      hashToken(stale.token),
+      Buffer.alloc(32, 8),
+      new Date(nowMs).toISOString(),
+      new Date(nowMs + 30 * 24 * 60 * 60_000).toISOString(),
+    );
+    const stored = await pool.query<{ expires_at: Date }>(
+      "SELECT expires_at FROM device_sessions ORDER BY id",
+    );
+
+    expect(revokedRotation.status).toBe("unavailable");
+    expect(staleRotation.status).toBe("unavailable");
+    // Neither dead session may have had its window extended by the attempted renewal.
+    expect(stored.rows.map((row) => row.expires_at.toISOString())).toEqual([
+      revokedRecord.expiresAt,
+      staleRecord.expiresAt,
+    ]);
+    expect(await service.authenticate(stale.token)).toBeNull();
+  });
+
   it("routes device listing, refresh, targeted revocation, and sign-out", async () => {
     await seedOwner();
     const first = await signIn("owner@example.com", "127.0.0.1");
