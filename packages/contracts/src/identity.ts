@@ -6,7 +6,7 @@ import { userSchema, workspaceRoleSchema } from "./entities.js";
 /**
  * Email addresses are stored and compared in a single normalized form so that an invitation and a
  * later sign-in for the same person always match. Normalization is lowercasing only: the local
- * part of an address is case-sensitive per RFC 5321, but every provider this pilot targets treats
+ * part of an address is case-sensitive per RFC 5321, but every provider we target treats
  * it case-insensitively, and matching invitations reliably matters more here.
  */
 export const emailSchema = z

@@ -1,25 +1,27 @@
 # Architecture implementation contract
 
-This document is the decision record for the private HMM Chat pilot. It describes the
+This document is the decision record for HMM Chat. It describes the
 target implementation, not the capabilities of the initial repository scaffold. Changes to
 these invariants require a reviewed architecture change and matching contract tests.
 
 ## Product and platform invariants
 
-- There is exactly one hosted workspace and no public registration. One bootstrapped owner
-  invites members by email; the service rejects a 26th active membership.
+- Today there is exactly one hosted workspace and no public registration. One bootstrapped
+  owner invites members by email; the service rejects a 26th active membership.
+  Multi-workspace and open signup are deliberate future changes, not emergent ones.
 - Channels are visible to every active workspace member. Direct conversations contain
   exactly two active members and are unique for that unordered pair. Private channels and
-  group DMs are not pilot features.
+  group DMs are not yet supported.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 x64, and Linux x64
-  AppImage/Debian packages. Electron is the only pilot client.
+  AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
   hint, and a client must be able to rebuild from HTTP APIs without losing its local outbox.
-- The pilot includes channels, 1:1 DMs, one-level threads, emoji reactions, user mentions,
-  unread state, file attachments, message/filename search, and native notifications.
-- Transport and managed storage are encrypted, but the pilot is not end-to-end encrypted.
+- The target feature set is channels, 1:1 DMs, one-level threads, emoji reactions, user
+  mentions, unread state, file attachments, message/filename search, and native
+  notifications.
+- Transport and managed storage are encrypted, but HMM Chat is not end-to-end encrypted.
   The service necessarily processes plaintext for authorization, notifications, malware
   scanning, and search; operators with explicitly granted production access are inside the
   trust boundary.
@@ -28,7 +30,7 @@ these invariants require a reviewed architecture change and matching contract te
   exceed JavaScript's safe integer range.
 - The shared Zod package is the source of truth for HTTP, IPC, and realtime wire shapes.
   Reserved schema values such as `group_direct_message`, `editedAt`, and `deletedAt` do not
-  imply a reachable pilot behavior; the server rejects unsupported operations.
+  imply a reachable behavior today; the server rejects unsupported operations.
 
 ## System shape and trust boundaries
 
@@ -68,20 +70,20 @@ behind an ALB, an encrypted Multi-AZ RDS PostgreSQL instance in private subnets,
 versioned S3 buckets, SES, KMS, Secrets Manager, and CloudWatch. Cloudflare proxies
 API/WebSocket traffic with Full (strict) TLS, WAF, and rate limiting; the origin accepts only
 authenticated Cloudflare/operations traffic. No Redis or separate search cluster is needed
-for a 25-person pilot.
+at the current 25-member scale.
 
 ## Domain and persistence contract
 
-| Aggregate              | Pilot rules                                                                                                                                                                                                                                                                                                            |
+| Aggregate              | Current rules                                                                                                                                                                                                                                                                                                          |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                         |
 | User and membership    | Email is normalized for comparison and unique. A membership is `owner` or `member` and `invited`, `active`, or `revoked`. Capacity counts active memberships transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                        |
 | Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                               |
 | Conversation           | `channel` has a unique normalized slug and is readable by every active member. `direct_message` has a unique sorted pair of member IDs and is readable only by that pair. Archived channels remain readable but reject writes.                                                                                         |
-| Message                | Immutable pilot record with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                    |
+| Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.      |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                       |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                        |
-| Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so the pilot has no read receipts.           |
+| Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.               |
 | Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                           |
 
@@ -179,8 +181,8 @@ email magic links, refresh credentials, presigned object URLs, or file object ke
 The renderer owns a Dexie-backed IndexedDB adapter so the application state layer remains
 browser-portable and avoids native database rebuilds. UI code depends on a typed transport
 interface; its Electron implementation is validated IPC to main, while a future browser
-implementation could supply `fetch`/WebSocket without changing stores or views. The pilot
-does not give the renderer direct production-network access.
+implementation could supply `fetch`/WebSocket without changing stores or views. The
+renderer does not get direct production-network access.
 
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message
@@ -242,7 +244,7 @@ devices is private to that user.
 ## Feature behavior
 
 - Channel names use a unique lowercase hyphenated slug; all active members can create a
-  channel in the pilot, and only the owner can archive it. `general` is provisioned and
+  channel, and only the owner can archive it. `general` is provisioned and
   cannot be archived.
 - Creating a DM is symmetric and returns the existing conversation for the member pair.
   Revoking either member immediately blocks new reads/writes and event delivery to that
@@ -312,12 +314,12 @@ search terms, filenames, email addresses, tokens, URL query strings, event paylo
 presigned URLs. Email addresses may appear only in access-controlled audit records as a
 keyed digest plus an operator-readable value encrypted under a dedicated key.
 
-Messages and ready attachments are retained for the duration of the pilot because editing,
+Messages and ready attachments are retained indefinitely for now because editing,
 deletion, and user-configurable retention are deferred. Sync events expire after 90 days,
 application logs after 30 days, abandoned uploads after 24 hours, and database point-in-time
 recovery/backups after 35 days. Closing the workspace disables access immediately and
 deletes active data and objects within 30 days; encrypted backups age out within the stated
-35-day window. This limitation is disclosed to pilot members.
+35-day window. This limitation is disclosed to members.
 
 ### Deployment and operation
 
@@ -341,7 +343,7 @@ deletes active data and objects within 30 days; encrypted backups age out within
   support signals with request IDs.
 - RDS point-in-time recovery targets an RPO of five minutes and RTO of four hours. Automated
   restore checks run monthly; a documented restore plus attachment-access rehearsal is
-  required before pilot and quarterly thereafter. CloudTrail/audit records cover deploys,
+  required before hosted production and quarterly thereafter. CloudTrail/audit records cover deploys,
   secret/key access, owner invitations/revocations, membership changes, and session
   revocations without recording chat content.
 - Production has a runbook for auth/email failure, database saturation, event lag, malware
@@ -349,8 +351,8 @@ deletes active data and objects within 30 days; encrypted backups age out within
   Dependency and base-image updates are reviewed weekly; critical security releases bypass
   the normal feature cadence.
 
-The pilot service-level objectives are 99.5% monthly API availability, p95 under 500 ms from
-committed message creation to event delivery at pilot load, and p95 under one second for
+The hosted-deployment service-level objectives are 99.5% monthly API availability, p95 under
+500 ms from committed message creation to event delivery at current scale, and p95 under one second for
 search against 100,000 messages, excluding client network time. These are measured at the
 service and reported alongside error rates rather than inferred from anecdotes.
 
@@ -390,10 +392,10 @@ downgrade.
 | PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                  |
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                       |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                 |
-| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before pilot release.                                                                                            |
+| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                         |
 | Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 x64, and Ubuntu 24.04 x64 AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                         |
-| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening the pilot.                                            |
+| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                       |
 
 No release may waive authorization, idempotency/data-loss, artifact-signature, or restore
 tests. Flaky tests are treated as failed gates until fixed or replaced with an equivalent

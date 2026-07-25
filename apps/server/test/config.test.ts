@@ -13,7 +13,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("uses the pilot API and packaged renderer origins in production", () => {
+  it("uses the production API and packaged renderer origins in production", () => {
     expect(
       loadConfig({
         NODE_ENV: "production",

@@ -1,8 +1,8 @@
-# M2 coordinated cutover
+# SQLite-to-PostgreSQL cutover
 
-M2 replaces the access-code/SQLite conversation prototype with the PostgreSQL conversation and
-sync model. The server and desktop are a coordinated cutover: there is no compatibility window
-for the removed `/v1/chat/*` API.
+The PostgreSQL conversation and sync model replaces the access-code/SQLite prototype. The
+server and desktop are a coordinated cutover: there is no compatibility window for the
+removed `/v1/chat/*` API.
 
 ## Before deployment
 
@@ -11,11 +11,11 @@ for the removed `/v1/chat/*` API.
 3. Record its filename, byte size, UTC capture time, and SHA-256 checksum.
 4. Verify that the archive opens read-only, then remove the live SQLite volume only after the
    archive has been independently retained.
-5. Back up PostgreSQL and verify the target has the current M1 migrations.
+5. Back up PostgreSQL and verify the target has the identity/auth migrations already applied.
 
 The SQLite `#welcome` history is not imported. It has no stable per-member identity or
-conversation/event sequence compatible with M2, so inventing a mapping would weaken attribution
-and idempotency guarantees. It remains an external historical archive only.
+conversation/event sequence compatible with the new model, so inventing a mapping would weaken
+attribution and idempotency guarantees. It remains an external historical archive only.
 
 ## Deploy
 
@@ -30,6 +30,6 @@ and idempotency guarantees. It remains an external historical archive only.
 ## Rollback boundary
 
 The migration is forward-only and must not be edited after application. Application rollback is
-safe only to a build that understands the M2 schema and API. The retired SQLite service must not
+safe only to a build that understands the new schema and API. The retired SQLite service must not
 be restarted against new writes; restoration of the old archive is an explicit incident decision,
 not an application rollback.

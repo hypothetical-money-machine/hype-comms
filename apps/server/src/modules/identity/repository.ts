@@ -366,7 +366,7 @@ export class IdentityRepository {
     return result.rows[0] !== undefined;
   }
 
-  async lockPilotIdentity(): Promise<void> {
+  async lockWorkspaceIdentity(): Promise<void> {
     await this.#database.query("SELECT pg_advisory_xact_lock($1::bigint)", ["3247861932147782"]);
   }
 

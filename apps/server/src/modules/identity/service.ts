@@ -267,7 +267,7 @@ export class IdentityService {
 
   async seedOwner(input: SeedOwnerInput): Promise<void> {
     await this.#repository.transaction(async (repository) => {
-      await repository.lockPilotIdentity();
+      await repository.lockWorkspaceIdentity();
       if ((await repository.findWorkspaceBySlug(input.workspaceSlug)) !== null) return;
 
       const user =

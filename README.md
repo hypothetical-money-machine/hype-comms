@@ -1,15 +1,16 @@
 # HMM Chat
 
-HMM Chat is a private, desktop-first team chat for one Hypothetical Money Machine workspace.
-The current implementation combines invited-member magic-link access with a PostgreSQL-backed
+HMM Chat is a private, desktop-first team chat. We build it as our own daily communication
+tool, designed so it can grow into something other small teams can use. The current
+implementation combines invited-member magic-link access with a PostgreSQL-backed
 conversation core, reconnecting realtime delivery, and a restart-safe encrypted desktop outbox.
 
-See [ROADMAP.md](ROADMAP.md) for milestone status,
+See [ROADMAP.md](ROADMAP.md) for status and direction,
 [docs/architecture.md](docs/architecture.md) for the implementation contract, and
-[docs/milestones/m2-cutover.md](docs/milestones/m2-cutover.md) for the SQLite-to-PostgreSQL
+[docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the SQLite-to-PostgreSQL
 cutover boundary.
 
-## Joining the pilot
+## Joining a workspace
 
 If you only want to use HMM Chat, you do not need Docker, PostgreSQL, Node, or a local server.
 Install the desktop build provided by the workspace owner, open it, enter your invited email
@@ -25,7 +26,7 @@ address has not been admitted yet.
 apps/desktop       Electron main, preload, and React renderer
 apps/server        Fastify HTTP/WebSocket service and PostgreSQL migrations
 packages/contracts Strict Zod schemas shared across every wire boundary
-docs               Architecture, milestone sign-offs, and cutover notes
+docs               Architecture and operational notes
 ```
 
 ## Prerequisites for development
@@ -220,7 +221,7 @@ change both together with the deployment rather than letting them drift apart.
 initialised by a different major version will refuse to start, reporting incompatible database
 files. Recreate it with `docker compose down -v` — that discards local development data only.
 
-Desktop packaging remains local until M4:
+Desktop packaging is currently local and unsigned:
 
 ```bash
 npm run package:desktop
@@ -254,7 +255,7 @@ harmless but not free, and is worth collapsing if CI minutes or feedback latency
 
 ## Scope
 
-The pilot is limited to one invited workspace and 25 active members. M2 covers channels, 1:1
-DMs, paginated text history, mentions, unread state, ordered reconnect sync, and restart-safe
-sends. Threads, reactions, attachments, search, notifications, signed releases, and hosted
-production operations remain later milestones.
+The current build serves one invited workspace of at most 25 active members. It covers
+channels, 1:1 DMs, paginated text history, mentions, unread state, ordered reconnect sync,
+and restart-safe sends. Threads, reactions, attachments, search, notifications, signed
+releases, and hosted operations are upcoming work — see [ROADMAP.md](ROADMAP.md).
