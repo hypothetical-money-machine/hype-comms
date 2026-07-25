@@ -10,13 +10,26 @@ export interface RealtimeEventHubOptions {
   readonly reconnectDelaysMs?: readonly number[];
 }
 
+/** Loss bookkeeping for a client `#listen()` has checked out but has not adopted yet. */
+interface PendingListen {
+  lost: boolean;
+  error: unknown;
+}
+
 export class RealtimeEventHub {
   readonly #listeners = new Map<string, Set<() => void>>();
   readonly #reconnectDelaysMs: readonly number[];
+  /**
+   * Clients an in-flight #listen() has checked out but not yet adopted. A loss for a client in here
+   * belongs to that #listen() call, which cleans up once its LISTEN settles.
+   */
+  readonly #pending = new Map<PoolClient, PendingListen>();
   #client: PoolClient | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectAttempt = 0;
   #stopped = false;
+  /** True once LISTEN has succeeded, so a later success is known to be a re-LISTEN. */
+  #hasListened = false;
 
   constructor(
     private readonly pool: Pool,
@@ -57,9 +70,7 @@ export class RealtimeEventHub {
     this.#listeners.clear();
     if (client !== null) {
       await client.query(`UNLISTEN ${CHANNEL}`).catch(() => undefined);
-      client.removeAllListeners("notification");
-      client.removeAllListeners("error");
-      client.removeAllListeners("end");
+      this.#detach(client);
       this.#release(client);
     }
   }
@@ -68,14 +79,61 @@ export class RealtimeEventHub {
   async #listen(): Promise<void> {
     if (this.#client !== null || this.#stopped) return;
     const client = await this.pool.connect();
+    // Supervise the client before writing to it. A checked-out client is no longer covered by the
+    // pool's idle-client error handler, and pg emits `error` from the socket callback *before* the
+    // in-flight query rejects, so attaching these after LISTEN leaves a window where a dying
+    // connection raises ERR_UNHANDLED_ERROR and exits the process. LISTEN is exactly the write
+    // that discovers a recycled half-open socket, so that window is the likely one.
+    // The hub cannot own the client yet, so record it as pending: a loss delivered before adoption
+    // has no adopted client to match, and the loss handler would otherwise drop it on the floor.
+    const pending: PendingListen = { lost: false, error: undefined };
+    this.#pending.set(client, pending);
+    client.on("error", (error: unknown) => {
+      this.#handleClientLoss(client, error);
+    });
+    client.once("end", () => {
+      this.#handleClientLoss(client, new Error("Postgres realtime listener connection ended"));
+    });
+    const isRelisten = this.#hasListened;
     try {
       await client.query(`LISTEN ${CHANNEL}`);
     } catch (error) {
-      this.#release(client);
+      // The client is still pending, so #handleClientLoss only recorded any socket error emitted
+      // above and this catch owns the cleanup. Leaving #client null also keeps a later start() or
+      // reconnect from being turned into a no-op by the idempotence guard.
+      this.#pending.delete(client);
+      this.#detach(client);
+      this.#release(client, error);
       throw error;
     }
+    // Past this point every branch cleans up for itself, so stop the loss handler deferring to us.
+    this.#pending.delete(client);
+    if (pending.lost) {
+      // The connection died between LISTEN resolving and this continuation running: pg emits
+      // `error` from the socket callback, so the loss arrived while the hub still had no client to
+      // compare it against. Adopting a dead client would leave the hub certain it is live, with
+      // subscribers silent and no reconnect scheduled, so take the loss handler's path instead.
+      console.error(
+        "The Postgres realtime listener was lost before the hub could adopt it",
+        pending.error,
+      );
+      this.#detach(client);
+      this.#release(client, pending.error);
+      if (!this.#stopped) this.#scheduleReconnect();
+      return;
+    }
     if (this.#stopped) {
+      this.#detach(client);
       this.#release(client);
+      return;
+    }
+    if (this.#client !== null) {
+      // Two #listen() runs can overlap (start() racing a reconnect tick) and each check out a
+      // client. Whoever adopted first is the live listener; overwriting it would strand it forever,
+      // because the loss handler ignores a client the hub no longer holds. Destroy this spare
+      // rather than hand a connection that still has LISTEN registered back to the pool.
+      this.#detach(client);
+      this.#release(client, new Error("Discarded a redundant Postgres realtime listener"));
       return;
     }
     client.on("notification", (notification) => {
@@ -83,26 +141,52 @@ export class RealtimeEventHub {
       if (workspaceId === undefined) return;
       for (const listener of this.#listeners.get(workspaceId) ?? []) listener();
     });
-    // A checked-out client is no longer covered by the pool's idle-client error handler, so
-    // without these listeners a Postgres restart raises ERR_UNHANDLED_ERROR and exits the process.
-    client.on("error", (error: unknown) => {
-      this.#handleClientLoss(client, error);
-    });
-    client.once("end", () => {
-      this.#handleClientLoss(client, new Error("Postgres realtime listener connection ended"));
-    });
     this.#client = client;
+    this.#hasListened = true;
     this.#reconnectAttempt = 0;
+    if (isRelisten) this.#catchUpSubscribers();
+  }
+
+  /**
+   * Every NOTIFY raised while the listener was down went to nobody, and each socket still believes
+   * it is live. Wake every subscriber once so it re-runs its HTTP flush and catches up; one failing
+   * subscriber must not strand the others.
+   */
+  #catchUpSubscribers(): void {
+    for (const listeners of this.#listeners.values()) {
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch (error) {
+          console.error("A realtime subscriber failed to catch up after a listener restart", error);
+        }
+      }
+    }
+  }
+
+  /** Stop a released or replaced client from calling back into the hub. */
+  #detach(client: PoolClient): void {
+    client.removeAllListeners("notification");
+    client.removeAllListeners("error");
+    client.removeAllListeners("end");
   }
 
   #handleClientLoss(client: PoolClient, error: unknown): void {
+    const pending = this.#pending.get(client);
+    if (pending !== undefined) {
+      // #listen() has not adopted this client yet and its LISTEN is still settling. Record the
+      // first loss and let that call release the client, so neither side releases it twice.
+      if (!pending.lost) {
+        pending.lost = true;
+        pending.error = error;
+      }
+      return;
+    }
     // Ignore losses for a client we already replaced or released in close().
     if (this.#client !== client) return;
     this.#client = null;
     console.error("Unexpected error from the Postgres realtime listener", error);
-    client.removeAllListeners("notification");
-    client.removeAllListeners("error");
-    client.removeAllListeners("end");
+    this.#detach(client);
     this.#release(client, error);
     if (this.#stopped) return;
     this.#scheduleReconnect();
