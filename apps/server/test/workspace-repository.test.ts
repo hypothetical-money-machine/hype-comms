@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
-import type { CurrentUser, SendConversationMessageRequest } from "@hmm-chat/contracts";
+import {
+  CONVERSATION_PAGE_DEFAULT_LIMIT,
+  CONVERSATION_PAGE_MAX_LIMIT,
+  type CurrentUser,
+  type SendConversationMessageRequest,
+} from "@hmm-chat/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
+import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 
 const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
@@ -56,6 +62,17 @@ function identity(user: CurrentUser, sessionId = randomUUID()): AuthenticatedIde
 const owner = identity(currentUser(ownerId, "owner", "Owner", "owner"), ownerSessionId);
 const member = identity(currentUser(memberId, "member", "Member", "member"));
 const observer = identity(currentUser(observerId, "observer", "Observer", "member"));
+
+const ownerPrincipal: RealtimePrincipal = {
+  userId: ownerId,
+  workspaceId,
+  deviceSessionId: ownerSessionId,
+};
+
+/** The wire form of a conversation keyset cursor, so tests can page from an arbitrary anchor. */
+function conversationCursor(conversationId: string): string {
+  return Buffer.from(JSON.stringify({ id: conversationId }), "utf8").toString("base64url");
+}
 
 function message(clientMessageId: string, body = "hello @member"): SendConversationMessageRequest {
   return {
@@ -130,20 +147,57 @@ describeWithPostgres("WorkspaceRepository", () => {
     await adminPool.end();
   });
 
+  async function seedChannels(count: number): Promise<void> {
+    const ids = Array.from({ length: count }, () => randomUUID());
+    const labels = ids.map((_, index) => String(index + 1).padStart(4, "0"));
+    await pool.query(
+      `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
+       SELECT seed.id, $2, 'channel', seed.name, seed.slug, $5
+         FROM unnest($1::uuid[], $3::text[], $4::text[]) AS seed(id, name, slug)`,
+      [
+        ids,
+        workspaceId,
+        labels.map((label) => `Channel ${label}`),
+        labels.map((label) => `channel-${label}`),
+        ownerId,
+      ],
+    );
+  }
+
+  /** The order the repository promises, computed independently of the paging implementation. */
+  async function orderedConversationIds(): Promise<string[]> {
+    const result = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM conversations
+        WHERE workspace_id = $1
+        ORDER BY kind, lower(coalesce(name, '')), created_at, id`,
+      [workspaceId],
+    );
+    return result.rows.map((row) => row.id);
+  }
+
   it("boots into #general and tracks unread mentions and read cursors", async () => {
     const bootstrap = await repository.bootstrap(owner);
     expect(bootstrap.conversations).toHaveLength(1);
     expect(bootstrap.conversations[0]?.conversation.slug).toBe("general");
 
     const sent = await repository.sendMessage(owner, generalId, message(randomUUID()));
-    const memberView = await repository.listConversations(member);
+    const memberView = await repository.listConversations(
+      member,
+      undefined,
+      CONVERSATION_PAGE_DEFAULT_LIMIT,
+    );
     expect(memberView.conversations[0]).toMatchObject({
       unreadCount: 1,
       mentionCount: 1,
     });
 
     await repository.advanceReadCursor(member, generalId, sent.message.id);
-    const readView = await repository.listConversations(member);
+    const readView = await repository.listConversations(
+      member,
+      undefined,
+      CONVERSATION_PAGE_DEFAULT_LIMIT,
+    );
     expect(readView.conversations[0]).toMatchObject({
       unreadCount: 0,
       mentionCount: 0,
@@ -195,5 +249,136 @@ describeWithPostgres("WorkspaceRepository", () => {
       deviceSessionId: ownerSessionId,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+  });
+
+  it("bootstraps one bounded page past the response cap and pages every conversation exactly once", async () => {
+    // One more conversation than a response may carry: before pagination this made
+    // workspaceBootstrapResponseSchema.parse throw, which the error handler mapped to 500.
+    await seedChannels(CONVERSATION_PAGE_MAX_LIMIT);
+    const expectedIds = await orderedConversationIds();
+    expect(expectedIds.length).toBe(CONVERSATION_PAGE_MAX_LIMIT + 1);
+
+    const bootstrap = await repository.bootstrap(owner);
+    expect(bootstrap.conversations).toHaveLength(CONVERSATION_PAGE_DEFAULT_LIMIT);
+    expect(bootstrap.conversationsHasMore).toBe(true);
+    expect(bootstrap.conversationsNextCursor).not.toBeNull();
+
+    const walked = bootstrap.conversations.map((summary) => summary.conversation.id);
+    let cursor = bootstrap.conversationsNextCursor;
+    let pages = 0;
+    while (cursor !== null) {
+      pages += 1;
+      expect(pages).toBeLessThanOrEqual(expectedIds.length);
+      const page = await repository.listConversations(
+        owner,
+        cursor,
+        CONVERSATION_PAGE_DEFAULT_LIMIT,
+      );
+      // A handed-out cursor must always lead to progress, never to an empty page.
+      expect(page.conversations.length).toBeGreaterThan(0);
+      expect(page.conversations.length).toBeLessThanOrEqual(CONVERSATION_PAGE_DEFAULT_LIMIT);
+      expect(page.hasMore).toBe(page.nextCursor !== null);
+      walked.push(...page.conversations.map((summary) => summary.conversation.id));
+      cursor = page.nextCursor;
+    }
+
+    expect(walked).toEqual(expectedIds);
+    expect(new Set(walked).size).toBe(walked.length);
+  }, 120_000);
+
+  it("stops conversation paging at an exact page boundary and on an empty trailing page", async () => {
+    await seedChannels(3);
+    const expectedIds = await orderedConversationIds();
+    expect(expectedIds).toHaveLength(4);
+
+    const exact = await repository.listConversations(owner, undefined, 4);
+    expect(exact.conversations.map((summary) => summary.conversation.id)).toEqual(expectedIds);
+    expect(exact.hasMore).toBe(false);
+    expect(exact.nextCursor).toBeNull();
+
+    const first = await repository.listConversations(owner, undefined, 2);
+    expect(first.conversations.map((summary) => summary.conversation.id)).toEqual(
+      expectedIds.slice(0, 2),
+    );
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await repository.listConversations(owner, first.nextCursor ?? undefined, 2);
+    expect(second.conversations.map((summary) => summary.conversation.id)).toEqual(
+      expectedIds.slice(2),
+    );
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeNull();
+
+    const lastId = expectedIds.at(-1);
+    if (lastId === undefined) throw new Error("Expected a seeded conversation");
+    const beyond = await repository.listConversations(owner, conversationCursor(lastId), 4);
+    expect(beyond.conversations).toEqual([]);
+    expect(beyond.hasMore).toBe(false);
+    expect(beyond.nextCursor).toBeNull();
+
+    const historyShapedCursor = Buffer.from(JSON.stringify({ sequence: "1" }), "utf8").toString(
+      "base64url",
+    );
+    const rejected = repository.listConversations(owner, historyShapedCursor, 4);
+    await expect(rejected).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+    } satisfies Partial<ApiError>);
+  });
+
+  it("revalidates a live realtime principal and rejects an unknown device session", async () => {
+    await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+      status: "valid",
+    });
+    await expect(
+      repository.revalidateRealtimePrincipal({
+        ...ownerPrincipal,
+        deviceSessionId: randomUUID(),
+      }),
+    ).resolves.toEqual({ status: "invalid", reason: "unknown_session" });
+    // Revalidation is read-only: the session must survive being checked.
+    expect(
+      (await pool.query("SELECT id FROM device_sessions WHERE revoked_at IS NULL")).rowCount,
+    ).toBe(1);
+  });
+
+  it("invalidates a realtime principal whose device session was revoked", async () => {
+    await pool.query(`UPDATE device_sessions SET revoked_at = clock_timestamp() WHERE id = $1`, [
+      ownerSessionId,
+    ]);
+    await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+      status: "invalid",
+      reason: "session_revoked",
+    });
+  });
+
+  it("invalidates a realtime principal whose device session expired", async () => {
+    await pool.query(
+      `UPDATE device_sessions
+          SET expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [ownerSessionId],
+    );
+    await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+      status: "invalid",
+      reason: "session_expired",
+    });
+  });
+
+  it("invalidates a realtime principal whose membership is no longer active", async () => {
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'revoked'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+    await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+      status: "invalid",
+      reason: "membership_inactive",
+    });
+    await expect(
+      repository.revalidateRealtimePrincipal({ ...ownerPrincipal, workspaceId: randomUUID() }),
+    ).resolves.toEqual({ status: "invalid", reason: "membership_inactive" });
   });
 });

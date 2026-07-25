@@ -86,6 +86,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           return {
             userId: principal.userId,
             workspaceId: principal.workspaceId,
+            deviceSessionId: principal.deviceSessionId,
           };
         };
   await app.register(
@@ -101,6 +102,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
                 options.workspace!.repository.syncPrincipal(principal, after, 100),
               subscribe: (workspaceId, listener) =>
                 options.workspace!.realtimeHub.subscribe(workspaceId, listener),
+              revalidate: (principal) =>
+                options.workspace!.repository.revalidateRealtimePrincipal(principal),
             }),
       });
       if (options.identity !== undefined) {

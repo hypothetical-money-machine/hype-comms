@@ -4,6 +4,7 @@ import {
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
+  listConversationsQuerySchema,
   messageHistoryQuerySchema,
   sendConversationMessageRequestSchema,
   syncQuerySchema,
@@ -44,7 +45,9 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/conversations", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    return repository.listConversations(identity);
+    const query = listConversationsQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
+    return repository.listConversations(identity, query.data.after, query.data.limit);
   });
 
   app.post("/channels", async (request, reply) => {

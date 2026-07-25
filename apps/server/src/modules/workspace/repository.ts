@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  CONVERSATION_PAGE_DEFAULT_LIMIT,
+  CONVERSATION_PAGE_MAX_LIMIT,
   advanceReadCursorResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
@@ -37,9 +39,11 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
+import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface WorkspaceRow extends QueryResultRow {
   id: string;
@@ -119,6 +123,19 @@ interface TicketRow extends QueryResultRow {
   workspace_id: string;
   user_id: string;
   device_session_id: string;
+}
+
+interface RealtimeSessionRow extends QueryResultRow {
+  revoked: boolean;
+  expired: boolean;
+  membership_inactive: boolean;
+}
+
+/** One bounded page of conversation summaries plus the keyset cursor that follows it. */
+interface ConversationPage {
+  readonly conversations: ConversationSummary[];
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
 }
 
 export interface ConsumedRealtimeTicket {
@@ -235,6 +252,34 @@ function decodeHistoryCursor(cursor: string | undefined): string | null {
   }
 }
 
+function encodeConversationCursor(conversationId: string): string {
+  return Buffer.from(JSON.stringify({ id: conversationId }), "utf8").toString("base64url");
+}
+
+/**
+ * Decode the opaque keyset cursor back into the anchor conversation id. A cursor that does not
+ * carry a conversation id is a client error, not a server fault, so it is rejected with 400
+ * instead of failing the whole listing.
+ */
+function decodeConversationCursor(cursor: string | undefined): string | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("id" in parsed) ||
+      typeof parsed.id !== "string" ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      throw new Error("Invalid cursor");
+    }
+    return parsed.id;
+  } catch {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid conversation cursor");
+  }
+}
+
 function fingerprintMessage(conversationId: string, input: SendConversationMessageRequest): Buffer {
   return createHash("sha256")
     .update(
@@ -275,12 +320,21 @@ export class WorkspaceRepository {
       const workspace = workspaceResult.rows[0];
       if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
       const members = await this.#members(client, workspace.id);
-      const conversations = await this.#conversationSummaries(client, identity);
+      // Bootstrap only ever carries the first page; the client pages the rest through
+      // GET /v1/conversations, so a workspace can grow past the response cap without bricking.
+      const page = await this.#conversationSummaries(
+        client,
+        identity,
+        null,
+        CONVERSATION_PAGE_DEFAULT_LIMIT,
+      );
       return workspaceBootstrapResponseSchema.parse({
         currentUser: identity.currentUser,
         workspace: mapWorkspace(workspace),
         members,
-        conversations,
+        conversations: page.conversations,
+        conversationsNextCursor: page.nextCursor,
+        conversationsHasMore: page.hasMore,
         syncCursor: workspace.last_event_sequence,
         featureFlags: {
           channels: true,
@@ -304,11 +358,19 @@ export class WorkspaceRepository {
     }
   }
 
-  async listConversations(identity: AuthenticatedIdentity): Promise<ListConversationsResponse> {
+  async listConversations(
+    identity: AuthenticatedIdentity,
+    after: string | undefined,
+    limit: number,
+  ): Promise<ListConversationsResponse> {
+    const anchorId = decodeConversationCursor(after);
     const client = await this.pool.connect();
     try {
+      const page = await this.#conversationSummaries(client, identity, anchorId, limit);
       return listConversationsResponseSchema.parse({
-        conversations: await this.#conversationSummaries(client, identity),
+        conversations: page.conversations,
+        nextCursor: page.nextCursor,
+        hasMore: page.hasMore,
       });
     } finally {
       client.release();
@@ -793,6 +855,36 @@ export class WorkspaceRepository {
         };
   }
 
+  /**
+   * Re-check a live realtime connection's device session and workspace membership.
+   *
+   * This is a read-only counterpart to {@link consumeRealtimeTicket}: it consumes nothing and
+   * mutates nothing, so the realtime heartbeat can call it repeatedly. A socket authorized
+   * minutes ago must not outlive a revoked session, an expired session, or a revoked membership.
+   */
+  async revalidateRealtimePrincipal(
+    principal: RealtimePrincipal,
+  ): Promise<RealtimePrincipalRevalidation> {
+    const result = await this.pool.query<RealtimeSessionRow>(
+      `SELECT session.revoked_at IS NOT NULL AS revoked,
+              session.expires_at <= clock_timestamp() AS expired,
+              coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
+         FROM device_sessions AS session
+         LEFT JOIN workspace_memberships AS membership
+           ON membership.user_id = session.user_id
+          AND membership.workspace_id = $2
+        WHERE session.id = $1
+          AND session.user_id = $3`,
+      [principal.deviceSessionId, principal.workspaceId, principal.userId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return { status: "invalid", reason: "unknown_session" };
+    if (row.revoked) return { status: "invalid", reason: "session_revoked" };
+    if (row.expired) return { status: "invalid", reason: "session_expired" };
+    if (row.membership_inactive) return { status: "invalid", reason: "membership_inactive" };
+    return { status: "valid" };
+  }
+
   async deleteExpiredState(): Promise<void> {
     await this.pool.query(
       `DELETE FROM sync_events
@@ -820,10 +912,26 @@ export class WorkspaceRepository {
     return result.rows.map(mapUser);
   }
 
+  /**
+   * One page of the member's visible conversations.
+   *
+   * The listing is keyset-paginated over the existing deterministic ordering
+   * `(kind, lower(coalesce(name, '')), created_at, id)`. Because that tuple ends in the primary
+   * key it is a total order, so the row-value comparison against the anchor row walks every
+   * conversation exactly once with no duplicates and no skips. `LIMIT pageLimit + 1` is what
+   * detects a further page, and bounding the page is also what bounds the per-conversation summary
+   * queries below.
+   *
+   * The page size is clamped to the contract's maximum as well as validated at the route, so no
+   * caller can ever produce a response too large for its own schema to accept.
+   */
   async #conversationSummaries(
     client: PoolClient,
     identity: AuthenticatedIdentity,
-  ): Promise<ConversationSummary[]> {
+    after: string | null,
+    limit: number,
+  ): Promise<ConversationPage> {
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
     const result = await client.query<ConversationRow>(
       `SELECT *
          FROM conversations
@@ -833,14 +941,34 @@ export class WorkspaceRepository {
             OR dm_user_low_id = $2
             OR dm_user_high_id = $2
           )
-        ORDER BY kind, lower(coalesce(name, '')), created_at, id`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id],
+          AND (
+            $3::uuid IS NULL
+            OR (kind, lower(coalesce(name, '')), created_at, id) >
+               (
+                 SELECT anchor.kind,
+                        lower(coalesce(anchor.name, '')),
+                        anchor.created_at,
+                        anchor.id
+                   FROM conversations AS anchor
+                  WHERE anchor.id = $3::uuid
+                    AND anchor.workspace_id = $1
+               )
+          )
+        ORDER BY kind, lower(coalesce(name, '')), created_at, id
+        LIMIT $4`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id, after, pageLimit + 1],
     );
+    const rows = result.rows.slice(0, pageLimit);
     const summaries: ConversationSummary[] = [];
-    for (const row of result.rows) {
+    for (const row of rows) {
       summaries.push(await this.#conversationSummary(client, identity, row));
     }
-    return summaries;
+    const last = rows.at(-1);
+    const nextCursor =
+      result.rows.length > pageLimit && last !== undefined
+        ? encodeConversationCursor(last.id)
+        : null;
+    return { conversations: summaries, nextCursor, hasMore: nextCursor !== null };
   }
 
   async #conversationSummary(
