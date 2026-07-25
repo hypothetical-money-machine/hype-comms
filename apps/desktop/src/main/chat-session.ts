@@ -5,6 +5,7 @@ import {
   magicLinkTokenSchema,
   requestMagicLinkSchema,
   type ChatSessionState,
+  type CurrentUser,
   type MagicLinkDeliveryState,
   type MagicLinkToken,
 } from "@hmm-chat/contracts";
@@ -17,12 +18,41 @@ import {
 
 const IDENTITY_COOKIE_NAME = "hmm_session";
 const REQUEST_TIMEOUT_MS = 10_000;
+/** Renew a day before the stored credential lapses, so a slow or offline device still recovers. */
+const RENEWAL_MARGIN_MS = 24 * 60 * 60 * 1000;
+/** Also keeps every armed delay far below the platform timer ceiling. */
+const RENEWAL_MAX_DELAY_MS = 12 * 60 * 60 * 1000;
+const RENEWAL_MIN_DELAY_MS = 60_000;
+const RENEWAL_RETRY_DELAY_MS = 5 * 60_000;
+const RENEWAL_MAX_RETRY_DELAY_MS = 60 * 60_000;
+
 export const INVALID_MAGIC_LINK_MESSAGE = "This sign-in link is invalid or has expired";
+export const SESSION_UNREACHABLE_MESSAGE =
+  "Could not reach the chat server. Your session is preserved.";
+export const SESSION_SERVER_ERROR_MESSAGE =
+  "The chat server is not responding correctly. Your session is preserved.";
 
 interface SessionCookie {
   readonly name: string;
   readonly value: string;
+  /** Seconds since the epoch, as Electron reports cookie expiry. Absent for session cookies. */
+  readonly expirationDate?: number;
 }
+
+/**
+ * Outcome of a single `GET /v1/auth/me` probe. Only an authentication rejection may discard the
+ * stored credential; every other outcome leaves the device session intact.
+ */
+type IdentityProbe =
+  | { readonly status: "identified"; readonly identity: CurrentUser }
+  /** `401`: the credential may still be recoverable by exactly one rotation. */
+  | { readonly status: "expired" }
+  /** `403`: the service rejected the credential outright. */
+  | { readonly status: "rejected" }
+  /** The request never completed: offline, no server yet, or the request timeout. */
+  | { readonly status: "unreachable" }
+  /** The service answered, but not usefully: `5xx`, an unexpected status, or an invalid body. */
+  | { readonly status: "failed" };
 
 export interface SessionCookieStore {
   readonly get: (filter: {
@@ -59,17 +89,21 @@ export class ChatSession {
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
   readonly #identitySessionUrl: string;
+  readonly #sessionRefreshUrl: string;
   readonly #currentUserUrl: string;
   readonly #magicLinkUrl: string;
   readonly #listeners = new Set<(state: ChatSessionState) => void>();
   #mutation: Promise<void> = Promise.resolve();
   #state: ChatSessionState = { status: "signed-out" };
+  #renewalTimer: ReturnType<typeof setTimeout> | null = null;
+  #renewalFailures = 0;
 
   constructor(options: { apiOrigin: string; cookies: SessionCookieStore; request: SessionFetch }) {
     this.#apiOrigin = options.apiOrigin;
     this.#cookies = options.cookies;
     this.#request = options.request;
     this.#identitySessionUrl = createIdentitySessionUrl(options.apiOrigin);
+    this.#sessionRefreshUrl = new URL("/v1/auth/session/refresh", options.apiOrigin).href;
     this.#currentUserUrl = createCurrentUserUrl(options.apiOrigin);
     this.#magicLinkUrl = createMagicLinkUrl(options.apiOrigin);
   }
@@ -107,27 +141,81 @@ export class ChatSession {
   }
 
   async #restore(): Promise<ChatSessionState> {
-    try {
-      const identityResponse = await this.#fetch(this.#currentUserUrl, { method: "GET" });
-      if (identityResponse.ok) {
-        const identity = currentUserSchema.parse(await identityResponse.json());
+    let probe = await this.#probeIdentity();
+    // A `401` gets exactly one credential rotation before this device pauses for login.
+    if (probe.status === "expired" && (await this.#rotateSession())) {
+      probe = await this.#probeIdentity();
+    }
+
+    switch (probe.status) {
+      case "identified": {
+        this.#applySignedIn(probe.identity);
+        await this.#scheduleRenewal();
+        return this.#state;
+      }
+      case "expired":
+      case "rejected": {
+        // The only outcome that discards a stored credential: the service rejected it.
+        this.#stopRenewal();
+        await this.#clearCookie(IDENTITY_COOKIE_NAME);
+        this.#setState({ status: "signed-out" });
+        return this.#state;
+      }
+      case "unreachable": {
         this.#setState({
-          status: "signed-in",
-          method: "email",
-          name: identity.user.displayName,
-          email: identity.email,
-          userId: identity.user.id,
-          workspaceId: identity.workspaceId,
+          status: "session-unavailable",
+          reason: "server_unreachable",
+          message: SESSION_UNREACHABLE_MESSAGE,
         });
         return this.#state;
       }
+      default: {
+        this.#setState({
+          status: "session-unavailable",
+          reason: "server_error",
+          message: SESSION_SERVER_ERROR_MESSAGE,
+        });
+        return this.#state;
+      }
+    }
+  }
+
+  /** Reads the signed-in identity without ever letting a transient failure look like a sign-out. */
+  async #probeIdentity(): Promise<IdentityProbe> {
+    let response: Response;
+    try {
+      response = await this.#fetch(this.#currentUserUrl, { method: "GET" });
     } catch {
-      // Stay signed out when the stored credential cannot be restored.
+      // Offline, a server that is not listening yet, or the request timeout aborting.
+      return { status: "unreachable" };
     }
 
-    await this.#clearCookie(IDENTITY_COOKIE_NAME);
-    this.#setState({ status: "signed-out" });
-    return this.#state;
+    if (response.status === 401) return { status: "expired" };
+    if (response.status === 403) return { status: "rejected" };
+    if (!response.ok) return { status: "failed" };
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return { status: "failed" };
+    }
+
+    const identity = currentUserSchema.safeParse(body);
+    return identity.success
+      ? { status: "identified", identity: identity.data }
+      : { status: "failed" };
+  }
+
+  #applySignedIn(identity: CurrentUser): void {
+    this.#setState({
+      status: "signed-in",
+      method: "email",
+      name: identity.user.displayName,
+      email: identity.email,
+      userId: identity.user.id,
+      workspaceId: identity.workspaceId,
+    });
   }
 
   async requestMagicLink(input: { email: string }): Promise<MagicLinkDeliveryState> {
@@ -182,23 +270,20 @@ export class ChatSession {
       return this.#rejectMagicLink();
     }
 
+    let identity: CurrentUser;
     try {
-      const identity = currentUserSchema.parse(await response.json());
-      this.#setState({
-        status: "signed-in",
-        method: "email",
-        name: identity.user.displayName,
-        email: identity.email,
-        userId: identity.user.id,
-        workspaceId: identity.workspaceId,
-      });
-      return this.#state;
+      identity = currentUserSchema.parse(await response.json());
     } catch {
       return this.#rejectMagicLink();
     }
+
+    this.#applySignedIn(identity);
+    await this.#scheduleRenewal();
+    return this.#state;
   }
 
   async #rejectMagicLink(): Promise<never> {
+    this.#stopRenewal();
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     this.#setState({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
@@ -209,10 +294,96 @@ export class ChatSession {
   }
 
   async #signOut(): Promise<ChatSessionState> {
+    this.#stopRenewal();
     await this.#deleteSession(this.#identitySessionUrl);
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     this.#setState({ status: "signed-out" });
     return this.#state;
+  }
+
+  /**
+   * Rotates the stored credential before it expires. Each rotation slides the 30-day window
+   * forward, so an actively used device is never signed out mid-use. Serialized on the same
+   * mutation chain as restore, exchange, and sign-out.
+   */
+  renewSession(): Promise<void> {
+    return this.#runMutation(() => this.#renewSession());
+  }
+
+  async #renewSession(): Promise<void> {
+    if (this.#state.status === "signed-out") {
+      this.#stopRenewal();
+      return;
+    }
+
+    if (await this.#rotateSession()) {
+      this.#renewalFailures = 0;
+      await this.#scheduleRenewal();
+      return;
+    }
+
+    // A failed renewal is never an escalation: the credential stays in the jar and we try again.
+    // A credential the service has genuinely rejected is discarded by the next authenticated
+    // request instead (`markSignedOut`) or by the next restore.
+    this.#renewalFailures += 1;
+    const backoff = RENEWAL_RETRY_DELAY_MS * 2 ** (this.#renewalFailures - 1);
+    this.#armRenewal(Math.min(backoff, RENEWAL_MAX_RETRY_DELAY_MS));
+  }
+
+  /** Performs one credential rotation. Returns false when it could not be completed. */
+  async #rotateSession(): Promise<boolean> {
+    try {
+      const response = await this.#fetch(this.#sessionRefreshUrl, { method: "POST" });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async #scheduleRenewal(): Promise<void> {
+    const expiresAt = await this.#readIdentityExpiry();
+    this.#armRenewal(
+      expiresAt === null ? RENEWAL_MAX_DELAY_MS : expiresAt - RENEWAL_MARGIN_MS - Date.now(),
+    );
+  }
+
+  #armRenewal(delayMs: number): void {
+    this.#stopRenewal();
+    const delay = Math.min(Math.max(delayMs, RENEWAL_MIN_DELAY_MS), RENEWAL_MAX_DELAY_MS);
+    const timer = setTimeout(() => {
+      this.#renewalTimer = null;
+      void this.renewSession();
+    }, delay);
+    // A pending renewal must never hold the Electron main process open at quit.
+    timer.unref?.();
+    this.#renewalTimer = timer;
+  }
+
+  /** Cancels any pending renewal. Safe to call repeatedly; also the teardown entry point. */
+  stop(): void {
+    this.#stopRenewal();
+  }
+
+  #stopRenewal(): void {
+    if (this.#renewalTimer !== null) {
+      clearTimeout(this.#renewalTimer);
+      this.#renewalTimer = null;
+    }
+  }
+
+  /** Milliseconds since the epoch at which the stored credential lapses, when the jar knows. */
+  async #readIdentityExpiry(): Promise<number | null> {
+    try {
+      const cookies = await this.#cookies.get({
+        url: this.#apiOrigin,
+        name: IDENTITY_COOKIE_NAME,
+      });
+      const stored = cookies.find((cookie) => cookie.name === IDENTITY_COOKIE_NAME);
+      const expirationDate = stored?.expirationDate;
+      return expirationDate === undefined ? null : expirationDate * 1000;
+    } catch {
+      return null;
+    }
   }
 
   async #deleteSession(url: string): Promise<void> {
@@ -248,6 +419,7 @@ export class ChatSession {
 
   /** Marks the session as ended after the server rejects an authenticated request. */
   markSignedOut(): void {
+    this.#stopRenewal();
     if (this.#state.status !== "signed-out") {
       this.#setState({ status: "signed-out" });
     }

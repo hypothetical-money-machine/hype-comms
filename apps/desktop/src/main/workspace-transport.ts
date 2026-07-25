@@ -2,6 +2,7 @@ import {
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
   conversationMutationResponseSchema,
+  CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
@@ -15,6 +16,7 @@ import {
   type ConversationMutationResponse,
   type CreateChannelRequest,
   type DirectConversationRequest,
+  type ListConversationsQuery,
   type ListConversationsResponse,
   type ListMembersResponse,
   type MessageHistoryResponse,
@@ -35,6 +37,36 @@ function retryAfter(response: Response): number | null {
     ? Math.min(Math.round(seconds * 1_000), 86_400_000)
     : null;
 }
+
+/**
+ * A transport-level failure worth retrying. `fetch` reports connection problems as `TypeError`,
+ * while `AbortSignal.timeout` rejects with a `DOMException` named `TimeoutError`, so a plain
+ * request timeout must not be mistaken for a malformed response.
+ */
+function isNetworkFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
+
+type SendPermanentReason = Extract<SendAttemptResult, { status: "permanent" }>["reason"];
+type SyncPermanentReason = Extract<SyncAttemptResult, { status: "permanent" }>["reason"];
+
+/** Statuses whose meaning is fixed: retrying the identical request cannot change the outcome. */
+const SEND_PERMANENT_REASONS = new Map<number, SendPermanentReason>([
+  [400, "validation"],
+  [403, "forbidden"],
+  [404, "not_found"],
+  [409, "conflict"],
+]);
+
+const SYNC_PERMANENT_REASONS = new Map<number, SyncPermanentReason>([
+  [400, "validation"],
+  [403, "forbidden"],
+  [404, "not_found"],
+]);
+
+/** 4xx statuses that describe a transient condition rather than a rejected request. */
+const RETRYABLE_CLIENT_STATUSES = new Set([408, 425]);
 
 export class WorkspaceTransport {
   constructor(
@@ -69,10 +101,13 @@ export class WorkspaceTransport {
     return listMembersResponseSchema.parse(await this.#payload(response));
   }
 
-  async conversations(): Promise<ListConversationsResponse> {
-    const response = await this.session.fetch(this.#url("/v1/conversations").href, {
-      method: "GET",
-    });
+  async conversations(
+    input: Partial<ListConversationsQuery> = {},
+  ): Promise<ListConversationsResponse> {
+    const url = this.#url("/v1/conversations");
+    if (input.after !== undefined) url.searchParams.set("after", input.after);
+    url.searchParams.set("limit", String(input.limit ?? CONVERSATION_PAGE_DEFAULT_LIMIT));
+    const response = await this.session.fetch(url.href, { method: "GET" });
     return listConversationsResponseSchema.parse(await this.#payload(response));
   }
 
@@ -153,21 +188,15 @@ export class WorkspaceTransport {
           retryAfterMs: retryAfter(response),
         };
       }
-      if (response.status >= 500) {
-        return { status: "retryable", reason: "server", retryAfterMs: null };
+      if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
+        return { status: "retryable", reason: "server", retryAfterMs: retryAfter(response) };
       }
-      const reasons = new Map<number, "validation" | "forbidden" | "not_found" | "conflict">([
-        [400, "validation"],
-        [403, "forbidden"],
-        [404, "not_found"],
-        [409, "conflict"],
-      ]);
       return {
         status: "permanent",
-        reason: reasons.get(response.status) ?? "validation",
+        reason: SEND_PERMANENT_REASONS.get(response.status) ?? "validation",
       };
     } catch (error) {
-      if (error instanceof TypeError) {
+      if (isNetworkFailure(error)) {
         return { status: "retryable", reason: "network", retryAfterMs: null };
       }
       return { status: "retryable", reason: "invalid_response", retryAfterMs: null };
@@ -193,25 +222,47 @@ export class WorkspaceTransport {
     const url = this.#url("/v1/sync");
     url.searchParams.set("after", after);
     url.searchParams.set("limit", String(limit));
+
+    let response: Response;
     try {
-      const response = await this.session.fetch(url.href, { method: "GET" });
-      if (response.ok) {
-        return syncAttemptResultSchema.parse({
-          status: "accepted",
-          response: await response.json(),
-        });
-      }
-      if (response.status === 401) {
-        this.session.markSignedOut();
-        return { status: "authentication_required" };
-      }
-      if (response.status === 410) {
-        return { status: "reset_required", reason: "cursor_expired" };
-      }
-      return { status: "retryable" };
-    } catch {
-      return { status: "retryable" };
+      response = await this.session.fetch(url.href, { method: "GET" });
+    } catch (error) {
+      // Only a transport failure is worth retrying; anything else would retry forever.
+      return isNetworkFailure(error)
+        ? { status: "retryable", reason: "network", retryAfterMs: null }
+        : { status: "permanent", reason: "invalid_response" };
     }
+
+    if (response.ok) {
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        return { status: "permanent", reason: "invalid_response" };
+      }
+      // A response the client cannot parse never becomes retryable: the renderer must surface it.
+      const accepted = syncAttemptResultSchema.safeParse({ status: "accepted", response: body });
+      if (!accepted.success) return { status: "permanent", reason: "invalid_response" };
+      return accepted.data;
+    }
+    if (response.status === 401) {
+      this.session.markSignedOut();
+      return { status: "authentication_required" };
+    }
+    if (response.status === 410) {
+      return { status: "reset_required", reason: "cursor_expired" };
+    }
+    if (response.status === 429) {
+      return { status: "retryable", reason: "rate_limited", retryAfterMs: retryAfter(response) };
+    }
+    if (response.status >= 500) {
+      return { status: "retryable", reason: "server", retryAfterMs: retryAfter(response) };
+    }
+    // Every remaining status is a rejected request, not a hiccup: retrying it changes nothing.
+    return {
+      status: "permanent",
+      reason: SYNC_PERMANENT_REASONS.get(response.status) ?? "validation",
+    };
   }
 
   async ticket(): Promise<RealtimeTicketResponse> {

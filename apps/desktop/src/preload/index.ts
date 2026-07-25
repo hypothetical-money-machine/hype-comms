@@ -12,9 +12,12 @@ import {
   createChannelRequestSchema,
   directConversationRequestSchema,
   chatSessionStateSchema,
+  listConversationsQuerySchema,
+  listConversationsResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
   productRealtimeEventSchema,
+  realtimeConnectionStateSchema,
   requestMagicLinkSchema,
   sendAttemptResultSchema,
   sendMessageOperationSchema,
@@ -28,6 +31,7 @@ import {
   type CacheScope,
   type CreateChannelRequest,
   type DirectConversationRequest,
+  type ListConversationsQuery,
   type ProductRealtimeEvent,
   type SendMessageOperation,
   type UpdateState,
@@ -137,6 +141,13 @@ const desktopApi: DesktopApi = Object.freeze({
     workspaceBootstrapResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceBootstrap),
     ),
+  listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
+    listConversationsResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceConversationsList,
+        listConversationsQuerySchema.parse(input),
+      ),
+    ),
   getConversationMessages: async (input: {
     readonly conversationId: string;
     readonly before?: string;
@@ -193,27 +204,16 @@ const desktopApi: DesktopApi = Object.freeze({
       sequenceSchema.parse(cursor),
     );
   },
-  getRealtimeState: async () => {
-    const state: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.realtimeStateGet);
-    if (
-      state !== "connecting" &&
-      state !== "live" &&
-      state !== "offline" &&
-      state !== "reconnecting"
-    ) {
-      throw new Error("Invalid realtime state");
-    }
-    return state;
-  },
+  getRealtimeState: async () =>
+    realtimeConnectionStateSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.realtimeStateGet),
+    ),
   onRealtimeStateChanged: (listener: (state: RealtimeConnectionState) => void) =>
     subscribe(
       DESKTOP_CHANNELS.realtimeStateChanged,
       listener,
       (value): value is RealtimeConnectionState =>
-        value === "connecting" ||
-        value === "live" ||
-        value === "offline" ||
-        value === "reconnecting",
+        realtimeConnectionStateSchema.safeParse(value).success,
     ),
   onWorkspaceEvent: (listener: (event: ProductRealtimeEvent) => void) =>
     subscribe(

@@ -10,9 +10,12 @@ import type {
   ConversationMutationResponse,
   CreateChannelRequest,
   DirectConversationRequest,
+  ListConversationsQuery,
+  ListConversationsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
   ProductRealtimeEvent,
+  RealtimeConnectionState,
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
@@ -28,7 +31,8 @@ export interface NotificationAction {
 }
 
 export type ServerStatus = "reachable" | "unreachable";
-export type RealtimeConnectionState = "connecting" | "live" | "offline" | "reconnecting";
+/** Re-exported from the contracts package so main, preload, and the renderer cannot drift. */
+export type { RealtimeConnectionState };
 
 export interface SessionTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
@@ -55,6 +59,13 @@ export interface DesktopApi extends SessionTransport {
   ) => Promise<CacheDecryptBatchResponse>;
   readonly resetCacheCrypto: () => Promise<void>;
   readonly getWorkspaceBootstrap: () => Promise<WorkspaceBootstrapResponse>;
+  /**
+   * Fetches one page of conversation summaries. Bootstrap returns the first page; callers page
+   * with `after` until `hasMore` is false so a large workspace cannot exceed the wire contract.
+   */
+  readonly listConversations: (
+    input?: Partial<ListConversationsQuery>,
+  ) => Promise<ListConversationsResponse>;
   readonly getConversationMessages: (input: {
     readonly conversationId: string;
     readonly before?: string;
