@@ -9,6 +9,7 @@ import {
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
+  listConversationsQuerySchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -397,6 +398,13 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace bootstrap sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.bootstrap();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationsList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace conversations sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.conversations(listConversationsQuerySchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessagesList);
