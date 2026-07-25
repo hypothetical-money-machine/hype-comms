@@ -13,7 +13,9 @@ import {
 
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
 import {
-  clearPersistentWorkspaceCaches,
+  clearPersistentWorkspaceCache,
+  compareConversations,
+  compareMembers,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   type OutboxItem,
@@ -48,6 +50,26 @@ interface OutboxUpdate {
   readonly nextAttemptAt: string | null;
   readonly failureReason: string | null;
 }
+
+/**
+ * How many resync demands in one chain this client answers before it stops re-downloading the
+ * workspace. A server that rejects the cursor it just issued — an inconsistent restore whose
+ * `last_event_sequence` sits below the oldest retained event, for instance — answers every
+ * handshake with `system.resync_required`, and re-downloading the whole workspace on each one is
+ * worse for the user than being told to reset the local cache. Only demands count against this: a
+ * download that fails while a resync runs is transient, and is retried with backoff instead.
+ */
+const MAX_CONSECUTIVE_RESYNCS = 3;
+
+/**
+ * How long the resync in place has to hold up before the next demand starts a chain of its own
+ * rather than extending the current one. `system.connected` cannot end a chain: the server sends it
+ * on every socket whose first flush drains and can still send `system.resync_required` from a later
+ * flush on that same socket, so resetting the counter there would disarm the bound in steady state.
+ * Chained attempts are at most one 30-second backoff apart, so a minute of connected time is a
+ * genuinely healthy stretch and not a repeat of the demand the last resync answered.
+ */
+const RESYNC_CHAIN_RESET_MS = 60_000;
 
 const INITIAL_STATE: WorkspaceRuntimeState = {
   bootstrap: null,
@@ -118,7 +140,9 @@ function replaceConversation(
   const conversations = [...snapshot.conversations];
   if (index === -1) conversations.push(next);
   else conversations[index] = next;
-  return { ...snapshot, conversations };
+  // A created conversation appends and a rename moves one, so re-sort instead of trusting the
+  // previous positions: the sidebar renders this order directly and must agree with a cold load().
+  return { ...snapshot, conversations: conversations.sort(compareConversations) };
 }
 
 /** Mirrors the cache's own unread and mention accounting for one applied message event. */
@@ -204,7 +228,20 @@ export class WorkspaceRuntime {
   #flushing = false;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #syncAttempt = 0;
+  /**
+   * Resync demands in the current chain. Only demands count: a failed download is retried without
+   * touching this, and `system.connected` cannot reset it either, so the bound stays armed on a
+   * server that accepts a handshake and then rejects the cursor it just issued.
+   */
+  #resyncAttempt = 0;
+  /** Transient failures of the resync now in flight, so its backoff grows the usual way. */
+  #resyncFailures = 0;
+  /** When the resync now in place restarted realtime; how a chain is told from a fresh demand. */
+  #resyncSettledAt: number | null = null;
+  /** The signed-in scope, kept past `stop()` so a sign-out reset knows whose cache to delete. */
+  #scope: CacheScope | null = null;
   /** The highest workspace sequence this client has durably applied. */
   #syncCursor: string | null = null;
   #eventQueue: Promise<void> = Promise.resolve();
@@ -241,6 +278,7 @@ export class WorkspaceRuntime {
     const generation = ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#resetResyncState();
     this.#syncAttempt = 0;
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
@@ -266,6 +304,9 @@ export class WorkspaceRuntime {
       userId: session.userId,
       workspaceId: session.workspaceId,
     };
+    // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
+    // and that reset has to know which member's database it is allowed to delete.
+    this.#scope = scope;
     try {
       const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
       this.#cache = this.#createCache(cryptoStatus);
@@ -304,6 +345,7 @@ export class WorkspaceRuntime {
     ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#resetResyncState();
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
@@ -417,9 +459,14 @@ export class WorkspaceRuntime {
     ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#resetResyncState();
+    const scope = this.#scope;
     await this.#client.stopWorkspaceRealtime();
     await this.#cache?.clearAll().catch(() => undefined);
-    await clearPersistentWorkspaceCaches();
+    // Only the signed-in member's database goes. Another member of this OS account can still have
+    // an encrypted cache and undelivered outbox on disk, and this runs on every sign-out, so
+    // deleting every scope's database here silently destroys messages nobody agreed to discard.
+    if (scope !== null) await clearPersistentWorkspaceCache(scope).catch(() => undefined);
     await this.#client.resetCacheCrypto();
     this.#cache = null;
     this.#syncCursor = null;
@@ -550,6 +597,13 @@ export class WorkspaceRuntime {
     if (event.type === "system.connected") {
       await this.#cache.advanceCursor(event.workspaceSequence);
       await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
+      // A live socket makes a queued resync backoff pointless: the server took this cursor, so
+      // dropping the cached workspace again would only cost another full download. A resync whose
+      // download failed is a different matter — the cache has no workspace until it lands — so
+      // that retry stays armed. The chain counter is deliberately *not* reset here: the server
+      // sends this event on every socket whose first flush drains and can still demand a resync
+      // from a later flush on that same socket, so resetting it here disarms the bound entirely.
+      if (this.#resyncFailures === 0) this.#clearResyncTimer();
       this.#setState({ connection: "live" });
       return;
     }
@@ -563,20 +617,79 @@ export class WorkspaceRuntime {
   /**
    * The server sends `system.resync_required` and then closes the socket, so realtime has to be
    * restarted with the cursor the fresh snapshot establishes. Reconnecting with the stale cursor
-   * would be answered with another resync, and the client would re-download history forever.
+   * would be answered with another resync, and the client would re-download history forever, so
+   * the first demand of a chain is answered at once and repeats wait for a backoff — then stop.
    */
   async #resync(generation: number): Promise<void> {
-    const cache = this.#cache;
-    if (cache === null || generation !== this.#generation) return;
+    if (this.#cache === null || generation !== this.#generation) return;
     await this.#client.stopWorkspaceRealtime();
     this.#setState({ stale: true });
-    await cache.clearServerStatePreservingOutbox();
-    this.#syncCursor = null;
-    await this.#refreshSnapshot(generation);
-    if (generation !== this.#generation || this.#cache === null) return;
-    await this.#repairAndFlush(generation);
-    if (generation !== this.#generation || this.#cache === null) return;
-    await this.#restartRealtime(generation);
+    const settledAt = this.#resyncSettledAt;
+    // A demand that arrives long after the last resync settled is a new problem rather than a
+    // repeat of the one that resync answered, so it starts counting again. Elapsed connected time
+    // is the signal, since the server sends `system.connected` on handshakes it then rejects.
+    if (settledAt !== null && Date.now() - settledAt >= RESYNC_CHAIN_RESET_MS) {
+      this.#resyncAttempt = 0;
+    }
+    this.#resyncAttempt += 1;
+    if (this.#resyncAttempt > MAX_CONSECUTIVE_RESYNCS) {
+      // Mirrors the reset guard in #repairAndFlush: another download cannot help, so the dead end
+      // has to be visible instead of spinning behind a "cached state may be stale" note.
+      this.#clearResyncTimer();
+      this.#setState({
+        stale: true,
+        error: "The server keeps asking this device to resync. Reset the local cache.",
+      });
+      return;
+    }
+    if (this.#resyncAttempt === 1) {
+      await this.#attemptResync(generation);
+      return;
+    }
+    this.#scheduleResync(generation, retryDelay(this.#resyncAttempt));
+  }
+
+  /**
+   * One resync attempt: drop the server-derived stores, keep the outbox, re-download, resume the
+   * sync loop, and restart realtime with the cursor that establishes. A failure here is transient —
+   * a server that has not finished coming back up, most often — so it is retried with backoff and
+   * does not count against the demand bound. Charging it there wedged the client for good: a few
+   * seconds of downtime spent the whole budget, left no cached workspace behind, and reported a
+   * server demanding resyncs it had never sent.
+   */
+  async #attemptResync(generation: number): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return;
+    try {
+      await cache.clearServerStatePreservingOutbox();
+      this.#syncCursor = null;
+      await this.#refreshSnapshot(generation);
+      if (generation !== this.#generation || this.#cache === null) return;
+      await this.#repairAndFlush(generation);
+      if (generation !== this.#generation || this.#cache === null) return;
+      // Stamped before the handshake goes out, because the demand that answers it arrives on the
+      // socket this opens: a chain has to be measured from the handshake, not from a reply to it.
+      this.#resyncSettledAt = Date.now();
+      await this.#restartRealtime(generation);
+      if (generation !== this.#generation) return;
+      this.#resyncFailures = 0;
+    } catch (error) {
+      if (generation !== this.#generation) return;
+      // Realtime is stopped and the server-derived stores are already gone, so without rearming
+      // here the client sits offline with no cached workspace until the user presses Retry. The
+      // notice is the failure that actually happened, never the server-keeps-demanding dead end.
+      this.#resyncFailures += 1;
+      this.#setState({ stale: true, error: errorMessage(error, "Could not resync the workspace") });
+      this.#scheduleResync(generation, retryDelay(this.#resyncFailures));
+    }
+  }
+
+  #scheduleResync(generation: number, delayMs: number): void {
+    this.#clearResyncTimer();
+    this.#resyncTimer = setTimeout(() => {
+      this.#resyncTimer = null;
+      void this.#attemptResync(generation);
+    }, delayMs);
   }
 
   async #restartRealtime(generation: number): Promise<void> {
@@ -614,9 +727,11 @@ export class WorkspaceRuntime {
     if (snapshot === null) return;
     if (event.type === "member.updated") {
       const member = event.payload.member;
-      const members = snapshot.members.some((existing) => existing.id === member.id)
+      const updated = snapshot.members.some((existing) => existing.id === member.id)
         ? snapshot.members.map((existing) => (existing.id === member.id ? member : existing))
         : [...snapshot.members, member];
+      // A new member appends and a display-name change reorders, so re-sort as above.
+      const members = updated.sort(compareMembers);
       this.#setState({ bootstrap: { ...snapshot, members } });
       return;
     }
@@ -797,5 +912,20 @@ export class WorkspaceRuntime {
       clearTimeout(this.#syncRetryTimer);
       this.#syncRetryTimer = null;
     }
+  }
+
+  #clearResyncTimer(): void {
+    if (this.#resyncTimer !== null) {
+      clearTimeout(this.#resyncTimer);
+      this.#resyncTimer = null;
+    }
+  }
+
+  /** Forgets the current resync chain, pending retry included. */
+  #resetResyncState(): void {
+    this.#clearResyncTimer();
+    this.#resyncAttempt = 0;
+    this.#resyncFailures = 0;
+    this.#resyncSettledAt = null;
   }
 }

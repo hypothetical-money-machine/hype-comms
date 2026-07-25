@@ -19,6 +19,7 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  UpdateState,
   WorkspaceBootstrapResponse,
   WorkspaceEvent,
 } from "@hmm-chat/contracts";
@@ -43,6 +44,8 @@ const PEER_EVENT_ID = "20000000-0000-4000-8000-000000000008";
 const RESYNC_EVENT_ID = "20000000-0000-4000-8000-000000000009";
 const OWN_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000a";
 const PEER_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000b";
+const CONNECTED_EVENT_ID = "20000000-0000-4000-8000-00000000000c";
+const CONNECTION_ID = "20000000-0000-4000-8000-00000000000d";
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -152,6 +155,27 @@ const peerEvent: WorkspaceEvent = {
   delivery: "at_least_once",
   payload: { message: peerMessage, mentionedUserIds: [] },
 };
+
+/**
+ * The server sends this on every socket whose first flush drains, including one it goes on to
+ * answer with `system.resync_required` from a later flush, so a healthy handshake proves nothing
+ * about the cursor holding up.
+ */
+function connectedAt(workspaceSequence: string): ProductRealtimeEvent {
+  return {
+    version: 1,
+    id: CONNECTED_EVENT_ID,
+    type: "system.connected",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId: null,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { connectionId: CONNECTION_ID, userId: USER_ID },
+  };
+}
 
 const resyncRequired: ProductRealtimeEvent = {
   version: 1,
@@ -281,6 +305,12 @@ class FakeDesktopApi implements DesktopApi {
   };
   bootstrapRequests = 0;
   stopRequests = 0;
+  /** How many upcoming bootstrap requests fail, standing in for a server still coming back up. */
+  bootstrapFailures = 0;
+  /** When set, every handshake is answered with a resync demand, as an unusable cursor is. */
+  resyncOnStart = false;
+  /** When set, every handshake reports itself live first, exactly as the real server does. */
+  connectedOnStart = false;
   readonly conversationPages = new Map<string, ListConversationsResponse>();
   readonly histories = new Map<string, MessageHistoryResponse>();
   readonly syncResults: SyncAttemptResult[] = [];
@@ -340,6 +370,24 @@ class FakeDesktopApi implements DesktopApi {
     return "0.0.0-test";
   }
 
+  // The updater belongs to the app shell, not the workspace runtime. These throw so that a runtime
+  // that starts reaching for them fails loudly here instead of silently observing a no-op updater.
+  async getUpdateState(): Promise<UpdateState> {
+    throw new Error("The runtime test does not report update state");
+  }
+
+  async checkForUpdates(): Promise<void> {
+    throw new Error("The runtime test does not check for updates");
+  }
+
+  async restartToInstallUpdate(): Promise<void> {
+    throw new Error("The runtime test does not install updates");
+  }
+
+  onUpdateStateChanged(): () => void {
+    throw new Error("The runtime test does not observe update state");
+  }
+
   onNotificationAction(listener: (action: NotificationAction) => void): () => void {
     this.#notificationListeners.add(listener);
     return () => this.#notificationListeners.delete(listener);
@@ -363,6 +411,10 @@ class FakeDesktopApi implements DesktopApi {
 
   async getWorkspaceBootstrap(): Promise<WorkspaceBootstrapResponse> {
     this.bootstrapRequests += 1;
+    if (this.bootstrapFailures > 0) {
+      this.bootstrapFailures -= 1;
+      throw new Error("The workspace is temporarily unavailable");
+    }
     return this.bootstrap;
   }
 
@@ -446,6 +498,10 @@ class FakeDesktopApi implements DesktopApi {
 
   async startWorkspaceRealtime(after: string): Promise<void> {
     this.startedCursors.push(after);
+    // The real server reports the connection live once its first flush drains and sends the resync
+    // demand from a later flush on that same socket, then closes it, so the client sees both.
+    if (this.connectedOnStart) this.emitWorkspaceEvent(connectedAt(after));
+    if (this.resyncOnStart) this.emitWorkspaceEvent(resyncRequired);
   }
 
   async stopWorkspaceRealtime(): Promise<void> {
@@ -510,6 +566,76 @@ describe("WorkspaceRuntime", () => {
     await drain();
     expect(api.bootstrapRequests).toBe(2);
     expect(api.startedCursors).toEqual(["5", "40"]);
+  });
+
+  it("bounds a resync chain whose handshakes each report the connection live", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("5"));
+      // A restored workspace whose cursor sits below the oldest retained event answers every
+      // handshake this way: the socket comes up live and the demand follows from a later flush, so
+      // `system.connected` says nothing about the cursor and cannot end the chain.
+      api.connectedOnStart = true;
+      api.resyncOnStart = true;
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+      await settle(() => api.bootstrapRequests === 2, "first resync download");
+
+      // The repeat waits for a backoff instead of re-downloading as fast as the server rejects it.
+      await drain();
+      expect(api.bootstrapRequests).toBe(2);
+
+      for (let round = 0; round < 12 && runtime.state.error === null; round += 1) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await drain();
+      }
+      const downloads = api.bootstrapRequests;
+      expect(runtime.state.error).toBe(
+        "The server keeps asking this device to resync. Reset the local cache.",
+      );
+      expect(runtime.state.stale).toBe(true);
+      // Bounded: a handful of downloads, then the dead end is reported instead of retried.
+      expect(downloads).toBeLessThanOrEqual(4);
+
+      for (let round = 0; round < 4; round += 1) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await drain();
+      }
+      expect(api.bootstrapRequests).toBe(downloads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a resync whose download failed instead of wedging the client", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("5"));
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      // One genuine demand, then a server that is briefly unavailable: a 502 for a few seconds is
+      // not a server demanding resyncs, and it must not spend a budget meant for that.
+      api.bootstrap = bootstrapAt("40");
+      api.bootstrapFailures = 3;
+      api.emitWorkspaceEvent(resyncRequired);
+      await settle(() => runtime.state.error !== null, "failed resync surfaces");
+
+      // The notice is the failure that happened, not a resync loop the server never asked for.
+      expect(runtime.state.error).toBe("The workspace is temporarily unavailable");
+      // Realtime is stopped and the cached workspace is gone, so only the retry can heal this.
+      expect(api.startedCursors).toEqual(["5"]);
+
+      for (let round = 0; round < 6 && api.startedCursors.length === 1; round += 1) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await drain();
+      }
+      expect(api.startedCursors).toEqual(["5", "40"]);
+      expect(runtime.state.error).toBeNull();
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("applies an in-flight lower-sequence peer event after a send is accepted", async () => {
@@ -582,6 +708,73 @@ describe("WorkspaceRuntime", () => {
 
     expect(cache.loadCount).toBe(loadsAfterStart);
     expect((await cache.load()).messages.map((item) => item.id)).toContain(PEER_MESSAGE_ID);
+  });
+
+  it("orders a peer-created conversation the way a cold load would", async () => {
+    const alphaId = "20000000-0000-4000-8000-000000000010";
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-00000000000e",
+      type: "channel.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: alphaId,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { conversation: channel(alphaId, "alpha").conversation, participantIds: [] },
+    });
+    await settle(
+      () => runtime.state.bootstrap?.conversations.length === 2,
+      "peer channel application",
+    );
+
+    // "alpha" sorts before "general", so appending it renders it last in the sidebar until the next
+    // full reload silently moves it.
+    expect(runtime.state.bootstrap?.conversations.map((item) => item.conversation.slug)).toEqual([
+      "alpha",
+      "general",
+    ]);
+  });
+
+  it("orders a newly delivered member the way a cold load would", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-00000000000f",
+      type: "member.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: null,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        member: {
+          id: "20000000-0000-4000-8000-000000000011",
+          username: "alice",
+          displayName: "Alice",
+          avatarUrl: null,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      },
+    });
+    await settle(() => runtime.state.bootstrap?.members.length === 2, "member application");
+
+    expect(runtime.state.bootstrap?.members.map((item) => item.displayName)).toEqual([
+      "Alice",
+      "Morgan",
+    ]);
   });
 
   it("pages conversations that the bootstrap response could not carry", async () => {

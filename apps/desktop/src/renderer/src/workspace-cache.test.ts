@@ -14,9 +14,14 @@ import {
   type WorkspaceEvent,
 } from "@hmm-chat/contracts";
 
-import { clearPersistentWorkspaceCaches, PersistentWorkspaceCache } from "./workspace-cache";
+import {
+  clearPersistentWorkspaceCache,
+  clearPersistentWorkspaceCaches,
+  PersistentWorkspaceCache,
+} from "./workspace-cache";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
+const OTHER_USER_ID = "10000000-0000-4000-8000-000000000008";
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
@@ -191,6 +196,31 @@ describe("PersistentWorkspaceCache", () => {
     expect(state.bootstrap).toBeNull();
     expect(state.messages).toEqual([]);
     expect(state.outbox).toHaveLength(1);
+  });
+
+  it("deletes only the scope that asked, so another member keeps their queued sends", async () => {
+    const crypto = new FakeCrypto();
+    // Two members sharing one OS account: the first signs out while the second is still waiting for
+    // messages to go out. A sign-out resets the signed-in scope, and nobody agreed to discard the
+    // other member's outbox along with it.
+    const otherScope = { userId: OTHER_USER_ID, workspaceId: WORKSPACE_ID };
+    const mine = new PersistentWorkspaceCache({ crypto, scope });
+    const theirs = new PersistentWorkspaceCache({ crypto, scope: otherScope });
+    await mine.replaceSnapshot(bootstrap, []);
+    await mine.enqueue(operation);
+    await theirs.enqueue(operation);
+
+    await clearPersistentWorkspaceCache(scope);
+
+    const reopenedMine = await new PersistentWorkspaceCache({ crypto, scope }).load();
+    expect(reopenedMine.bootstrap).toBeNull();
+    expect(reopenedMine.outbox).toEqual([]);
+    const reopenedTheirs = await new PersistentWorkspaceCache({
+      crypto,
+      scope: otherScope,
+    }).load();
+    expect(reopenedTheirs.outbox).toHaveLength(1);
+    expect(reopenedTheirs.outbox[0]?.operation.message.body).toBe("Survive restart");
   });
 
   it("upgrades a version 1 database in place and indexes the message sequence", async () => {

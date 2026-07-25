@@ -194,16 +194,26 @@ function compareMessages(left: Message, right: Message): number {
   return compareSequence(left.conversationSequence, right.conversationSequence);
 }
 
-/** Mirrors the server's `ORDER BY lower(display_name), id`. */
-function compareMembers(left: User, right: User): number {
+/**
+ * Mirrors the server's `ORDER BY lower(display_name), id`. Exported so the runtime's in-memory
+ * projection orders realtime-delivered rows the same way a cold `load()` does, instead of growing a
+ * second ordering that drifts from this one.
+ */
+export function compareMembers(left: User, right: User): number {
   const leftName = left.displayName.toLowerCase();
   const rightName = right.displayName.toLowerCase();
   const byName = leftName.localeCompare(rightName);
   return byName !== 0 ? byName : compareText(left.id, right.id);
 }
 
-/** Mirrors the server's `ORDER BY kind, lower(coalesce(name, '')), created_at, id`. */
-function compareConversations(left: ConversationSummary, right: ConversationSummary): number {
+/**
+ * Mirrors the server's `ORDER BY kind, lower(coalesce(name, '')), created_at, id`. Exported for the
+ * same reason as {@link compareMembers}.
+ */
+export function compareConversations(
+  left: ConversationSummary,
+  right: ConversationSummary,
+): number {
   const byKind = compareText(left.conversation.kind, right.conversation.kind);
   if (byKind !== 0) return byKind;
   const leftName = (left.conversation.name ?? "").toLowerCase();
@@ -248,6 +258,20 @@ function databaseName(scope: CacheScope): string {
   return `${CACHE_DATABASE_PREFIX}${scope.workspaceId}-${scope.userId}`;
 }
 
+/**
+ * Deletes one member's cached workspace and nothing else. Every scope keeps its own database, and a
+ * member who is not signed in can still have an encrypted cache and undelivered outbox on this OS
+ * account, so signing out or resetting the local cache must reach only the scope that asked.
+ */
+export async function clearPersistentWorkspaceCache(scope: CacheScope): Promise<void> {
+  await Dexie.delete(databaseName(scope));
+}
+
+/**
+ * Deletes every scope's cache on this OS account. Test cleanup is what this is for — wiping other
+ * members' undelivered messages is data loss anywhere a real member signs out, so product code
+ * deletes the signed-in scope with `clearPersistentWorkspaceCache` instead.
+ */
 export async function clearPersistentWorkspaceCaches(): Promise<void> {
   const names = await Dexie.getDatabaseNames();
   await Promise.all(
