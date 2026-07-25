@@ -9,6 +9,7 @@ import type {
   ChatSessionState,
   ConversationMutationResponse,
   ConversationSummary,
+  CreateChannelRequest,
   ListConversationsQuery,
   ListConversationsResponse,
   MagicLinkDeliveryState,
@@ -46,6 +47,7 @@ const OWN_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000a";
 const PEER_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000b";
 const CONNECTED_EVENT_ID = "20000000-0000-4000-8000-00000000000c";
 const CONNECTION_ID = "20000000-0000-4000-8000-00000000000d";
+const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -205,6 +207,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #messages = new Map<string, Message>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
+  upsertFailure: Error | null = null;
 
   get cursor(): string | null {
     return this.#syncCursor;
@@ -227,6 +230,20 @@ class FakeWorkspaceCache implements WorkspaceCache {
     this.#messages.clear();
     for (const item of messages) this.#messages.set(item.id, item);
     this.#syncCursor = snapshot.syncCursor;
+  }
+
+  async upsertConversation(summary: ConversationSummary): Promise<void> {
+    if (this.upsertFailure !== null) throw this.upsertFailure;
+    if (this.#snapshot === null) return;
+    this.#snapshot = {
+      ...this.#snapshot,
+      conversations: [
+        summary,
+        ...this.#snapshot.conversations.filter(
+          (candidate) => candidate.conversation.id !== summary.conversation.id,
+        ),
+      ],
+    };
   }
 
   async applyEvent(event: WorkspaceEvent): Promise<boolean> {
@@ -315,11 +332,16 @@ class FakeDesktopApi implements DesktopApi {
   readonly histories = new Map<string, MessageHistoryResponse>();
   readonly syncResults: SyncAttemptResult[] = [];
   readonly sendResults: SendAttemptResult[] = [];
+  readonly channelResults: (
+    ConversationMutationResponse | Promise<ConversationMutationResponse>
+  )[] = [];
   readonly startedCursors: string[] = [];
   readonly acknowledged: string[] = [];
   readonly sent: SendMessageOperation[] = [];
+  readonly createdChannels: CreateChannelRequest[] = [];
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
+  readonly historyRequests: string[] = [];
   readonly #eventListeners = new Set<(event: ProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
@@ -434,6 +456,7 @@ class FakeDesktopApi implements DesktopApi {
   async getConversationMessages(input: {
     readonly conversationId: string;
   }): Promise<MessageHistoryResponse> {
+    this.historyRequests.push(input.conversationId);
     return this.histories.get(input.conversationId) ?? { messages: [], nextCursor: null };
   }
 
@@ -452,8 +475,11 @@ class FakeDesktopApi implements DesktopApi {
     };
   }
 
-  async createChannel(): Promise<ConversationMutationResponse> {
-    throw new Error("The runtime test does not create channels");
+  async createChannel(input: CreateChannelRequest): Promise<ConversationMutationResponse> {
+    this.createdChannels.push(input);
+    const result = this.channelResults.shift();
+    if (result === undefined) throw new Error("The test queued no channel result");
+    return await result;
   }
 
   async archiveChannel(): Promise<ConversationMutationResponse> {
@@ -665,6 +691,97 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("projects and selects a created channel without refreshing or skipping earlier events", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const bootstrapRequestsAfterStart = api.bootstrapRequests;
+    const historyRequestsAfterStart = api.historyRequests.length;
+    const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
+    api.channelResults.push({
+      conversation: {
+        ...createdSummary,
+        conversation: { ...createdSummary.conversation, name: "Alpha Team" },
+      },
+      syncCursor: "12",
+    });
+
+    await runtime.createChannel("Alpha Team", "alpha-team");
+
+    expect(api.createdChannels).toEqual([{ name: "Alpha Team", slug: "alpha-team", topic: null }]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(CREATED_CHANNEL_ID);
+    expect(runtime.state.bootstrap?.conversations.map((item) => item.conversation.slug)).toEqual([
+      "alpha-team",
+      "general",
+    ]);
+    expect(
+      (await cache.load()).bootstrap?.conversations.map((item) => item.conversation.slug),
+    ).toContain("alpha-team");
+    await runtime.loadOlder(CREATED_CHANNEL_ID);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+
+    // The mutation's cursor is a high-water mark, not proof that every earlier event is cached.
+    expect(cache.cursor).toBe("10");
+    expect(api.acknowledged).not.toContain("12");
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(
+      () => runtime.state.messages.some((item) => item.id === PEER_MESSAGE_ID),
+      "earlier peer event after channel creation",
+    );
+    expect(runtime.state.messages.map((item) => item.id)).toContain(PEER_MESSAGE_ID);
+  });
+
+  it("rejects channel creation before bootstrap without contacting the server", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await expect(runtime.createChannel("Too Soon", "too-soon")).rejects.toThrow(
+      "Workspace is still loading",
+    );
+    expect(api.createdChannels).toEqual([]);
+  });
+
+  it("does not project a successful mutation into a replacement session", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    let resolveResult: ((result: ConversationMutationResponse) => void) | undefined;
+    api.channelResults.push(
+      new Promise((resolve) => {
+        resolveResult = resolve;
+      }),
+    );
+    const creation = runtime.createChannel("Alpha Team", "alpha-team");
+    await settle(() => api.createdChannels.length === 1, "channel request");
+    await runtime.stop();
+    const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
+    resolveResult?.({ conversation: createdSummary, syncCursor: "12" });
+
+    await expect(creation).resolves.toBeUndefined();
+    expect(runtime.state.bootstrap).toBeNull();
+  });
+
+  it("keeps a server-created channel selected when its cache write fails", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    cache.upsertFailure = new Error("disk full");
+    const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
+    api.channelResults.push({ conversation: createdSummary, syncCursor: "12" });
+
+    await expect(runtime.createChannel("Alpha Team", "alpha-team")).resolves.toBeUndefined();
+    expect(runtime.state.selectedConversationId).toBe(CREATED_CHANNEL_ID);
+    expect(runtime.state.bootstrap?.conversations).toContainEqual(createdSummary);
+    expect(runtime.state.stale).toBe(true);
+    expect(runtime.state.error).toMatch(/local cache needs repair/);
+    expect(cache.cursor).toBe("10");
   });
 
   it("rearms the retry timer so a retryable send is redelivered with no user action", async () => {

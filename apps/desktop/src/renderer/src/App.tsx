@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type { ChatSessionState, Message, UpdateState, User } from "@hmm-chat/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
+import { ChannelCreatePopover } from "./channel-create-popover";
 import {
   cacheFallbackNotice,
   WorkspaceRuntime,
@@ -259,21 +260,12 @@ export function App({ client }: AppProps) {
     }
   };
 
-  const createChannel = useCallback(async () => {
-    const name = window.prompt("Channel name");
-    if (name === null || name.trim() === "") return;
-    const slug = name
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    if (slug === "") return;
-    try {
-      await runtime.createChannel(name.trim(), slug);
-    } catch (error) {
-      setComposerError(errorMessage(error, "Could not create the channel"));
-    }
-  }, [runtime]);
+  const createChannel = useCallback(
+    async (name: string, slug: string): Promise<void> => {
+      await runtime.createChannel(name, slug);
+    },
+    [runtime],
+  );
 
   const startDirectMessage = useCallback(
     async (memberId: string) => {
@@ -391,9 +383,7 @@ export function App({ client }: AppProps) {
         <nav aria-label="Conversations">
           <div className="nav-heading">
             <span>Channels</span>
-            <button type="button" onClick={() => void createChannel()} aria-label="Create channel">
-              +
-            </button>
+            <ChannelCreatePopover onCreate={createChannel} />
           </div>
           {channels.map((summary) => (
             <button

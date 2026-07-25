@@ -4,6 +4,8 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   apiErrorEnvelopeSchema,
+  channelSlugFromName,
+  channelSlugSchema,
   conversationSummarySchema,
   conversationSchema,
   displayNameSchema,
@@ -139,6 +141,31 @@ describe("entity contracts", () => {
         role: "admin",
       }),
     ).toThrow();
+  });
+});
+
+describe("channel slugs", () => {
+  it("normalizes names while preserving Unicode letters, numbers, and combining marks", () => {
+    expect(channelSlugFromName(" Café Déjà Vu ")).toBe("café-déjà-vu");
+    expect(channelSlugFromName("產品 設計")).toBe("產品-設計");
+    expect(channelSlugFromName("हिन्दी टीम")).toBe("हिन्दी-टीम");
+    expect(channelSlugFromName("ＦＵＬＬ　ＷＩＤＴＨ")).toBe("full-width");
+    expect(channelSlugFromName("Ops / EU -- 2026")).toBe("ops-eu-2026");
+  });
+
+  it("rejects noncanonical, overlength, and emoji-only slugs", () => {
+    expect(channelSlugFromName("👋✨")).toBe("");
+    expect(() => channelSlugSchema.parse("CAFÉ")).toThrow();
+    expect(() => channelSlugSchema.parse("cafe\u0301")).toThrow();
+    expect(() => channelSlugSchema.parse("alpha--team")).toThrow();
+    expect(() => channelSlugSchema.parse(`a${"界".repeat(100)}`)).toThrow();
+    expect(channelSlugSchema.parse("équipe-產品-हिन्दी")).toBe("équipe-產品-हिन्दी");
+  });
+
+  it("caps generated slugs at 100 Unicode code points", () => {
+    const slug = channelSlugFromName("界".repeat(120));
+    expect([...slug]).toHaveLength(100);
+    expect(channelSlugSchema.parse(slug)).toBe(slug);
   });
 });
 

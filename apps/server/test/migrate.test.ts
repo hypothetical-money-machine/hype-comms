@@ -39,7 +39,11 @@ describeWithPostgres("runMigrations", () => {
   it("applies migrations cleanly and is idempotent", async () => {
     await withFreshSchema(async (pool) => {
       await expect(runMigrations(pool)).resolves.toEqual({
-        applied: ["0001_identity.sql", "0002_conversation_core.sql"],
+        applied: [
+          "0001_identity.sql",
+          "0002_conversation_core.sql",
+          "0003_unicode_channel_slugs.sql",
+        ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
 
@@ -49,7 +53,47 @@ describeWithPostgres("runMigrations", () => {
       expect(result.rows).toEqual([
         { filename: "0001_identity.sql" },
         { filename: "0002_conversation_core.sql" },
+        { filename: "0003_unicode_channel_slugs.sql" },
       ]);
+
+      const userId = randomUUID();
+      const workspaceId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'migration@example.test', 'migration', 'Migration')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Migration', 'migration', $2)`,
+        [workspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [workspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
+         VALUES
+           ($1, $2, 'channel', 'Existing ASCII', 'existing-ascii', $3),
+           ($4, $2, 'channel', 'Équipe Produit', 'équipe-produit', $3)`,
+        [randomUUID(), workspaceId, userId, randomUUID()],
+      );
+      await expect(
+        pool.query(
+          `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
+           VALUES ($1, $2, 'channel', 'Duplicate', 'équipe-produit', $3)`,
+          [randomUUID(), workspaceId, userId],
+        ),
+      ).rejects.toMatchObject({ code: "23505" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
+           VALUES ($1, $2, 'channel', 'Not normalized', $3, $4)`,
+          [randomUUID(), workspaceId, "e\u0301quipe", userId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
     });
   });
 

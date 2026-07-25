@@ -251,6 +251,32 @@ afterEach(async () => {
 });
 
 describe.each(implementations)("$name conformance", ({ create }) => {
+  it("upserts a conversation without advancing the cursor or losing newer counters", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    const before = await cache.load();
+    const current = before.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(current).toBeDefined();
+
+    await cache.upsertConversation({
+      ...alphaSummary,
+      conversation: { ...alphaSummary.conversation, topic: "A projected update" },
+    });
+
+    const after = await cache.load();
+    const alpha = after.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(after.syncCursor).toBe("7");
+    expect(alpha?.conversation.topic).toBe("A projected update");
+    expect(alpha?.lastMessage?.id).toBe(MESSAGE_SEQUENCE_2_ID);
+    expect(alpha?.unreadCount).toBe(1);
+    expect(alpha?.mentionCount).toBe(1);
+  });
+
   it("orders messages by conversation sequence after an out-of-order upsertHistory", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);

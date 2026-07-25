@@ -330,6 +330,9 @@ deletes active data and objects within 30 days; encrypted backups age out within
   expand/backfill/contract. A release may roll back application tasks without rolling back a
   destructive migration; destructive cleanup waits until the previous client/server version
   is outside the compatibility window.
+- Channel slugs use Unicode NFKC normalization and locale-independent lowercase conversion. They
+  retain Unicode letters, numbers, and following combining marks while other runs collapse to one
+  ASCII hyphen; workspace slugs remain ASCII administrative identifiers.
 - `/livez` checks only the process. `/readyz` checks database connectivity and migration
   compatibility and removes an unhealthy task from service. Deploys drain WebSockets and
   clients reconnect/sync; no sticky-session correctness is assumed.

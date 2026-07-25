@@ -422,8 +422,51 @@ export class WorkspaceRuntime {
   }
 
   async createChannel(name: string, slug: string): Promise<void> {
-    await this.#client.createChannel({ name, slug, topic: null });
-    await this.#refreshSnapshot(this.#generation);
+    const generation = this.#generation;
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
+    const result = await this.#client.createChannel({ name, slug, topic: null });
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    const conversationId = result.conversation.conversation.id;
+
+    // Join the same queue used by realtime so events that arrived while the request was in flight
+    // are projected first. The response cursor is only a high-water mark; ordered realtime/sync is
+    // still solely responsible for advancing and acknowledging it.
+    const projection = this.#eventQueue.then(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      const snapshot = this.#state.bootstrap;
+      if (snapshot === null) return;
+      const projected = replaceConversation(snapshot, conversationId, (current) => ({
+        ...result.conversation,
+        lastMessage: current?.lastMessage ?? result.conversation.lastMessage,
+        unreadCount: current?.unreadCount ?? result.conversation.unreadCount,
+        mentionCount: current?.mentionCount ?? result.conversation.mentionCount,
+        readCursor: current?.readCursor ?? result.conversation.readCursor,
+      }));
+      const summary = projected.conversations.find(
+        (candidate) => candidate.conversation.id === conversationId,
+      );
+      if (summary === undefined) return;
+
+      let repairError: string | null = null;
+      try {
+        await cache.upsertConversation(summary);
+      } catch {
+        repairError =
+          "The channel was created, but its local cache needs repair. Reconnect to refresh it.";
+      }
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#historyCursors.set(conversationId, null);
+      this.#setState({
+        bootstrap: projected,
+        selectedConversationId: conversationId,
+        ...(repairError === null ? {} : { stale: true, error: repairError }),
+      });
+    });
+    this.#eventQueue = projection;
+    await projection;
   }
 
   async createDirectConversation(memberId: string): Promise<void> {

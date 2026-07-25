@@ -6,6 +6,7 @@ import {
   isoDateTimeSchema,
   sequenceSchema,
 } from "./common.js";
+import { channelSlugSchema } from "./channel-slug.js";
 import {
   conversationSchema,
   messageSchema,
@@ -109,12 +110,7 @@ export const listConversationsResponseSchema = z
 export const createChannelRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(100),
-    slug: z
-      .string()
-      .trim()
-      .min(1)
-      .max(100)
-      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    slug: channelSlugSchema,
     topic: z.string().trim().max(250).nullable(),
   })
   .strict();

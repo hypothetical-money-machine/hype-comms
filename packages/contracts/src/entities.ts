@@ -8,6 +8,7 @@ import {
   isoDateTimeSchema,
   sequenceSchema,
 } from "./common.js";
+import { channelSlugSchema } from "./channel-slug.js";
 
 const timestampsShape = {
   createdAt: isoDateTimeSchema,
@@ -77,13 +78,7 @@ export const conversationSchema = z
     workspaceId: entityIdSchema,
     kind: conversationKindSchema,
     name: z.string().trim().min(1).max(100).nullable(),
-    slug: z
-      .string()
-      .trim()
-      .min(1)
-      .max(100)
-      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
-      .nullable(),
+    slug: channelSlugSchema.nullable(),
     topic: z.string().trim().max(250).nullable(),
     isArchived: z.boolean(),
     createdBy: entityIdSchema.nullable(),

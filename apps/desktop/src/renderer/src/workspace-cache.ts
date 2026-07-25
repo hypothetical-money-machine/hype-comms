@@ -64,6 +64,8 @@ export interface WorkspaceCache {
     snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
   ): Promise<void>;
+  /** Persists a mutation projection without claiming that its workspace cursor was applied. */
+  upsertConversation(summary: ConversationSummary): Promise<void>;
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
   advanceCursor(syncCursor: string): Promise<void>;
   upsertHistory(messages: readonly Message[]): Promise<void>;
@@ -350,6 +352,39 @@ function messageRow(message: Message, encrypted: ReadonlyMap<string, CacheCipher
   };
 }
 
+function mergeConversationProjection(
+  incoming: ConversationSummary,
+  current: ConversationSummary | null,
+): ConversationSummary {
+  if (current === null) return incoming;
+  const currentLast = current.lastMessage;
+  const incomingLast = incoming.lastMessage;
+  const lastMessage =
+    currentLast !== null &&
+    (incomingLast === null ||
+      compareSequence(currentLast.conversationSequence, incomingLast.conversationSequence) >= 0)
+      ? currentLast
+      : incomingLast;
+  const currentRead = current.readCursor;
+  const incomingRead = incoming.readCursor;
+  const readCursor =
+    currentRead !== null &&
+    (incomingRead === null ||
+      compareSequence(
+        currentRead.lastReadConversationSequence,
+        incomingRead.lastReadConversationSequence,
+      ) >= 0)
+      ? currentRead
+      : incomingRead;
+  return conversationSummarySchema.parse({
+    ...incoming,
+    lastMessage,
+    unreadCount: current.unreadCount,
+    mentionCount: current.mentionCount,
+    readCursor,
+  });
+}
+
 export class PersistentWorkspaceCache implements WorkspaceCache {
   readonly mode = "persistent" as const;
   readonly #crypto: CacheCryptoClient;
@@ -506,6 +541,21 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       },
     );
     await this.#evictMessages();
+  }
+
+  async upsertConversation(summary: ConversationSummary): Promise<void> {
+    const parsed = conversationSummarySchema.parse(summary);
+    const current = await this.#conversation(parsed.conversation.id);
+    const merged = mergeConversationProjection(parsed, current);
+    const encrypted = await encryptRecords(this.#crypto, [
+      protectedRecord("conversation", merged.conversation.id, merged),
+    ]);
+    await this.#database.conversations.put({
+      id: merged.conversation.id,
+      kind: merged.conversation.kind,
+      updatedAt: merged.conversation.updatedAt,
+      value: encryptedValue(encrypted, "conversation", merged.conversation.id),
+    });
   }
 
   async applyEvent(event: WorkspaceEvent): Promise<boolean> {
@@ -849,6 +899,24 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
+  }
+
+  async upsertConversation(summary: ConversationSummary): Promise<void> {
+    const parsed = conversationSummarySchema.parse(summary);
+    if (this.#snapshot === null) return;
+    const current =
+      this.#snapshot.conversations.find(
+        (candidate) => candidate.conversation.id === parsed.conversation.id,
+      ) ?? null;
+    const merged = mergeConversationProjection(parsed, current);
+    const conversations = this.#snapshot.conversations.filter(
+      (candidate) => candidate.conversation.id !== parsed.conversation.id,
+    );
+    conversations.push(merged);
+    this.#snapshot = {
+      ...this.#snapshot,
+      conversations: conversations.sort(compareConversations),
+    };
   }
 
   async applyEvent(event: WorkspaceEvent): Promise<boolean> {
