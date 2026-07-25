@@ -1,0 +1,334 @@
+import "fake-indexeddb/auto";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  cacheDecryptBatchResponseSchema,
+  cacheEncryptBatchResponseSchema,
+  type CacheDecryptBatchRequest,
+  type CacheEncryptBatchRequest,
+  type ConversationSummary,
+  type Message,
+  type User,
+  type WorkspaceEvent,
+  type WorkspaceSnapshot,
+} from "@hmm-chat/contracts";
+
+import {
+  clearPersistentWorkspaceCaches,
+  MemoryWorkspaceCache,
+  PersistentWorkspaceCache,
+  type CachedWorkspaceState,
+  type WorkspaceCache,
+} from "./workspace-cache";
+
+const NOW = "2026-07-24T12:00:00.000Z";
+const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
+
+/** Lexicographically first, alphabetically last: the two orders must disagree. */
+const MORGAN_ID = "10000000-0000-4000-8000-000000000001";
+const ALICE_ID = "10000000-0000-4000-8000-000000000009";
+
+/** Primary-key order is Zebra, direct message, Alpha — never the server's order. */
+const ZEBRA_ID = "10000000-0000-4000-8000-000000000031";
+const DIRECT_ID = "10000000-0000-4000-8000-000000000032";
+const ALPHA_ID = "10000000-0000-4000-8000-000000000033";
+
+/** Primary-key order is sequence 2, 10, 1 — neither insertion nor sequence order. */
+const MESSAGE_SEQUENCE_2_ID = "10000000-0000-4000-8000-000000000041";
+const MESSAGE_SEQUENCE_10_ID = "10000000-0000-4000-8000-000000000042";
+const MESSAGE_SEQUENCE_1_ID = "10000000-0000-4000-8000-000000000043";
+const CLIENT_MESSAGE_2_ID = "10000000-0000-4000-8000-000000000051";
+const CLIENT_MESSAGE_10_ID = "10000000-0000-4000-8000-000000000052";
+const CLIENT_MESSAGE_1_ID = "10000000-0000-4000-8000-000000000053";
+
+const scope = { userId: MORGAN_ID, workspaceId: WORKSPACE_ID };
+
+const morgan: User = {
+  id: MORGAN_ID,
+  username: "morgan",
+  displayName: "Morgan",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+const alice: User = {
+  id: ALICE_ID,
+  username: "alice",
+  displayName: "alice",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+function channelSummary(id: string, name: string, slug: string): ConversationSummary {
+  return {
+    conversation: {
+      id,
+      workspaceId: WORKSPACE_ID,
+      kind: "channel",
+      name,
+      slug,
+      topic: null,
+      isArchived: false,
+      createdBy: MORGAN_ID,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    participantIds: [],
+    lastMessage: null,
+    unreadCount: 0,
+    mentionCount: 0,
+    readCursor: null,
+  };
+}
+
+const zebraSummary = channelSummary(ZEBRA_ID, "Zebra", "zebra");
+const alphaSummary = channelSummary(ALPHA_ID, "Alpha", "alpha");
+
+const directSummary: ConversationSummary = {
+  conversation: {
+    id: DIRECT_ID,
+    workspaceId: WORKSPACE_ID,
+    kind: "direct_message",
+    name: null,
+    slug: null,
+    topic: null,
+    isArchived: false,
+    createdBy: MORGAN_ID,
+    createdAt: NOW,
+    updatedAt: NOW,
+  },
+  participantIds: [MORGAN_ID, ALICE_ID],
+  lastMessage: null,
+  unreadCount: 0,
+  mentionCount: 0,
+  readCursor: null,
+};
+
+/**
+ * Deliberately scrambled: neither the server's order nor primary-key order, so a cache that
+ * returns storage order or insertion order cannot pass by accident.
+ */
+const snapshot: WorkspaceSnapshot = {
+  currentUser: {
+    user: morgan,
+    email: "morgan@example.com",
+    workspaceId: WORKSPACE_ID,
+    role: "owner",
+  },
+  workspace: {
+    id: WORKSPACE_ID,
+    name: "HMM Chat",
+    slug: "hmm-chat",
+    createdBy: MORGAN_ID,
+    createdAt: NOW,
+    updatedAt: NOW,
+  },
+  members: [morgan, alice],
+  conversations: [directSummary, zebraSummary, alphaSummary],
+  syncCursor: "0",
+  featureFlags: { channels: true, directMessages: true, mentions: true },
+};
+
+function historyMessage(id: string, clientMessageId: string, sequence: string): Message {
+  return {
+    id,
+    conversationId: ALPHA_ID,
+    conversationSequence: sequence,
+    version: 1,
+    clientMessageId,
+    authorId: ALICE_ID,
+    threadRootId: null,
+    body: `Message ${sequence}`,
+    bodyFormat: "hmm_markdown_v1",
+    editedAt: null,
+    deletedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+const messageSequence1 = historyMessage(MESSAGE_SEQUENCE_1_ID, CLIENT_MESSAGE_1_ID, "1");
+const messageSequence2 = historyMessage(MESSAGE_SEQUENCE_2_ID, CLIENT_MESSAGE_2_ID, "2");
+const messageSequence10 = historyMessage(MESSAGE_SEQUENCE_10_ID, CLIENT_MESSAGE_10_ID, "10");
+
+const messageCreatedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000061",
+  type: "message.created",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "7",
+  conversationSequence: "2",
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: { message: messageSequence2, mentionedUserIds: [MORGAN_ID] },
+};
+
+const readCursorEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000062",
+  type: "read_cursor.updated",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "8",
+  conversationSequence: null,
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: {
+    readCursor: {
+      conversationId: ALPHA_ID,
+      userId: MORGAN_ID,
+      lastReadMessageId: MESSAGE_SEQUENCE_2_ID,
+      lastReadConversationSequence: "2",
+      lastReadAt: NOW,
+      updatedAt: NOW,
+    },
+  },
+};
+
+class FakeCrypto {
+  async encryptCacheRecords(input: CacheEncryptBatchRequest) {
+    return cacheEncryptBatchResponseSchema.parse({
+      items: input.items.map((item) => ({
+        store: item.store,
+        recordId: item.recordId,
+        schemaVersion: 1,
+        value: {
+          version: 1,
+          keyVersion: 1,
+          schemaVersion: 1,
+          nonce: "AAAAAAAAAAAAAAAA",
+          ciphertext: btoa(item.plaintext)
+            .replaceAll("+", "-")
+            .replaceAll("/", "_")
+            .replaceAll("=", ""),
+        },
+      })),
+    });
+  }
+
+  async decryptCacheRecords(input: CacheDecryptBatchRequest) {
+    return cacheDecryptBatchResponseSchema.parse({
+      items: input.items.map((item) => ({
+        store: item.store,
+        recordId: item.recordId,
+        schemaVersion: 1,
+        plaintext: atob(
+          item.value.ciphertext
+            .replaceAll("-", "+")
+            .replaceAll("_", "/")
+            .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+        ),
+      })),
+    });
+  }
+}
+
+interface CacheImplementation {
+  readonly name: string;
+  readonly create: () => WorkspaceCache;
+}
+
+const implementations: readonly CacheImplementation[] = [
+  { name: "MemoryWorkspaceCache", create: () => new MemoryWorkspaceCache() },
+  {
+    name: "PersistentWorkspaceCache",
+    create: () => new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+  },
+];
+
+function withoutTimestamps(state: CachedWorkspaceState) {
+  return { ...state, lastSyncedAt: null };
+}
+
+afterEach(async () => {
+  await clearPersistentWorkspaceCaches();
+});
+
+describe.each(implementations)("$name conformance", ({ create }) => {
+  it("orders messages by conversation sequence after an out-of-order upsertHistory", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory([messageSequence10, messageSequence1, messageSequence2]);
+
+    const state = await cache.load();
+    const sequences = state.messages.map((message) => message.conversationSequence);
+    expect(sequences).toEqual(["1", "2", "10"]);
+    expect(state.messages.at(-1)?.id).toBe(MESSAGE_SEQUENCE_10_ID);
+  });
+
+  it("restores the server's conversation and member order on load", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+
+    const state = await cache.load();
+    const conversations = state.bootstrap?.conversations ?? [];
+    const members = state.bootstrap?.members ?? [];
+    const expectedConversations = [ALPHA_ID, ZEBRA_ID, DIRECT_ID];
+    expect(conversations.map((summary) => summary.conversation.id)).toEqual(expectedConversations);
+    expect(members.map((member) => member.id)).toEqual([ALICE_ID, MORGAN_ID]);
+  });
+
+  it("treats read_cursor.updated for an uncached conversation as a no-op", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.clearServerStatePreservingOutbox();
+
+    await expect(cache.applyEvent(readCursorEvent)).resolves.toBe(true);
+    const state = await cache.load();
+    expect(state.bootstrap).toBeNull();
+    expect(state.syncCursor).toBe("8");
+  });
+
+  it("stores message.created when no workspace row is cached", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.clearServerStatePreservingOutbox();
+
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    const state = await cache.load();
+    expect(state.bootstrap).toBeNull();
+    expect(state.messages.map((message) => message.id)).toEqual([MESSAGE_SEQUENCE_2_ID]);
+    expect(state.syncCursor).toBe("7");
+  });
+
+  it("counts an unread mention once and rejects the duplicate event", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(false);
+
+    const state = await cache.load();
+    const conversations = state.bootstrap?.conversations ?? [];
+    const alpha = conversations.find((summary) => summary.conversation.id === ALPHA_ID);
+    expect(alpha?.unreadCount).toBe(1);
+    expect(alpha?.mentionCount).toBe(1);
+    expect(state.messages).toHaveLength(1);
+  });
+});
+
+describe("workspace cache implementation parity", () => {
+  it("returns identical loaded state from both implementations", async () => {
+    const memory: WorkspaceCache = new MemoryWorkspaceCache();
+    const persistent: WorkspaceCache = new PersistentWorkspaceCache({
+      crypto: new FakeCrypto(),
+      scope,
+    });
+    for (const cache of [memory, persistent]) {
+      await cache.replaceSnapshot(snapshot, []);
+      await cache.upsertHistory([messageSequence10, messageSequence1]);
+      await cache.applyEvent(messageCreatedEvent);
+      await cache.applyEvent(readCursorEvent);
+    }
+
+    const memoryState = withoutTimestamps(await memory.load());
+    const persistentState = withoutTimestamps(await persistent.load());
+    expect(memoryState).toEqual(persistentState);
+  });
+});

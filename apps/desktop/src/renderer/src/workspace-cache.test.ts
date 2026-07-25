@@ -1,5 +1,6 @@
 import "fake-indexeddb/auto";
 
+import Dexie from "dexie";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -69,6 +70,8 @@ const bootstrap: WorkspaceBootstrapResponse = {
       readCursor: null,
     },
   ],
+  conversationsNextCursor: null,
+  conversationsHasMore: false,
   syncCursor: "0",
   featureFlags: { channels: true, directMessages: true, mentions: true },
 };
@@ -188,5 +191,38 @@ describe("PersistentWorkspaceCache", () => {
     expect(state.bootstrap).toBeNull();
     expect(state.messages).toEqual([]);
     expect(state.outbox).toHaveLength(1);
+  });
+
+  it("upgrades a version 1 database in place and indexes the message sequence", async () => {
+    // A scope of its own, so no cache opened by an earlier test can still hold this database.
+    const upgradeScope = {
+      userId: "10000000-0000-4000-8000-000000000007",
+      workspaceId: WORKSPACE_ID,
+    };
+    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const legacy = new Dexie(name);
+    legacy.version(1).stores({
+      metadata: "&id",
+      workspaces: "&id",
+      members: "&id,updatedAt",
+      conversations: "&id,kind,updatedAt",
+      messages: "&id,&clientMessageId,conversationId,createdAt",
+      outbox: "&clientMessageId,conversationId,createdAt,status,nextAttemptAt",
+      events: "&id,workspaceSequence",
+    });
+    await legacy.open();
+    const legacyMetadata = { id: "state", ...upgradeScope, syncCursor: "12", lastSyncedAt: NOW };
+    await legacy.table("metadata").put(legacyMetadata);
+    legacy.close();
+
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope: upgradeScope });
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("12");
+
+    const upgraded = new Dexie(name);
+    await upgraded.open();
+    const indexes = upgraded.table("messages").schema.indexes.map((index) => index.name);
+    upgraded.close();
+    expect(indexes).toContain("conversationSequence");
   });
 });

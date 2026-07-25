@@ -3,7 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type { ChatSessionState, Message, UpdateState, User } from "@hmm-chat/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
-import { WorkspaceRuntime, type WorkspaceRuntimeState } from "./workspace-runtime";
+import {
+  cacheFallbackNotice,
+  WorkspaceRuntime,
+  type WorkspaceRuntimeState,
+} from "./workspace-runtime";
+
+type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -178,32 +184,46 @@ export function App({ client }: AppProps) {
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
+  const applySession = useCallback(
+    (next: ChatSessionState) => {
+      setSession(next);
+      if (next.status === "signed-in" && next.method === "email") {
+        void runtime.start(next);
+      } else if (next.status === "signed-out") {
+        void runtime.stop();
+      }
+    },
+    [runtime],
+  );
+
+  const retrySession = useCallback(async (): Promise<void> => {
+    try {
+      applySession(await client.getSessionState());
+    } catch {
+      // Main reports an unreachable server as a preserved session, so there is nothing to add.
+    }
+  }, [applySession, client]);
+
   useEffect(() => {
     let active = true;
     const unsubscribe = client.onSessionChanged((next) => {
-      if (!active) return;
-      setSession(next);
-      if (next.status === "signed-in" && next.method === "email") {
-        void runtime.start(next);
-      } else {
-        void runtime.stop();
-      }
+      if (active) applySession(next);
     });
     void client.getSessionState().then((next) => {
-      if (!active) return;
-      setSession(next);
-      if (next.status === "signed-in" && next.method === "email") {
-        void runtime.start(next);
-      }
+      if (active) applySession(next);
     });
     return () => {
       active = false;
       unsubscribe();
       void runtime.stop();
     };
-  }, [client, runtime]);
+  }, [applySession, client, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
+  // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
+  // and sync failures for the entire life of a session.
+  const workspaceNotice =
+    runtimeState.error ?? cacheFallbackNotice(runtimeState.cacheFallbackReason);
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
@@ -266,6 +286,11 @@ export function App({ client }: AppProps) {
     [runtime],
   );
 
+  const rebuildLocalCache = async (signedIn: SignedInSession): Promise<void> => {
+    await runtime.resetLocalCache();
+    await runtime.start(signedIn);
+  };
+
   const signOut = async (): Promise<void> => {
     if (
       runtimeState.outbox.length > 0 &&
@@ -286,6 +311,19 @@ export function App({ client }: AppProps) {
   if (session === null) return <main className="signin-shell" aria-busy="true" />;
   if (session.status === "signed-out") {
     return <SignIn client={client} sessionMessage={session.message} />;
+  }
+  if (session.status === "session-unavailable") {
+    return (
+      <main className="signin-shell">
+        <section className="signin-card">
+          <h1>Chat server unavailable</h1>
+          <p>{session.message}</p>
+          <button type="button" onClick={() => void retrySession()}>
+            Try again
+          </button>
+        </section>
+      </main>
+    );
   }
   if (session.method !== "email") {
     return (
@@ -311,9 +349,14 @@ export function App({ client }: AppProps) {
             {runtimeState.error ?? "Restoring encrypted history and checking for new messages."}
           </p>
           {runtimeState.error !== null && (
-            <button type="button" onClick={() => void runtime.start(session)}>
-              Retry
-            </button>
+            <div className="message-actions">
+              <button type="button" onClick={() => void runtime.start(session)}>
+                Retry
+              </button>
+              <button type="button" onClick={() => void rebuildLocalCache(session)}>
+                Reset local cache
+              </button>
+            </div>
           )}
         </section>
       </main>
@@ -427,6 +470,25 @@ export function App({ client }: AppProps) {
               {runtimeState.stale ? " · cached state may be stale" : ""}
               {runtimeState.cacheMode === "memory_only" ? " · memory-only cache" : ""}
             </p>
+            {workspaceNotice !== null && (
+              <p className="composer-error" role="alert">
+                {workspaceNotice}{" "}
+                <button
+                  className="quiet-button"
+                  type="button"
+                  onClick={() => void runtime.start(session)}
+                >
+                  Retry
+                </button>{" "}
+                <button
+                  className="quiet-button"
+                  type="button"
+                  onClick={() => void rebuildLocalCache(session)}
+                >
+                  Reset local cache
+                </button>
+              </p>
+            )}
           </div>
           {selectedSummary?.conversation.kind === "channel" &&
             selectedSummary.conversation.slug !== "general" &&

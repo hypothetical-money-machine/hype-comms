@@ -1,12 +1,14 @@
 import {
   sendMessageOperationSchema,
+  type CacheCryptoStatus,
   type CacheScope,
   type ChatSessionState,
   type ConversationSummary,
   type Message,
   type ProductRealtimeEvent,
-  type WorkspaceBootstrapResponse,
+  type SyncAttemptResult,
   type WorkspaceEvent,
+  type WorkspaceSnapshot,
 } from "@hmm-chat/contracts";
 
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
@@ -15,19 +17,36 @@ import {
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   type OutboxItem,
+  type OutboxStatus,
   type WorkspaceCache,
 } from "./workspace-cache";
 
+/** Why the encrypted cache fell back to memory. Derived so a new crypto reason cannot drift. */
+export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_only" }>["reason"];
+
 export interface WorkspaceRuntimeState {
-  readonly bootstrap: WorkspaceBootstrapResponse | null;
+  readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly connection: RealtimeConnectionState;
   readonly cacheMode: "persistent" | "memory_only" | null;
+  readonly cacheFallbackReason: CacheFallbackReason | null;
   readonly stale: boolean;
   readonly busy: boolean;
   readonly error: string | null;
+}
+
+export interface WorkspaceRuntimeOptions {
+  /** Test seam: lets a test observe cache traffic without reaching for IndexedDB. */
+  readonly createCache?: (status: CacheCryptoStatus) => WorkspaceCache;
+}
+
+interface OutboxUpdate {
+  readonly status: OutboxStatus;
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string | null;
+  readonly failureReason: string | null;
 }
 
 const INITIAL_STATE: WorkspaceRuntimeState = {
@@ -37,6 +56,7 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   selectedConversationId: null,
   connection: "offline",
   cacheMode: null,
+  cacheFallbackReason: null,
   stale: true,
   busy: false,
   error: null,
@@ -46,20 +66,104 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
 }
 
-function firstConversation(bootstrap: WorkspaceBootstrapResponse): string | null {
+function firstConversation(snapshot: WorkspaceSnapshot): string | null {
   return (
-    bootstrap.conversations.find(
+    snapshot.conversations.find(
       (summary) =>
         summary.conversation.kind === "channel" && summary.conversation.slug === "general",
     )?.conversation.id ??
-    bootstrap.conversations[0]?.conversation.id ??
+    snapshot.conversations[0]?.conversation.id ??
     null
   );
 }
 
+/** Full jitter between one second and 30 seconds, per the delivery contract. */
 function retryDelay(attempt: number): number {
   const maximum = Math.min(1_000 * 2 ** Math.min(attempt, 5), 30_000);
-  return Math.floor(Math.random() * maximum);
+  return Math.max(1_000, Math.floor(Math.random() * maximum));
+}
+
+function compareSequence(left: string, right: string): number {
+  const leftValue = BigInt(left);
+  const rightValue = BigInt(right);
+  return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+/**
+ * Merges server-derived messages into the in-memory projection using the same ordering the cache
+ * uses, so incremental application and a cold `load()` agree.
+ */
+function mergeMessages(
+  messages: readonly Message[],
+  incoming: readonly Message[],
+): readonly Message[] {
+  if (incoming.length === 0) return messages;
+  const byId = new Map(messages.map((message) => [message.id, message]));
+  for (const message of incoming) byId.set(message.id, message);
+  return [...byId.values()].sort((left, right) =>
+    compareSequence(left.conversationSequence, right.conversationSequence),
+  );
+}
+
+function replaceConversation(
+  snapshot: WorkspaceSnapshot,
+  conversationId: string,
+  update: (current: ConversationSummary | undefined) => ConversationSummary | null,
+): WorkspaceSnapshot {
+  const index = snapshot.conversations.findIndex(
+    (summary) => summary.conversation.id === conversationId,
+  );
+  const next = update(snapshot.conversations[index]);
+  if (next === null) return snapshot;
+  const conversations = [...snapshot.conversations];
+  if (index === -1) conversations.push(next);
+  else conversations[index] = next;
+  return { ...snapshot, conversations };
+}
+
+/** Mirrors the cache's own unread and mention accounting for one applied message event. */
+function countMessage(
+  snapshot: WorkspaceSnapshot,
+  event: Extract<WorkspaceEvent, { type: "message.created" }>,
+): WorkspaceSnapshot {
+  const message = event.payload.message;
+  const currentUserId = snapshot.currentUser.user.id;
+  const fromAnotherMember = message.authorId !== currentUserId;
+  const mentioned = fromAnotherMember && event.payload.mentionedUserIds.includes(currentUserId);
+  return replaceConversation(snapshot, event.conversationId, (current) => {
+    if (current === undefined) return null;
+    return {
+      ...current,
+      lastMessage: message,
+      unreadCount: current.unreadCount + (fromAnotherMember ? 1 : 0),
+      mentionCount: current.mentionCount + (mentioned ? 1 : 0),
+    };
+  });
+}
+
+function syncFailureMessage(
+  reason: Extract<SyncAttemptResult, { status: "permanent" }>["reason"],
+): string {
+  switch (reason) {
+    case "forbidden":
+      return "This device is no longer allowed to sync this workspace.";
+    case "not_found":
+      return "The workspace could not be found on the server.";
+    case "invalid_response":
+      return "The server sent a sync response this app cannot read.";
+    default:
+      return "The server rejected this device's sync request. Reset the local cache to recover.";
+  }
+}
+
+/**
+ * Copy for the recovery signal the cache crypto reports when it cannot use the stored key. A
+ * missing credential store is already described in the connection line and cannot be repaired from
+ * the app; every other reason is an unreadable key, which resetting the local cache does repair.
+ */
+export function cacheFallbackNotice(reason: CacheFallbackReason | null): string | null {
+  if (reason === null || reason === "credential_store_unavailable") return null;
+  return "The encrypted cache key could not be read. Reset the local cache to rebuild it.";
 }
 
 function nextDeliverable(outbox: readonly OutboxItem[], now: number): OutboxItem | undefined {
@@ -93,18 +197,29 @@ function firstItemsByConversation(outbox: readonly OutboxItem[]): readonly Outbo
 export class WorkspaceRuntime {
   readonly #listeners = new Set<(state: WorkspaceRuntimeState) => void>();
   readonly #client: DesktopApi;
+  readonly #createCache: (status: CacheCryptoStatus) => WorkspaceCache;
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
   #flushing = false;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
+  #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #syncAttempt = 0;
+  /** The highest workspace sequence this client has durably applied. */
+  #syncCursor: string | null = null;
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
-  constructor(client: DesktopApi) {
+  constructor(client: DesktopApi, options: WorkspaceRuntimeOptions = {}) {
     this.#client = client;
+    this.#createCache =
+      options.createCache ??
+      ((status) =>
+        status.mode === "persistent"
+          ? new PersistentWorkspaceCache({ crypto: client, scope: status.scope })
+          : new MemoryWorkspaceCache());
   }
 
   get state(): WorkspaceRuntimeState {
@@ -124,6 +239,9 @@ export class WorkspaceRuntime {
 
   async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
     const generation = ++this.#generation;
+    this.#clearRetryTimer();
+    this.#clearSyncRetryTimer();
+    this.#syncAttempt = 0;
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
@@ -150,12 +268,10 @@ export class WorkspaceRuntime {
     };
     try {
       const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
-      this.#cache =
-        cryptoStatus.mode === "persistent"
-          ? new PersistentWorkspaceCache({ crypto: this.#client, scope })
-          : new MemoryWorkspaceCache();
+      this.#cache = this.#createCache(cryptoStatus);
       const cached = await this.#cache.load();
       if (generation !== this.#generation) return;
+      this.#syncCursor = cached.syncCursor;
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -164,14 +280,15 @@ export class WorkspaceRuntime {
           this.#state.selectedConversationId ??
           (cached.bootstrap === null ? null : firstConversation(cached.bootstrap)),
         cacheMode: cryptoStatus.mode,
+        cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
         stale: true,
       });
 
       await this.#refreshSnapshot(generation);
       if (generation !== this.#generation || this.#cache === null) return;
       await this.#repairAndFlush(generation);
-      const loaded = await this.#cache.load();
-      await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
+      if (generation !== this.#generation || this.#cache === null) return;
+      await this.#restartRealtime(generation);
       this.#setState({ busy: false });
     } catch (error) {
       if (generation !== this.#generation) return;
@@ -186,12 +303,14 @@ export class WorkspaceRuntime {
   async stop(): Promise<void> {
     ++this.#generation;
     this.#clearRetryTimer();
+    this.#clearSyncRetryTimer();
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
     this.#unsubscribeConnection = null;
     await this.#client.stopWorkspaceRealtime();
     this.#cache = null;
+    this.#syncCursor = null;
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
   }
@@ -227,25 +346,37 @@ export class WorkspaceRuntime {
         attachmentIds: [],
       },
     });
-    await cache.enqueue(operation);
-    await this.#reloadCache();
+    const createdAt = new Date().toISOString();
+    await cache.enqueue(operation, createdAt);
+    this.#setState({
+      outbox: [
+        ...this.#state.outbox,
+        {
+          operation,
+          createdAt,
+          status: "pending",
+          attemptCount: 0,
+          nextAttemptAt: null,
+          failureReason: null,
+        },
+      ],
+    });
     void this.#flushOutbox(this.#generation);
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
-    await this.#cache?.updateOutbox(clientMessageId, {
+    await this.#patchOutbox(clientMessageId, {
       status: "pending",
       attemptCount: 0,
       nextAttemptAt: null,
       failureReason: null,
     });
-    await this.#reloadCache();
     void this.#flushOutbox(this.#generation);
   }
 
   async discardMessage(clientMessageId: string): Promise<void> {
     await this.#cache?.removeOutbox(clientMessageId);
-    await this.#reloadCache();
+    this.#setState({ outbox: this.#withoutOutbox([clientMessageId]) });
   }
 
   async createChannel(name: string, slug: string): Promise<void> {
@@ -275,7 +406,7 @@ export class WorkspaceRuntime {
     });
     this.#historyCursors.set(conversationId, history.nextCursor);
     await cache.upsertHistory(history.messages);
-    await this.#reloadCache();
+    this.#setState({ messages: mergeMessages(this.#state.messages, history.messages) });
   }
 
   hasOlder(conversationId: string): boolean {
@@ -283,12 +414,17 @@ export class WorkspaceRuntime {
   }
 
   async resetLocalCache(): Promise<void> {
+    ++this.#generation;
+    this.#clearRetryTimer();
+    this.#clearSyncRetryTimer();
     await this.#client.stopWorkspaceRealtime();
     await this.#cache?.clearAll().catch(() => undefined);
     await clearPersistentWorkspaceCaches();
     await this.#client.resetCacheCrypto();
     this.#cache = null;
-    this.#setState({ ...INITIAL_STATE, error: "Local cache reset. Sign in again to rebuild it." });
+    this.#syncCursor = null;
+    this.#historyCursors.clear();
+    this.#setState({ ...INITIAL_STATE, error: "Local cache reset. Rebuilding the workspace…" });
   }
 
   conversationName(summary: ConversationSummary): string {
@@ -304,13 +440,38 @@ export class WorkspaceRuntime {
     );
   }
 
+  /** Pages `/v1/conversations` until the server stops claiming more, per the bootstrap contract. */
+  async #fetchSnapshot(): Promise<WorkspaceSnapshot> {
+    const bootstrap = await this.#client.getWorkspaceBootstrap();
+    const conversations = [...bootstrap.conversations];
+    const seen = new Set(conversations.map((summary) => summary.conversation.id));
+    let cursor = bootstrap.conversationsNextCursor;
+    while (cursor !== null) {
+      const page = await this.#client.listConversations({ after: cursor });
+      const added = page.conversations.filter((summary) => !seen.has(summary.conversation.id));
+      for (const summary of added) seen.add(summary.conversation.id);
+      conversations.push(...added);
+      // A server that claims another page without advancing must not spin the renderer.
+      if (added.length === 0 || page.nextCursor === cursor) break;
+      cursor = page.nextCursor;
+    }
+    return {
+      currentUser: bootstrap.currentUser,
+      workspace: bootstrap.workspace,
+      members: bootstrap.members,
+      conversations,
+      syncCursor: bootstrap.syncCursor,
+      featureFlags: bootstrap.featureFlags,
+    };
+  }
+
   async #refreshSnapshot(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null) return;
-    const bootstrap = await this.#client.getWorkspaceBootstrap();
+    const snapshot = await this.#fetchSnapshot();
     const messages: Message[] = [];
     this.#historyCursors.clear();
-    for (const summary of bootstrap.conversations) {
+    for (const summary of snapshot.conversations) {
       const history = await this.#client.getConversationMessages({
         conversationId: summary.conversation.id,
         limit: 50,
@@ -319,13 +480,15 @@ export class WorkspaceRuntime {
       messages.push(...history.messages);
     }
     if (generation !== this.#generation) return;
-    await cache.replaceSnapshot(bootstrap, messages);
+    await cache.replaceSnapshot(snapshot, messages);
     const loaded = await cache.load();
+    if (generation !== this.#generation) return;
+    this.#syncCursor = loaded.syncCursor;
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       outbox: loaded.outbox,
-      selectedConversationId: this.#state.selectedConversationId ?? firstConversation(bootstrap),
+      selectedConversationId: this.#state.selectedConversationId ?? firstConversation(snapshot),
       stale: false,
       error: null,
     });
@@ -334,19 +497,37 @@ export class WorkspaceRuntime {
   async #repairAndFlush(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
+    this.#clearSyncRetryTimer();
     let state = await cache.load();
     let cursor = state.syncCursor ?? "0";
+    let resets = 0;
     for (;;) {
       const result = await this.#client.syncWorkspace(cursor);
       if (generation !== this.#generation) return;
       if (result.status === "authentication_required") return;
+      if (result.status === "permanent") {
+        // Retrying cannot help, so the failure must be visible instead of silently going stale.
+        this.#setState({ stale: true, error: syncFailureMessage(result.reason) });
+        return;
+      }
       if (result.status === "retryable") {
         this.#setState({ stale: true });
+        this.#scheduleSyncRetry(generation, result.retryAfterMs);
         return;
       }
       if (result.status === "reset_required") {
+        if (resets > 0) {
+          this.#setState({
+            stale: true,
+            error: "The server keeps asking this device to resync. Reset the local cache.",
+          });
+          return;
+        }
+        resets += 1;
         await cache.clearServerStatePreservingOutbox();
+        this.#syncCursor = null;
         await this.#refreshSnapshot(generation);
+        if (generation !== this.#generation) return;
         state = await cache.load();
         cursor = state.syncCursor ?? "0";
         continue;
@@ -354,9 +535,11 @@ export class WorkspaceRuntime {
       for (const event of result.response.events) await cache.applyEvent(event);
       await cache.advanceCursor(result.response.nextCursor);
       await this.#client.acknowledgeWorkspaceEvent(result.response.nextCursor);
+      this.#syncCursor = result.response.nextCursor;
       cursor = result.response.nextCursor;
       if (!result.response.hasMore) break;
     }
+    this.#syncAttempt = 0;
     await this.#reloadCache();
     this.#setState({ stale: false });
     await this.#flushOutbox(generation);
@@ -371,55 +554,126 @@ export class WorkspaceRuntime {
       return;
     }
     if (event.type === "system.resync_required") {
-      await this.#cache.clearServerStatePreservingOutbox();
-      await this.#refreshSnapshot(generation);
+      await this.#resync(generation);
       return;
     }
     await this.#applyWorkspaceEvent(event);
   }
 
+  /**
+   * The server sends `system.resync_required` and then closes the socket, so realtime has to be
+   * restarted with the cursor the fresh snapshot establishes. Reconnecting with the stale cursor
+   * would be answered with another resync, and the client would re-download history forever.
+   */
+  async #resync(generation: number): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return;
+    await this.#client.stopWorkspaceRealtime();
+    this.#setState({ stale: true });
+    await cache.clearServerStatePreservingOutbox();
+    this.#syncCursor = null;
+    await this.#refreshSnapshot(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    await this.#repairAndFlush(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    await this.#restartRealtime(generation);
+  }
+
+  async #restartRealtime(generation: number): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return;
+    const loaded = await cache.load();
+    if (generation !== this.#generation) return;
+    this.#syncCursor = loaded.syncCursor;
+    await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
+  }
+
   async #applyWorkspaceEvent(event: WorkspaceEvent): Promise<void> {
-    if (this.#cache === null) return;
-    await this.#cache.applyEvent(event);
+    const cache = this.#cache;
+    if (cache === null) return;
+    const applied = await cache.applyEvent(event);
     await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
-    await this.#reloadCache();
+    if (!applied) return;
+    this.#syncCursor = event.workspaceSequence;
+    // The event payload already carries everything the view needs, so the whole encrypted cache
+    // does not have to be decrypted again for every message.
+    this.#projectEvent(event);
+  }
+
+  #projectEvent(event: WorkspaceEvent): void {
+    const snapshot = this.#state.bootstrap;
+    if (event.type === "message.created") {
+      const message = event.payload.message;
+      this.#setState({
+        messages: mergeMessages(this.#state.messages, [message]),
+        outbox: this.#withoutOutbox([message.clientMessageId]),
+        bootstrap: snapshot === null ? null : countMessage(snapshot, event),
+      });
+      return;
+    }
+    if (snapshot === null) return;
+    if (event.type === "member.updated") {
+      const member = event.payload.member;
+      const members = snapshot.members.some((existing) => existing.id === member.id)
+        ? snapshot.members.map((existing) => (existing.id === member.id ? member : existing))
+        : [...snapshot.members, member];
+      this.#setState({ bootstrap: { ...snapshot, members } });
+      return;
+    }
+    if (event.type === "read_cursor.updated") {
+      const readCursor = event.payload.readCursor;
+      this.#setState({
+        bootstrap: replaceConversation(snapshot, event.conversationId, (current) => {
+          if (current === undefined) return null;
+          return { ...current, readCursor, unreadCount: 0, mentionCount: 0 };
+        }),
+      });
+      return;
+    }
+    this.#setState({
+      bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
+        conversation: event.payload.conversation,
+        participantIds: [...event.payload.participantIds],
+        lastMessage: current?.lastMessage ?? null,
+        unreadCount: current?.unreadCount ?? 0,
+        mentionCount: current?.mentionCount ?? 0,
+        readCursor: current?.readCursor ?? null,
+      })),
+    });
   }
 
   async #flushOutbox(generation: number): Promise<void> {
-    if (this.#flushing || this.#cache === null || generation !== this.#generation) return;
+    const cache = this.#cache;
+    if (this.#flushing || cache === null || generation !== this.#generation) return;
     this.#flushing = true;
     this.#clearRetryTimer();
     try {
       for (;;) {
-        const loaded = await this.#cache.load();
-        const now = Date.now();
-        const next = nextDeliverable(loaded.outbox, now);
+        const next = nextDeliverable(this.#state.outbox, Date.now());
         if (next === undefined) {
-          this.#scheduleNextRetry(loaded.outbox, generation);
+          this.#scheduleNextRetry(this.#state.outbox, generation);
           break;
         }
         const id = next.operation.message.clientMessageId;
         const attempt = next.attemptCount + 1;
-        await this.#cache.updateOutbox(id, {
+        await this.#patchOutbox(id, {
           status: "sending",
           attemptCount: attempt,
           nextAttemptAt: null,
           failureReason: null,
         });
-        await this.#reloadCache();
         const result = await this.#client.sendConversationMessage(next.operation);
         if (generation !== this.#generation) return;
         if (result.status === "accepted") {
-          await this.#cache.upsertAcknowledgedMessage(
-            result.response.message,
-            result.response.syncCursor,
-          );
-          await this.#client.acknowledgeWorkspaceEvent(result.response.syncCursor);
-          await this.#reloadCache();
+          // The send response's cursor is a whole-workspace sequence, so a peer event still in
+          // flight can be below it. Record the message durably but keep this client's cursor at
+          // what it has actually applied, and never acknowledge the send cursor to the server.
+          await cache.upsertAcknowledgedMessage(result.response.message, this.#syncCursor ?? "0");
+          this.#acceptMessage(result.response.message, id);
           continue;
         }
         if (result.status === "authentication_required") {
-          await this.#cache.updateOutbox(id, {
+          await this.#patchOutbox(id, {
             status: "paused_auth",
             attemptCount: attempt,
             nextAttemptAt: null,
@@ -428,7 +682,7 @@ export class WorkspaceRuntime {
           break;
         }
         if (result.status === "permanent") {
-          await this.#cache.updateOutbox(id, {
+          await this.#patchOutbox(id, {
             status: "permanent_failure",
             attemptCount: attempt,
             nextAttemptAt: null,
@@ -437,28 +691,81 @@ export class WorkspaceRuntime {
           continue;
         }
         const delay = result.retryAfterMs ?? retryDelay(attempt);
-        await this.#cache.updateOutbox(id, {
+        await this.#patchOutbox(id, {
           status: "retry_wait",
           attemptCount: attempt,
           nextAttemptAt: new Date(Date.now() + delay).toISOString(),
           failureReason: result.reason,
         });
+        // Without rearming here the message waits for a manual retry or a restart forever.
+        this.#scheduleNextRetry(this.#state.outbox, generation);
         break;
       }
     } finally {
       this.#flushing = false;
-      await this.#reloadCache();
     }
   }
 
+  #acceptMessage(message: Message, clientMessageId: string): void {
+    const snapshot = this.#state.bootstrap;
+    const bootstrap =
+      snapshot === null
+        ? null
+        : replaceConversation(snapshot, message.conversationId, (current) => {
+            if (current === undefined) return null;
+            return { ...current, lastMessage: message };
+          });
+    this.#setState({
+      messages: mergeMessages(this.#state.messages, [message]),
+      // Both ids are dropped so a server that does not echo the client id cannot leave the
+      // delivered item queued and spin the flush loop.
+      outbox: this.#withoutOutbox([clientMessageId, message.clientMessageId]),
+      bootstrap,
+    });
+  }
+
+  #withoutOutbox(clientMessageIds: readonly string[]): readonly OutboxItem[] {
+    return this.#state.outbox.filter(
+      (item) => !clientMessageIds.includes(item.operation.message.clientMessageId),
+    );
+  }
+
+  async #patchOutbox(clientMessageId: string, update: OutboxUpdate): Promise<void> {
+    await this.#cache?.updateOutbox(clientMessageId, update);
+    this.#setState({
+      outbox: this.#state.outbox.map((item) =>
+        item.operation.message.clientMessageId === clientMessageId ? { ...item, ...update } : item,
+      ),
+    });
+  }
+
   async #reloadCache(): Promise<void> {
-    if (this.#cache === null) return;
-    const loaded = await this.#cache.load();
+    const cache = this.#cache;
+    if (cache === null) return;
+    const loaded = await cache.load();
+    this.#syncCursor = loaded.syncCursor;
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       outbox: loaded.outbox,
     });
+  }
+
+  #scheduleSyncRetry(generation: number, retryAfterMs: number | null): void {
+    this.#clearSyncRetryTimer();
+    this.#syncAttempt += 1;
+    const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
+    this.#syncRetryTimer = setTimeout(() => {
+      this.#syncRetryTimer = null;
+      void this.#repairAndFlush(generation).catch((error: unknown) => {
+        if (generation === this.#generation) {
+          this.#setState({
+            stale: true,
+            error: errorMessage(error, "Could not sync the workspace"),
+          });
+        }
+      });
+    }, delay);
   }
 
   #scheduleNextRetry(outbox: readonly OutboxItem[], generation: number): void {
@@ -468,6 +775,7 @@ export class WorkspaceRuntime {
       .filter(Number.isFinite);
     const next = times.length === 0 ? undefined : Math.min(...times);
     if (next === undefined) return;
+    this.#clearRetryTimer();
     this.#retryTimer = setTimeout(
       () => {
         this.#retryTimer = null;
@@ -481,6 +789,13 @@ export class WorkspaceRuntime {
     if (this.#retryTimer !== null) {
       clearTimeout(this.#retryTimer);
       this.#retryTimer = null;
+    }
+  }
+
+  #clearSyncRetryTimer(): void {
+    if (this.#syncRetryTimer !== null) {
+      clearTimeout(this.#syncRetryTimer);
+      this.#syncRetryTimer = null;
     }
   }
 }

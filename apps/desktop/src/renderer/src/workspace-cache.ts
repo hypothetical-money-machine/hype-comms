@@ -5,8 +5,8 @@ import {
   messageSchema,
   sendMessageOperationSchema,
   userSchema,
-  workspaceBootstrapResponseSchema,
   workspaceEventSchema,
+  workspaceSnapshotSchema,
   type CacheCiphertext,
   type CacheCryptoStatus,
   type CacheDecryptBatchRequest,
@@ -17,8 +17,10 @@ import {
   type ConversationSummary,
   type Message,
   type SendMessageOperation,
+  type User,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
+  type WorkspaceSnapshot,
 } from "@hmm-chat/contracts";
 
 const CACHE_SCHEMA_VERSION = 1 as const;
@@ -39,7 +41,11 @@ export interface OutboxItem {
 }
 
 export interface CachedWorkspaceState {
-  readonly bootstrap: WorkspaceBootstrapResponse | null;
+  /**
+   * The aggregate client snapshot, not a bootstrap response: the cache holds every conversation
+   * page the client has fetched, so page cursors have no meaning once state is cached.
+   */
+  readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
   readonly outbox: readonly OutboxItem[];
   readonly syncCursor: string | null;
@@ -49,8 +55,13 @@ export interface CachedWorkspaceState {
 export interface WorkspaceCache {
   readonly mode: CacheCryptoStatus["mode"];
   load(): Promise<CachedWorkspaceState>;
+  /**
+   * Accepts either a bootstrap response or the aggregate client snapshot; only the fields both
+   * shapes share are persisted, so a caller that has paged past the first conversation page can
+   * hand the aggregate straight in.
+   */
   replaceSnapshot(
-    bootstrap: WorkspaceBootstrapResponse,
+    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
   ): Promise<void>;
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
@@ -154,6 +165,11 @@ class WorkspaceCacheDatabase extends Dexie {
       outbox: "&clientMessageId,conversationId,createdAt,status,nextAttemptAt",
       events: "&id,workspaceSequence",
     });
+    // Version 2 only adds the message sequence index, so existing databases upgrade in place and
+    // every store not named here carries over from version 1 unchanged.
+    this.version(2).stores({
+      messages: "&id,&clientMessageId,conversationId,createdAt,conversationSequence",
+    });
   }
 }
 
@@ -163,6 +179,69 @@ function compareSequence(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
   return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Sequences are decimal strings, so IndexedDB's lexicographic index order is not the numeric
+ * order the UI needs ("10" sorts before "9"). Every read therefore sorts numerically in JS; the
+ * stored index exists for lookups, not for ordering.
+ */
+function compareMessages(left: Message, right: Message): number {
+  return compareSequence(left.conversationSequence, right.conversationSequence);
+}
+
+/** Mirrors the server's `ORDER BY lower(display_name), id`. */
+function compareMembers(left: User, right: User): number {
+  const leftName = left.displayName.toLowerCase();
+  const rightName = right.displayName.toLowerCase();
+  const byName = leftName.localeCompare(rightName);
+  return byName !== 0 ? byName : compareText(left.id, right.id);
+}
+
+/** Mirrors the server's `ORDER BY kind, lower(coalesce(name, '')), created_at, id`. */
+function compareConversations(left: ConversationSummary, right: ConversationSummary): number {
+  const byKind = compareText(left.conversation.kind, right.conversation.kind);
+  if (byKind !== 0) return byKind;
+  const leftName = (left.conversation.name ?? "").toLowerCase();
+  const rightName = (right.conversation.name ?? "").toLowerCase();
+  const byName = leftName.localeCompare(rightName);
+  if (byName !== 0) return byName;
+  const byCreatedAt = compareText(left.conversation.createdAt, right.conversation.createdAt);
+  return byCreatedAt !== 0 ? byCreatedAt : compareText(left.conversation.id, right.conversation.id);
+}
+
+/**
+ * Both cache implementations store rows keyed by ID, which loses the order the server sent. This
+ * restores the server's deliberate ordering so the renderer never has to sort, and so the two
+ * implementations return identical state for identical input.
+ */
+function canonicalSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  return {
+    ...snapshot,
+    members: [...snapshot.members].sort(compareMembers),
+    conversations: [...snapshot.conversations].sort(compareConversations),
+  };
+}
+
+/**
+ * Reduces a bootstrap response or an aggregate snapshot to the cached snapshot shape. Picking
+ * fields explicitly keeps the strict schema happy for both inputs.
+ */
+function parseSnapshotInput(
+  input: WorkspaceBootstrapResponse | WorkspaceSnapshot,
+): WorkspaceSnapshot {
+  return workspaceSnapshotSchema.parse({
+    currentUser: input.currentUser,
+    workspace: input.workspace,
+    members: input.members,
+    conversations: input.conversations,
+    syncCursor: input.syncCursor,
+    featureFlags: input.featureFlags,
+  });
 }
 
 function databaseName(scope: CacheScope): string {
@@ -307,20 +386,22 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ),
     ]);
     const workspace = workspacePayloads[0];
+    // Dexie reads return primary-key (UUID) order, so both collections are re-sorted into the
+    // order the server sent them; the renderer does not sort.
     const bootstrap =
       workspace === undefined
         ? null
-        : workspaceBootstrapResponseSchema.parse({
-            ...workspace,
-            members,
-            conversations,
-            syncCursor: metadata?.syncCursor ?? "0",
-          });
+        : canonicalSnapshot(
+            parseSnapshotInput({
+              ...workspace,
+              members,
+              conversations,
+              syncCursor: metadata?.syncCursor ?? "0",
+            }),
+          );
     return {
       bootstrap,
-      messages: messages.sort((left, right) =>
-        compareSequence(left.conversationSequence, right.conversationSequence),
-      ),
+      messages: messages.sort(compareMessages),
       outbox: outboxRows.map((row, index) => ({
         operation: operations[index] as SendMessageOperation,
         createdAt: row.createdAt,
@@ -335,10 +416,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(
-    bootstrap: WorkspaceBootstrapResponse,
+    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
   ): Promise<void> {
-    const parsed = workspaceBootstrapResponseSchema.parse(bootstrap);
+    const parsed = parseSnapshotInput(snapshot);
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
     const encrypted = await encryptRecords(this.#crypto, [
       protectedRecord("workspace", parsed.workspace.id, {
@@ -417,10 +498,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
 
     if (parsed.type === "message.created") {
       const currentSummary = await this.#conversation(parsed.conversationId);
+      // The workspace row can be missing while a resync is in flight. Store the message and skip
+      // the unread bookkeeping instead of throwing, matching MemoryWorkspaceCache.
       const currentUserId = await this.#currentUserId();
       const fromAnotherMember = parsed.payload.message.authorId !== currentUserId;
       const nextSummary =
-        currentSummary === null
+        currentSummary === null || currentUserId === null
           ? null
           : conversationSummarySchema.parse({
               ...currentSummary,
@@ -479,22 +562,42 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       );
     } else {
       const current = await this.#conversation(parsed.conversationId);
-      const summary: ConversationSummary =
-        parsed.type === "read_cursor.updated"
-          ? conversationSummarySchema.parse({
-              ...current,
-              readCursor: parsed.payload.readCursor,
-              unreadCount: 0,
-              mentionCount: 0,
-            })
-          : conversationSummarySchema.parse({
-              conversation: parsed.payload.conversation,
-              participantIds: parsed.payload.participantIds,
-              lastMessage: current?.lastMessage ?? null,
-              unreadCount: current?.unreadCount ?? 0,
-              mentionCount: current?.mentionCount ?? 0,
-              readCursor: current?.readCursor ?? null,
-            });
+      let nextSummary: ConversationSummary | null = null;
+      if (parsed.type === "read_cursor.updated") {
+        // A read cursor for a conversation this cache has never seen is a no-op: there is no
+        // summary to attach it to, and a placeholder would invent a conversation the server never
+        // sent. MemoryWorkspaceCache makes the same choice. The event is still recorded, so the
+        // sync cursor advances past it rather than replaying it forever.
+        if (current !== null) {
+          nextSummary = conversationSummarySchema.parse({
+            ...current,
+            readCursor: parsed.payload.readCursor,
+            unreadCount: 0,
+            mentionCount: 0,
+          });
+        }
+      } else {
+        nextSummary = conversationSummarySchema.parse({
+          conversation: parsed.payload.conversation,
+          participantIds: parsed.payload.participantIds,
+          lastMessage: current?.lastMessage ?? null,
+          unreadCount: current?.unreadCount ?? 0,
+          mentionCount: current?.mentionCount ?? 0,
+          readCursor: current?.readCursor ?? null,
+        });
+      }
+      if (nextSummary === null) {
+        await this.#database.transaction(
+          "rw",
+          this.#database.metadata,
+          this.#database.events,
+          async () => {
+            await this.#recordEvent(parsed);
+          },
+        );
+        return true;
+      }
+      const summary = nextSummary;
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("conversation", summary.conversation.id, summary),
       ]);
@@ -641,18 +744,22 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     );
   }
 
-  async #currentUserId(): Promise<string> {
+  /**
+   * Null when no workspace row is cached — the window a resync opens between
+   * `clearServerStatePreservingOutbox()` and the next snapshot refresh. Callers treat that as
+   * "identity unknown" and skip identity-dependent bookkeeping instead of failing the event.
+   */
+  async #currentUserId(): Promise<string | null> {
     const row = (await this.#database.workspaces.toArray())[0];
-    if (row === undefined) throw new Error("Cached workspace identity is unavailable");
+    if (row === undefined) return null;
     const payload = (
       await decryptRows(this.#crypto, "workspace", [row], [row.id], (value) =>
-        workspaceBootstrapResponseSchema.shape.currentUser.parse(
+        workspaceSnapshotSchema.shape.currentUser.parse(
           (value as Partial<WorkspacePayload>).currentUser,
         ),
       )
     )[0];
-    if (payload === undefined) throw new Error("Cached workspace identity is unavailable");
-    return payload.user.id;
+    return payload?.user.id ?? null;
   }
 
   async #recordEvent(event: WorkspaceEvent): Promise<void> {
@@ -681,7 +788,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
 
 export class MemoryWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
-  #bootstrap: WorkspaceBootstrapResponse | null = null;
+  #snapshot: WorkspaceSnapshot | null = null;
   readonly #messages = new Map<string, Message>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
@@ -689,9 +796,17 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   #lastSyncedAt: string | null = null;
 
   async load(): Promise<CachedWorkspaceState> {
+    const snapshot = this.#snapshot;
+    // The reported snapshot cursor tracks applied events, matching how PersistentWorkspaceCache
+    // rebuilds it from the metadata row.
+    const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? "0";
+    const bootstrap = snapshot === null ? null : canonicalSnapshot({ ...snapshot, syncCursor });
     return {
-      bootstrap: this.#bootstrap,
-      messages: [...this.#messages.values()],
+      bootstrap,
+      // Map insertion order is arrival order, not conversation order; sort so "load older
+      // messages" cannot append history below newer messages and so `messages.at(-1)` is really
+      // the newest message, exactly like PersistentWorkspaceCache.
+      messages: [...this.#messages.values()].sort(compareMessages),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       ),
@@ -701,13 +816,14 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(
-    bootstrap: WorkspaceBootstrapResponse,
+    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
   ): Promise<void> {
-    this.#bootstrap = workspaceBootstrapResponseSchema.parse(bootstrap);
+    const parsed = parseSnapshotInput(snapshot);
+    this.#snapshot = parsed;
     this.#messages.clear();
     for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
-    this.#syncCursor = bootstrap.syncCursor;
+    this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
   }
 
@@ -726,13 +842,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     if (parsed.type === "message.created") {
       this.#messages.set(parsed.payload.message.id, parsed.payload.message);
       this.#outbox.delete(parsed.payload.message.clientMessageId);
-      if (this.#bootstrap !== null && parsed.conversationId !== null) {
+      if (this.#snapshot !== null && parsed.conversationId !== null) {
         const conversations = new Map(
-          this.#bootstrap.conversations.map((summary) => [summary.conversation.id, summary]),
+          this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
         );
         const current = conversations.get(parsed.conversationId);
         if (current !== undefined) {
-          const currentUserId = this.#bootstrap.currentUser.user.id;
+          const currentUserId = this.#snapshot.currentUser.user.id;
           conversations.set(parsed.conversationId, {
             ...current,
             lastMessage: parsed.payload.message,
@@ -745,19 +861,19 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
                 ? 1
                 : 0),
           });
-          this.#bootstrap = {
-            ...this.#bootstrap,
+          this.#snapshot = {
+            ...this.#snapshot,
             conversations: [...conversations.values()],
           };
         }
       }
-    } else if (this.#bootstrap !== null && parsed.type === "member.updated") {
-      const members = new Map(this.#bootstrap.members.map((member) => [member.id, member]));
+    } else if (this.#snapshot !== null && parsed.type === "member.updated") {
+      const members = new Map(this.#snapshot.members.map((member) => [member.id, member]));
       members.set(parsed.payload.member.id, parsed.payload.member);
-      this.#bootstrap = { ...this.#bootstrap, members: [...members.values()] };
-    } else if (this.#bootstrap !== null && parsed.conversationId !== null) {
+      this.#snapshot = { ...this.#snapshot, members: [...members.values()] };
+    } else if (this.#snapshot !== null && parsed.conversationId !== null) {
       const conversations = new Map(
-        this.#bootstrap.conversations.map((summary) => [summary.conversation.id, summary]),
+        this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
       );
       const current = conversations.get(parsed.conversationId);
       if (parsed.type === "read_cursor.updated") {
@@ -779,7 +895,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           readCursor: current?.readCursor ?? null,
         });
       }
-      this.#bootstrap = { ...this.#bootstrap, conversations: [...conversations.values()] };
+      this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
     }
     return true;
   }
@@ -840,7 +956,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   }
 
   async clearServerStatePreservingOutbox(): Promise<void> {
-    this.#bootstrap = null;
+    this.#snapshot = null;
     this.#messages.clear();
     this.#events.clear();
     this.#syncCursor = null;
