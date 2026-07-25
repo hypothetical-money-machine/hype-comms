@@ -46,6 +46,9 @@ npm ci
 Everything below is for working on HMM Chat. Create `.env.local` with local-only values:
 
 ```dotenv
+HMM_POSTGRES_PASSWORD=local-password
+HMM_POSTGRES_BIND_PORT=5432
+HMM_DEMO_POSTGRES_BIND_PORT=54330
 HMM_DATABASE_URL=postgres://hmm:local-password@127.0.0.1:5432/hmm_chat
 HMM_OWNER_EMAIL=you@example.com
 HMM_EMAIL_DELIVERY=console
@@ -56,8 +59,7 @@ HMM_ALLOWED_ORIGINS=http://127.0.0.1:5173
 Start PostgreSQL, then the host server and Electron client:
 
 ```bash
-# Use a matching HMM_POSTGRES_PASSWORD in .env for Compose.
-docker compose up -d postgres
+docker compose --env-file .env.local up -d postgres
 npm run dev
 ```
 
@@ -73,6 +75,33 @@ An additional desktop identity needs isolated Electron storage:
 ```bash
 npm run dev:join -- --profile=dan
 ```
+
+### Two-client demo
+
+For UI and realtime work, start the complete local demo with:
+
+```bash
+npm run demo
+```
+
+The command uses the isolated `hmm-chat-demo` Compose project and PostgreSQL volume on loopback port
+`54330` by default, so it can run beside the normal development database. It applies migrations,
+idempotently seeds Claire, Woots, four channels, one direct conversation, and eight messages, then
+starts the API and two isolated Electron profiles under `.dev-data/demo/desktop`. Authentication
+callbacks are private one-shot files: Electron consumes each file only when its profile is signed
+out, while a restored session wins after a main-process restart.
+
+Use `npm run seed:demo` to start the same isolated PostgreSQL service, seed it, and write fresh
+private callback files without launching the API or clients. Ordinary demo shutdown leaves its
+PostgreSQL volume running for fast restarts. To erase only the demo database and Claire/Woots
+profiles, first close the demo and run:
+
+```bash
+npm run demo:reset
+```
+
+The reset refuses to run while its launcher marker names a live process. It never removes the
+normal Compose volume or standard Electron profiles.
 
 The API applies forward-only migrations on startup. Migration filenames and checksums are
 recorded under an advisory lock; add a new numbered file and never edit an applied migration.

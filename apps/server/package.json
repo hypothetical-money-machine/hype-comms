@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs",
     "predev": "npm run build --workspace @hmm-chat/contracts",
     "dev": "tsx watch src/main.ts",
+    "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
     "invite:dist": "node dist/modules/identity/invite-cli.js",
     "migrate": "tsx src/db/migrate.ts",

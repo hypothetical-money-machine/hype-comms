@@ -35,7 +35,13 @@ import {
 } from "./auth-callback";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
-import { resolveDevelopmentProfile } from "./development-profile";
+import {
+  callbackForSignedOutSession,
+  consumeDevelopmentAuthCallbackFile,
+  resolveDevelopmentAuthCallbackFile,
+  resolveDevelopmentProfile,
+  resolveDevelopmentUserDataPath,
+} from "./development-profile";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
 import {
@@ -73,9 +79,20 @@ const pendingAuthCallbackUrls: string[] = [];
 let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
-if (developmentProfile !== "") {
-  app.setPath("userData", path.join(app.getPath("userData"), `development-${developmentProfile}`));
-}
+const developmentAuthCallbackFile = resolveDevelopmentAuthCallbackFile(
+  process.env,
+  app.isPackaged,
+  developmentProfile,
+);
+app.setPath(
+  "userData",
+  resolveDevelopmentUserDataPath(
+    process.env,
+    app.isPackaged,
+    developmentProfile,
+    app.getPath("userData"),
+  ),
+);
 let chatSession: ChatSession | null = null;
 let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
@@ -704,11 +721,19 @@ if (!hasSingleInstanceLock) {
       await createMainWindow();
 
       // Restores a session left over from a previous run; the cookie outlives the process.
-      await chatSession.restore();
+      const restoredSession = await chatSession.restore();
 
       const initialCallbackUrl = findAuthCallbackUrl(process.argv);
       if (initialCallbackUrl !== null) {
         handleAuthCallback(initialCallbackUrl);
+      }
+      const developmentCallback =
+        developmentAuthCallbackFile === null
+          ? null
+          : await consumeDevelopmentAuthCallbackFile(developmentAuthCallbackFile);
+      const signedOutCallback = callbackForSignedOutSession(developmentCallback, restoredSession);
+      if (signedOutCallback !== null && !handleAuthCallback(signedOutCallback)) {
+        throw new Error("HMM_DEVELOPMENT_AUTH_CALLBACK_FILE did not contain a valid auth callback");
       }
       authCallbacksReady = true;
       await drainPendingAuthCallbacks();
