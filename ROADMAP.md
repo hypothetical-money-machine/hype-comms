@@ -6,11 +6,6 @@ the identity, sync, and security models are the ones we would want at small-team
 growing it — or eventually selling it — should be a matter of adding capability, not
 rewriting foundations.
 
-The original Go server and terminal client are preserved at the annotated tag
-`prototype-go-tui-2025-11-30`. `main` is a fresh Electron/TypeScript implementation; no
-prototype code is carried forward unless a later change deliberately ports and tests a
-behavior.
-
 The implementation contract and security boundaries live in
 [`docs/architecture.md`](docs/architecture.md).
 
