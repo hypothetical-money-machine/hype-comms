@@ -658,8 +658,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           nextSummary = conversationSummarySchema.parse({
             ...current,
             readCursor: parsed.payload.readCursor,
-            unreadCount: 0,
-            mentionCount: 0,
+            unreadCount: parsed.payload.unreadCount,
+            mentionCount: parsed.payload.mentionCount,
           });
         }
       } else {
@@ -989,8 +989,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           conversations.set(parsed.conversationId, {
             ...current,
             readCursor: parsed.payload.readCursor,
-            unreadCount: 0,
-            mentionCount: 0,
+            unreadCount: parsed.payload.unreadCount,
+            mentionCount: parsed.payload.mentionCount,
           });
         }
       } else {

@@ -324,6 +324,8 @@ export const readCursorUpdatedEventSchema = workspaceEventBaseSchema.extend({
   payload: z
     .object({
       readCursor: readCursorSchema,
+      unreadCount: z.number().int().nonnegative(),
+      mentionCount: z.number().int().nonnegative(),
     })
     .strict(),
 });

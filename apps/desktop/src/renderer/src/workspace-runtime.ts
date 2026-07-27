@@ -856,11 +856,11 @@ export class WorkspaceRuntime {
       return;
     }
     if (event.type === "read_cursor.updated") {
-      const readCursor = event.payload.readCursor;
+      const { readCursor, unreadCount, mentionCount } = event.payload;
       this.#setState({
         bootstrap: replaceConversation(snapshot, event.conversationId, (current) => {
           if (current === undefined) return null;
-          return { ...current, readCursor, unreadCount: 0, mentionCount: 0 };
+          return { ...current, readCursor, unreadCount, mentionCount };
         }),
       });
       return;
