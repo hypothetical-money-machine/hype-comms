@@ -47,8 +47,6 @@ Woodpecker is self-hosted and unaffected, so server builds and deploys still wor
 - **Port 5173 is `strictPort`.** A stale desktop dev process blocks `npm run dev:desktop`; the
   preflight now names the port rather than failing cryptically. Do not make it fall back to another
   port — the trusted-origin checks in `security.ts` are pinned to it.
-- **`AGENTS.md` and `CLAUDE.md` describe a Jujutsu workflow, but `jj` is not installed and there is
-  no `.jj` directory.** This checkout is plain git. Those instructions are stale.
 - **`apps/desktop/release/` is gitignored and can reach ~1 GB.** Never commit it.
 - **macOS ships bash 3.2.** Signal handling in shell scripts behaves differently than bash 5; a
   trap that looks correct on Linux may not fire here. Test interrupts, do not reason about them.
