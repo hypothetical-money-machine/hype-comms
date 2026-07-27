@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import type { ChatSessionState, Message, UpdateState, User } from "@hmm-chat/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
+import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import {
   cacheFallbackNotice,
   WorkspaceRuntime,
@@ -514,54 +515,66 @@ export function App({ client }: AppProps) {
               <p>Start the conversation.</p>
             </div>
           ) : (
-            messages.map((message) => (
-              <MessageRow key={message.id} message={message} members={bootstrap.members} />
+            messages.map((message, index) => (
+              <Fragment key={message.id}>
+                {shouldShowDateSeparator(
+                  message.createdAt,
+                  messages[index - 1]?.createdAt ?? null,
+                ) && <MessageDateSeparator value={message.createdAt} />}
+                <MessageRow message={message} members={bootstrap.members} />
+              </Fragment>
             ))
           )}
-          {pending.map((item) => (
-            <article
-              className="message pending-message"
-              key={item.operation.message.clientMessageId}
-            >
-              <Avatar user={bootstrap.currentUser.user} />
-              <div>
-                <header>
-                  <strong>{bootstrap.currentUser.user.displayName}</strong>
-                  <span>{item.status.replaceAll("_", " ")}</span>
-                </header>
-                <p>{item.operation.message.body}</p>
-                {item.status === "permanent_failure" && (
-                  <div className="message-actions">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDraft(item.operation.message.body);
-                        void runtime.discardMessage(item.operation.message.clientMessageId);
-                      }}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runtime.retryMessage(item.operation.message.clientMessageId)
-                      }
-                    >
-                      Retry
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void runtime.discardMessage(item.operation.message.clientMessageId)
-                      }
-                    >
-                      Discard
-                    </button>
-                  </div>
+          {pending.map((item, index) => {
+            const previousTimestamp =
+              pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
+            return (
+              <Fragment key={item.operation.message.clientMessageId}>
+                {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
+                  <MessageDateSeparator value={item.createdAt} />
                 )}
-              </div>
-            </article>
-          ))}
+                <article className="message pending-message">
+                  <Avatar user={bootstrap.currentUser.user} />
+                  <div>
+                    <header>
+                      <strong>{bootstrap.currentUser.user.displayName}</strong>
+                      <span>{item.status.replaceAll("_", " ")}</span>
+                    </header>
+                    <p>{item.operation.message.body}</p>
+                    {item.status === "permanent_failure" && (
+                      <div className="message-actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDraft(item.operation.message.body);
+                            void runtime.discardMessage(item.operation.message.clientMessageId);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runtime.retryMessage(item.operation.message.clientMessageId)
+                          }
+                        >
+                          Retry
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runtime.discardMessage(item.operation.message.clientMessageId)
+                          }
+                        >
+                          Discard
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </article>
+              </Fragment>
+            );
+          })}
         </div>
 
         <form className="composer" onSubmit={(event) => void send(event)}>

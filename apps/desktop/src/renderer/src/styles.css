@@ -462,6 +462,30 @@ button:disabled {
   cursor: pointer;
 }
 
+.message-date-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 6px;
+  color: #8792ad;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.message-date-separator::before,
+.message-date-separator::after {
+  height: 1px;
+  flex: 1;
+  background: #293047;
+  content: "";
+}
+
+.message-date-separator span {
+  flex: none;
+}
+
 .message {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr);
