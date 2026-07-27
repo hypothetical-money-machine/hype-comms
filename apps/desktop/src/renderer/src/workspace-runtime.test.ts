@@ -208,6 +208,10 @@ type ReplaceSnapshotArgs = Parameters<WorkspaceCache["replaceSnapshot"]>;
 class FakeWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   loadCount = 0;
+  readonly outboxMutations: {
+    readonly type: "enqueue" | "remove";
+    readonly clientMessageId: string;
+  }[] = [];
   #snapshot: CachedWorkspaceState["bootstrap"] = null;
   #syncCursor: string | null = null;
   readonly #messages = new Map<string, Message>();
@@ -224,7 +228,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
-      outbox: [...this.#outbox.values()],
+      outbox: [...this.#outbox.values()].sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt),
+      ),
       syncCursor: this.#syncCursor,
       lastSyncedAt: null,
     };
@@ -285,6 +291,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   async enqueue(operation: SendMessageOperation, createdAt = NOW): Promise<void> {
     const id = operation.message.clientMessageId;
     if (this.#outbox.has(id)) return;
+    this.outboxMutations.push({ type: "enqueue", clientMessageId: id });
     this.#outbox.set(id, {
       operation,
       createdAt,
@@ -302,6 +309,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {
+    this.outboxMutations.push({ type: "remove", clientMessageId });
     this.#outbox.delete(clientMessageId);
   }
 
@@ -597,7 +605,143 @@ function runtimeWith(api: FakeDesktopApi, cache: WorkspaceCache): WorkspaceRunti
   return new WorkspaceRuntime(api, { createCache: () => cache });
 }
 
+function queuedOperation(
+  clientMessageId: string,
+  body: string,
+  conversationId = CONVERSATION_ID,
+): SendMessageOperation {
+  return {
+    conversationId,
+    idempotencyKey: clientMessageId,
+    message: {
+      threadRootId: null,
+      body,
+      bodyFormat: "hmm_markdown_v1",
+      clientMessageId,
+      mentionedUserIds: [],
+      attachmentIds: [],
+    },
+  };
+}
+
+async function enqueuePermanentFailure(
+  cache: WorkspaceCache,
+  clientMessageId: string,
+  body: string,
+  createdAt = NOW,
+): Promise<void> {
+  await cache.enqueue(queuedOperation(clientMessageId, body), createdAt);
+  await cache.updateOutbox(clientMessageId, {
+    status: "permanent_failure",
+    attemptCount: 1,
+    nextAttemptAt: null,
+    failureReason: "validation",
+  });
+}
+
 describe("WorkspaceRuntime", () => {
+  it("keeps an abandoned failed-message edit recoverable across a restart", async () => {
+    const cache = new FakeWorkspaceCache();
+    await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Authored while offline");
+    const firstRuntime = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    await firstRuntime.start(session);
+
+    // Entering edit mode only copies this durable body into renderer state; it deliberately makes
+    // no runtime/cache mutation until a replacement is submitted.
+    expect(firstRuntime.state.outbox[0]?.operation.message.body).toBe("Authored while offline");
+    await firstRuntime.stop();
+
+    const restarted = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    await restarted.start(session);
+    expect(restarted.state.outbox).toHaveLength(1);
+    expect(restarted.state.outbox[0]?.operation.message.body).toBe("Authored while offline");
+    expect(restarted.state.outbox[0]?.status).toBe("permanent_failure");
+  });
+
+  it("durably queues a fresh replacement before removing the failed predecessor", async () => {
+    const cache = new FakeWorkspaceCache();
+    await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Original body");
+    cache.outboxMutations.length = 0;
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.replaceFailedMessage(OWN_CLIENT_MESSAGE_ID, "Replacement body", []);
+    await settle(
+      () =>
+        runtime.state.outbox[0]?.status === "permanent_failure" &&
+        runtime.state.outbox[0]?.operation.message.clientMessageId !== OWN_CLIENT_MESSAGE_ID,
+      "replacement failure",
+    );
+
+    const durableOutbox = (await cache.load()).outbox.filter(
+      (item) => item.operation.conversationId === CONVERSATION_ID,
+    );
+    expect(durableOutbox).toHaveLength(1);
+    const replacement = durableOutbox[0];
+    expect(replacement?.operation.message.body).toBe("Replacement body");
+    expect(replacement?.operation.message.clientMessageId).not.toBe(OWN_CLIENT_MESSAGE_ID);
+    expect(replacement?.operation.idempotencyKey).toBe(
+      replacement?.operation.message.clientMessageId,
+    );
+    expect(
+      durableOutbox.some(
+        (item) => item.operation.message.clientMessageId === OWN_CLIENT_MESSAGE_ID,
+      ),
+    ).toBe(false);
+    expect(cache.outboxMutations.map((mutation) => mutation.type)).toEqual(["enqueue", "remove"]);
+    expect(cache.outboxMutations[0]?.clientMessageId).toBe(
+      replacement?.operation.message.clientMessageId,
+    );
+    expect(cache.outboxMutations[1]?.clientMessageId).toBe(OWN_CLIENT_MESSAGE_ID);
+  });
+
+  it("keeps a failed replacement in its predecessor's per-conversation FIFO position", async () => {
+    const cache = new FakeWorkspaceCache();
+    await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Original body");
+    const laterClientMessageId = "20000000-0000-4000-8000-000000000011";
+    await cache.enqueue(
+      queuedOperation(laterClientMessageId, "Later body"),
+      "2026-07-24T12:00:00.001Z",
+    );
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.replaceFailedMessage(OWN_CLIENT_MESSAGE_ID, "Replacement body", []);
+    await settle(
+      () => runtime.state.outbox[0]?.status === "permanent_failure",
+      "replacement failure",
+    );
+
+    const inMemoryBodies = runtime.state.outbox
+      .filter((item) => item.operation.conversationId === CONVERSATION_ID)
+      .map((item) => item.operation.message.body);
+    const durableBodies = (await cache.load()).outbox
+      .filter((item) => item.operation.conversationId === CONVERSATION_ID)
+      .map((item) => item.operation.message.body);
+    expect(inMemoryBodies).toEqual(["Replacement body", "Later body"]);
+    expect(durableBodies).toEqual(["Replacement body", "Later body"]);
+  });
+
+  it("still discards a failed message immediately and durably", async () => {
+    const cache = new FakeWorkspaceCache();
+    await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Discard me");
+    const runtime = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    await runtime.start(session);
+
+    await runtime.discardMessage(OWN_CLIENT_MESSAGE_ID);
+    expect(runtime.state.outbox).toEqual([]);
+    expect((await cache.load()).outbox).toEqual([]);
+    await runtime.stop();
+
+    const restarted = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    await restarted.start(session);
+    expect(restarted.state.outbox).toEqual([]);
+  });
+
   it("restarts realtime with the cursor a resync established, and does not loop", async () => {
     const api = new FakeDesktopApi(bootstrapAt("5"));
     const cache = new FakeWorkspaceCache();

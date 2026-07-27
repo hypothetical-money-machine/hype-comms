@@ -413,6 +413,63 @@ export class WorkspaceRuntime {
     void this.#flushOutbox(this.#generation);
   }
 
+  async replaceFailedMessage(
+    clientMessageId: string,
+    body: string,
+    mentionedUserIds: readonly string[],
+  ): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    const predecessor = this.#state.outbox.find(
+      (item) => item.operation.message.clientMessageId === clientMessageId,
+    );
+    if (predecessor === undefined) throw new Error("The queued message is no longer available");
+    if (predecessor.status !== "permanent_failure") {
+      throw new Error("Only a permanently failed message can be replaced");
+    }
+
+    const replacementClientMessageId = crypto.randomUUID();
+    const operation = sendMessageOperationSchema.parse({
+      conversationId: predecessor.operation.conversationId,
+      idempotencyKey: replacementClientMessageId,
+      message: {
+        ...predecessor.operation.message,
+        body,
+        clientMessageId: replacementClientMessageId,
+        mentionedUserIds: [...mentionedUserIds],
+      },
+    });
+    const replacement: OutboxItem = {
+      operation,
+      // Retaining the authored timestamp keeps the replacement in the predecessor's FIFO slot.
+      createdAt: predecessor.createdAt,
+      status: "pending",
+      attemptCount: 0,
+      nextAttemptAt: null,
+      failureReason: null,
+    };
+
+    // The replacement must exist durably before the predecessor can be removed. If either write
+    // fails, at least one encrypted outbox record still contains the authored text.
+    await cache.enqueue(operation, predecessor.createdAt);
+    await cache.removeOutbox(clientMessageId);
+
+    const outbox = [...this.#state.outbox];
+    const predecessorIndex = outbox.findIndex(
+      (item) => item.operation.message.clientMessageId === clientMessageId,
+    );
+    if (predecessorIndex === -1) {
+      const insertionIndex = outbox.findIndex(
+        (item) => item.createdAt.localeCompare(predecessor.createdAt) > 0,
+      );
+      outbox.splice(insertionIndex === -1 ? outbox.length : insertionIndex, 0, replacement);
+    } else {
+      outbox[predecessorIndex] = replacement;
+    }
+    this.#setState({ outbox });
+    void this.#flushOutbox(this.#generation);
+  }
+
   async searchMessages(query: string, after?: string): Promise<MessageSearchResponse> {
     return this.#client.searchMessages({
       query,

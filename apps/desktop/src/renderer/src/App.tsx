@@ -193,6 +193,7 @@ export function App({ client }: AppProps) {
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
   const [draft, setDraft] = useState("");
+  const [editingClientMessageId, setEditingClientMessageId] = useState<string | null>(null);
   const [composerError, setComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [showChannelMembers, setShowChannelMembers] = useState(false);
@@ -249,8 +250,25 @@ export function App({ client }: AppProps) {
   const pending = runtimeState.outbox.filter(
     (item) => item.operation.conversationId === runtimeState.selectedConversationId,
   );
+  const editingItem =
+    editingClientMessageId === null
+      ? undefined
+      : runtimeState.outbox.find(
+          (item) => item.operation.message.clientMessageId === editingClientMessageId,
+        );
 
   useEffect(() => setShowChannelMembers(false), [runtimeState.selectedConversationId]);
+
+  useEffect(() => {
+    if (editingClientMessageId === null) return;
+    if (
+      editingItem === undefined ||
+      editingItem.status !== "permanent_failure" ||
+      editingItem.operation.conversationId !== runtimeState.selectedConversationId
+    ) {
+      setEditingClientMessageId(null);
+    }
+  }, [editingClientMessageId, editingItem, runtimeState.selectedConversationId]);
 
   useEffect(() => {
     const list = messageList.current;
@@ -277,7 +295,12 @@ export function App({ client }: AppProps) {
       })
       .map((member) => member.id);
     try {
-      await runtime.sendMessage(conversationId, body, mentionedUserIds);
+      if (editingClientMessageId === null) {
+        await runtime.sendMessage(conversationId, body, mentionedUserIds);
+      } else {
+        await runtime.replaceFailedMessage(editingClientMessageId, body, mentionedUserIds);
+        setEditingClientMessageId(null);
+      }
       setDraft("");
       setComposerError("");
     } catch (error) {
@@ -609,7 +632,11 @@ export function App({ client }: AppProps) {
                   <div>
                     <header>
                       <strong>{bootstrap.currentUser.user.displayName}</strong>
-                      <span>{item.status.replaceAll("_", " ")}</span>
+                      <span>
+                        {editingClientMessageId === item.operation.message.clientMessageId
+                          ? "editing"
+                          : item.status.replaceAll("_", " ")}
+                      </span>
                     </header>
                     <p>{item.operation.message.body}</p>
                     {item.status === "permanent_failure" && (
@@ -618,7 +645,7 @@ export function App({ client }: AppProps) {
                           type="button"
                           onClick={() => {
                             setDraft(item.operation.message.body);
-                            void runtime.discardMessage(item.operation.message.clientMessageId);
+                            setEditingClientMessageId(item.operation.message.clientMessageId);
                           }}
                         >
                           Edit
