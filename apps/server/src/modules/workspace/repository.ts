@@ -4,6 +4,8 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   advanceReadCursorResponseSchema,
+  channelMembershipMutationResponseSchema,
+  channelMembersResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
   conversationSummarySchema,
@@ -20,6 +22,8 @@ import {
   workspaceEventSchema,
   workspaceSchema,
   type AdvanceReadCursorResponse,
+  type ChannelMembershipMutationResponse,
+  type ChannelMembersResponse,
   type Conversation,
   type ConversationMutationResponse,
   type ConversationSummary,
@@ -32,6 +36,7 @@ import {
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
+  type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
 } from "@hmm-chat/contracts";
@@ -71,12 +76,28 @@ interface ConversationRow extends QueryResultRow {
   name: string | null;
   slug: string | null;
   topic: string | null;
+  channel_access: "workspace" | "members" | null;
   is_archived: boolean;
   created_by: string | null;
   dm_user_low_id: string | null;
   dm_user_high_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface ConversationMembershipRow extends QueryResultRow {
+  conversation_id: string;
+  workspace_id: string;
+  user_id: string;
+  role: "owner" | "member";
+  joined_at: Date | string;
+  left_at: Date | string | null;
+  updated_at: Date | string;
+}
+
+interface ChannelMemberRow extends UserRow {
+  role: "owner" | "member";
+  joined_at: Date | string;
 }
 
 interface MessageRow extends QueryResultRow {
@@ -187,11 +208,37 @@ function mapConversation(row: ConversationRow): Conversation {
     name: row.name,
     slug: row.slug,
     topic: row.topic,
+    access: row.channel_access,
     isArchived: row.is_archived,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+function conversationVisibilitySql(
+  alias: "conversation" | "anchor",
+  userParameter: string,
+): string {
+  return `(
+    (
+      ${alias}.kind = 'channel'
+      AND ${alias}.channel_access = 'workspace'
+    )
+    OR (
+      ${alias}.kind = 'channel'
+      AND ${alias}.channel_access = 'members'
+      AND EXISTS (
+        SELECT 1
+          FROM conversation_memberships AS visible_membership
+         WHERE visible_membership.conversation_id = ${alias}.id
+           AND visible_membership.user_id = ${userParameter}
+           AND visible_membership.left_at IS NULL
+      )
+    )
+    OR ${alias}.dm_user_low_id = ${userParameter}
+    OR ${alias}.dm_user_high_id = ${userParameter}
+  )`;
 }
 
 function participants(row: ConversationRow): string[] {
@@ -385,8 +432,8 @@ export class WorkspaceRepository {
       const created = await client
         .query<ConversationRow>(
           `INSERT INTO conversations
-           (id, workspace_id, kind, name, slug, topic, created_by)
-         VALUES ($1, $2, 'channel', $3, $4, $5, $6)
+           (id, workspace_id, kind, name, slug, topic, channel_access, created_by)
+         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7)
          RETURNING *`,
           [
             randomUUID(),
@@ -394,6 +441,7 @@ export class WorkspaceRepository {
             input.name,
             input.slug,
             input.topic,
+            input.access,
             identity.currentUser.user.id,
           ],
         )
@@ -405,16 +453,151 @@ export class WorkspaceRepository {
         });
       const row = created.rows[0];
       if (row === undefined) throw new Error("Channel insert returned no row");
+      if (input.access === "members") {
+        await client.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'owner')`,
+          [row.id, row.workspace_id, identity.currentUser.user.id],
+        );
+      }
+      const audienceUserIds = await this.#conversationAudience(client, row);
       const event = await this.#insertEvent(client, identity, {
         type: "channel.created",
         conversation: row,
         payload: {
           conversation: mapConversation(row),
-          participantIds: [],
+          participantIds: audienceUserIds,
         },
+        audienceUserIds,
       });
       return conversationMutationResponseSchema.parse({
         conversation: await this.#conversationSummary(client, identity, row),
+        syncCursor: event.workspaceSequence,
+      });
+    });
+  }
+
+  async listChannelMembers(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+  ): Promise<ChannelMembersResponse> {
+    const client = await this.pool.connect();
+    try {
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+      );
+      if (conversation.kind !== "channel") {
+        throw new ApiError(404, "NOT_FOUND", "Channel not found");
+      }
+      return this.#channelMembers(client, identity, conversation);
+    } finally {
+      client.release();
+    }
+  }
+
+  async upsertChannelMember(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    memberId: string,
+    input: UpsertChannelMemberRequest,
+  ): Promise<ChannelMembershipMutationResponse> {
+    return this.#transaction(async (client) => {
+      const conversation = await this.#requireManagedChannel(client, identity, conversationId);
+      const target = await client.query(
+        `SELECT 1
+           FROM workspace_memberships
+          WHERE workspace_id = $1
+            AND user_id = $2
+            AND status = 'active'`,
+        [identity.currentUser.workspaceId, memberId],
+      );
+      if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
+
+      const existing = await client.query<ConversationMembershipRow>(
+        `SELECT *
+           FROM conversation_memberships
+          WHERE conversation_id = $1
+            AND user_id = $2
+          FOR UPDATE`,
+        [conversationId, memberId],
+      );
+      const current = existing.rows[0];
+      if (current?.left_at === null && current.role === "owner" && input.role === "member") {
+        await this.#requireAnotherChannelOwner(client, conversationId, memberId);
+      }
+      const audienceBefore = await this.#conversationAudience(client, conversation);
+      await client.query(
+        `INSERT INTO conversation_memberships
+           (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (conversation_id, user_id) DO UPDATE
+           SET role = EXCLUDED.role,
+               joined_at = CASE
+                 WHEN conversation_memberships.left_at IS NULL
+                   THEN conversation_memberships.joined_at
+                 ELSE clock_timestamp()
+               END,
+               left_at = NULL,
+               updated_at = clock_timestamp()`,
+        [conversationId, identity.currentUser.workspaceId, memberId, input.role],
+      );
+      const audienceAfter = await this.#conversationAudience(client, conversation);
+      const action = current === undefined || current.left_at !== null ? "added" : "updated";
+      const event = await this.#insertEvent(client, identity, {
+        type: "channel.membership_changed",
+        conversation,
+        payload: { memberId, action },
+        audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
+      });
+      return channelMembershipMutationResponseSchema.parse({
+        channelMembers: await this.#channelMembers(client, identity, conversation),
+        syncCursor: event.workspaceSequence,
+      });
+    });
+  }
+
+  async removeChannelMember(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    memberId: string,
+  ): Promise<ChannelMembershipMutationResponse> {
+    return this.#transaction(async (client) => {
+      const conversation = await this.#requireManagedChannel(client, identity, conversationId);
+      const existing = await client.query<ConversationMembershipRow>(
+        `SELECT *
+           FROM conversation_memberships
+          WHERE conversation_id = $1
+            AND user_id = $2
+            AND left_at IS NULL
+          FOR UPDATE`,
+        [conversationId, memberId],
+      );
+      const current = existing.rows[0];
+      if (current === undefined) throw new ApiError(404, "NOT_FOUND", "Channel member not found");
+      if (current.role === "owner") {
+        await this.#requireAnotherChannelOwner(client, conversationId, memberId);
+      }
+      const audienceBefore = await this.#conversationAudience(client, conversation);
+      await client.query(
+        `UPDATE conversation_memberships
+            SET left_at = clock_timestamp(), updated_at = clock_timestamp()
+          WHERE conversation_id = $1
+            AND user_id = $2`,
+        [conversationId, memberId],
+      );
+      const audienceAfter = await this.#conversationAudience(client, conversation);
+      const event = await this.#insertEvent(client, identity, {
+        type: "channel.membership_changed",
+        conversation,
+        payload: { memberId, action: "removed" },
+        audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
+      });
+      return channelMembershipMutationResponseSchema.parse({
+        channelMembers: await this.#channelMembers(client, identity, conversation),
         syncCursor: event.workspaceSequence,
       });
     });
@@ -429,26 +612,29 @@ export class WorkspaceRepository {
     }
     return this.#transaction(async (client) => {
       const updated = await client.query<ConversationRow>(
-        `UPDATE conversations
+        `UPDATE conversations AS conversation
             SET is_archived = true, updated_at = clock_timestamp()
-          WHERE id = $1
-            AND workspace_id = $2
-            AND kind = 'channel'
-            AND slug <> 'general'
+          WHERE conversation.id = $1
+            AND conversation.workspace_id = $2
+            AND conversation.kind = 'channel'
+            AND conversation.slug <> 'general'
+            AND ${conversationVisibilitySql("conversation", "$3")}
           RETURNING *`,
-        [conversationId, identity.currentUser.workspaceId],
+        [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       const row = updated.rows[0];
       if (row === undefined) {
         throw new ApiError(404, "NOT_FOUND", "Channel not found or cannot be archived");
       }
+      const audienceUserIds = await this.#conversationAudience(client, row);
       const event = await this.#insertEvent(client, identity, {
         type: "channel.archived",
         conversation: row,
         payload: {
           conversation: mapConversation(row),
-          participantIds: [],
+          participantIds: audienceUserIds,
         },
+        audienceUserIds,
       });
       return conversationMutationResponseSchema.parse({
         conversation: await this.#conversationSummary(client, identity, row),
@@ -567,6 +753,12 @@ export class WorkspaceRepository {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
         `${identity.currentUser.user.id}:${input.clientMessageId}`,
       ]);
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+      );
       const existing = await client.query<MessageRow>(
         `SELECT *
            FROM messages
@@ -587,14 +779,10 @@ export class WorkspaceRepository {
           syncCursor: replay.committed_workspace_sequence,
         });
       }
-
-      const conversation = await this.#requireVisibleConversation(
-        client,
-        identity,
-        conversationId,
-        true,
-      );
-      await this.#validateMentions(client, identity, input);
+      if (conversation.is_archived) {
+        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+      }
+      await this.#validateMentions(client, identity, conversation, input);
 
       const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
         `UPDATE conversations
@@ -650,9 +838,7 @@ export class WorkspaceRepository {
           message: mapMessage(row),
           mentionedUserIds: [...new Set(input.mentionedUserIds)],
         },
-        ...(conversation.kind === "direct_message"
-          ? { audienceUserIds: participants(conversation) }
-          : {}),
+        audienceUserIds: await this.#conversationAudience(client, conversation),
       });
       const response = sendMessageResponseSchema.parse({
         message: mapMessage(row),
@@ -781,11 +967,28 @@ export class WorkspaceRepository {
       }
       const rows = await client.query<EventRow>(
         `SELECT event.*,
-                EXISTS (
-                  SELECT 1
-                    FROM sync_event_audiences AS audience
-                   WHERE audience.event_id = event.id
-                     AND audience.user_id = $2
+                (
+                  EXISTS (
+                    SELECT 1
+                      FROM sync_event_audiences AS audience
+                     WHERE audience.event_id = event.id
+                       AND audience.user_id = $2
+                  )
+                  AND (
+                    event.conversation_id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                        FROM conversations AS conversation
+                       WHERE conversation.id = event.conversation_id
+                         AND conversation.workspace_id = event.workspace_id
+                         AND ${conversationVisibilitySql("conversation", "$2")}
+                    )
+                    OR (
+                      event.event_type = 'channel.membership_changed'
+                      AND event.payload ->> 'action' = 'removed'
+                      AND event.payload ->> 'memberId' = $2::text
+                    )
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -934,16 +1137,17 @@ export class WorkspaceRepository {
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
     const result = await client.query<ConversationRow>(
       `SELECT *
-         FROM conversations
-        WHERE workspace_id = $1
-          AND (
-            kind = 'channel'
-            OR dm_user_low_id = $2
-            OR dm_user_high_id = $2
-          )
+         FROM conversations AS conversation
+        WHERE conversation.workspace_id = $1
+          AND ${conversationVisibilitySql("conversation", "$2")}
           AND (
             $3::uuid IS NULL
-            OR (kind, lower(coalesce(name, '')), created_at, id) >
+            OR (
+              conversation.kind,
+              lower(coalesce(conversation.name, '')),
+              conversation.created_at,
+              conversation.id
+            ) >
                (
                  SELECT anchor.kind,
                         lower(coalesce(anchor.name, '')),
@@ -952,9 +1156,23 @@ export class WorkspaceRepository {
                    FROM conversations AS anchor
                   WHERE anchor.id = $3::uuid
                     AND anchor.workspace_id = $1
+                    AND (
+                      ${conversationVisibilitySql("anchor", "$2")}
+                      OR (
+                        anchor.kind = 'channel'
+                        AND anchor.channel_access = 'members'
+                        AND EXISTS (
+                          SELECT 1
+                            FROM conversation_memberships AS anchor_membership
+                           WHERE anchor_membership.conversation_id = anchor.id
+                             AND anchor_membership.user_id = $2
+                        )
+                      )
+                    )
                )
           )
-        ORDER BY kind, lower(coalesce(name, '')), created_at, id
+        ORDER BY conversation.kind, lower(coalesce(conversation.name, '')),
+                 conversation.created_at, conversation.id
         LIMIT $4`,
       [identity.currentUser.workspaceId, identity.currentUser.user.id, after, pageLimit + 1],
     );
@@ -1016,7 +1234,8 @@ export class WorkspaceRepository {
     );
     return conversationSummarySchema.parse({
       conversation: mapConversation(conversation),
-      participantIds: participants(conversation),
+      participantIds: await this.#conversationAudience(client, conversation),
+      membershipRole: await this.#membershipRole(client, identity, conversation),
       lastMessage: latestResult.rows[0] === undefined ? null : mapMessage(latestResult.rows[0]),
       unreadCount: Number(unreadResult.rows[0]?.count ?? "0"),
       mentionCount: Number(mentionResult.rows[0]?.count ?? "0"),
@@ -1029,18 +1248,16 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
     requireWritable: boolean,
+    lock = false,
   ): Promise<ConversationRow> {
     const result = await client.query<ConversationRow>(
       `SELECT *
-         FROM conversations
-        WHERE id = $1
-          AND workspace_id = $2
-          AND (
-            kind = 'channel'
-            OR dm_user_low_id = $3
-            OR dm_user_high_id = $3
-          )
-          AND ($4::boolean = false OR is_archived = false)`,
+         FROM conversations AS conversation
+        WHERE conversation.id = $1
+          AND conversation.workspace_id = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}
+          AND ($4::boolean = false OR conversation.is_archived = false)
+        ${lock ? "FOR UPDATE" : ""}`,
       [
         conversationId,
         identity.currentUser.workspaceId,
@@ -1053,9 +1270,152 @@ export class WorkspaceRepository {
     return row;
   }
 
+  async #requireManagedChannel(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+  ): Promise<ConversationRow> {
+    const conversation = await this.#requireVisibleConversation(
+      client,
+      identity,
+      conversationId,
+      true,
+      true,
+    );
+    if (conversation.kind !== "channel" || conversation.channel_access !== "members") {
+      throw new ApiError(404, "NOT_FOUND", "Managed channel not found");
+    }
+    const role = await this.#membershipRole(client, identity, conversation);
+    if (role !== "owner") {
+      throw new ApiError(403, "FORBIDDEN", "Only a channel owner can manage members");
+    }
+    return conversation;
+  }
+
+  async #requireAnotherChannelOwner(
+    client: PoolClient,
+    conversationId: string,
+    excludedUserId: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `SELECT 1
+         FROM conversation_memberships AS membership
+         JOIN workspace_memberships AS workspace_membership
+           ON workspace_membership.workspace_id = membership.workspace_id
+          AND workspace_membership.user_id = membership.user_id
+        WHERE membership.conversation_id = $1
+          AND membership.user_id <> $2
+          AND membership.role = 'owner'
+          AND membership.left_at IS NULL
+          AND workspace_membership.status = 'active'
+        LIMIT 1`,
+      [conversationId, excludedUserId],
+    );
+    if (result.rowCount !== 1) {
+      throw new ApiError(409, "CONFLICT", "A channel must retain at least one owner");
+    }
+  }
+
+  async #channelMembers(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
+  ): Promise<ChannelMembersResponse> {
+    const result =
+      conversation.channel_access === "workspace"
+        ? await client.query<ChannelMemberRow>(
+            `SELECT user_account.id, user_account.username, user_account.display_name,
+                    user_account.avatar_url, user_account.created_at, user_account.updated_at,
+                    CASE WHEN user_account.id = $2 THEN 'owner' ELSE 'member' END AS role,
+                    workspace_membership.created_at AS joined_at
+               FROM users AS user_account
+               JOIN workspace_memberships AS workspace_membership
+                 ON workspace_membership.user_id = user_account.id
+              WHERE workspace_membership.workspace_id = $1
+                AND workspace_membership.status = 'active'
+              ORDER BY lower(user_account.display_name), user_account.id`,
+            [conversation.workspace_id, conversation.created_by],
+          )
+        : await client.query<ChannelMemberRow>(
+            `SELECT user_account.id, user_account.username, user_account.display_name,
+                    user_account.avatar_url, user_account.created_at, user_account.updated_at,
+                    membership.role, membership.joined_at
+               FROM conversation_memberships AS membership
+               JOIN workspace_memberships AS workspace_membership
+                 ON workspace_membership.workspace_id = membership.workspace_id
+                AND workspace_membership.user_id = membership.user_id
+               JOIN users AS user_account ON user_account.id = membership.user_id
+              WHERE membership.conversation_id = $1
+                AND membership.left_at IS NULL
+                AND workspace_membership.status = 'active'
+              ORDER BY lower(user_account.display_name), user_account.id`,
+            [conversation.id],
+          );
+    const role = await this.#membershipRole(client, identity, conversation);
+    return channelMembersResponseSchema.parse({
+      conversationId: conversation.id,
+      access: conversation.channel_access,
+      members: result.rows.map((row) => ({
+        user: mapUser(row),
+        role: row.role,
+        joinedAt: iso(row.joined_at),
+      })),
+      canManage: conversation.channel_access === "members" && role === "owner",
+    });
+  }
+
+  async #conversationAudience(
+    client: PoolClient,
+    conversation: ConversationRow,
+  ): Promise<string[]> {
+    if (conversation.kind === "direct_message") return participants(conversation);
+    if (conversation.channel_access === "workspace") {
+      const result = await client.query<{ user_id: string } & QueryResultRow>(
+        `SELECT user_id
+           FROM workspace_memberships
+          WHERE workspace_id = $1
+            AND status = 'active'
+          ORDER BY user_id`,
+        [conversation.workspace_id],
+      );
+      return result.rows.map((row) => row.user_id);
+    }
+    const result = await client.query<{ user_id: string } & QueryResultRow>(
+      `SELECT membership.user_id
+         FROM conversation_memberships AS membership
+         JOIN workspace_memberships AS workspace_membership
+           ON workspace_membership.workspace_id = membership.workspace_id
+          AND workspace_membership.user_id = membership.user_id
+        WHERE membership.conversation_id = $1
+          AND membership.left_at IS NULL
+          AND workspace_membership.status = 'active'
+        ORDER BY membership.user_id`,
+      [conversation.id],
+    );
+    return result.rows.map((row) => row.user_id);
+  }
+
+  async #membershipRole(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
+  ): Promise<"owner" | "member" | null> {
+    if (conversation.kind !== "channel" || conversation.channel_access !== "members") return null;
+    const result = await client.query<{ role: "owner" | "member" } & QueryResultRow>(
+      `SELECT role
+         FROM conversation_memberships
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND left_at IS NULL`,
+      [conversation.id, identity.currentUser.user.id],
+    );
+    return result.rows[0]?.role ?? null;
+  }
+
   async #validateMentions(
     client: PoolClient,
     identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
     input: SendConversationMessageRequest,
   ): Promise<void> {
     const ids = [...new Set(input.mentionedUserIds)];
@@ -1063,6 +1423,10 @@ export class WorkspaceRepository {
       throw new ApiError(400, "BAD_REQUEST", "Mentioned members must be unique");
     }
     if (ids.length === 0) return;
+    const audience = new Set(await this.#conversationAudience(client, conversation));
+    if (ids.some((id) => !audience.has(id))) {
+      throw new ApiError(400, "BAD_REQUEST", "A mentioned member cannot access this conversation");
+    }
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.username, user_account.display_name,
               user_account.avatar_url, user_account.created_at, user_account.updated_at

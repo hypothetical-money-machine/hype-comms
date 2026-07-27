@@ -8,6 +8,8 @@ import {
 } from "./common.js";
 import { channelSlugSchema } from "./channel-slug.js";
 import {
+  channelAccessSchema,
+  conversationMembershipRoleSchema,
   conversationSchema,
   messageSchema,
   readCursorSchema,
@@ -38,7 +40,10 @@ export const CONVERSATION_PAGE_MAX_LIMIT = 100;
 export const conversationSummarySchema = z
   .object({
     conversation: conversationSchema,
-    participantIds: z.array(entityIdSchema).max(2),
+    participantIds: z.array(entityIdSchema).max(25),
+    // Added with channel membership management. Defaulting only this absent field keeps existing
+    // encrypted cache records readable during the client upgrade.
+    membershipRole: conversationMembershipRoleSchema.nullable().default(null),
     lastMessage: messageSchema.nullable(),
     unreadCount: z.number().int().nonnegative(),
     mentionCount: z.number().int().nonnegative(),
@@ -112,6 +117,49 @@ export const createChannelRequestSchema = z
     name: z.string().trim().min(1).max(100),
     slug: channelSlugSchema,
     topic: z.string().trim().max(250).nullable(),
+    // Old clients created only workspace-visible channels and omitted this field.
+    access: channelAccessSchema.default("workspace"),
+  })
+  .strict();
+
+export const channelMemberSchema = z
+  .object({
+    user: userSchema,
+    role: conversationMembershipRoleSchema,
+    joinedAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const channelMembersResponseSchema = z
+  .object({
+    conversationId: entityIdSchema,
+    access: channelAccessSchema,
+    members: z.array(channelMemberSchema).max(25),
+    canManage: z.boolean(),
+  })
+  .strict();
+
+export const upsertChannelMemberRequestSchema = z
+  .object({
+    role: conversationMembershipRoleSchema,
+  })
+  .strict();
+
+export const channelMemberTargetSchema = z
+  .object({
+    conversationId: entityIdSchema,
+    userId: entityIdSchema,
+  })
+  .strict();
+
+export const upsertChannelMemberOperationSchema = channelMemberTargetSchema
+  .extend(upsertChannelMemberRequestSchema.shape)
+  .strict();
+
+export const channelMembershipMutationResponseSchema = z
+  .object({
+    channelMembers: channelMembersResponseSchema,
+    syncCursor: sequenceSchema,
   })
   .strict();
 
@@ -211,7 +259,19 @@ export const conversationUpdatedEventSchema = workspaceEventBaseSchema.extend({
   payload: z
     .object({
       conversation: conversationSchema,
-      participantIds: z.array(entityIdSchema).max(2),
+      participantIds: z.array(entityIdSchema).max(25),
+    })
+    .strict(),
+});
+
+export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.extend({
+  type: z.literal("channel.membership_changed"),
+  conversationId: entityIdSchema,
+  conversationSequence: z.null(),
+  payload: z
+    .object({
+      memberId: entityIdSchema,
+      action: z.enum(["added", "updated", "removed"]),
     })
     .strict(),
 });
@@ -242,6 +302,7 @@ export const readCursorUpdatedEventSchema = workspaceEventBaseSchema.extend({
 export const workspaceEventSchema = z.discriminatedUnion("type", [
   memberUpdatedEventSchema,
   conversationUpdatedEventSchema,
+  channelMembershipChangedEventSchema,
   messageCreatedEventSchema,
   readCursorUpdatedEventSchema,
 ]);
@@ -294,6 +355,14 @@ export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
+export type ChannelMember = z.infer<typeof channelMemberSchema>;
+export type ChannelMembersResponse = z.infer<typeof channelMembersResponseSchema>;
+export type UpsertChannelMemberRequest = z.infer<typeof upsertChannelMemberRequestSchema>;
+export type ChannelMemberTarget = z.infer<typeof channelMemberTargetSchema>;
+export type UpsertChannelMemberOperation = z.infer<typeof upsertChannelMemberOperationSchema>;
+export type ChannelMembershipMutationResponse = z.infer<
+  typeof channelMembershipMutationResponseSchema
+>;
 export type ArchiveChannelRequest = z.infer<typeof archiveChannelRequestSchema>;
 export type DirectConversationRequest = z.infer<typeof directConversationRequestSchema>;
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;

@@ -104,7 +104,8 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
                sync_events, conversation_read_cursors, message_mentions, messages,
-               conversations, device_sessions, magic_link_tokens, invitations,
+               conversation_memberships, conversations, device_sessions, magic_link_tokens,
+               invitations,
                workspace_memberships, workspaces, users
       CASCADE
     `);
@@ -128,8 +129,9 @@ describeWithPostgres("WorkspaceRepository", () => {
       [workspaceId, ownerId, memberId, observerId],
     );
     await pool.query(
-      `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
-       VALUES ($1, $2, 'channel', 'General', 'general', $3)`,
+      `INSERT INTO conversations
+         (id, workspace_id, kind, name, slug, channel_access, created_by)
+       VALUES ($1, $2, 'channel', 'General', 'general', 'workspace', $3)`,
       [generalId, workspaceId, ownerId],
     );
     await pool.query(
@@ -151,8 +153,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     const ids = Array.from({ length: count }, () => randomUUID());
     const labels = ids.map((_, index) => String(index + 1).padStart(4, "0"));
     await pool.query(
-      `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by)
-       SELECT seed.id, $2, 'channel', seed.name, seed.slug, $5
+      `INSERT INTO conversations
+         (id, workspace_id, kind, name, slug, channel_access, created_by)
+       SELECT seed.id, $2, 'channel', seed.name, seed.slug, 'workspace', $5
          FROM unnest($1::uuid[], $3::text[], $4::text[]) AS seed(id, name, slug)`,
       [
         ids,
@@ -241,6 +244,189 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("grants and revokes member-only channel access across every message boundary", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Leadership",
+      slug: "leadership",
+      topic: "Private planning",
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    expect(created.conversation).toMatchObject({
+      membershipRole: "owner",
+      conversation: { access: "members" },
+    });
+
+    const observerConversations = await repository.listConversations(
+      observer,
+      undefined,
+      CONVERSATION_PAGE_DEFAULT_LIMIT,
+    );
+    expect(
+      observerConversations.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      ),
+    ).toBe(false);
+    await expect(repository.history(observer, conversationId, undefined, 50)).rejects.toMatchObject(
+      { statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>,
+    );
+    await expect(
+      repository.sendMessage(observer, conversationId, {
+        ...message(randomUUID(), "private"),
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(repository.listChannelMembers(observer, conversationId)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const added = await repository.upsertChannelMember(owner, conversationId, memberId, {
+      role: "member",
+    });
+    expect(added.channelMembers).toMatchObject({ canManage: true, access: "members" });
+    expect(added.channelMembers.members.map(({ user: listed }) => listed.id)).toEqual([
+      memberId,
+      ownerId,
+    ]);
+    expect(
+      (await repository.listConversations(member, undefined, 50)).conversations.find(
+        (summary) => summary.conversation.id === conversationId,
+      ),
+    ).toMatchObject({ membershipRole: "member" });
+
+    await expect(
+      repository.upsertChannelMember(member, conversationId, observerId, { role: "member" }),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    const privateMessageInput = message(randomUUID());
+    const privateMessage = await repository.sendMessage(
+      member,
+      conversationId,
+      privateMessageInput,
+    );
+    expect(privateMessage).toMatchObject({ message: { conversationId } });
+    await expect(
+      repository.sendMessage(owner, conversationId, {
+        ...message(randomUUID(), "secret @observer"),
+        mentionedUserIds: [observerId],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+
+    const removed = await repository.removeChannelMember(owner, conversationId, memberId);
+    expect(removed.channelMembers.members).toHaveLength(1);
+    await expect(repository.history(member, conversationId, undefined, 50)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    expect(
+      (await repository.listConversations(member, undefined, 50)).conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      ),
+    ).toBe(false);
+    await expect(
+      repository.sendMessage(member, conversationId, privateMessageInput),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+
+    const memberSync = await repository.sync(member, added.syncCursor, 100);
+    expect(memberSync.events).toContainEqual(
+      expect.objectContaining({
+        type: "channel.membership_changed",
+        conversationId,
+        payload: { memberId, action: "removed" },
+      }),
+    );
+    const replayedSync = await repository.sync(member, "0", 100);
+    expect(
+      replayedSync.events.some(
+        (event) => event.type === "message.created" && event.conversationId === conversationId,
+      ),
+    ).toBe(false);
+    expect(replayedSync.events).toContainEqual(
+      expect.objectContaining({
+        type: "channel.membership_changed",
+        conversationId,
+        payload: { memberId, action: "removed" },
+      }),
+    );
+  });
+
+  it("always retains an owner for a member-only channel", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Steering",
+      slug: "steering",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+
+    await expect(
+      repository.removeChannelMember(owner, conversationId, ownerId),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    await expect(
+      repository.upsertChannelMember(owner, conversationId, ownerId, { role: "member" }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "owner" });
+    const removals = await Promise.allSettled([
+      repository.removeChannelMember(owner, conversationId, ownerId),
+      repository.removeChannelMember(member, conversationId, memberId),
+    ]);
+    expect(removals.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"]);
+    const rejected = removals.find((result) => result.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({
+      statusCode: 409,
+      code: "CONFLICT",
+    } satisfies Partial<ApiError>);
+    const activeOwners = await pool.query(
+      `SELECT user_id
+         FROM conversation_memberships
+        WHERE conversation_id = $1 AND role = 'owner' AND left_at IS NULL`,
+      [conversationId],
+    );
+    expect(activeOwners.rowCount).toBe(1);
+  });
+
+  it("does not count a workspace-revoked member as an active channel owner", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Operations",
+      slug: "operations",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "owner" });
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'revoked'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, memberId],
+    );
+
+    await expect(
+      repository.removeChannelMember(owner, conversationId, ownerId),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    await expect(
+      repository.upsertChannelMember(owner, conversationId, ownerId, { role: "member" }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+  });
+
+  it("reports workspace channels as visible to everyone but not individually managed", async () => {
+    const members = await repository.listChannelMembers(member, generalId);
+    expect(members).toMatchObject({
+      conversationId: generalId,
+      access: "workspace",
+      canManage: false,
+    });
+    expect(members.members.map(({ user: listed }) => listed.id)).toEqual([
+      memberId,
+      observerId,
+      ownerId,
+    ]);
+    await expect(
+      repository.upsertChannelMember(owner, generalId, memberId, { role: "owner" }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+  });
+
   it("consumes realtime tickets exactly once", async () => {
     const issued = await repository.issueRealtimeTicket(owner);
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toEqual({
@@ -325,6 +511,25 @@ describeWithPostgres("WorkspaceRepository", () => {
       statusCode: 400,
       code: "BAD_REQUEST",
     } satisfies Partial<ApiError>);
+  });
+
+  it("continues conversation paging after the member loses access to the cursor anchor", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "A Private",
+      slug: "a-private",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+
+    const first = await repository.listConversations(member, undefined, 1);
+    expect(first.conversations.map((summary) => summary.conversation.id)).toEqual([conversationId]);
+    expect(first.nextCursor).not.toBeNull();
+
+    await repository.removeChannelMember(owner, conversationId, memberId);
+    const second = await repository.listConversations(member, first.nextCursor ?? undefined, 50);
+    expect(second.conversations.map((summary) => summary.conversation.id)).toContain(generalId);
   });
 
   it("revalidates a live realtime principal and rejects an unknown device session", async () => {

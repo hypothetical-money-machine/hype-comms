@@ -1,9 +1,16 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import type { ChatSessionState, Message, UpdateState, User } from "@hmm-chat/contracts";
+import type {
+  ChannelAccess,
+  ChatSessionState,
+  Message,
+  UpdateState,
+  User,
+} from "@hmm-chat/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
+import { ChannelMembersDialog } from "./channel-members-dialog";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import {
   cacheFallbackNotice,
@@ -182,6 +189,7 @@ export function App({ client }: AppProps) {
   const [draft, setDraft] = useState("");
   const [composerError, setComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
+  const [showChannelMembers, setShowChannelMembers] = useState(false);
   const messageList = useRef<HTMLDivElement>(null);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
@@ -236,6 +244,8 @@ export function App({ client }: AppProps) {
     (item) => item.operation.conversationId === runtimeState.selectedConversationId,
   );
 
+  useEffect(() => setShowChannelMembers(false), [runtimeState.selectedConversationId]);
+
   useEffect(() => {
     const list = messageList.current;
     if (list !== null) list.scrollTop = list.scrollHeight;
@@ -246,8 +256,10 @@ export function App({ client }: AppProps) {
     const body = draft.trim();
     const conversationId = runtimeState.selectedConversationId;
     if (body === "" || conversationId === null || bootstrap === null) return;
+    const visibleMemberIds = new Set(selectedSummary?.participantIds ?? []);
     const mentionedUserIds = bootstrap.members
       .filter((member) => {
+        if (!visibleMemberIds.has(member.id)) return false;
         const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
       })
@@ -262,9 +274,25 @@ export function App({ client }: AppProps) {
   };
 
   const createChannel = useCallback(
-    async (name: string, slug: string): Promise<void> => {
-      await runtime.createChannel(name, slug);
+    async (name: string, slug: string, access: ChannelAccess): Promise<void> => {
+      await runtime.createChannel(name, slug, access);
     },
+    [runtime],
+  );
+
+  const loadChannelMembers = useCallback(
+    (conversationId: string) => runtime.getChannelMembers(conversationId),
+    [runtime],
+  );
+
+  const upsertChannelMember = useCallback(
+    (conversationId: string, userId: string, role: "owner" | "member") =>
+      runtime.upsertChannelMember(conversationId, userId, role),
+    [runtime],
+  );
+
+  const removeChannelMember = useCallback(
+    (conversationId: string, userId: string) => runtime.removeChannelMember(conversationId, userId),
     [runtime],
   );
 
@@ -398,7 +426,8 @@ export function App({ client }: AppProps) {
               onClick={() => runtime.selectConversation(summary.conversation.id)}
             >
               <span>
-                # {summary.conversation.name}
+                {summary.conversation.access === "members" ? "🔒 " : "# "}
+                {summary.conversation.name}
                 {summary.conversation.isArchived ? " (archived)" : ""}
               </span>
               {(summary.unreadCount > 0 || summary.mentionCount > 0) && (
@@ -481,18 +510,30 @@ export function App({ client }: AppProps) {
               </p>
             )}
           </div>
-          {selectedSummary?.conversation.kind === "channel" &&
-            selectedSummary.conversation.slug !== "general" &&
-            !selectedSummary.conversation.isArchived &&
-            bootstrap.currentUser.role === "owner" && (
+          {selectedSummary?.conversation.kind === "channel" && (
+            <div className="conversation-header-actions">
               <button
                 className="quiet-button"
                 type="button"
-                onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
+                onClick={() => setShowChannelMembers(true)}
               >
-                Archive
+                {selectedSummary.conversation.access === "members"
+                  ? `${String(selectedSummary.participantIds.length)} members`
+                  : "Everyone"}
               </button>
-            )}
+              {selectedSummary.conversation.slug !== "general" &&
+                !selectedSummary.conversation.isArchived &&
+                bootstrap.currentUser.role === "owner" && (
+                  <button
+                    className="quiet-button"
+                    type="button"
+                    onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
+                  >
+                    Archive
+                  </button>
+                )}
+            </div>
+          )}
         </header>
 
         <div className="message-list" ref={messageList} aria-live="polite">
@@ -606,6 +647,19 @@ export function App({ client }: AppProps) {
           {composerError !== "" && <p className="composer-error">{composerError}</p>}
         </form>
       </section>
+      {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (
+        <ChannelMembersDialog
+          channelName={
+            selectedSummary.conversation.name ?? selectedSummary.conversation.slug ?? "channel"
+          }
+          conversationId={selectedSummary.conversation.id}
+          workspaceMembers={bootstrap.members}
+          onClose={() => setShowChannelMembers(false)}
+          load={loadChannelMembers}
+          upsert={upsertChannelMember}
+          remove={removeChannelMember}
+        />
+      )}
     </main>
   );
 }

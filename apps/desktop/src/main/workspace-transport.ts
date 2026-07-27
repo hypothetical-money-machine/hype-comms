@@ -1,6 +1,8 @@
 import {
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
+  channelMembershipMutationResponseSchema,
+  channelMembersResponseSchema,
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
@@ -13,6 +15,8 @@ import {
   workspaceBootstrapResponseSchema,
   type AdvanceReadCursorResponse,
   type ArchiveChannelRequest,
+  type ChannelMembershipMutationResponse,
+  type ChannelMembersResponse,
   type ConversationMutationResponse,
   type CreateChannelRequest,
   type DirectConversationRequest,
@@ -24,6 +28,7 @@ import {
   type SendAttemptResult,
   type SendMessageOperation,
   type SyncAttemptResult,
+  type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
@@ -154,6 +159,45 @@ export class WorkspaceTransport {
       },
     );
     return conversationMutationResponseSchema.parse(await this.#payload(response));
+  }
+
+  async channelMembers(conversationId: string): Promise<ChannelMembersResponse> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/channels/${encodeURIComponent(conversationId)}/members`).href,
+      { method: "GET" },
+    );
+    return channelMembersResponseSchema.parse(await this.#payload(response));
+  }
+
+  async upsertChannelMember(
+    conversationId: string,
+    userId: string,
+    input: UpsertChannelMemberRequest,
+  ): Promise<ChannelMembershipMutationResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
+      ).href,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    return channelMembershipMutationResponseSchema.parse(await this.#payload(response));
+  }
+
+  async removeChannelMember(
+    conversationId: string,
+    userId: string,
+  ): Promise<ChannelMembershipMutationResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
+      ).href,
+      { method: "DELETE" },
+    );
+    return channelMembershipMutationResponseSchema.parse(await this.#payload(response));
   }
 
   async createDirectConversation(

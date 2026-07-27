@@ -257,6 +257,7 @@ async function ensureChannel(
         name: fixture.name,
         slug: fixture.slug,
         topic: fixture.topic,
+        access: "workspace",
       })
     ).conversation.conversation.id;
   } catch (error) {

@@ -71,6 +71,7 @@ export const invitationSchema = z
   .strict();
 
 export const conversationKindSchema = z.enum(["channel", "direct_message", "group_direct_message"]);
+export const channelAccessSchema = z.enum(["workspace", "members"]);
 
 export const conversationSchema = z
   .object({
@@ -80,6 +81,10 @@ export const conversationSchema = z
     name: z.string().trim().min(1).max(100).nullable(),
     slug: channelSlugSchema.nullable(),
     topic: z.string().trim().max(250).nullable(),
+    // Missing on pre-membership server responses and encrypted cache records. Null has the same
+    // renderer meaning as a legacy workspace-visible channel; current servers always send the
+    // explicit access mode.
+    access: channelAccessSchema.nullable().default(null),
     isArchived: z.boolean(),
     createdBy: entityIdSchema.nullable(),
     ...timestampsShape,
@@ -180,6 +185,7 @@ export type WorkspaceMembership = z.infer<typeof workspaceMembershipSchema>;
 export type InvitationStatus = z.infer<typeof invitationStatusSchema>;
 export type Invitation = z.infer<typeof invitationSchema>;
 export type ConversationKind = z.infer<typeof conversationKindSchema>;
+export type ChannelAccess = z.infer<typeof channelAccessSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
 export type ConversationMembershipRole = z.infer<typeof conversationMembershipRoleSchema>;
 export type ConversationMembership = z.infer<typeof conversationMembershipSchema>;

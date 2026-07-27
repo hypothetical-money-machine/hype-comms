@@ -634,6 +634,18 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           await this.#recordEvent(parsed);
         },
       );
+    } else if (parsed.type === "channel.membership_changed") {
+      // Membership changes can remove the current user and therefore invalidate both the
+      // conversation and its cached history. Record the cursor here; WorkspaceRuntime replaces
+      // the complete server-derived snapshot immediately after applying this event.
+      await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.events,
+        async () => {
+          await this.#recordEvent(parsed);
+        },
+      );
     } else {
       const current = await this.#conversation(parsed.conversationId);
       let nextSummary: ConversationSummary | null = null;
@@ -654,6 +666,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         nextSummary = conversationSummarySchema.parse({
           conversation: parsed.payload.conversation,
           participantIds: parsed.payload.participantIds,
+          membershipRole: current?.membershipRole ?? null,
           lastMessage: current?.lastMessage ?? null,
           unreadCount: current?.unreadCount ?? 0,
           mentionCount: current?.mentionCount ?? 0,
@@ -959,6 +972,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           };
         }
       }
+    } else if (parsed.type === "channel.membership_changed") {
+      // WorkspaceRuntime replaces the snapshot because the current conversation may have become
+      // invisible. Advancing the cursor above keeps this event idempotent until that refresh.
     } else if (this.#snapshot !== null && parsed.type === "member.updated") {
       const members = new Map(this.#snapshot.members.map((member) => [member.id, member]));
       members.set(parsed.payload.member.id, parsed.payload.member);
@@ -981,6 +997,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         conversations.set(parsed.conversationId, {
           conversation: parsed.payload.conversation,
           participantIds: parsed.payload.participantIds,
+          membershipRole: current?.membershipRole ?? null,
           lastMessage: current?.lastMessage ?? null,
           unreadCount: current?.unreadCount ?? 0,
           mentionCount: current?.mentionCount ?? 0,

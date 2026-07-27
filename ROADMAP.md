@@ -16,6 +16,9 @@ The implementation contract and security boundaries live in
   validated IPC.
 - A PostgreSQL-authoritative conversation core: workspace channels, unique 1:1 DMs,
   paginated history, and server-authoritative unread/mention counters.
+- Workspace-visible and members-only channels with owner-managed membership, server-enforced
+  visibility at list/history/send/sync boundaries, and immediate cache purge on removal.
+- Date separators in the main message timeline, including pending outbox messages.
 - Every mutation commits together with its ordered sync event in one transaction; clients
   converge through a ticketed reconnecting WebSocket plus cursor-based HTTP sync.
 - An encrypted IndexedDB cache and a restart-safe outbox: one UUID serves as both client

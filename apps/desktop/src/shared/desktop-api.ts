@@ -7,6 +7,8 @@ import type {
   CacheEncryptBatchResponse,
   CacheScope,
   ChatSessionState,
+  ChannelMembershipMutationResponse,
+  ChannelMembersResponse,
   ConversationMutationResponse,
   CreateChannelRequest,
   DirectConversationRequest,
@@ -74,6 +76,16 @@ export interface DesktopApi extends SessionTransport {
   readonly sendConversationMessage: (input: SendMessageOperation) => Promise<SendAttemptResult>;
   readonly createChannel: (input: CreateChannelRequest) => Promise<ConversationMutationResponse>;
   readonly archiveChannel: (conversationId: string) => Promise<ConversationMutationResponse>;
+  readonly getChannelMembers: (conversationId: string) => Promise<ChannelMembersResponse>;
+  readonly upsertChannelMember: (
+    conversationId: string,
+    userId: string,
+    role: "owner" | "member",
+  ) => Promise<ChannelMembershipMutationResponse>;
+  readonly removeChannelMember: (
+    conversationId: string,
+    userId: string,
+  ) => Promise<ChannelMembershipMutationResponse>;
   readonly createDirectConversation: (
     input: DirectConversationRequest,
   ) => Promise<ConversationMutationResponse>;

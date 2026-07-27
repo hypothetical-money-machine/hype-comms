@@ -74,7 +74,9 @@ describe("ChannelCreatePopover", () => {
     fireEvent.change(input, { target: { value: "Équipe Produit" } });
     fireEvent.submit(screen.getByRole("dialog"));
 
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith("Équipe Produit", "équipe-produit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith("Équipe Produit", "équipe-produit", "workspace"),
+    );
     expect(trigger.hasAttribute("disabled")).toBe(true);
     expect(
       screen.getByRole("button", { name: "Close channel creation" }).hasAttribute("disabled"),
@@ -111,6 +113,18 @@ describe("ChannelCreatePopover", () => {
     fireEvent.change(input, { target: { value: "👋✨" } });
     expect(screen.getByText(/symbols and emoji alone cannot form a channel/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("creates an invited-members channel when private access is selected", async () => {
+    const { onCreate, trigger } = renderPopover();
+    const input = open(trigger);
+    fireEvent.change(input, { target: { value: "Leadership" } });
+    fireEvent.click(screen.getByRole("radio", { name: /invited members/i }));
+    fireEvent.submit(screen.getByRole("dialog"));
+
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith("Leadership", "leadership", "members"),
+    );
   });
 
   it("anchors the portal to the trigger and recalculates after sidebar scroll", async () => {

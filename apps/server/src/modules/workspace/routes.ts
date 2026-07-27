@@ -8,6 +8,7 @@ import {
   messageHistoryQuerySchema,
   sendConversationMessageRequestSchema,
   syncQuerySchema,
+  upsertChannelMemberRequestSchema,
 } from "@hmm-chat/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
@@ -27,6 +28,18 @@ function parameters(value: unknown): { readonly id: string } {
   );
   if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid resource id");
   return { id: result.data };
+}
+
+function memberParameters(value: unknown): { readonly id: string; readonly userId: string } {
+  if (typeof value !== "object" || value === null) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
+  }
+  const id = entityIdSchema.safeParse("id" in value ? value.id : undefined);
+  const userId = entityIdSchema.safeParse("userId" in value ? value.userId : undefined);
+  if (!id.success || !userId.success) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
+  }
+  return { id: id.data, userId: userId.data };
 }
 
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (
@@ -63,6 +76,26 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const result = archiveChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel update");
     return repository.archiveChannel(identity, id);
+  });
+
+  app.get("/channels/:id/members", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    return repository.listChannelMembers(identity, id);
+  });
+
+  app.put("/channels/:id/members/:userId", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id, userId } = memberParameters(request.params);
+    const body = upsertChannelMemberRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel member");
+    return repository.upsertChannelMember(identity, id, userId, body.data);
+  });
+
+  app.delete("/channels/:id/members/:userId", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id, userId } = memberParameters(request.params);
+    return repository.removeChannelMember(identity, id, userId);
   });
 
   app.post("/direct-conversations", async (request, reply) => {

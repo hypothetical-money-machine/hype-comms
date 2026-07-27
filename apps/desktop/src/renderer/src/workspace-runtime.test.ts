@@ -6,6 +6,8 @@ import type {
   CacheDecryptBatchResponse,
   CacheEncryptBatchResponse,
   CacheScope,
+  ChannelMembershipMutationResponse,
+  ChannelMembersResponse,
   ChatSessionState,
   ConversationMutationResponse,
   ConversationSummary,
@@ -80,12 +82,14 @@ function channel(id: string, slug: string): ConversationSummary {
       name: slug,
       slug,
       topic: null,
+      access: "workspace",
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,
       updatedAt: NOW,
     },
     participantIds: [],
+    membershipRole: null,
     lastMessage: null,
     unreadCount: 0,
     mentionCount: 0,
@@ -486,6 +490,18 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not archive channels");
   }
 
+  async getChannelMembers(): Promise<ChannelMembersResponse> {
+    throw new Error("The runtime test does not list channel members");
+  }
+
+  async upsertChannelMember(): Promise<ChannelMembershipMutationResponse> {
+    throw new Error("The runtime test does not update channel members");
+  }
+
+  async removeChannelMember(): Promise<ChannelMembershipMutationResponse> {
+    throw new Error("The runtime test does not remove channel members");
+  }
+
   async createDirectConversation(): Promise<ConversationMutationResponse> {
     throw new Error("The runtime test does not create direct conversations");
   }
@@ -709,9 +725,11 @@ describe("WorkspaceRuntime", () => {
       syncCursor: "12",
     });
 
-    await runtime.createChannel("Alpha Team", "alpha-team");
+    await runtime.createChannel("Alpha Team", "alpha-team", "workspace");
 
-    expect(api.createdChannels).toEqual([{ name: "Alpha Team", slug: "alpha-team", topic: null }]);
+    expect(api.createdChannels).toEqual([
+      { name: "Alpha Team", slug: "alpha-team", topic: null, access: "workspace" },
+    ]);
     expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
     expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
     expect(runtime.state.selectedConversationId).toBe(CREATED_CHANNEL_ID);
@@ -740,7 +758,7 @@ describe("WorkspaceRuntime", () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
-    await expect(runtime.createChannel("Too Soon", "too-soon")).rejects.toThrow(
+    await expect(runtime.createChannel("Too Soon", "too-soon", "members")).rejects.toThrow(
       "Workspace is still loading",
     );
     expect(api.createdChannels).toEqual([]);
@@ -757,7 +775,7 @@ describe("WorkspaceRuntime", () => {
         resolveResult = resolve;
       }),
     );
-    const creation = runtime.createChannel("Alpha Team", "alpha-team");
+    const creation = runtime.createChannel("Alpha Team", "alpha-team", "workspace");
     await settle(() => api.createdChannels.length === 1, "channel request");
     await runtime.stop();
     const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
@@ -776,7 +794,9 @@ describe("WorkspaceRuntime", () => {
     const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
     api.channelResults.push({ conversation: createdSummary, syncCursor: "12" });
 
-    await expect(runtime.createChannel("Alpha Team", "alpha-team")).resolves.toBeUndefined();
+    await expect(
+      runtime.createChannel("Alpha Team", "alpha-team", "workspace"),
+    ).resolves.toBeUndefined();
     expect(runtime.state.selectedConversationId).toBe(CREATED_CHANNEL_ID);
     expect(runtime.state.bootstrap?.conversations).toContainEqual(createdSummary);
     expect(runtime.state.stale).toBe(true);
@@ -857,6 +877,61 @@ describe("WorkspaceRuntime", () => {
       "alpha",
       "general",
     ]);
+  });
+
+  it("purges a removed member's private channel, history, and active selection", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const privateMessage = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000012",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    api.histories.set(SECOND_CONVERSATION_ID, {
+      messages: [privateMessage],
+      nextCursor: null,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    expect(runtime.state.messages).toContainEqual(privateMessage);
+
+    api.bootstrap = bootstrapAt("11");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000013",
+      type: "channel.membership_changed",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: SECOND_CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { memberId: USER_ID, action: "removed" },
+    });
+
+    await settle(
+      () => runtime.state.selectedConversationId === CONVERSATION_ID,
+      "membership removal refresh",
+    );
+    expect(runtime.state.bootstrap?.conversations).toHaveLength(1);
+    expect(runtime.state.messages).not.toContainEqual(privateMessage);
+    expect((await cache.load()).messages).not.toContainEqual(privateMessage);
+    expect(api.acknowledged).toContain("11");
   });
 
   it("orders a newly delivered member the way a cold load would", async () => {

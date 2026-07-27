@@ -1,4 +1,4 @@
-import { channelSlugFromName } from "@hmm-chat/contracts";
+import { channelSlugFromName, type ChannelAccess } from "@hmm-chat/contracts";
 import {
   useCallback,
   useEffect,
@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 
 interface ChannelCreatePopoverProps {
-  readonly onCreate: (name: string, slug: string) => Promise<void>;
+  readonly onCreate: (name: string, slug: string, access: ChannelAccess) => Promise<void>;
 }
 
 interface PopoverPosition {
@@ -35,6 +35,7 @@ const ARROW_MARGIN = 18;
 export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [access, setAccess] = useState<ChannelAccess>("workspace");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
@@ -49,6 +50,7 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
     if (creatingRef.current) return;
     setOpen(false);
     setName("");
+    setAccess("workspace");
     setError("");
     setPosition(null);
     restoreFocus.current = true;
@@ -135,7 +137,7 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
     setCreating(true);
     setError("");
     try {
-      await onCreate(displayName, slug);
+      await onCreate(displayName, slug, access);
       creatingRef.current = false;
       setCreating(false);
       dismiss();
@@ -185,7 +187,7 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
             <header>
               <div>
                 <h2 id="channel-create-title">Create a channel</h2>
-                <p>Everyone in the workspace can find and join it.</p>
+                <p>Choose who can find and read this channel.</p>
               </div>
               <button
                 className="channel-create-close"
@@ -223,6 +225,38 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
                 Add a Unicode letter or number; symbols and emoji alone cannot form a channel.
               </p>
             )}
+
+            <fieldset className="channel-access-options">
+              <legend>Who has access?</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="channel-access"
+                  value="workspace"
+                  checked={access === "workspace"}
+                  disabled={creating}
+                  onChange={() => setAccess("workspace")}
+                />
+                <span>
+                  <strong>Everyone</strong>
+                  <small>All workspace members can read and send.</small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="channel-access"
+                  value="members"
+                  checked={access === "members"}
+                  disabled={creating}
+                  onChange={() => setAccess("members")}
+                />
+                <span>
+                  <strong>Invited members</strong>
+                  <small>Only people added by a channel owner.</small>
+                </span>
+              </label>
+            </fieldset>
 
             <p className="channel-create-error" role="alert">
               {error}

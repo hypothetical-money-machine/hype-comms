@@ -402,8 +402,10 @@ export class IdentityRepository {
     if (input.role === "owner" && input.status === "active") {
       await this.#database.query(
         `INSERT INTO conversations
-           (id, workspace_id, kind, name, slug, topic, created_by)
-         VALUES ($1, $2, 'channel', 'General', 'general', 'Workspace-wide conversation', $3)
+           (id, workspace_id, kind, name, slug, topic, channel_access, created_by)
+         VALUES (
+           $1, $2, 'channel', 'General', 'general', 'Workspace-wide conversation', 'workspace', $3
+         )
          ON CONFLICT (workspace_id, slug) DO NOTHING`,
         [randomUUID(), input.workspaceId, input.userId],
       );

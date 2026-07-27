@@ -8,6 +8,9 @@ import {
   cacheEncryptBatchRequestSchema,
   cacheEncryptBatchResponseSchema,
   cacheScopeSchema,
+  channelMemberTargetSchema,
+  channelMembershipMutationResponseSchema,
+  channelMembersResponseSchema,
   conversationMutationResponseSchema,
   createChannelRequestSchema,
   directConversationRequestSchema,
@@ -24,6 +27,8 @@ import {
   sequenceSchema,
   syncAttemptResultSchema,
   updateStateSchema,
+  upsertChannelMemberRequestSchema,
+  upsertChannelMemberOperationSchema,
   workspaceBootstrapResponseSchema,
   type ChatSessionState,
   type CacheDecryptBatchRequest,
@@ -174,6 +179,29 @@ const desktopApi: DesktopApi = Object.freeze({
     conversationMutationResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelArchive, conversationId),
     ),
+  getChannelMembers: async (conversationId: string) =>
+    channelMembersResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMembersList, conversationId),
+    ),
+  upsertChannelMember: async (conversationId: string, userId: string, role: "owner" | "member") => {
+    const operation = upsertChannelMemberOperationSchema.parse({
+      conversationId,
+      userId,
+      ...upsertChannelMemberRequestSchema.parse({ role }),
+    });
+    return channelMembershipMutationResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMemberUpsert, operation),
+    );
+  },
+  removeChannelMember: async (conversationId: string, userId: string) => {
+    const target = channelMemberTargetSchema.parse({
+      conversationId,
+      userId,
+    });
+    return channelMembershipMutationResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMemberRemove, target),
+    );
+  },
   createDirectConversation: async (input: DirectConversationRequest) =>
     conversationMutationResponseSchema.parse(
       await ipcRenderer.invoke(

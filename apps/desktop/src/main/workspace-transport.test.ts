@@ -9,6 +9,7 @@ const API_ORIGIN = "https://chat.example";
 const NOW = "2026-07-24T12:00:00.000Z";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
+const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
 
 const CURRENT_USER = {
   user: {
@@ -51,12 +52,14 @@ const BOOTSTRAP_RESPONSE = {
         name: "General",
         slug: "general",
         topic: null,
+        access: "workspace",
         isArchived: false,
         createdBy: "10000000-0000-4000-8000-000000000001",
         createdAt: NOW,
         updatedAt: NOW,
       },
       participantIds: [],
+      membershipRole: null,
       lastMessage: null,
       unreadCount: 0,
       mentionCount: 0,
@@ -81,6 +84,13 @@ const SEND_OPERATION: SendMessageOperation = {
     attachmentIds: [],
   },
 };
+
+const CHANNEL_MEMBERS_RESPONSE = {
+  conversationId: CONVERSATION_ID,
+  access: "members",
+  members: [{ user: CURRENT_USER.user, role: "owner", joinedAt: NOW }],
+  canManage: true,
+} as const;
 
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
@@ -353,5 +363,59 @@ describe("WorkspaceTransport conversations", () => {
       "GET https://chat.example/v1/conversations?after=cursor-2&limit=10",
       "GET https://chat.example/v1/conversations?limit=50",
     ]);
+  });
+});
+
+describe("WorkspaceTransport channel membership", () => {
+  it("uses the scoped member routes and bodies for list, add, update, and remove", async () => {
+    const requests: { method: string; url: string; body: string | null }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+      });
+      return init.method === "GET"
+        ? jsonResponse(CHANNEL_MEMBERS_RESPONSE)
+        : jsonResponse({ channelMembers: CHANNEL_MEMBERS_RESPONSE, syncCursor: "43" });
+    });
+
+    await expect(transport.channelMembers(CONVERSATION_ID)).resolves.toEqual(
+      CHANNEL_MEMBERS_RESPONSE,
+    );
+    await transport.upsertChannelMember(CONVERSATION_ID, MEMBER_ID, { role: "member" });
+    await transport.upsertChannelMember(CONVERSATION_ID, MEMBER_ID, { role: "owner" });
+    await transport.removeChannelMember(CONVERSATION_ID, MEMBER_ID);
+
+    expect(requests).toEqual([
+      {
+        method: "GET",
+        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members`,
+        body: null,
+      },
+      {
+        method: "PUT",
+        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        body: JSON.stringify({ role: "member" }),
+      },
+      {
+        method: "PUT",
+        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        body: JSON.stringify({ role: "owner" }),
+      },
+      {
+        method: "DELETE",
+        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        body: null,
+      },
+    ]);
+  });
+
+  it("rejects a malformed successful member response", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ ...CHANNEL_MEMBERS_RESPONSE, unexpected: true }),
+    );
+
+    await expect(transport.channelMembers(CONVERSATION_ID)).rejects.toThrow();
   });
 });

@@ -6,6 +6,7 @@ import {
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
+  channelMemberTargetSchema,
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
@@ -13,6 +14,7 @@ import {
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
+  upsertChannelMemberOperationSchema,
   type ChatSessionState,
   type ProductRealtimeEvent,
   type UpdateState,
@@ -462,6 +464,31 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel archive sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.archiveChannel(entityIdSchema.parse(id), { isArchived: true });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMembersList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMembersList, async (event, id: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel members sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.channelMembers(entityIdSchema.parse(id));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMemberUpsert);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMemberUpsert, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel member sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const operation = upsertChannelMemberOperationSchema.parse(value);
+    return workspaceTransport.upsertChannelMember(operation.conversationId, operation.userId, {
+      role: operation.role,
+    });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMemberRemove);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMemberRemove, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel member sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const target = channelMemberTargetSchema.parse(value);
+    return workspaceTransport.removeChannelMember(target.conversationId, target.userId);
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceDirectCreate);

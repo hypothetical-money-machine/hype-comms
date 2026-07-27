@@ -40,12 +40,14 @@ const CONVERSATION_SUMMARY = {
     name: "General",
     slug: "general",
     topic: null,
+    access: "workspace",
     isArchived: false,
     createdBy: USER_ID,
     createdAt: NOW,
     updatedAt: NOW,
   },
   participantIds: [],
+  membershipRole: null,
   lastMessage: null,
   unreadCount: 0,
   mentionCount: 0,
@@ -103,6 +105,7 @@ describe("entity contracts", () => {
         name: "general",
         slug: "general",
         topic: null,
+        access: "workspace",
         isArchived: false,
         createdBy: USER_ID,
         createdAt: NOW,
@@ -183,18 +186,36 @@ describe("transport contracts", () => {
           name: "General",
           slug: "general",
           topic: null,
+          access: "workspace",
           isArchived: false,
           createdBy: USER_ID,
           createdAt: NOW,
           updatedAt: NOW,
         },
         participantIds: [],
+        membershipRole: null,
         lastMessage: null,
         unreadCount: 0,
         mentionCount: 0,
         readCursor: null,
       }),
     ).toMatchObject({ conversation: { slug: "general" } });
+  });
+
+  it("upgrades legacy workspace-channel cache records without relaxing strict fields", () => {
+    const legacy = {
+      ...CONVERSATION_SUMMARY,
+      conversation: {
+        ...CONVERSATION_SUMMARY.conversation,
+        access: undefined,
+      },
+      membershipRole: undefined,
+    };
+    expect(conversationSummarySchema.parse(legacy)).toMatchObject({
+      conversation: { access: null },
+      membershipRole: null,
+    });
+    expect(() => conversationSummarySchema.parse({ ...legacy, unexpected: true })).toThrow();
   });
 
   it("keeps the session state discriminated and free of credentials", () => {

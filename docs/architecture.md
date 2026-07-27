@@ -9,9 +9,10 @@ these invariants require a reviewed architecture change and matching contract te
 - Today there is exactly one hosted workspace and no public registration. One bootstrapped
   owner invites members by email; the service rejects a 26th active membership.
   Multi-workspace and open signup are deliberate future changes, not emergent ones.
-- Channels are visible to every active workspace member. Direct conversations contain
-  exactly two active members and are unique for that unordered pair. Private channels and
-  group DMs are not yet supported.
+- Channels are either workspace-visible or restricted to an explicit member list. A
+  members-only channel always retains at least one channel owner, and only its owners can
+  add, remove, promote, or demote members. Direct conversations contain exactly two active
+  members and are unique for that unordered pair. Group DMs are not yet supported.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 x64, and Linux x64
   AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
@@ -74,18 +75,18 @@ at the current 25-member scale.
 
 ## Domain and persistence contract
 
-| Aggregate              | Current rules                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                         |
-| User and membership    | Email is normalized for comparison and unique. A membership is `owner` or `member` and `invited`, `active`, or `revoked`. Capacity counts active memberships transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                        |
-| Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                               |
-| Conversation           | `channel` has a unique normalized slug and is readable by every active member. `direct_message` has a unique sorted pair of member IDs and is readable only by that pair. Archived channels remain readable but reject writes.                                                                                         |
-| Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.      |
-| Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                       |
-| Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                        |
-| Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.               |
-| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. |
-| Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                           |
+| Aggregate              | Current rules                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                                                                                                    |
+| User and membership    | Email is normalized for comparison and unique. A membership is `owner` or `member` and `invited`, `active`, or `revoked`. Capacity counts active memberships transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                                                                                                   |
+| Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                                                                                                          |
+| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active member, while `members` is readable only by active conversation memberships. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted pair and is readable only by that pair. Archived channels remain readable but reject writes. |
+| Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
+| Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
+| Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                                                                   |
+| Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
+| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments.                                                                            |
+| Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
 
 Domain mutations, their idempotency result, and corresponding sync events commit in one
 database transaction. A per-workspace sequence provides a total event order; message order
@@ -100,6 +101,9 @@ author/`clientMessageId`; monotonic read cursors; unique active email/username/c
 and attachment/message/thread references within the same authorized conversation. Every
 query for history, sync, search, files, or events applies conversation visibility on the
 server; knowledge of an ID never grants access.
+
+Membership mutations lock the channel row to serialize competing owner changes, then reject a
+removal or demotion that would leave a members-only channel without an owner.
 
 Search uses a stored `tsvector` over the flattened message body and ready attachment
 filenames with a GIN index and `websearch_to_tsquery`. Results are ranked, then ordered by
@@ -118,29 +122,30 @@ Collection pagination uses opaque `before`/`after` cursors, defaults to 50 items
 UUID as `clientMessageId`. A replay with the same authenticated actor, route, key, and body
 returns the original result. Reuse with a different fingerprint returns `409 CONFLICT`.
 
-| Route                                                                       | Contract                                                                                                                                  |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /livez`, `GET /readyz`                                                 | Process liveness and dependency readiness; no sensitive diagnostic data.                                                                  |
-| `POST /v1/auth/magic-links`                                                 | Accept email plus PKCE-style code challenge and always return `202`; send only for a valid invited/active email.                          |
-| `POST /v1/auth/exchange`                                                    | Exchange a short-lived callback code plus verifier for an access credential, rotating refresh credential, and session summary.            |
-| `POST /v1/auth/refresh`, `DELETE /v1/auth/session`                          | Rotate a refresh credential or revoke the current device session.                                                                         |
-| `GET /v1/sessions`, `DELETE /v1/sessions/:id`                               | List and revoke the caller's other device sessions.                                                                                       |
-| `GET /v1/bootstrap`                                                         | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
-| `GET /v1/members`                                                           | Active member directory for DMs and mention completion.                                                                                   |
-| `GET /v1/invitations`, `POST /v1/invitations`, `DELETE /v1/invitations/:id` | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
-| `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`      | List visible summaries, create a workspace-visible channel, or owner-archive one.                                                         |
-| `POST /v1/direct-conversations`                                             | Return the existing DM for `memberId` or atomically create it.                                                                            |
-| `GET /v1/conversations/:id/messages`                                        | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
-| `POST /v1/conversations/:id/messages`                                       | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
-| `GET /v1/messages/:id/thread`                                               | Root plus paginated replies, authorized through the parent conversation.                                                                  |
-| `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                       | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
-| `PUT /v1/conversations/:id/read-cursor`                                     | Advance through `lastReadMessageId`; never move backward.                                                                                 |
-| `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                     | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
-| `GET /v1/files/:id/download`                                                | For an authorized ready file, return a five-minute signed download URL.                                                                   |
-| `GET /v1/search`                                                            | Query authorized text/filenames with optional conversation and time filters and an opaque result cursor.                                  |
-| `GET /v1/sync?after=...`                                                    | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
-| `POST /v1/realtime/tickets`                                                 | Issue a single-use 30-second ticket bound to the current member/session for a WSS connection; never return the access credential.         |
-| `GET /v1/desktop/releases/latest`                                           | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
+| Route                                                                         | Contract                                                                                                                                  |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /livez`, `GET /readyz`                                                   | Process liveness and dependency readiness; no sensitive diagnostic data.                                                                  |
+| `POST /v1/auth/magic-links`                                                   | Accept email plus PKCE-style code challenge and always return `202`; send only for a valid invited/active email.                          |
+| `POST /v1/auth/exchange`                                                      | Exchange a short-lived callback code plus verifier for an access credential, rotating refresh credential, and session summary.            |
+| `POST /v1/auth/refresh`, `DELETE /v1/auth/session`                            | Rotate a refresh credential or revoke the current device session.                                                                         |
+| `GET /v1/sessions`, `DELETE /v1/sessions/:id`                                 | List and revoke the caller's other device sessions.                                                                                       |
+| `GET /v1/bootstrap`                                                           | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
+| `GET /v1/members`                                                             | Active member directory for DMs and mention completion.                                                                                   |
+| `GET /v1/invitations`, `POST /v1/invitations`, `DELETE /v1/invitations/:id`   | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
+| `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
+| `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
+| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it.                                                                            |
+| `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
+| `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
+| `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation.                                                                  |
+| `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
+| `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
+| `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
+| `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
+| `GET /v1/search`                                                              | Query authorized text/filenames with optional conversation and time filters and an opaque result cursor.                                  |
+| `GET /v1/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
+| `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the current member/session for a WSS connection; never return the access credential.         |
+| `GET /v1/desktop/releases/latest`                                             | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
 
 The app requests a magic link only after generating a verifier and challenge. The emailed
 HTTPS URL lands at `https://chat.hypemm.com/auth/verify`, consumes the hashed single-use
@@ -163,15 +168,18 @@ full jitter from 500 ms to 30 seconds and obtains a fresh ticket for every attem
 control frames include `system.connected`, `system.resync_required`, and `system.error`;
 domain events are:
 
-- `member.updated`, `channel.created`, and `direct_conversation.created`;
+- `member.updated`, `channel.created`, `channel.membership_changed`, and
+  `direct_conversation.created`;
 - `message.created`, `reaction.added`, and `reaction.removed`;
 - `read_cursor.updated` (the owning member only); and
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
-and optional conversation IDs, and a typed payload. Channel events target active workspace
-members; DM events target only the two participants. A global cursor may therefore contain
+and optional conversation IDs, and a typed payload. Workspace-channel events target active
+workspace members; members-only channel events target active channel members. Membership
+changes target the union of the old and new audience so a removed member can purge the channel
+immediately. DM events target only the two participants. A global cursor may therefore contain
 gaps for a client. Sync advances to the server's scanned cursor rather than the last visible
 event so a client cannot loop on hidden events. Event payloads never contain access tokens,
 email magic links, refresh credentials, presigned object URLs, or file object keys.
@@ -223,6 +231,11 @@ outbox, replace server-derived cache stores from bootstrap/history, and resume. 
 event version pauses cursor advancement, records a redacted diagnostic, and requires a
 compatible app update or full resync; it is never skipped.
 
+A channel-membership event refreshes the authoritative visible-conversation snapshot instead of
+trying to infer access locally. If the current member was removed, that refresh deletes the
+channel summary and acknowledged history from the cache, preserves unrelated outbox entries, and
+moves selection to the first remaining visible conversation.
+
 Each queued send stores one generated UUID as both `clientMessageId` and idempotency key.
 The optimistic row is reconciled by that ID, not by body or timestamp. Network errors,
 timeouts, `429`, and `5xx` retry with full jitter (one second to 30 seconds) and honor
@@ -243,9 +256,10 @@ devices is private to that user.
 
 ## Feature behavior
 
-- Channel names use a unique lowercase hyphenated slug; all active members can create a
-  channel, and only the owner can archive it. `general` is provisioned and
-  cannot be archived.
+- Channel names use a unique lowercase hyphenated slug; all active members can create either a
+  workspace channel or a members-only channel. The creator owns a members-only channel, owners
+  manage its member/owner roles, and the final owner cannot be removed or demoted. `general` is
+  provisioned workspace-wide and cannot be archived.
 - Creating a DM is symmetric and returns the existing conversation for the member pair.
   Revoking either member immediately blocks new reads/writes and event delivery to that
   device after session invalidation.

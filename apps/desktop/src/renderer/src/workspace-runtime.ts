@@ -2,6 +2,9 @@ import {
   sendMessageOperationSchema,
   type CacheCryptoStatus,
   type CacheScope,
+  type ChannelMembershipMutationResponse,
+  type ChannelMembersResponse,
+  type ChannelAccess,
   type ChatSessionState,
   type ConversationSummary,
   type Message,
@@ -421,13 +424,13 @@ export class WorkspaceRuntime {
     this.#setState({ outbox: this.#withoutOutbox([clientMessageId]) });
   }
 
-  async createChannel(name: string, slug: string): Promise<void> {
+  async createChannel(name: string, slug: string, access: ChannelAccess): Promise<void> {
     const generation = this.#generation;
     const cache = this.#cache;
     if (cache === null || this.#state.bootstrap === null) {
       throw new Error("Workspace is still loading");
     }
-    const result = await this.#client.createChannel({ name, slug, topic: null });
+    const result = await this.#client.createChannel({ name, slug, topic: null, access });
     if (generation !== this.#generation || cache !== this.#cache) return;
     const conversationId = result.conversation.conversation.id;
 
@@ -478,6 +481,29 @@ export class WorkspaceRuntime {
   async archiveChannel(conversationId: string): Promise<void> {
     await this.#client.archiveChannel(conversationId);
     await this.#refreshSnapshot(this.#generation);
+  }
+
+  async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
+    return this.#client.getChannelMembers(conversationId);
+  }
+
+  async upsertChannelMember(
+    conversationId: string,
+    userId: string,
+    role: "owner" | "member",
+  ): Promise<ChannelMembershipMutationResponse> {
+    const result = await this.#client.upsertChannelMember(conversationId, userId, role);
+    await this.#refreshSnapshot(this.#generation);
+    return result;
+  }
+
+  async removeChannelMember(
+    conversationId: string,
+    userId: string,
+  ): Promise<ChannelMembershipMutationResponse> {
+    const result = await this.#client.removeChannelMember(conversationId, userId);
+    await this.#refreshSnapshot(this.#generation);
+    return result;
   }
 
   async loadOlder(conversationId: string): Promise<void> {
@@ -574,11 +600,21 @@ export class WorkspaceRuntime {
     const loaded = await cache.load();
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
+    const loadedSnapshot = loaded.bootstrap;
+    const currentSelection = this.#state.selectedConversationId;
+    const selectedConversationId =
+      loadedSnapshot !== null &&
+      currentSelection !== null &&
+      loadedSnapshot.conversations.some((summary) => summary.conversation.id === currentSelection)
+        ? currentSelection
+        : loadedSnapshot === null
+          ? null
+          : firstConversation(loadedSnapshot);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       outbox: loaded.outbox,
-      selectedConversationId: this.#state.selectedConversationId ?? firstConversation(snapshot),
+      selectedConversationId,
       stale: false,
       error: null,
     });
@@ -654,7 +690,7 @@ export class WorkspaceRuntime {
       await this.#resync(generation);
       return;
     }
-    await this.#applyWorkspaceEvent(event);
+    await this.#applyWorkspaceEvent(event, generation);
   }
 
   /**
@@ -744,13 +780,17 @@ export class WorkspaceRuntime {
     await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
   }
 
-  async #applyWorkspaceEvent(event: WorkspaceEvent): Promise<void> {
+  async #applyWorkspaceEvent(event: WorkspaceEvent, generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null) return;
     const applied = await cache.applyEvent(event);
     await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
     if (!applied) return;
     this.#syncCursor = event.workspaceSequence;
+    if (event.type === "channel.membership_changed") {
+      await this.#refreshSnapshot(generation);
+      return;
+    }
     // The event payload already carries everything the view needs, so the whole encrypted cache
     // does not have to be decrypted again for every message.
     this.#projectEvent(event);
@@ -788,10 +828,12 @@ export class WorkspaceRuntime {
       });
       return;
     }
+    if (event.type === "channel.membership_changed") return;
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,
         participantIds: [...event.payload.participantIds],
+        membershipRole: current?.membershipRole ?? null,
         lastMessage: current?.lastMessage ?? null,
         unreadCount: current?.unreadCount ?? 0,
         mentionCount: current?.mentionCount ?? 0,
