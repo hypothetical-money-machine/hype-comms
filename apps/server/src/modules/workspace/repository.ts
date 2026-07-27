@@ -1074,7 +1074,9 @@ export class WorkspaceRepository {
     const client = await this.pool.connect();
     try {
       const highWaterCursor = await this.#highWater(client, principal.workspaceId);
-      if (BigInt(after) > BigInt(highWaterCursor)) {
+      const afterSequence = BigInt(after);
+      const highWaterSequence = BigInt(highWaterCursor);
+      if (afterSequence > highWaterSequence) {
         throw new ApiError(410, "CURSOR_EXPIRED", "The sync cursor is no longer valid");
       }
       const earliest = await client.query<{ sequence: string | null } & QueryResultRow>(
@@ -1084,11 +1086,9 @@ export class WorkspaceRepository {
         [principal.workspaceId],
       );
       const earliestSequence = earliest.rows[0]?.sequence ?? null;
-      if (
-        earliestSequence !== null &&
-        BigInt(after) + 1n < BigInt(earliestSequence) &&
-        BigInt(after) !== 0n
-      ) {
+      const retainedCursorFloor =
+        earliestSequence === null ? highWaterSequence : BigInt(earliestSequence) - 1n;
+      if (afterSequence !== 0n && afterSequence < retainedCursorFloor) {
         throw new ApiError(410, "CURSOR_EXPIRED", "The sync cursor has expired");
       }
       const rows = await client.query<EventRow>(

@@ -200,6 +200,18 @@ describeWithPostgres("WorkspaceRepository", () => {
     return result.rows.map((row) => row.id);
   }
 
+  async function seedMessageEvents(count: number): Promise<string[]> {
+    const cursors: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const sent = await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), `sync event ${index + 1}`),
+        mentionedUserIds: [],
+      });
+      cursors.push(sent.syncCursor);
+    }
+    return cursors;
+  }
+
   it("boots into #general and tracks unread mentions and read cursors", async () => {
     const bootstrap = await repository.bootstrap(owner);
     expect(bootstrap.conversations).toHaveLength(1);
@@ -263,6 +275,64 @@ describeWithPostgres("WorkspaceRepository", () => {
         code: "NOT_FOUND",
       },
     );
+  });
+
+  it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
+    const [staleCursor] = await seedMessageEvents(2);
+    if (staleCursor === undefined) throw new Error("Expected a stale sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
+      statusCode: 410,
+      code: "CURSOR_EXPIRED",
+    } satisfies Partial<ApiError>);
+  });
+
+  it("returns an empty sync when the cursor equals high-water and no sync events remain", async () => {
+    const highWaterCursor = (await seedMessageEvents(2)).at(-1);
+    if (highWaterCursor === undefined) throw new Error("Expected a high-water sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, highWaterCursor, 100)).resolves.toEqual({
+      events: [],
+      nextCursor: highWaterCursor,
+      highWaterCursor,
+      hasMore: false,
+    });
+  });
+
+  it("preserves bootstrap from zero when no sync events remain", async () => {
+    const highWaterCursor = (await seedMessageEvents(2)).at(-1);
+    if (highWaterCursor === undefined) throw new Error("Expected a high-water sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, "0", 100)).resolves.toEqual({
+      events: [],
+      nextCursor: "0",
+      highWaterCursor,
+      hasMore: false,
+    });
+  });
+
+  it("expires a cursor that falls before the retained sync event range", async () => {
+    const [staleCursor, retainedPredecessor, earliestRetainedCursor] = await seedMessageEvents(3);
+    if (
+      staleCursor === undefined ||
+      retainedPredecessor === undefined ||
+      earliestRetainedCursor === undefined
+    ) {
+      throw new Error("Expected seeded sync cursors");
+    }
+    await pool.query(
+      `DELETE FROM sync_events
+        WHERE workspace_id = $1 AND workspace_sequence <= $2::bigint`,
+      [workspaceId, retainedPredecessor],
+    );
+
+    await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
+      statusCode: 410,
+      code: "CURSOR_EXPIRED",
+    } satisfies Partial<ApiError>);
   });
 
   it("searches only messages in conversations the caller can currently access", async () => {
