@@ -14,6 +14,7 @@ import {
   listConversationsResponseSchema,
   messageSchema,
   messageHistoryQuerySchema,
+  messageSearchQuerySchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
@@ -292,6 +293,15 @@ describe("transport contracts", () => {
 
   it("coerces bounded HTTP query parameters from URL strings", () => {
     expect(messageHistoryQuerySchema.parse({ limit: "25" })).toEqual({ limit: 25 });
+    expect(messageSearchQuerySchema.parse({ query: "  quarterly avalanche  " })).toEqual({
+      query: "quarterly avalanche",
+      limit: 25,
+    });
+    expect(() => messageSearchQuerySchema.parse({ query: "q" })).toThrow();
+    expect(() => messageSearchQuerySchema.parse({ query: "quarterly", limit: "51" })).toThrow();
+    expect(() =>
+      messageSearchQuerySchema.parse({ query: "quarterly", workspaceId: WORKSPACE_ID }),
+    ).toThrow();
     expect(syncQuerySchema.parse({ after: "4", limit: "100" })).toEqual({
       after: "4",
       limit: 100,

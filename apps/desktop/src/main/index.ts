@@ -11,6 +11,7 @@ import {
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
+  messageSearchQuerySchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -443,6 +444,13 @@ function registerIpcHandlers(): void {
       ...(typeof request.before === "string" ? { before: request.before } : {}),
       ...(typeof request.limit === "number" ? { limit: request.limit } : {}),
     });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSearch);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSearch, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSend);

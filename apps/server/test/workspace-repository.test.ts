@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
@@ -72,6 +72,27 @@ const ownerPrincipal: RealtimePrincipal = {
 /** The wire form of a conversation keyset cursor, so tests can page from an arbitrary anchor. */
 function conversationCursor(conversationId: string): string {
   return Buffer.from(JSON.stringify({ id: conversationId }), "utf8").toString("base64url");
+}
+
+function searchCursor(
+  query: string,
+  overrides: Partial<{
+    queryHash: string;
+    rank: number;
+    workspaceSequence: string;
+    id: string;
+  }> = {},
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      queryHash: createHash("sha256").update(query.trim()).digest("base64url"),
+      rank: 0.1,
+      workspaceSequence: "1",
+      id: randomUUID(),
+      ...overrides,
+    }),
+    "utf8",
+  ).toString("base64url");
 }
 
 function message(clientMessageId: string, body = "hello @member"): SendConversationMessageRequest {
@@ -242,6 +263,108 @@ describeWithPostgres("WorkspaceRepository", () => {
         code: "NOT_FOUND",
       },
     );
+  });
+
+  it("searches only messages in conversations the caller can currently access", async () => {
+    const searchBody = "Quarterly avalanche review";
+    const publicMessage = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), searchBody),
+      mentionedUserIds: [],
+    });
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Private Search",
+      slug: "private-search",
+      topic: null,
+      access: "members",
+    });
+    const privateConversationId = privateChannel.conversation.conversation.id;
+    const privateMessage = await repository.sendMessage(owner, privateConversationId, {
+      ...message(randomUUID(), searchBody),
+      mentionedUserIds: [],
+    });
+    const direct = await repository.createDirectConversation(owner, { memberId });
+    const directMessage = await repository.sendMessage(owner, direct.conversation.conversation.id, {
+      ...message(randomUUID(), searchBody),
+      mentionedUserIds: [],
+    });
+
+    const ownerSearch = await repository.searchMessages(
+      owner,
+      "quarterly avalanche",
+      undefined,
+      50,
+    );
+    expect(new Set(ownerSearch.results.map(({ message: result }) => result.id))).toEqual(
+      new Set([publicMessage.message.id, privateMessage.message.id, directMessage.message.id]),
+    );
+    const memberSearch = await repository.searchMessages(
+      member,
+      "quarterly avalanche",
+      undefined,
+      50,
+    );
+    expect(new Set(memberSearch.results.map(({ message: result }) => result.id))).toEqual(
+      new Set([publicMessage.message.id, directMessage.message.id]),
+    );
+    const observerSearch = await repository.searchMessages(
+      observer,
+      "quarterly avalanche",
+      undefined,
+      50,
+    );
+    expect(observerSearch.results.map(({ message: result }) => result.id)).toEqual([
+      publicMessage.message.id,
+    ]);
+
+    const pagedIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.searchMessages(owner, "quarterly avalanche", cursor, 1);
+      pagedIds.push(...page.results.map(({ message: result }) => result.id));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(pagedIds).toEqual(ownerSearch.results.map(({ message: result }) => result.id));
+    expect(new Set(pagedIds).size).toBe(pagedIds.length);
+
+    await repository.upsertChannelMember(owner, privateConversationId, memberId, {
+      role: "member",
+    });
+    expect(
+      (await repository.searchMessages(member, "quarterly avalanche", undefined, 50)).results.map(
+        ({ message: result }) => result.id,
+      ),
+    ).toContain(privateMessage.message.id);
+    await repository.removeChannelMember(owner, privateConversationId, memberId);
+    expect(
+      (await repository.searchMessages(member, "quarterly avalanche", undefined, 50)).results.map(
+        ({ message: result }) => result.id,
+      ),
+    ).not.toContain(privateMessage.message.id);
+
+    await expect(
+      repository.searchMessages(owner, "quarterly avalanche", "not-a-cursor", 50),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    const firstPage = await repository.searchMessages(owner, "quarterly avalanche", undefined, 1);
+    expect(firstPage.nextCursor).not.toBeNull();
+    await expect(
+      repository.searchMessages(owner, "different query", firstPage.nextCursor ?? undefined, 1),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    await expect(
+      repository.searchMessages(
+        owner,
+        "quarterly avalanche",
+        searchCursor("quarterly avalanche", { rank: 1e39 }),
+        50,
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    await expect(
+      repository.searchMessages(
+        owner,
+        "quarterly avalanche",
+        searchCursor("quarterly avalanche", { workspaceSequence: "9223372036854775808" }),
+        50,
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
   });
 
   it("grants and revokes member-only channel access across every message boundary", async () => {

@@ -16,6 +16,8 @@ import type {
   ListConversationsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
+  MessageSearchQuery,
+  MessageSearchResponse,
   ProductRealtimeEvent,
   RealtimeConnectionState,
   SendAttemptResult,
@@ -73,6 +75,7 @@ export interface DesktopApi extends SessionTransport {
     readonly before?: string;
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
+  readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
   readonly sendConversationMessage: (input: SendMessageOperation) => Promise<SendAttemptResult>;
   readonly createChannel: (input: CreateChannelRequest) => Promise<ConversationMutationResponse>;
   readonly archiveChannel: (conversationId: string) => Promise<ConversationMutationResponse>;

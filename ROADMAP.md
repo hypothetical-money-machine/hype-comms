@@ -19,6 +19,8 @@ The implementation contract and security boundaries live in
 - Workspace-visible and members-only channels with owner-managed membership, server-enforced
   visibility at list/history/send/sync boundaries, and immediate cache purge on removal.
 - Date separators in the main message timeline, including pending outbox messages.
+- Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
+  result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients
   converge through a ticketed reconnecting WebSocket plus cursor-based HTTP sync.
 - An encrypted IndexedDB cache and a restart-safe outbox: one UUID serves as both client
@@ -49,8 +51,8 @@ Roughly in order:
   state is the stronger position. Decide, then update the contract — this is much cheaper
   to change now than after threads ship.
 - Emoji reactions and structured mentions on the existing message model.
-- File attachments: quarantined direct uploads, malware scanning, expiring downloads.
-- Full-text search over authorized message text and filenames.
+- File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
+  authorized filename search.
 - Native notifications with focus and self suppression, and click-through to the
   conversation.
 - Signed macOS/Windows/Linux builds with authenticated auto-update, so using the app stops

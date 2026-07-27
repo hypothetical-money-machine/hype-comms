@@ -285,6 +285,7 @@ harmless but not free, and is worth collapsing if CI minutes or feedback latency
 ## Scope
 
 The current build serves one invited workspace of at most 25 active members. It covers
-channels, 1:1 DMs, paginated text history, mentions, unread state, ordered reconnect sync,
-and restart-safe sends. Threads, reactions, attachments, search, notifications, signed
+workspace-visible and members-only channels, 1:1 DMs, paginated text history, authorized
+message search, mentions, unread state, ordered reconnect sync, date-separated timelines, and
+restart-safe sends. Threads, reactions, attachments, notifications, signed
 releases, and hosted operations are upcoming work — see [ROADMAP.md](ROADMAP.md).

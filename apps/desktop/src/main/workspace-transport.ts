@@ -8,6 +8,7 @@ import {
   listConversationsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
+  messageSearchResponseSchema,
   realtimeTicketResponseSchema,
   sendAttemptResultSchema,
   sendMessageResponseSchema,
@@ -24,6 +25,8 @@ import {
   type ListConversationsResponse,
   type ListMembersResponse,
   type MessageHistoryResponse,
+  type MessageSearchQuery,
+  type MessageSearchResponse,
   type RealtimeTicketResponse,
   type SendAttemptResult,
   type SendMessageOperation,
@@ -221,6 +224,15 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(input.limit ?? 50));
     const response = await this.session.fetch(url.href, { method: "GET" });
     return messageHistoryResponseSchema.parse(await this.#payload(response));
+  }
+
+  async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
+    const url = this.#url("/v1/search");
+    url.searchParams.set("query", input.query);
+    if (input.after !== undefined) url.searchParams.set("after", input.after);
+    url.searchParams.set("limit", String(input.limit));
+    const response = await this.session.fetch(url.href, { method: "GET" });
+    return messageSearchResponseSchema.parse(await this.#payload(response));
   }
 
   async send(input: SendMessageOperation): Promise<SendAttemptResult> {

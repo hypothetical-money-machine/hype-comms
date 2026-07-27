@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  MESSAGE_SEARCH_MAX_LIMIT,
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -12,6 +13,7 @@ import {
   listConversationsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
+  messageSearchResponseSchema,
   messageSchema,
   readCursorSchema,
   realtimeTicketResponseSchema,
@@ -33,6 +35,7 @@ import {
   type ListMembersResponse,
   type Message,
   type MessageHistoryResponse,
+  type MessageSearchResponse,
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
@@ -48,6 +51,8 @@ import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realti
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
+const POSTGRES_REAL_MAX = 3.4028234663852886e38;
+const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface WorkspaceRow extends QueryResultRow {
@@ -116,6 +121,10 @@ interface MessageRow extends QueryResultRow {
   deleted_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface SearchMessageRow extends MessageRow {
+  search_rank: string;
 }
 
 interface ReadCursorRow extends QueryResultRow {
@@ -296,6 +305,65 @@ function decodeHistoryCursor(cursor: string | undefined): string | null {
     return parsed.sequence;
   } catch {
     throw new ApiError(400, "BAD_REQUEST", "Invalid history cursor");
+  }
+}
+
+interface SearchCursor {
+  readonly queryHash: string;
+  readonly rank: number;
+  readonly workspaceSequence: string;
+  readonly id: string;
+}
+
+function searchQueryHash(query: string): string {
+  return createHash("sha256").update(query).digest("base64url");
+}
+
+function encodeSearchCursor(row: SearchMessageRow, queryHash: string): string {
+  return Buffer.from(
+    JSON.stringify({
+      queryHash,
+      rank: Number(row.search_rank),
+      workspaceSequence: row.committed_workspace_sequence,
+      id: row.id,
+    } satisfies SearchCursor),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeSearchCursor(cursor: string | undefined, queryHash: string): SearchCursor | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("queryHash" in parsed) ||
+      typeof parsed.queryHash !== "string" ||
+      parsed.queryHash !== queryHash ||
+      !("rank" in parsed) ||
+      typeof parsed.rank !== "number" ||
+      !Number.isFinite(parsed.rank) ||
+      parsed.rank < 0 ||
+      parsed.rank > POSTGRES_REAL_MAX ||
+      !("workspaceSequence" in parsed) ||
+      typeof parsed.workspaceSequence !== "string" ||
+      !/^[1-9]\d*$/.test(parsed.workspaceSequence) ||
+      BigInt(parsed.workspaceSequence) > POSTGRES_BIGINT_MAX ||
+      !("id" in parsed) ||
+      typeof parsed.id !== "string" ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      throw new Error("Invalid cursor");
+    }
+    return {
+      queryHash: parsed.queryHash,
+      rank: parsed.rank,
+      workspaceSequence: parsed.workspaceSequence,
+      id: parsed.id,
+    };
+  } catch {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid search cursor");
   }
 }
 
@@ -731,6 +799,64 @@ export class WorkspaceRepository {
           hasMore && oldest !== undefined
             ? encodeHistoryCursor(oldest.conversation_sequence)
             : null,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async searchMessages(
+    identity: AuthenticatedIdentity,
+    query: string,
+    after: string | undefined,
+    limit: number,
+  ): Promise<MessageSearchResponse> {
+    const normalizedQuery = query.trim();
+    const queryHash = searchQueryHash(normalizedQuery);
+    const cursor = decodeSearchCursor(after, queryHash);
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), MESSAGE_SEARCH_MAX_LIMIT);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<SearchMessageRow>(
+        `WITH search_query AS (
+           SELECT websearch_to_tsquery('simple', $3) AS value
+         )
+         SELECT message.*,
+                ts_rank_cd(message.search_vector, search_query.value)::text AS search_rank
+           FROM messages AS message
+           JOIN conversations AS conversation ON conversation.id = message.conversation_id
+          CROSS JOIN search_query
+          WHERE message.workspace_id = $1
+            AND ${conversationVisibilitySql("conversation", "$2")}
+            AND message.search_vector @@ search_query.value
+            AND (
+              $4::real IS NULL
+              OR (
+                ts_rank_cd(message.search_vector, search_query.value),
+                message.committed_workspace_sequence,
+                message.id
+              ) < ($4::real, $5::bigint, $6::uuid)
+            )
+          ORDER BY ts_rank_cd(message.search_vector, search_query.value) DESC,
+                   message.committed_workspace_sequence DESC,
+                   message.id DESC
+          LIMIT $7`,
+        [
+          identity.currentUser.workspaceId,
+          identity.currentUser.user.id,
+          normalizedQuery,
+          cursor?.rank ?? null,
+          cursor?.workspaceSequence ?? null,
+          cursor?.id ?? null,
+          pageLimit + 1,
+        ],
+      );
+      const hasMore = result.rows.length > pageLimit;
+      const selected = result.rows.slice(0, pageLimit);
+      const last = selected.at(-1);
+      return messageSearchResponseSchema.parse({
+        results: selected.map((row) => ({ message: mapMessage(row) })),
+        nextCursor: hasMore && last !== undefined ? encodeSearchCursor(last, queryHash) : null,
       });
     } finally {
       client.release();

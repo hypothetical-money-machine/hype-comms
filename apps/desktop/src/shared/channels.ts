@@ -16,6 +16,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceBootstrap: "workspace:bootstrap",
   workspaceConversationsList: "workspace:conversations-list",
   workspaceMessagesList: "workspace:messages-list",
+  workspaceMessageSearch: "workspace:message-search",
   workspaceMessageSend: "workspace:message-send",
   workspaceChannelCreate: "workspace:channel-create",
   workspaceChannelArchive: "workspace:channel-archive",

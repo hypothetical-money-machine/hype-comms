@@ -19,6 +19,8 @@ import {
   listConversationsResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
+  messageSearchQuerySchema,
+  messageSearchResponseSchema,
   productRealtimeEventSchema,
   realtimeConnectionStateSchema,
   requestMagicLinkSchema,
@@ -37,6 +39,7 @@ import {
   type CreateChannelRequest,
   type DirectConversationRequest,
   type ListConversationsQuery,
+  type MessageSearchQuery,
   type ProductRealtimeEvent,
   type SendMessageOperation,
   type UpdateState,
@@ -160,6 +163,13 @@ const desktopApi: DesktopApi = Object.freeze({
   }) =>
     messageHistoryResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessagesList, input),
+    ),
+  searchMessages: async (input: MessageSearchQuery) =>
+    messageSearchResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceMessageSearch,
+        messageSearchQuerySchema.parse(input),
+      ),
     ),
   sendConversationMessage: async (input: SendMessageOperation) =>
     sendAttemptResultSchema.parse(

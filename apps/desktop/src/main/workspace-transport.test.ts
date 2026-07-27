@@ -92,6 +92,29 @@ const CHANNEL_MEMBERS_RESPONSE = {
   canManage: true,
 } as const;
 
+const SEARCH_RESPONSE = {
+  results: [
+    {
+      message: {
+        id: CLIENT_MESSAGE_ID,
+        conversationId: CONVERSATION_ID,
+        conversationSequence: "7",
+        version: 1,
+        clientMessageId: CLIENT_MESSAGE_ID,
+        authorId: CURRENT_USER.user.id,
+        threadRootId: null,
+        body: "Quarterly avalanche review",
+        bodyFormat: "hmm_markdown_v1",
+        editedAt: null,
+        deletedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    },
+  ],
+  nextCursor: "next-page",
+} as const;
+
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
   readonly removals: string[] = [];
@@ -417,5 +440,36 @@ describe("WorkspaceTransport channel membership", () => {
     );
 
     await expect(transport.channelMembers(CONVERSATION_ID)).rejects.toThrow();
+  });
+});
+
+describe("WorkspaceTransport search", () => {
+  it("encodes the query and cursor and validates the result page", async () => {
+    const requests: string[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push(`${init.method} ${url}`);
+      return jsonResponse(SEARCH_RESPONSE);
+    });
+
+    await expect(
+      transport.searchMessages({
+        query: "quarterly avalanche",
+        after: "cursor-2",
+        limit: 25,
+      }),
+    ).resolves.toEqual(SEARCH_RESPONSE);
+    expect(requests).toEqual([
+      "GET https://chat.example/v1/search?query=quarterly+avalanche&after=cursor-2&limit=25",
+    ]);
+  });
+
+  it("rejects a malformed successful search response", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ ...SEARCH_RESPONSE, unexpected: true }),
+    );
+
+    await expect(
+      transport.searchMessages({ query: "quarterly avalanche", limit: 25 }),
+    ).rejects.toThrow();
   });
 });

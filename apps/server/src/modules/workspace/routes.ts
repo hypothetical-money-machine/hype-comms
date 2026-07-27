@@ -6,6 +6,7 @@ import {
   entityIdSchema,
   listConversationsQuerySchema,
   messageHistoryQuerySchema,
+  messageSearchQuerySchema,
   sendConversationMessageRequestSchema,
   syncQuerySchema,
   upsertChannelMemberRequestSchema,
@@ -113,6 +114,18 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
     return repository.history(identity, id, query.data.before, query.data.limit);
+  });
+
+  app.get("/search", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const query = messageSearchQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid search query");
+    return repository.searchMessages(
+      identity,
+      query.data.query,
+      query.data.after,
+      query.data.limit,
+    );
   });
 
   app.post("/conversations/:id/messages", async (request, reply) => {

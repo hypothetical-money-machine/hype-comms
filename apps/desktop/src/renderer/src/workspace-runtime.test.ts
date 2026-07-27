@@ -17,6 +17,8 @@ import type {
   MagicLinkDeliveryState,
   Message,
   MessageHistoryResponse,
+  MessageSearchQuery,
+  MessageSearchResponse,
   ProductRealtimeEvent,
   RealtimeConnectionState,
   SendAttemptResult,
@@ -346,6 +348,8 @@ class FakeDesktopApi implements DesktopApi {
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
   readonly historyRequests: string[] = [];
+  readonly searchResults: MessageSearchResponse[] = [];
+  readonly searchRequests: MessageSearchQuery[] = [];
   readonly #eventListeners = new Set<(event: ProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
@@ -462,6 +466,13 @@ class FakeDesktopApi implements DesktopApi {
   }): Promise<MessageHistoryResponse> {
     this.historyRequests.push(input.conversationId);
     return this.histories.get(input.conversationId) ?? { messages: [], nextCursor: null };
+  }
+
+  async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
+    this.searchRequests.push(input);
+    const response = this.searchResults.shift();
+    if (response === undefined) throw new Error("The test queued no search result");
+    return response;
   }
 
   async sendConversationMessage(input: SendMessageOperation): Promise<SendAttemptResult> {
@@ -845,6 +856,35 @@ describe("WorkspaceRuntime", () => {
 
     expect(cache.loadCount).toBe(loadsAfterStart);
     expect((await cache.load()).messages.map((item) => item.id)).toContain(PEER_MESSAGE_ID);
+  });
+
+  it("opens a search hit in the main timeline and clears the focus on normal navigation", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const searchHit: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000014",
+      clientMessageId: "20000000-0000-4000-8000-000000000015",
+      body: "Quarterly avalanche review",
+      conversationSequence: "3",
+    };
+    api.searchResults.push({ results: [{ message: searchHit }], nextCursor: null });
+
+    const response = await runtime.searchMessages("quarterly avalanche");
+    expect(api.searchRequests).toEqual([{ query: "quarterly avalanche", limit: 25 }]);
+    const firstResult = response.results[0];
+    if (firstResult === undefined) throw new Error("Expected a search result");
+    await runtime.openSearchResult(firstResult);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBe(searchHit.id);
+    expect(runtime.state.messages).toContainEqual(searchHit);
+    expect((await cache.load()).messages).toContainEqual(searchHit);
+
+    runtime.selectConversation(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
   });
 
   it("orders a peer-created conversation the way a cold load would", async () => {

@@ -8,6 +8,8 @@ import {
   type ChatSessionState,
   type ConversationSummary,
   type Message,
+  type MessageSearchResponse,
+  type MessageSearchResult,
   type ProductRealtimeEvent,
   type SyncAttemptResult,
   type WorkspaceEvent,
@@ -34,6 +36,7 @@ export interface WorkspaceRuntimeState {
   readonly messages: readonly Message[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
+  readonly focusedMessageId: string | null;
   readonly connection: RealtimeConnectionState;
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly cacheFallbackReason: CacheFallbackReason | null;
@@ -79,6 +82,7 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   messages: [],
   outbox: [],
   selectedConversationId: null,
+  focusedMessageId: null,
   connection: "offline",
   cacheMode: null,
   cacheFallbackReason: null,
@@ -361,7 +365,7 @@ export class WorkspaceRuntime {
   }
 
   selectConversation(conversationId: string): void {
-    this.#setState({ selectedConversationId: conversationId });
+    this.#setState({ selectedConversationId: conversationId, focusedMessageId: null });
     const messages = this.#state.messages.filter(
       (message) => message.conversationId === conversationId,
     );
@@ -407,6 +411,35 @@ export class WorkspaceRuntime {
       ],
     });
     void this.#flushOutbox(this.#generation);
+  }
+
+  async searchMessages(query: string, after?: string): Promise<MessageSearchResponse> {
+    return this.#client.searchMessages({
+      query,
+      ...(after === undefined ? {} : { after }),
+      limit: 25,
+    });
+  }
+
+  async openSearchResult(result: MessageSearchResult): Promise<void> {
+    const cache = this.#cache;
+    const snapshot = this.#state.bootstrap;
+    if (cache === null || snapshot === null) throw new Error("Workspace is still loading");
+    const conversationId = result.message.conversationId;
+    if (!snapshot.conversations.some((summary) => summary.conversation.id === conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
+    await cache.upsertHistory([result.message]);
+    const messages = mergeMessages(this.#state.messages, [result.message]);
+    this.#setState({
+      messages,
+      selectedConversationId: conversationId,
+      focusedMessageId: result.message.id,
+    });
+    const latest = messages.filter((message) => message.conversationId === conversationId).at(-1);
+    if (latest !== undefined) {
+      void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
+    }
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
@@ -465,6 +498,7 @@ export class WorkspaceRuntime {
       this.#setState({
         bootstrap: projected,
         selectedConversationId: conversationId,
+        focusedMessageId: null,
         ...(repairError === null ? {} : { stale: true, error: repairError }),
       });
     });
@@ -610,11 +644,14 @@ export class WorkspaceRuntime {
         : loadedSnapshot === null
           ? null
           : firstConversation(loadedSnapshot);
+    const focusedMessageId =
+      selectedConversationId === currentSelection ? this.#state.focusedMessageId : null;
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       outbox: loaded.outbox,
       selectedConversationId,
+      focusedMessageId,
       stale: false,
       error: null,
     });

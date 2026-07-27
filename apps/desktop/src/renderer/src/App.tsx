@@ -12,6 +12,7 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
   WorkspaceRuntime,
@@ -163,13 +164,18 @@ function Avatar({ user }: { user: User | undefined }) {
 function MessageRow({
   message,
   members,
+  highlighted,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
+  readonly highlighted: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   return (
-    <article className="message">
+    <article
+      className={highlighted ? "message search-target" : "message"}
+      id={`message-${message.id}`}
+    >
       <Avatar user={author} />
       <div>
         <header>
@@ -250,6 +256,12 @@ export function App({ client }: AppProps) {
     const list = messageList.current;
     if (list !== null) list.scrollTop = list.scrollHeight;
   }, [messages.length, pending.length, runtimeState.selectedConversationId]);
+
+  useEffect(() => {
+    const focusedMessageId = runtimeState.focusedMessageId;
+    if (focusedMessageId === null) return;
+    document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({ block: "center" });
+  }, [messages.length, runtimeState.focusedMessageId, runtimeState.selectedConversationId]);
 
   const send = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -409,6 +421,20 @@ export function App({ client }: AppProps) {
           </button>
         </header>
 
+        <WorkspaceSearch
+          members={bootstrap.members}
+          conversationName={(conversationId) => {
+            const summary = bootstrap.conversations.find(
+              (candidate) => candidate.conversation.id === conversationId,
+            );
+            return summary === undefined
+              ? "Unavailable conversation"
+              : runtime.conversationName(summary);
+          }}
+          search={(query, after) => runtime.searchMessages(query, after)}
+          openResult={(result) => runtime.openSearchResult(result)}
+        />
+
         <nav aria-label="Conversations">
           <div className="nav-heading">
             <span>Channels</span>
@@ -562,7 +588,11 @@ export function App({ client }: AppProps) {
                   message.createdAt,
                   messages[index - 1]?.createdAt ?? null,
                 ) && <MessageDateSeparator value={message.createdAt} />}
-                <MessageRow message={message} members={bootstrap.members} />
+                <MessageRow
+                  message={message}
+                  members={bootstrap.members}
+                  highlighted={message.id === runtimeState.focusedMessageId}
+                />
               </Fragment>
             ))
           )}

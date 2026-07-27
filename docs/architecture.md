@@ -105,10 +105,12 @@ server; knowledge of an ID never grants access.
 Membership mutations lock the channel row to serialize competing owner changes, then reject a
 removal or demotion that would leave a members-only channel without an owner.
 
-Search uses a stored `tsvector` over the flattened message body and ready attachment
-filenames with a GIN index and `websearch_to_tsquery`. Results are ranked, then ordered by
-message creation sequence plus ID for stable cursor pagination. Search does not inspect file
-contents, pending/failed files, or inaccessible conversations.
+Search uses a stored `tsvector` over the flattened message body with a GIN index and
+`websearch_to_tsquery`. Results are ranked, then ordered by committed workspace sequence plus ID
+for stable cursor pagination. Each opaque cursor is bound to the normalized query and rejects sort
+keys outside PostgreSQL's `real`/`bigint` ranges. Ready attachment filenames join that vector when
+attachments ship; search never inspects file contents, pending/failed files, or inaccessible
+conversations.
 
 ## HTTP and realtime interface
 
@@ -142,7 +144,7 @@ returns the original result. Reuse with a different fingerprint returns `409 CON
 | `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
 | `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
-| `GET /v1/search`                                                              | Query authorized text/filenames with optional conversation and time filters and an opaque result cursor.                                  |
+| `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
 | `GET /v1/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
 | `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the current member/session for a WSS connection; never return the access credential.         |
 | `GET /v1/desktop/releases/latest`                                             | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
@@ -268,6 +270,9 @@ devices is private to that user.
 - Mention completion uses the active member directory and inserts stable `@username` text
   plus the user ID. Notifications and mention counts use the verified join rows, not regex
   parsing. Plain URLs may be linkified; arbitrary rich text/HTML is never rendered.
+- Search covers message bodies in every channel and DM visible at request time. Results use
+  PostgreSQL full-text ranking and stable cursor pagination; selecting one opens the conversation,
+  inserts an older hit into the cached timeline when needed, and highlights it.
 - Upload URLs accept one exact content length/type/checksum into an S3 quarantine prefix.
   Completion enqueues an isolated scanner; only a clean verdict atomically changes status
   to ready and emits an event. EICAR/unknown executable content becomes failed, is deleted,
@@ -344,6 +349,10 @@ deletes active data and objects within 30 days; encrypted backups age out within
   expand/backfill/contract. A release may roll back application tasks without rolling back a
   destructive migration; destructive cleanup waits until the previous client/server version
   is outside the compatibility window.
+- Migration `0005_message_search.sql` populates a stored search vector and builds its GIN index in
+  one transaction. Apply it during a maintenance window for an existing populated deployment;
+  replace it with a staged online backfill/index build before message history reaches production
+  scale.
 - Channel slugs use Unicode NFKC normalization and locale-independent lowercase conversion. They
   retain Unicode letters, numbers, and following combining marks while other runs collapse to one
   ASCII hyphen; workspace slugs remain ASCII administrative identifiers.

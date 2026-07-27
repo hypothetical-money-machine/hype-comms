@@ -196,6 +196,35 @@ export const messageHistoryResponseSchema = z
   })
   .strict();
 
+export const MESSAGE_SEARCH_DEFAULT_LIMIT = 25;
+export const MESSAGE_SEARCH_MAX_LIMIT = 50;
+
+export const messageSearchQuerySchema = z
+  .object({
+    query: z.string().trim().min(2).max(200),
+    after: paginationCursorSchema.optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MESSAGE_SEARCH_MAX_LIMIT)
+      .default(MESSAGE_SEARCH_DEFAULT_LIMIT),
+  })
+  .strict();
+
+export const messageSearchResultSchema = z
+  .object({
+    message: messageSchema,
+  })
+  .strict();
+
+export const messageSearchResponseSchema = z
+  .object({
+    results: z.array(messageSearchResultSchema).max(MESSAGE_SEARCH_MAX_LIMIT),
+    nextCursor: paginationCursorSchema.nullable(),
+  })
+  .strict();
+
 export const sendConversationMessageRequestSchema = sendMessageRequestSchema.omit({
   conversationId: true,
 });
@@ -368,6 +397,9 @@ export type DirectConversationRequest = z.infer<typeof directConversationRequest
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;
+export type MessageSearchQuery = z.infer<typeof messageSearchQuerySchema>;
+export type MessageSearchResult = z.infer<typeof messageSearchResultSchema>;
+export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;
 export type SendConversationMessageRequest = z.infer<typeof sendConversationMessageRequestSchema>;
 export type SendMessageOperation = z.infer<typeof sendMessageOperationSchema>;
 export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
