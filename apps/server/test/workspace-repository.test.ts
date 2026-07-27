@@ -560,6 +560,74 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
   });
 
+  it("consumes but refuses a ticket when its workspace membership was revoked", async () => {
+    const issued = await repository.issueRealtimeTicket(owner);
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'revoked'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+
+    await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'active'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+    await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+  });
+
+  it("refuses a ticket when its workspace membership row is absent", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `ALTER TABLE realtime_tickets
+         ALTER CONSTRAINT realtime_tickets_workspace_id_user_id_fkey
+         DEFERRABLE INITIALLY DEFERRED`,
+      );
+      await client.query(`SET CONSTRAINTS realtime_tickets_workspace_id_user_id_fkey DEFERRED`);
+      await client.query(
+        `INSERT INTO device_sessions
+           (id, user_id, token_hash, created_at, last_seen_at, expires_at)
+         VALUES ($1, $2, $3, $4, $4, $5)`,
+        [member.sessionId, memberId, Buffer.alloc(32, 8), now, later],
+      );
+      await client.query(
+        `DELETE FROM workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, memberId],
+      );
+      const transactionRepository = new WorkspaceRepository(client as unknown as Pool);
+      const issued = await transactionRepository.issueRealtimeTicket(member);
+
+      expect(
+        (
+          await client.query(
+            `SELECT 1
+               FROM workspace_memberships
+              WHERE workspace_id = $1 AND user_id = $2`,
+            [workspaceId, memberId],
+          )
+        ).rowCount,
+      ).toBe(0);
+      await expect(transactionRepository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+      const ticketState = await client.query<{ consumed_at: Date | string | null }>(
+        `SELECT consumed_at
+           FROM realtime_tickets
+          WHERE token_hash = $1`,
+        [createHash("sha256").update(issued.ticket).digest()],
+      );
+      expect(ticketState.rows[0]?.consumed_at).not.toBeNull();
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
   it("bootstraps one bounded page past the response cap and pages every conversation exactly once", async () => {
     // One more conversation than a response may carry: before pagination this made
     // workspaceBootstrapResponseSchema.parse throw, which the error handler mapped to 500.

@@ -1162,16 +1162,25 @@ export class WorkspaceRepository {
   async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
     const hash = createHash("sha256").update(token).digest();
     const result = await this.pool.query<TicketRow>(
-      `UPDATE realtime_tickets AS ticket
-          SET consumed_at = clock_timestamp()
-         FROM device_sessions AS session
-        WHERE ticket.token_hash = $1
-          AND ticket.consumed_at IS NULL
-          AND ticket.expires_at > clock_timestamp()
-          AND session.id = ticket.device_session_id
+      `WITH consumed_ticket AS (
+         UPDATE realtime_tickets AS ticket
+            SET consumed_at = clock_timestamp()
+          WHERE ticket.token_hash = $1
+            AND ticket.consumed_at IS NULL
+            AND ticket.expires_at > clock_timestamp()
+         RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id
+       )
+       SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id
+         FROM consumed_ticket AS ticket
+         JOIN device_sessions AS session
+           ON session.id = ticket.device_session_id
+          AND session.user_id = ticket.user_id
           AND session.revoked_at IS NULL
           AND session.expires_at > clock_timestamp()
-        RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id`,
+         JOIN workspace_memberships AS membership
+           ON membership.workspace_id = ticket.workspace_id
+          AND membership.user_id = ticket.user_id
+          AND membership.status = 'active'`,
       [hash],
     );
     const row = result.rows[0];
