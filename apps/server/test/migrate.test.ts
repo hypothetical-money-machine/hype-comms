@@ -45,6 +45,7 @@ describeWithPostgres("runMigrations", () => {
           "0003_unicode_channel_slugs.sql",
           "0004_channel_memberships.sql",
           "0005_message_search.sql",
+          "0006_message_reactions.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -58,6 +59,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0003_unicode_channel_slugs.sql" },
         { filename: "0004_channel_memberships.sql" },
         { filename: "0005_message_search.sql" },
+        { filename: "0006_message_reactions.sql" },
       ]);
 
       const userId = randomUUID();

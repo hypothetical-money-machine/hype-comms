@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { SendMessageOperation } from "@hmm-chat/contracts";
+import { REACTION_EVENTS_CAPABILITY, type SendMessageOperation } from "@hmm-chat/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -180,16 +180,41 @@ describe("WorkspaceTransport sync classification", () => {
     });
   });
 
-  it("sends the requested cursor and limit", async () => {
-    const requests: string[] = [];
+  it("sends the requested cursor, limit, and supported event capabilities", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
-      requests.push(`${init.method} ${url}`);
+      requests.push({ url, init });
       return jsonResponse(SYNC_RESPONSE);
     });
 
     await transport.sync("41", 25);
 
-    expect(requests).toEqual(["GET https://chat.example/v1/sync?after=41&limit=25"]);
+    expect(requests).toEqual([
+      {
+        url: "https://chat.example/v1/sync?after=41&limit=25",
+        init: expect.objectContaining({
+          method: "GET",
+          headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+        }),
+      },
+    ]);
+  });
+
+  it("advertises supported event capabilities when issuing a realtime ticket", async () => {
+    const requests: RequestInit[] = [];
+    const { transport } = createTransport(async (_url, init) => {
+      requests.push(init);
+      return jsonResponse({ ticket: "a".repeat(32), expiresAt: NOW });
+    });
+
+    await transport.ticket();
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+      }),
+    ]);
   });
 
   it("reports a revoked membership (403) as permanent instead of retryable", async () => {

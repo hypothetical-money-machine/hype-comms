@@ -3,18 +3,24 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  REACTION_EVENTS_CAPABILITY,
   apiErrorEnvelopeSchema,
   channelSlugFromName,
   channelSlugSchema,
+  clientCapabilitiesHeaderSchema,
   conversationSummarySchema,
   conversationSchema,
   displayNameSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
+  listMessageReactionsRequestSchema,
+  messageHistoryResponseSchema,
   messageSchema,
   messageHistoryQuerySchema,
   messageSearchQuerySchema,
+  reactionEmojiSchema,
+  reactionSchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
@@ -23,6 +29,7 @@ import {
   updateStateSchema,
   updateVersionSchema,
   userSchema,
+  workspaceEventSchema,
   workspaceBootstrapResponseSchema,
   workspaceSnapshotSchema,
 } from "../src/index.js";
@@ -31,6 +38,7 @@ const USER_ID = "10000000-0000-4000-8000-000000000001";
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
+const REACTION_ID = "10000000-0000-4000-8000-000000000005";
 const NOW = "2026-07-21T12:00:00.000Z";
 
 const CONVERSATION_SUMMARY = {
@@ -145,6 +153,25 @@ describe("entity contracts", () => {
         role: "admin",
       }),
     ).toThrow();
+  });
+
+  it("accepts one normalized Unicode emoji and rejects text or multiple emoji", () => {
+    expect(reactionEmojiSchema.parse("👩🏽‍💻")).toBe("👩🏽‍💻");
+    expect(reactionEmojiSchema.parse("🇺🇸")).toBe("🇺🇸");
+    expect(reactionEmojiSchema.parse("1️⃣")).toBe("1️⃣");
+    expect(() => reactionEmojiSchema.parse("shipit")).toThrow();
+    expect(() => reactionEmojiSchema.parse("👍 🎉")).toThrow();
+    expect(() => reactionEmojiSchema.parse(" 👍 ")).toThrow();
+
+    expect(
+      reactionSchema.parse({
+        id: REACTION_ID,
+        messageId: MESSAGE_ID,
+        userId: USER_ID,
+        emoji: "❤️",
+        createdAt: NOW,
+      }),
+    ).toMatchObject({ emoji: "❤️" });
   });
 });
 
@@ -309,6 +336,22 @@ describe("transport contracts", () => {
     expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
   });
 
+  it("batches reaction hydration without changing the strict history response", () => {
+    expect(listMessageReactionsRequestSchema.parse({ messageIds: [MESSAGE_ID] })).toEqual({
+      messageIds: [MESSAGE_ID],
+    });
+    expect(() =>
+      listMessageReactionsRequestSchema.parse({ messageIds: [MESSAGE_ID, MESSAGE_ID] }),
+    ).toThrow();
+    expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
+      messages: [],
+      nextCursor: null,
+    });
+    expect(() =>
+      messageHistoryResponseSchema.parse({ messages: [], reactions: [], nextCursor: null }),
+    ).toThrow();
+  });
+
   it("validates the initial realtime handshake event", () => {
     expect(
       systemConnectedEventSchema.parse({
@@ -328,6 +371,45 @@ describe("transport contracts", () => {
         },
       }),
     ).toMatchObject({ type: "system.connected" });
+  });
+
+  it("validates reaction sync events with their target message sequence", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000006",
+      type: "reaction.added",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "43",
+      conversationSequence: "42",
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        reaction: {
+          id: REACTION_ID,
+          messageId: MESSAGE_ID,
+          userId: USER_ID,
+          emoji: "🎉",
+          createdAt: NOW,
+        },
+      },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toMatchObject({ type: "reaction.added" });
+    expect(workspaceEventSchema.parse({ ...event, type: "reaction.removed" })).toMatchObject({
+      type: "reaction.removed",
+    });
+    expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
+  });
+
+  it("validates bounded client capability headers", () => {
+    expect(
+      clientCapabilitiesHeaderSchema.parse(`${REACTION_EVENTS_CAPABILITY}, future-events-v2`),
+    ).toEqual([REACTION_EVENTS_CAPABILITY, "future-events-v2"]);
+    for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
+      expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
+    }
   });
 
   it("rejects unsafe sequence and blank message values", () => {

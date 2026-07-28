@@ -195,6 +195,28 @@ const readCursorEvent: WorkspaceEvent = {
   },
 };
 
+const reactionAddedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000063",
+  type: "reaction.added",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "9",
+  conversationSequence: "2",
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: {
+    reaction: {
+      id: "10000000-0000-4000-8000-000000000064",
+      messageId: MESSAGE_SEQUENCE_2_ID,
+      userId: MORGAN_ID,
+      emoji: "🎉",
+      createdAt: NOW,
+    },
+  },
+};
+
 class FakeCrypto {
   async encryptCacheRecords(input: CacheEncryptBatchRequest) {
     return cacheEncryptBatchResponseSchema.parse({
@@ -340,6 +362,19 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(alpha?.unreadCount).toBe(1);
     expect(alpha?.mentionCount).toBe(1);
     expect(state.messages).toHaveLength(1);
+  });
+
+  it("accepts reaction events without corrupting pre-reaction cache projections", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(false);
+
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("9");
+    expect(state.messages).toEqual([messageSequence2]);
+    expect(state.bootstrap?.conversations).toHaveLength(snapshot.conversations.length);
   });
 });
 

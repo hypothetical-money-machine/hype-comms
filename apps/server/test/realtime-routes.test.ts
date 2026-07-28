@@ -22,6 +22,7 @@ interface ConsumedTicket {
   readonly workspaceId: string;
   readonly userId: string;
   readonly deviceSessionId: string;
+  readonly reactionEvents: boolean;
 }
 
 class FakeWorkspaceRepository {
@@ -33,7 +34,7 @@ class FakeWorkspaceRepository {
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedTicket | null> {
     this.consumedTickets.push(token);
-    return { workspaceId, userId, deviceSessionId };
+    return { workspaceId, userId, deviceSessionId, reactionEvents: true };
   }
 
   async syncPrincipal(principal: RealtimePrincipal, after: string): Promise<SyncResponse> {
@@ -130,7 +131,9 @@ describe("realtime session revalidation", () => {
     expect(reason.toString()).toBe("Session revoked");
     expect(messages).toEqual([]);
     expect(repository.syncedCursors).toEqual([]);
-    expect(repository.revalidations).toEqual([{ userId, workspaceId, deviceSessionId }]);
+    expect(repository.revalidations).toEqual([
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+    ]);
   });
 
   it("continues the initial replay when revalidation has a transient error", async () => {
@@ -139,7 +142,9 @@ describe("realtime session revalidation", () => {
 
     const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
 
-    expect(repository.revalidations).toEqual([{ userId, workspaceId, deviceSessionId }]);
+    expect(repository.revalidations).toEqual([
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+    ]);
     expect(repository.syncedCursors).toEqual(["9"]);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
@@ -157,8 +162,8 @@ describe("realtime session revalidation", () => {
     expect(reason.toString()).toBe("Session revoked");
     // The principal must carry the device session the ticket was bound to, or nothing is checkable.
     expect(repository.revalidations).toEqual([
-      { userId, workspaceId, deviceSessionId },
-      { userId, workspaceId, deviceSessionId },
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
     ]);
   });
 

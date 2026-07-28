@@ -3,7 +3,11 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  MESSAGE_HISTORY_MAX_LIMIT,
   MESSAGE_SEARCH_MAX_LIMIT,
+  REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
+  REACTIONS_PER_MESSAGE_MAX,
+  addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -11,12 +15,16 @@ import {
   conversationSchema,
   conversationSummarySchema,
   listConversationsResponseSchema,
+  listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
   messageSearchResponseSchema,
   messageSchema,
+  reactionEmojiSchema,
+  reactionSchema,
   readCursorSchema,
   realtimeTicketResponseSchema,
+  removeReactionResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
   userSchema,
@@ -24,6 +32,7 @@ import {
   workspaceEventSchema,
   workspaceSchema,
   type AdvanceReadCursorResponse,
+  type AddReactionResponse,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type Conversation,
@@ -32,10 +41,14 @@ import {
   type CreateChannelRequest,
   type DirectConversationRequest,
   type ListConversationsResponse,
+  type ListMessageReactionsResponse,
   type ListMembersResponse,
   type Message,
   type MessageHistoryResponse,
   type MessageSearchResponse,
+  type Reaction,
+  type ReactionEmoji,
+  type RemoveReactionResponse,
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
@@ -127,6 +140,20 @@ interface SearchMessageRow extends MessageRow {
   search_rank: string;
 }
 
+interface ReactionRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  message_id: string;
+  user_id: string;
+  emoji: string;
+  created_at: Date | string;
+}
+
+interface ReactionCountRow extends QueryResultRow {
+  total: string;
+  member_total: string;
+}
+
 interface ReadCursorRow extends QueryResultRow {
   conversation_id: string;
   user_id: string;
@@ -153,6 +180,7 @@ interface TicketRow extends QueryResultRow {
   workspace_id: string;
   user_id: string;
   device_session_id: string;
+  reaction_events: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -172,11 +200,13 @@ export interface ConsumedRealtimeTicket {
   readonly workspaceId: string;
   readonly userId: string;
   readonly deviceSessionId: string;
+  readonly reactionEvents: boolean;
 }
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
   readonly userId: string;
+  readonly reactionEvents?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -271,6 +301,16 @@ function mapMessage(row: MessageRow): Message {
     deletedAt: nullableIso(row.deleted_at),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+  });
+}
+
+function mapReaction(row: ReactionRow): Reaction {
+  return reactionSchema.parse({
+    id: row.id,
+    messageId: row.message_id,
+    userId: row.user_id,
+    emoji: row.emoji,
+    createdAt: iso(row.created_at),
   });
 }
 
@@ -805,6 +845,158 @@ export class WorkspaceRepository {
     }
   }
 
+  async listMessageReactions(
+    identity: AuthenticatedIdentity,
+    messageIds: readonly string[],
+  ): Promise<ListMessageReactionsResponse> {
+    const ids = [...new Set(messageIds)];
+    if (
+      ids.length === 0 ||
+      ids.length !== messageIds.length ||
+      ids.length > MESSAGE_HISTORY_MAX_LIMIT
+    ) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid reaction message IDs");
+    }
+    const client = await this.pool.connect();
+    try {
+      const visible = await client.query<{ id: string } & QueryResultRow>(
+        `SELECT message.id
+           FROM messages AS message
+           JOIN conversations AS conversation ON conversation.id = message.conversation_id
+          WHERE message.id = ANY($1::uuid[])
+            AND message.workspace_id = $2
+            AND conversation.workspace_id = $2
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      if (visible.rows.length !== ids.length) {
+        throw new ApiError(404, "NOT_FOUND", "One or more messages were not found");
+      }
+      const reactions = await client.query<ReactionRow>(
+        `SELECT *
+           FROM message_reactions
+          WHERE message_id = ANY($1::uuid[])
+          ORDER BY created_at, id`,
+        [ids],
+      );
+      return listMessageReactionsResponseSchema.parse({
+        reactions: reactions.rows.map(mapReaction),
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async addReaction(
+    identity: AuthenticatedIdentity,
+    messageId: string,
+    input: ReactionEmoji,
+  ): Promise<AddReactionResponse> {
+    const emoji = this.#reactionEmoji(input);
+    return this.#transaction(async (client) => {
+      const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
+      const existing = await client.query<ReactionRow>(
+        `SELECT *
+           FROM message_reactions
+          WHERE message_id = $1
+            AND user_id = $2
+            AND emoji = $3`,
+        [messageId, identity.currentUser.user.id, emoji],
+      );
+      const replay = existing.rows[0];
+      if (replay !== undefined) {
+        return addReactionResponseSchema.parse({
+          reaction: mapReaction(replay),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
+
+      const counts = await client.query<ReactionCountRow>(
+        `SELECT count(*)::text AS total,
+                count(*) FILTER (WHERE user_id = $2)::text AS member_total
+           FROM message_reactions
+          WHERE message_id = $1`,
+        [messageId, identity.currentUser.user.id],
+      );
+      const count = counts.rows[0];
+      if (Number(count?.member_total ?? "0") >= REACTIONS_PER_MEMBER_PER_MESSAGE_MAX) {
+        throw new ApiError(
+          409,
+          "CONFLICT",
+          `A member can add at most ${REACTIONS_PER_MEMBER_PER_MESSAGE_MAX} reactions to one message`,
+        );
+      }
+      if (Number(count?.total ?? "0") >= REACTIONS_PER_MESSAGE_MAX) {
+        throw new ApiError(
+          409,
+          "CONFLICT",
+          `A message can have at most ${REACTIONS_PER_MESSAGE_MAX} reactions`,
+        );
+      }
+
+      const inserted = await client.query<ReactionRow>(
+        `INSERT INTO message_reactions (id, workspace_id, message_id, user_id, emoji)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [
+          randomUUID(),
+          identity.currentUser.workspaceId,
+          messageId,
+          identity.currentUser.user.id,
+          emoji,
+        ],
+      );
+      const row = inserted.rows[0];
+      if (row === undefined) throw new Error("Reaction insert returned no row");
+      const reaction = mapReaction(row);
+      const event = await this.#insertEvent(client, identity, {
+        type: "reaction.added",
+        conversation,
+        conversationSequence: message.conversation_sequence,
+        payload: { reaction },
+        audienceUserIds: await this.#conversationAudience(client, conversation),
+      });
+      return addReactionResponseSchema.parse({ reaction, syncCursor: event.workspaceSequence });
+    });
+  }
+
+  async removeReaction(
+    identity: AuthenticatedIdentity,
+    messageId: string,
+    input: ReactionEmoji,
+  ): Promise<RemoveReactionResponse> {
+    const emoji = this.#reactionEmoji(input);
+    return this.#transaction(async (client) => {
+      const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
+      const removed = await client.query<ReactionRow>(
+        `DELETE FROM message_reactions
+          WHERE message_id = $1
+            AND user_id = $2
+            AND emoji = $3
+        RETURNING *`,
+        [messageId, identity.currentUser.user.id, emoji],
+      );
+      const row = removed.rows[0];
+      if (row === undefined) {
+        return removeReactionResponseSchema.parse({
+          removed: false,
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
+      const event = await this.#insertEvent(client, identity, {
+        type: "reaction.removed",
+        conversation,
+        conversationSequence: message.conversation_sequence,
+        payload: { reaction: mapReaction(row) },
+        audienceUserIds: await this.#conversationAudience(client, conversation),
+      });
+      return removeReactionResponseSchema.parse({
+        removed: true,
+        syncCursor: event.workspaceSequence,
+      });
+    });
+  }
+
   async searchMessages(
     identity: AuthenticatedIdentity,
     query: string,
@@ -1055,11 +1247,17 @@ export class WorkspaceRepository {
     });
   }
 
-  async sync(identity: AuthenticatedIdentity, after: string, limit: number): Promise<SyncResponse> {
+  async sync(
+    identity: AuthenticatedIdentity,
+    after: string,
+    limit: number,
+    reactionEvents = false,
+  ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
         workspaceId: identity.currentUser.workspaceId,
         userId: identity.currentUser.user.id,
+        reactionEvents,
       },
       after,
       limit,
@@ -1115,13 +1313,23 @@ export class WorkspaceRepository {
                       AND event.payload ->> 'memberId' = $2::text
                     )
                   )
+                  AND (
+                    $5::boolean
+                    OR event.event_type NOT IN ('reaction.added', 'reaction.removed')
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
             AND event.workspace_sequence > $3::bigint
           ORDER BY event.workspace_sequence
           LIMIT $4`,
-        [principal.workspaceId, principal.userId, after, limit + 1],
+        [
+          principal.workspaceId,
+          principal.userId,
+          after,
+          limit + 1,
+          principal.reactionEvents ?? false,
+        ],
       );
       const scanned = rows.rows.slice(0, limit);
       const nextCursor = scanned.at(-1)?.workspace_sequence ?? after;
@@ -1136,14 +1344,14 @@ export class WorkspaceRepository {
     }
   }
 
-  async issueRealtimeTicket(identity: AuthenticatedIdentity) {
+  async issueRealtimeTicket(identity: AuthenticatedIdentity, reactionEvents = false) {
     const token = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(token).digest();
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
-         (id, workspace_id, user_id, device_session_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -1151,6 +1359,7 @@ export class WorkspaceRepository {
         identity.sessionId,
         hash,
         expiresAt,
+        reactionEvents,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -1168,9 +1377,11 @@ export class WorkspaceRepository {
           WHERE ticket.token_hash = $1
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
-         RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id
+         RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id,
+                   ticket.reaction_events
        )
-       SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id
+       SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id,
+              ticket.reaction_events
          FROM consumed_ticket AS ticket
          JOIN device_sessions AS session
            ON session.id = ticket.device_session_id
@@ -1190,6 +1401,7 @@ export class WorkspaceRepository {
           workspaceId: row.workspace_id,
           userId: row.user_id,
           deviceSessionId: row.device_session_id,
+          reactionEvents: row.reaction_events,
         };
   }
 
@@ -1545,6 +1757,48 @@ export class WorkspaceRepository {
       [conversation.id, identity.currentUser.user.id],
     );
     return result.rows[0]?.role ?? null;
+  }
+
+  #reactionEmoji(input: string): ReactionEmoji {
+    const parsed = reactionEmojiSchema.safeParse(input);
+    if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction emoji");
+    return parsed.data;
+  }
+
+  async #reactionTarget(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    messageId: string,
+  ): Promise<{ readonly conversation: ConversationRow; readonly message: MessageRow }> {
+    const target = await client.query<{ conversation_id: string } & QueryResultRow>(
+      `SELECT conversation_id
+         FROM messages
+        WHERE id = $1
+          AND workspace_id = $2`,
+      [messageId, identity.currentUser.workspaceId],
+    );
+    const conversationId = target.rows[0]?.conversation_id;
+    if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+
+    // Locking the conversation serializes reaction capacity checks and prevents an archive or
+    // membership removal from committing between authorization and the reaction event audience.
+    const conversation = await this.#requireVisibleConversation(
+      client,
+      identity,
+      conversationId,
+      true,
+      true,
+    );
+    const messageResult = await client.query<MessageRow>(
+      `SELECT *
+         FROM messages
+        WHERE id = $1
+          AND conversation_id = $2`,
+      [messageId, conversationId],
+    );
+    const message = messageResult.rows[0];
+    if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+    return { conversation, message };
   }
 
   async #validateMentions(

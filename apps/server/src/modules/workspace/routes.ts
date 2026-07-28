@@ -1,12 +1,16 @@
 import {
+  REACTION_EVENTS_CAPABILITY,
   advanceReadCursorRequestSchema,
   archiveChannelRequestSchema,
+  clientCapabilitiesHeaderSchema,
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
+  listMessageReactionsRequestSchema,
   messageHistoryQuerySchema,
   messageSearchQuerySchema,
+  reactionEmojiSchema,
   sendConversationMessageRequestSchema,
   syncQuerySchema,
   upsertChannelMemberRequestSchema,
@@ -41,6 +45,28 @@ function memberParameters(value: unknown): { readonly id: string; readonly userI
     throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
   }
   return { id: id.data, userId: userId.data };
+}
+
+function reactionParameters(value: unknown): { readonly id: string; readonly emoji: string } {
+  if (typeof value !== "object" || value === null) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid reaction");
+  }
+  const id = entityIdSchema.safeParse("id" in value ? value.id : undefined);
+  const emoji = reactionEmojiSchema.safeParse("emoji" in value ? value.emoji : undefined);
+  if (!id.success || !emoji.success) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid reaction");
+  }
+  return { id: id.data, emoji: emoji.data };
+}
+
+function supportsReactionEvents(value: string | string[] | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  }
+  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  return parsed.data.includes(REACTION_EVENTS_CAPABILITY);
 }
 
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (
@@ -140,6 +166,25 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return reply.code(201).send(await repository.sendMessage(identity, id, body.data));
   });
 
+  app.post("/reactions/query", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const body = listMessageReactionsRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction query");
+    return repository.listMessageReactions(identity, body.data.messageIds);
+  });
+
+  app.put("/messages/:id/reactions/:emoji", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id, emoji } = reactionParameters(request.params);
+    return repository.addReaction(identity, id, emoji);
+  });
+
+  app.delete("/messages/:id/reactions/:emoji", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id, emoji } = reactionParameters(request.params);
+    return repository.removeReaction(identity, id, emoji);
+  });
+
   app.put("/conversations/:id/read-cursor", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     const { id } = parameters(request.params);
@@ -152,11 +197,19 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
-    return repository.sync(identity, query.data.after, query.data.limit);
+    return repository.sync(
+      identity,
+      query.data.after,
+      query.data.limit,
+      supportsReactionEvents(request.headers["x-hmm-chat-capabilities"]),
+    );
   });
 
   app.post("/realtime/tickets", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    return repository.issueRealtimeTicket(identity);
+    return repository.issueRealtimeTicket(
+      identity,
+      supportsReactionEvents(request.headers["x-hmm-chat-capabilities"]),
+    );
   });
 };

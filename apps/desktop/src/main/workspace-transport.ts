@@ -1,4 +1,5 @@
 import {
+  REACTION_EVENTS_CAPABILITY,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
@@ -302,7 +303,10 @@ export class WorkspaceTransport {
 
     let response: Response;
     try {
-      response = await this.session.fetch(url.href, { method: "GET" });
+      response = await this.session.fetch(url.href, {
+        method: "GET",
+        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+      });
     } catch (error) {
       // Only a transport failure is worth retrying; anything else would retry forever.
       return isNetworkFailure(error)
@@ -345,6 +349,7 @@ export class WorkspaceTransport {
   async ticket(): Promise<RealtimeTicketResponse> {
     const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
       method: "POST",
+      headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
     });
     return realtimeTicketResponseSchema.parse(await this.#payload(response));
   }

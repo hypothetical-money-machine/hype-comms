@@ -12,6 +12,7 @@ import {
   conversationMembershipRoleSchema,
   conversationSchema,
   messageSchema,
+  reactionSchema,
   readCursorSchema,
   sendMessageRequestSchema,
   userSchema,
@@ -29,6 +30,18 @@ export const paginationCursorSchema = z
   .min(1)
   .max(512)
   .regex(/^[A-Za-z0-9_-]+$/);
+
+export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
+const clientCapabilitySchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9-]*$/);
+export const clientCapabilitiesHeaderSchema = z
+  .string()
+  .max(512)
+  .transform((value) => value.split(",").map((capability) => capability.trim()))
+  .pipe(z.array(clientCapabilitySchema).max(32));
 
 /**
  * Conversation listing is cursor-paginated so a workspace can never outgrow the wire contract.
@@ -182,17 +195,51 @@ export const conversationMutationResponseSchema = z
   })
   .strict();
 
+export const MESSAGE_HISTORY_MAX_LIMIT = 100;
+export const REACTIONS_PER_MEMBER_PER_MESSAGE_MAX = 20;
+export const REACTIONS_PER_MESSAGE_MAX = 250;
+
 export const messageHistoryQuerySchema = z
   .object({
     before: paginationCursorSchema.optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(50),
+    limit: z.coerce.number().int().min(1).max(MESSAGE_HISTORY_MAX_LIMIT).default(50),
   })
   .strict();
 
 export const messageHistoryResponseSchema = z
   .object({
-    messages: z.array(messageSchema).max(100),
+    messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     nextCursor: paginationCursorSchema.nullable(),
+  })
+  .strict();
+
+export const listMessageReactionsRequestSchema = z
+  .object({
+    messageIds: z
+      .array(entityIdSchema)
+      .min(1)
+      .max(MESSAGE_HISTORY_MAX_LIMIT)
+      .refine((ids) => new Set(ids).size === ids.length, "Message IDs must be unique"),
+  })
+  .strict();
+
+export const listMessageReactionsResponseSchema = z
+  .object({
+    reactions: z.array(reactionSchema).max(MESSAGE_HISTORY_MAX_LIMIT * REACTIONS_PER_MESSAGE_MAX),
+  })
+  .strict();
+
+export const addReactionResponseSchema = z
+  .object({
+    reaction: reactionSchema,
+    syncCursor: sequenceSchema,
+  })
+  .strict();
+
+export const removeReactionResponseSchema = z
+  .object({
+    removed: z.boolean(),
+    syncCursor: sequenceSchema,
   })
   .strict();
 
@@ -317,6 +364,24 @@ export const messageCreatedEventSchema = workspaceEventBaseSchema.extend({
     .strict(),
 });
 
+const reactionChangedEventBaseSchema = workspaceEventBaseSchema.extend({
+  conversationId: entityIdSchema,
+  conversationSequence: sequenceSchema,
+  payload: z
+    .object({
+      reaction: reactionSchema,
+    })
+    .strict(),
+});
+
+export const reactionAddedEventSchema = reactionChangedEventBaseSchema.extend({
+  type: z.literal("reaction.added"),
+});
+
+export const reactionRemovedEventSchema = reactionChangedEventBaseSchema.extend({
+  type: z.literal("reaction.removed"),
+});
+
 export const readCursorUpdatedEventSchema = workspaceEventBaseSchema.extend({
   type: z.literal("read_cursor.updated"),
   conversationId: entityIdSchema,
@@ -333,6 +398,8 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   conversationUpdatedEventSchema,
   channelMembershipChangedEventSchema,
   messageCreatedEventSchema,
+  reactionAddedEventSchema,
+  reactionRemovedEventSchema,
   readCursorUpdatedEventSchema,
 ]);
 
@@ -397,6 +464,10 @@ export type DirectConversationRequest = z.infer<typeof directConversationRequest
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;
+export type ListMessageReactionsRequest = z.infer<typeof listMessageReactionsRequestSchema>;
+export type ListMessageReactionsResponse = z.infer<typeof listMessageReactionsResponseSchema>;
+export type AddReactionResponse = z.infer<typeof addReactionResponseSchema>;
+export type RemoveReactionResponse = z.infer<typeof removeReactionResponseSchema>;
 export type MessageSearchQuery = z.infer<typeof messageSearchQuerySchema>;
 export type MessageSearchResult = z.infer<typeof messageSearchResultSchema>;
 export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;

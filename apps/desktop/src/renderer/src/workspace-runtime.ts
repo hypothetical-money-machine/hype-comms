@@ -901,6 +901,7 @@ export class WorkspaceRuntime {
       });
       return;
     }
+    if (event.type === "reaction.added" || event.type === "reaction.removed") return;
     if (snapshot === null) return;
     if (event.type === "member.updated") {
       const member = event.payload.member;
