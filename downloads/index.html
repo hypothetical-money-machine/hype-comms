@@ -184,28 +184,34 @@
       const FEED = "desktop/";
       const MANIFESTS = ["latest-mac.yml", "latest.yml", "latest-linux.yml"];
 
+      function artifactPath(file) {
+        return new URL(file, window.location.href).pathname;
+      }
+
       const PLATFORMS = [
         {
           id: "mac",
           title: "macOS",
-          match: (f) => f.endsWith(".dmg"),
-          label: (f) => (f.includes("arm64") ? "Apple silicon" : "Intel"),
+          match: (f) => artifactPath(f).endsWith(".dmg"),
+          label: (f) => (artifactPath(f).includes("arm64") ? "Apple silicon" : "Intel"),
           note: "Signed and notarized. Updates install themselves from here on.",
           detect: (ua) => ua.includes("mac"),
         },
         {
           id: "win",
           title: "Windows",
-          match: (f) => f.endsWith(".exe"),
-          label: () => "Installer (x64)",
+          match: (f) => artifactPath(f).endsWith(".exe"),
+          label: (f) =>
+            artifactPath(f).includes("arm64") ? "Installer (ARM64)" : "Installer (x64)",
           note: "Windows may warn that the publisher is unverified on first install — choose More info, then Run anyway. Updates after that are silent.",
           detect: (ua) => ua.includes("win"),
         },
         {
           id: "linux",
           title: "Linux",
-          match: (f) => f.endsWith(".AppImage") || f.endsWith(".deb"),
-          label: (f) => (f.endsWith(".AppImage") ? "AppImage (recommended)" : "Debian package"),
+          match: (f) => artifactPath(f).endsWith(".AppImage") || artifactPath(f).endsWith(".deb"),
+          label: (f) =>
+            artifactPath(f).endsWith(".AppImage") ? "AppImage (recommended)" : "Debian package",
           note: "Choose the AppImage — it is the only Linux build that updates itself. Keep it somewhere stable such as ~/Applications, since it replaces its own file. On Arch you may need fuse2.",
           detect: (ua) => ua.includes("linux") || ua.includes("x11"),
         },

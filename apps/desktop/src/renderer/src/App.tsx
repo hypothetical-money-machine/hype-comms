@@ -4,6 +4,8 @@ import type {
   ChannelAccess,
   ChatSessionState,
   Message,
+  Reaction,
+  ReactionEmoji,
   UpdateState,
   User,
 } from "@hmm-chat/contracts";
@@ -12,6 +14,7 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { MessageReactions } from "./message-reactions";
 import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
@@ -25,6 +28,11 @@ interface AppProps {
   readonly client: DesktopApi;
 }
 
+type UpdateClient = Pick<
+  DesktopApi,
+  "getUpdateState" | "checkForUpdates" | "restartToInstallUpdate" | "onUpdateStateChanged"
+>;
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
 }
@@ -36,19 +44,24 @@ function messageTime(value: string): string {
   }).format(new Date(value));
 }
 
-function UpdateControl({ client }: { readonly client: DesktopApi }) {
+export function UpdateControl({ client }: { readonly client: UpdateClient }) {
   const [update, setUpdate] = useState<UpdateState | null>(null);
 
   useEffect(() => {
     let active = true;
-    const stopUpdateListener = client.onUpdateStateChanged(setUpdate);
+    let receivedLiveState = false;
+    const stopUpdateListener = client.onUpdateStateChanged((state) => {
+      if (!active) return;
+      receivedLiveState = true;
+      setUpdate(state);
+    });
     void client
       .getUpdateState()
       .then((state) => {
-        if (active) setUpdate(state);
+        if (active && !receivedLiveState) setUpdate(state);
       })
       .catch(() => {
-        if (active) setUpdate({ status: "unsupported" });
+        if (active && !receivedLiveState) setUpdate({ status: "unsupported" });
       });
 
     return () => {
@@ -164,10 +177,20 @@ function Avatar({ user }: { user: User | undefined }) {
 function MessageRow({
   message,
   members,
+  reactions,
+  currentUserId,
+  reactionsDisabled,
+  onAddReaction,
+  onRemoveReaction,
   highlighted,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
+  readonly reactions: readonly Reaction[];
+  readonly currentUserId: string;
+  readonly reactionsDisabled: boolean;
+  readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
+  readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly highlighted: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
@@ -183,6 +206,14 @@ function MessageRow({
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
         <p>{message.body}</p>
+        <MessageReactions
+          reactions={reactions}
+          members={members}
+          currentUserId={currentUserId}
+          disabled={reactionsDisabled}
+          onAdd={onAddReaction}
+          onRemove={onRemoveReaction}
+        />
       </div>
     </article>
   );
@@ -193,6 +224,7 @@ export function App({ client }: AppProps) {
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
   const [draft, setDraft] = useState("");
+  const [editingClientMessageId, setEditingClientMessageId] = useState<string | null>(null);
   const [composerError, setComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [showChannelMembers, setShowChannelMembers] = useState(false);
@@ -246,11 +278,37 @@ export function App({ client }: AppProps) {
   const messages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
   );
+  const reactionsByMessage = useMemo(() => {
+    const grouped = new Map<string, Reaction[]>();
+    for (const reaction of runtimeState.reactions) {
+      const values = grouped.get(reaction.messageId) ?? [];
+      values.push(reaction);
+      grouped.set(reaction.messageId, values);
+    }
+    return grouped;
+  }, [runtimeState.reactions]);
   const pending = runtimeState.outbox.filter(
     (item) => item.operation.conversationId === runtimeState.selectedConversationId,
   );
+  const editingItem =
+    editingClientMessageId === null
+      ? undefined
+      : runtimeState.outbox.find(
+          (item) => item.operation.message.clientMessageId === editingClientMessageId,
+        );
 
   useEffect(() => setShowChannelMembers(false), [runtimeState.selectedConversationId]);
+
+  useEffect(() => {
+    if (editingClientMessageId === null) return;
+    if (
+      editingItem === undefined ||
+      editingItem.status !== "permanent_failure" ||
+      editingItem.operation.conversationId !== runtimeState.selectedConversationId
+    ) {
+      setEditingClientMessageId(null);
+    }
+  }, [editingClientMessageId, editingItem, runtimeState.selectedConversationId]);
 
   useEffect(() => {
     const list = messageList.current;
@@ -277,7 +335,12 @@ export function App({ client }: AppProps) {
       })
       .map((member) => member.id);
     try {
-      await runtime.sendMessage(conversationId, body, mentionedUserIds);
+      if (editingClientMessageId === null) {
+        await runtime.sendMessage(conversationId, body, mentionedUserIds);
+      } else {
+        await runtime.replaceFailedMessage(editingClientMessageId, body, mentionedUserIds);
+        setEditingClientMessageId(null);
+      }
       setDraft("");
       setComposerError("");
     } catch (error) {
@@ -591,6 +654,11 @@ export function App({ client }: AppProps) {
                 <MessageRow
                   message={message}
                   members={bootstrap.members}
+                  reactions={reactionsByMessage.get(message.id) ?? []}
+                  currentUserId={currentUserId}
+                  reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                  onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
+                  onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                   highlighted={message.id === runtimeState.focusedMessageId}
                 />
               </Fragment>
@@ -609,7 +677,11 @@ export function App({ client }: AppProps) {
                   <div>
                     <header>
                       <strong>{bootstrap.currentUser.user.displayName}</strong>
-                      <span>{item.status.replaceAll("_", " ")}</span>
+                      <span>
+                        {editingClientMessageId === item.operation.message.clientMessageId
+                          ? "editing"
+                          : item.status.replaceAll("_", " ")}
+                      </span>
                     </header>
                     <p>{item.operation.message.body}</p>
                     {item.status === "permanent_failure" && (
@@ -618,7 +690,7 @@ export function App({ client }: AppProps) {
                           type="button"
                           onClick={() => {
                             setDraft(item.operation.message.body);
-                            void runtime.discardMessage(item.operation.message.clientMessageId);
+                            setEditingClientMessageId(item.operation.message.clientMessageId);
                           }}
                         >
                           Edit

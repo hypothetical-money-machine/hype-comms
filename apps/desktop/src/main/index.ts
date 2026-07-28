@@ -11,6 +11,8 @@ import {
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
+  listMessageReactionsRequestSchema,
+  messageReactionTargetSchema,
   messageSearchQuerySchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
@@ -451,6 +453,30 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionsList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionsList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace reactions sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const request = listMessageReactionsRequestSchema.parse(input);
+    return workspaceTransport.reactions(request.messageIds);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionAdd);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionAdd, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted reaction add sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const target = messageReactionTargetSchema.parse(input);
+    return workspaceTransport.addReaction(target.messageId, target.emoji);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionRemove);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionRemove, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted reaction remove sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const target = messageReactionTargetSchema.parse(input);
+    return workspaceTransport.removeReaction(target.messageId, target.emoji);
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSend);

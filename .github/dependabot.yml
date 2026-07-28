@@ -9,6 +9,16 @@ updates:
         dependency-type: production
       npm-development:
         dependency-type: development
+    ignore:
+      # typescript-eslint 8.65.0 peers typescript ">=4.8.4 <6.1.0".
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # electron-vite 5 peers vite "^5.0.0 || ^6.0.0 || ^7.0.0".
+      - dependency-name: vite
+        update-types: ["version-update:semver-major"]
+      # @types/node tracks the Node runtime pinned in engines.node (24.x).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 10
   - package-ecosystem: github-actions
     directory: /

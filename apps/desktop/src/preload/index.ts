@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import {
   advanceReadCursorResponseSchema,
+  addReactionResponseSchema,
   cacheCryptoStatusSchema,
   cacheDecryptBatchRequestSchema,
   cacheDecryptBatchResponseSchema,
@@ -17,13 +18,17 @@ import {
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
+  listMessageReactionsRequestSchema,
+  listMessageReactionsResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
+  messageReactionTargetSchema,
   messageSearchQuerySchema,
   messageSearchResponseSchema,
   productRealtimeEventSchema,
   realtimeConnectionStateSchema,
   requestMagicLinkSchema,
+  removeReactionResponseSchema,
   sendAttemptResultSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -40,6 +45,7 @@ import {
   type DirectConversationRequest,
   type ListConversationsQuery,
   type MessageSearchQuery,
+  type ReactionEmoji,
   type ProductRealtimeEvent,
   type SendMessageOperation,
   type UpdateState,
@@ -164,6 +170,24 @@ const desktopApi: DesktopApi = Object.freeze({
     messageHistoryResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessagesList, input),
     ),
+  listMessageReactions: async (messageIds: readonly string[]) => {
+    const request = listMessageReactionsRequestSchema.parse({ messageIds });
+    return listMessageReactionsResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionsList, request),
+    );
+  },
+  addMessageReaction: async (messageId: string, emoji: ReactionEmoji) => {
+    const target = messageReactionTargetSchema.parse({ messageId, emoji });
+    return addReactionResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionAdd, target),
+    );
+  },
+  removeMessageReaction: async (messageId: string, emoji: ReactionEmoji) => {
+    const target = messageReactionTargetSchema.parse({ messageId, emoji });
+    return removeReactionResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionRemove, target),
+    );
+  },
   searchMessages: async (input: MessageSearchQuery) =>
     messageSearchResponseSchema.parse(
       await ipcRenderer.invoke(

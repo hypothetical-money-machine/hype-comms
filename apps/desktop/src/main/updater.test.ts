@@ -9,6 +9,8 @@ import {
   UPDATE_DOWNLOAD_ERROR_MESSAGE,
   UPDATE_INSTALL_ERROR_MESSAGE,
   UpdateController,
+  type UpdateCancellationToken,
+  type UpdateCheckResult,
   type UpdateSource,
   type UpdateSourceConfiguration,
 } from "./updater";
@@ -18,12 +20,29 @@ function listen<T>(listeners: Set<T>, listener: T): () => void {
   return () => listeners.delete(listener);
 }
 
+function createControlledDownload() {
+  let resolveDownload: () => void = () => undefined;
+  let rejectDownload: (error: Error) => void = () => undefined;
+  const downloadPromise = new Promise<void>((resolve, reject) => {
+    resolveDownload = resolve;
+    rejectDownload = reject;
+  });
+  const cancel = vi.fn();
+  const cancellationToken = { cancel } satisfies UpdateCancellationToken;
+  return {
+    cancel,
+    reject: rejectDownload,
+    resolve: resolveDownload,
+    result: { downloadPromise, cancellationToken } satisfies UpdateCheckResult,
+  };
+}
+
 class FakeUpdateSource implements UpdateSource {
   configuration: UpdateSourceConfiguration | null = null;
   checks = 0;
   readonly installArguments: Array<readonly [isSilent: boolean, isForceRunAfter: boolean]> = [];
   installError: Error | null = null;
-  checkResult: () => Promise<unknown> = () => Promise.resolve();
+  checkResult: () => Promise<UpdateCheckResult | null> = () => Promise.resolve(null);
   readonly checkingListeners = new Set<() => void>();
   readonly availableListeners = new Set<(info: { readonly version: string }) => void>();
   readonly notAvailableListeners = new Set<() => void>();
@@ -60,7 +79,7 @@ class FakeUpdateSource implements UpdateSource {
   readonly onError = (listener: (error: unknown) => void): (() => void) =>
     listen(this.errorListeners, listener);
 
-  readonly checkForUpdates = (): Promise<unknown> => {
+  readonly checkForUpdates = (): Promise<UpdateCheckResult | null> => {
     this.checks += 1;
     return this.checkResult();
   };
@@ -183,8 +202,8 @@ describe("UpdateController lifecycle", () => {
     const updater = new FakeUpdateSource();
     let finishCheck: (() => void) | undefined;
     updater.checkResult = () =>
-      new Promise<void>((resolve) => {
-        finishCheck = resolve;
+      new Promise<null>((resolve) => {
+        finishCheck = () => resolve(null);
       });
     const controller = createController(updater);
     const states = [controller.state];
@@ -240,6 +259,27 @@ describe("UpdateController lifecycle", () => {
     expect(JSON.stringify(controller.state)).not.toContain(rawMessage);
   });
 
+  it("owns a nested automatic-download rejection", async () => {
+    const updater = new FakeUpdateSource();
+    const download = createControlledDownload();
+    const rawMessage = "Checksum failed for /private/tmp/downloaded-update.zip";
+    updater.checkResult = () => {
+      updater.emitAvailable("1.2.3");
+      return Promise.resolve(download.result);
+    };
+    const controller = createController(updater);
+
+    await controller.checkNow();
+    download.reject(new Error(rawMessage));
+    await Promise.resolve();
+
+    expect(controller.state).toEqual({
+      status: "error",
+      message: UPDATE_DOWNLOAD_ERROR_MESSAGE,
+    });
+    expect(JSON.stringify(controller.state)).not.toContain(rawMessage);
+  });
+
   it("translates a late macOS signing failure to unsupported", () => {
     const updater = new FakeUpdateSource();
     const controller = createController(updater, { platform: "darwin" });
@@ -263,27 +303,63 @@ describe("UpdateController lifecycle", () => {
     expect(updater.checks).toBe(0);
   });
 
-  it("recovers from a download that stops reporting progress", async () => {
-    vi.useFakeTimers();
-    try {
-      const updater = new FakeUpdateSource();
-      const controller = createController(updater);
+  it("cancels a stalled download and waits for it to settle before retrying", async () => {
+    const updater = new FakeUpdateSource();
+    const download = createControlledDownload();
+    updater.checkResult = () => {
+      if (updater.checks === 1) {
+        updater.emitAvailable("1.2.3");
+        return Promise.resolve(download.result);
+      }
+      return Promise.resolve(null);
+    };
+    const controller = createController(updater);
+
+    await controller.checkNow();
+    updater.emitProgress(43);
+    expect(controller.state).toEqual({ status: "downloading", percentage: 43 });
+
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_TIMEOUT_MS + 1);
+
+    expect(download.cancel).toHaveBeenCalledTimes(1);
+    expect(controller.state).toEqual({
+      status: "error",
+      message: UPDATE_DOWNLOAD_ERROR_MESSAGE,
+    });
+
+    // Events from the request being cancelled must not resurrect its stale state.
+    updater.emitProgress(99);
+    updater.emitDownloaded("1.2.3");
+    expect(controller.state).toEqual({
+      status: "error",
+      message: UPDATE_DOWNLOAD_ERROR_MESSAGE,
+    });
+
+    const retry = controller.checkNow();
+    await Promise.resolve();
+    expect(updater.checks).toBe(1);
+
+    download.reject(new Error("cancelled"));
+    await retry;
+    expect(updater.checks).toBe(2);
+    expect(controller.state).toEqual({ status: "idle" });
+  });
+
+  it("cancels an active download when disposed", async () => {
+    const updater = new FakeUpdateSource();
+    const download = createControlledDownload();
+    updater.checkResult = () => {
       updater.emitAvailable("1.2.3");
-      updater.emitProgress(43);
-      expect(controller.state).toEqual({ status: "downloading", percentage: 43 });
+      return Promise.resolve(download.result);
+    };
+    const controller = createController(updater);
+    await controller.checkNow();
 
-      // No further progress, downloaded, cancelled, or error event ever arrives — the case a
-      // suspended machine or dropped connection produces.
-      await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_TIMEOUT_MS + 1);
+    controller.dispose();
 
-      expect(controller.state).toEqual({
-        status: "error",
-        message: UPDATE_DOWNLOAD_ERROR_MESSAGE,
-      });
-      controller.dispose();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(download.cancel).toHaveBeenCalledTimes(1);
+    download.reject(new Error("cancelled"));
+    await Promise.resolve();
   });
 
   it("curates a synchronous install failure", () => {
@@ -293,6 +369,20 @@ describe("UpdateController lifecycle", () => {
     updater.emitDownloaded("1.2.3");
 
     expect(() => controller.quitAndInstall()).not.toThrow();
+    expect(controller.state).toEqual({
+      status: "error",
+      message: UPDATE_INSTALL_ERROR_MESSAGE,
+    });
+  });
+
+  it("classifies an updater error emitted after install was requested", () => {
+    const updater = new FakeUpdateSource();
+    const controller = createController(updater);
+    updater.emitDownloaded("1.2.3");
+
+    controller.quitAndInstall();
+    updater.emitError(new Error("The installer could not start"));
+
     expect(controller.state).toEqual({
       status: "error",
       message: UPDATE_INSTALL_ERROR_MESSAGE,

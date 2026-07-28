@@ -140,12 +140,28 @@ export const sendMessageRequestSchema = z
   })
   .strict();
 
+const emojiGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const emojiGraphemePattern =
+  /^(?:\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*|\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3)$/u;
+
+/** A single standard Unicode emoji. Custom shortcode reactions are deliberately unsupported. */
+export const reactionEmojiSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .transform((emoji) => emoji.normalize("NFC"))
+  .refine(
+    (emoji) =>
+      [...emojiGraphemeSegmenter.segment(emoji)].length === 1 && emojiGraphemePattern.test(emoji),
+    "Expected one Unicode emoji",
+  );
+
 export const reactionSchema = z
   .object({
     id: entityIdSchema,
     messageId: entityIdSchema,
     userId: entityIdSchema,
-    emoji: z.string().trim().min(1).max(64),
+    emoji: reactionEmojiSchema,
     createdAt: isoDateTimeSchema,
   })
   .strict();
@@ -192,6 +208,7 @@ export type ConversationMembership = z.infer<typeof conversationMembershipSchema
 export type MessageBodyFormat = z.infer<typeof messageBodyFormatSchema>;
 export type Message = z.infer<typeof messageSchema>;
 export type SendMessageRequest = z.infer<typeof sendMessageRequestSchema>;
+export type ReactionEmoji = z.infer<typeof reactionEmojiSchema>;
 export type Reaction = z.infer<typeof reactionSchema>;
 export type ReadCursor = z.infer<typeof readCursorSchema>;
 export type AttachmentStatus = z.infer<typeof attachmentStatusSchema>;

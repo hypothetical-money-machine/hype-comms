@@ -1,5 +1,6 @@
 import type {
   AdvanceReadCursorResponse,
+  AddReactionResponse,
   CacheCryptoStatus,
   CacheDecryptBatchRequest,
   CacheDecryptBatchResponse,
@@ -14,10 +15,13 @@ import type {
   DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
+  ReactionEmoji,
+  RemoveReactionResponse,
   ProductRealtimeEvent,
   RealtimeConnectionState,
   SendAttemptResult,
@@ -75,6 +79,17 @@ export interface DesktopApi extends SessionTransport {
     readonly before?: string;
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
+  readonly listMessageReactions: (
+    messageIds: readonly string[],
+  ) => Promise<ListMessageReactionsResponse>;
+  readonly addMessageReaction: (
+    messageId: string,
+    emoji: ReactionEmoji,
+  ) => Promise<AddReactionResponse>;
+  readonly removeMessageReaction: (
+    messageId: string,
+    emoji: ReactionEmoji,
+  ) => Promise<RemoveReactionResponse>;
   readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
   readonly sendConversationMessage: (input: SendMessageOperation) => Promise<SendAttemptResult>;
   readonly createChannel: (input: CreateChannelRequest) => Promise<ConversationMutationResponse>;

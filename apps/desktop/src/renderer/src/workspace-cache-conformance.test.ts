@@ -197,6 +197,35 @@ const readCursorEvent: WorkspaceEvent = {
   },
 };
 
+const reactionAddedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000063",
+  type: "reaction.added",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "9",
+  conversationSequence: "2",
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: {
+    reaction: {
+      id: "10000000-0000-4000-8000-000000000064",
+      messageId: MESSAGE_SEQUENCE_2_ID,
+      userId: MORGAN_ID,
+      emoji: "🎉",
+      createdAt: NOW,
+    },
+  },
+};
+
+const reactionRemovedEvent: WorkspaceEvent = {
+  ...reactionAddedEvent,
+  id: "10000000-0000-4000-8000-000000000065",
+  type: "reaction.removed",
+  workspaceSequence: "10",
+};
+
 class FakeCrypto {
   async encryptCacheRecords(input: CacheEncryptBatchRequest) {
     return cacheEncryptBatchResponseSchema.parse({
@@ -209,7 +238,7 @@ class FakeCrypto {
           keyVersion: 1,
           schemaVersion: 1,
           nonce: "AAAAAAAAAAAAAAAA",
-          ciphertext: btoa(item.plaintext)
+          ciphertext: btoa(String.fromCharCode(...new TextEncoder().encode(item.plaintext)))
             .replaceAll("+", "-")
             .replaceAll("/", "_")
             .replaceAll("=", ""),
@@ -224,11 +253,16 @@ class FakeCrypto {
         store: item.store,
         recordId: item.recordId,
         schemaVersion: 1,
-        plaintext: atob(
-          item.value.ciphertext
-            .replaceAll("-", "+")
-            .replaceAll("_", "/")
-            .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+        plaintext: new TextDecoder().decode(
+          Uint8Array.from(
+            atob(
+              item.value.ciphertext
+                .replaceAll("-", "+")
+                .replaceAll("_", "/")
+                .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+            ),
+            (character) => character.charCodeAt(0),
+          ),
         ),
       })),
     });
@@ -398,6 +432,40 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       unreadCount: 1,
       mentionCount: 1,
     });
+  });
+
+  it("persists reaction events idempotently without corrupting message projections", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(false);
+
+    const added = await cache.load();
+    expect(added.syncCursor).toBe("9");
+    expect(added.reactions).toEqual([reactionAddedEvent.payload.reaction]);
+    expect(added.messages).toEqual([messageSequence2]);
+    expect(added.bootstrap?.conversations).toHaveLength(snapshot.conversations.length);
+
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(false);
+    const removed = await cache.load();
+    expect(removed.syncCursor).toBe("10");
+    expect(removed.reactions).toEqual([]);
+  });
+
+  it("replaces hydrated reactions for a history page and projects mutation responses", async () => {
+    const cache = create();
+    const reaction = reactionAddedEvent.payload.reaction;
+    await cache.replaceSnapshot(snapshot, [messageSequence2], [reaction]);
+
+    await cache.upsertHistory([messageSequence2], []);
+    expect((await cache.load()).reactions).toEqual([]);
+
+    await cache.upsertReaction(reaction);
+    expect((await cache.load()).reactions).toEqual([reaction]);
+    await cache.removeReaction(reaction.id);
+    expect((await cache.load()).reactions).toEqual([]);
   });
 });
 

@@ -6,6 +6,8 @@ import { escapeIdentifier, type Pool } from "pg";
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
+  REACTIONS_PER_MESSAGE_MAX,
   type CurrentUser,
   type SendConversationMessageRequest,
 } from "@hmm-chat/contracts";
@@ -27,6 +29,30 @@ const observerId = "10000000-0000-4000-8000-000000000003";
 const workspaceId = "10000000-0000-4000-8000-000000000004";
 const generalId = "10000000-0000-4000-8000-000000000005";
 const ownerSessionId = "10000000-0000-4000-8000-000000000006";
+const reactionEmojis = [
+  "😀",
+  "😃",
+  "😄",
+  "😁",
+  "😆",
+  "😅",
+  "😂",
+  "🤣",
+  "😊",
+  "😇",
+  "🙂",
+  "🙃",
+  "😉",
+  "😌",
+  "😍",
+  "🥰",
+  "😘",
+  "😗",
+  "😙",
+  "😚",
+  "😋",
+  "😛",
+] as const;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
   const url = new URL(databaseUrl);
@@ -124,7 +150,7 @@ describeWithPostgres("WorkspaceRepository", () => {
   beforeEach(async () => {
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_mentions, messages,
+               sync_events, conversation_read_cursors, message_reactions, message_mentions, messages,
                conversation_memberships, conversations, device_sessions, magic_link_tokens,
                invitations,
                workspace_memberships, workspaces, users
@@ -198,6 +224,36 @@ describeWithPostgres("WorkspaceRepository", () => {
       [workspaceId],
     );
     return result.rows.map((row) => row.id);
+  }
+
+  async function seedMessageEvents(count: number): Promise<string[]> {
+    const cursors: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const sent = await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), `sync event ${index + 1}`),
+        mentionedUserIds: [],
+      });
+      cursors.push(sent.syncCursor);
+    }
+    return cursors;
+  }
+
+  async function seedReactionRows(
+    messageId: string,
+    entries: readonly { readonly userId: string; readonly emoji: string }[],
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO message_reactions (id, workspace_id, message_id, user_id, emoji)
+       SELECT seed.id, $2, $3, seed.user_id, seed.emoji
+         FROM unnest($1::uuid[], $4::uuid[], $5::text[]) AS seed(id, user_id, emoji)`,
+      [
+        entries.map(() => randomUUID()),
+        workspaceId,
+        messageId,
+        entries.map((entry) => entry.userId),
+        entries.map((entry) => entry.emoji),
+      ],
+    );
   }
 
   it("boots into #general and tracks unread mentions and read cursors", async () => {
@@ -324,6 +380,234 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
   });
 
+  it("adds and removes reactions idempotently while hydrating authorized messages", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "reaction target"),
+      mentionedUserIds: [],
+    });
+    const [first, replay] = await Promise.all([
+      repository.addReaction(owner, sent.message.id, "🎉"),
+      repository.addReaction(owner, sent.message.id, "🎉"),
+    ]);
+    expect(replay.reaction).toEqual(first.reaction);
+    expect(
+      (
+        await pool.query(
+          `SELECT id FROM message_reactions
+            WHERE message_id = $1 AND user_id = $2 AND emoji = '🎉'`,
+          [sent.message.id, ownerId],
+        )
+      ).rowCount,
+    ).toBe(1);
+
+    const memberReaction = await repository.addReaction(member, sent.message.id, "🎉");
+    const listed = await repository.listMessageReactions(observer, [sent.message.id]);
+    expect(listed.reactions).toEqual([first.reaction, memberReaction.reaction]);
+
+    const [removed, absent] = await Promise.all([
+      repository.removeReaction(owner, sent.message.id, "🎉"),
+      repository.removeReaction(owner, sent.message.id, "🎉"),
+    ]);
+    expect([removed.removed, absent.removed].sort()).toEqual([false, true]);
+    expect((await repository.listMessageReactions(owner, [sent.message.id])).reactions).toEqual([
+      memberReaction.reaction,
+    ]);
+
+    const legacySync = await repository.sync(observer, sent.syncCursor, 100);
+    expect(legacySync.events).toEqual([]);
+    expect(legacySync.nextCursor).toBe(legacySync.highWaterCursor);
+
+    const sync = await repository.sync(observer, sent.syncCursor, 100, true);
+    const reactionEvents = sync.events.filter(
+      (event) => event.type === "reaction.added" || event.type === "reaction.removed",
+    );
+    expect(reactionEvents).toHaveLength(3);
+    expect(reactionEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "reaction.added",
+          conversationId: generalId,
+          conversationSequence: sent.message.conversationSequence,
+          payload: { reaction: first.reaction },
+        }),
+        expect.objectContaining({
+          type: "reaction.added",
+          payload: { reaction: memberReaction.reaction },
+        }),
+        expect.objectContaining({
+          type: "reaction.removed",
+          payload: { reaction: first.reaction },
+        }),
+      ]),
+    );
+  });
+
+  it("serializes the per-member reaction cap at its concurrent boundary", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "member quota target"),
+      mentionedUserIds: [],
+    });
+    await seedReactionRows(
+      sent.message.id,
+      reactionEmojis
+        .slice(0, REACTIONS_PER_MEMBER_PER_MESSAGE_MAX - 1)
+        .map((emoji) => ({ userId: ownerId, emoji })),
+    );
+
+    const attempts = await Promise.allSettled([
+      repository.addReaction(
+        owner,
+        sent.message.id,
+        reactionEmojis[REACTIONS_PER_MEMBER_PER_MESSAGE_MAX - 1],
+      ),
+      repository.addReaction(
+        owner,
+        sent.message.id,
+        reactionEmojis[REACTIONS_PER_MEMBER_PER_MESSAGE_MAX],
+      ),
+    ]);
+    const failure = attempts.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(failure?.reason as ApiError).toMatchObject({
+      statusCode: 409,
+      code: "CONFLICT",
+    } satisfies Partial<ApiError>);
+    expect(
+      (
+        await pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count
+             FROM message_reactions
+            WHERE message_id = $1 AND user_id = $2`,
+          [sent.message.id, ownerId],
+        )
+      ).rows[0]?.count,
+    ).toBe(String(REACTIONS_PER_MEMBER_PER_MESSAGE_MAX));
+    await expect(
+      repository.addReaction(
+        owner,
+        sent.message.id,
+        reactionEmojis[REACTIONS_PER_MEMBER_PER_MESSAGE_MAX + 1],
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+  });
+
+  it("serializes the total reaction cap at its concurrent boundary", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "total quota target"),
+      mentionedUserIds: [],
+    });
+    const extraUsers = Array.from({ length: 10 }, (_, index) => ({
+      id: randomUUID(),
+      username: `reaction-quota-${index}`,
+    }));
+    await pool.query(
+      `INSERT INTO users (id, email, username, display_name)
+       SELECT seed.id, seed.username || '@example.com', seed.username, seed.username
+         FROM unnest($1::uuid[], $2::text[]) AS seed(id, username)`,
+      [extraUsers.map((user) => user.id), extraUsers.map((user) => user.username)],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       SELECT $1, seed.user_id, 'member', 'active'
+         FROM unnest($2::uuid[]) AS seed(user_id)`,
+      [workspaceId, extraUsers.map((user) => user.id)],
+    );
+
+    const reactingUserIds = [ownerId, memberId, observerId, ...extraUsers.map((user) => user.id)];
+    const seededEntries = reactingUserIds.flatMap((userId, index) =>
+      reactionEmojis
+        .slice(0, index === reactingUserIds.length - 1 ? 9 : 20)
+        .map((emoji) => ({ userId, emoji })),
+    );
+    expect(seededEntries).toHaveLength(REACTIONS_PER_MESSAGE_MAX - 1);
+    await seedReactionRows(sent.message.id, seededEntries);
+
+    const finalUser = extraUsers.at(-1);
+    if (finalUser === undefined) throw new Error("Reaction quota user was not created");
+    const finalIdentity = identity(
+      currentUser(finalUser.id, finalUser.username, finalUser.username, "member"),
+    );
+    const attempts = await Promise.allSettled([
+      repository.addReaction(finalIdentity, sent.message.id, reactionEmojis[9]),
+      repository.addReaction(finalIdentity, sent.message.id, reactionEmojis[10]),
+    ]);
+    const failure = attempts.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(failure?.reason as ApiError).toMatchObject({
+      statusCode: 409,
+      code: "CONFLICT",
+    } satisfies Partial<ApiError>);
+    expect(
+      (
+        await pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM message_reactions WHERE message_id = $1`,
+          [sent.message.id],
+        )
+      ).rows[0]?.count,
+    ).toBe(String(REACTIONS_PER_MESSAGE_MAX));
+    await expect(
+      repository.addReaction(finalIdentity, sent.message.id, reactionEmojis[11]),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+  });
+
+  it("enforces conversation visibility and archived-channel write rules for reactions", async () => {
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Reaction Council",
+      slug: "reaction-council",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = privateChannel.conversation.conversation.id;
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "private reaction target"),
+      mentionedUserIds: [],
+    });
+
+    await expect(repository.addReaction(member, sent.message.id, "👍")).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.listMessageReactions(member, [sent.message.id])).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    await expect(repository.addReaction(member, sent.message.id, "👍")).resolves.toMatchObject({
+      reaction: { userId: memberId, messageId: sent.message.id, emoji: "👍" },
+    });
+    await repository.removeChannelMember(owner, conversationId, memberId);
+    await expect(repository.removeReaction(member, sent.message.id, "👍")).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.listMessageReactions(member, [sent.message.id])).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const publicChannel = await repository.createChannel(owner, {
+      name: "Archived Reactions",
+      slug: "archived-reactions",
+      topic: null,
+      access: "workspace",
+    });
+    const archivedConversationId = publicChannel.conversation.conversation.id;
+    const archivedMessage = await repository.sendMessage(owner, archivedConversationId, {
+      ...message(randomUUID(), "archived reaction target"),
+      mentionedUserIds: [],
+    });
+    await repository.archiveChannel(owner, archivedConversationId);
+    await expect(
+      repository.addReaction(owner, archivedMessage.message.id, "👍"),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+  });
+
   it("keeps direct-message history and events private while advancing other cursors", async () => {
     const direct = await repository.createDirectConversation(owner, { memberId });
     const conversationId = direct.conversation.conversation.id;
@@ -342,6 +626,64 @@ describeWithPostgres("WorkspaceRepository", () => {
         code: "NOT_FOUND",
       },
     );
+  });
+
+  it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
+    const [staleCursor] = await seedMessageEvents(2);
+    if (staleCursor === undefined) throw new Error("Expected a stale sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
+      statusCode: 410,
+      code: "CURSOR_EXPIRED",
+    } satisfies Partial<ApiError>);
+  });
+
+  it("returns an empty sync when the cursor equals high-water and no sync events remain", async () => {
+    const highWaterCursor = (await seedMessageEvents(2)).at(-1);
+    if (highWaterCursor === undefined) throw new Error("Expected a high-water sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, highWaterCursor, 100)).resolves.toEqual({
+      events: [],
+      nextCursor: highWaterCursor,
+      highWaterCursor,
+      hasMore: false,
+    });
+  });
+
+  it("preserves bootstrap from zero when no sync events remain", async () => {
+    const highWaterCursor = (await seedMessageEvents(2)).at(-1);
+    if (highWaterCursor === undefined) throw new Error("Expected a high-water sync cursor");
+    await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
+
+    await expect(repository.sync(owner, "0", 100)).resolves.toEqual({
+      events: [],
+      nextCursor: "0",
+      highWaterCursor,
+      hasMore: false,
+    });
+  });
+
+  it("expires a cursor that falls before the retained sync event range", async () => {
+    const [staleCursor, retainedPredecessor, earliestRetainedCursor] = await seedMessageEvents(3);
+    if (
+      staleCursor === undefined ||
+      retainedPredecessor === undefined ||
+      earliestRetainedCursor === undefined
+    ) {
+      throw new Error("Expected seeded sync cursors");
+    }
+    await pool.query(
+      `DELETE FROM sync_events
+        WHERE workspace_id = $1 AND workspace_sequence <= $2::bigint`,
+      [workspaceId, retainedPredecessor],
+    );
+
+    await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
+      statusCode: 410,
+      code: "CURSOR_EXPIRED",
+    } satisfies Partial<ApiError>);
   });
 
   it("searches only messages in conversations the caller can currently access", async () => {
@@ -635,8 +977,85 @@ describeWithPostgres("WorkspaceRepository", () => {
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
+      reactionEvents: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+
+    const capable = await repository.issueRealtimeTicket(owner, true);
+    await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
+      workspaceId,
+      userId: ownerId,
+      deviceSessionId: ownerSessionId,
+      reactionEvents: true,
+    });
+  });
+
+  it("consumes but refuses a ticket when its workspace membership was revoked", async () => {
+    const issued = await repository.issueRealtimeTicket(owner);
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'revoked'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+
+    await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+
+    await pool.query(
+      `UPDATE workspace_memberships
+          SET status = 'active'
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+    await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+  });
+
+  it("refuses a ticket when its workspace membership row is absent", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `ALTER TABLE realtime_tickets
+         ALTER CONSTRAINT realtime_tickets_workspace_id_user_id_fkey
+         DEFERRABLE INITIALLY DEFERRED`,
+      );
+      await client.query(`SET CONSTRAINTS realtime_tickets_workspace_id_user_id_fkey DEFERRED`);
+      await client.query(
+        `INSERT INTO device_sessions
+           (id, user_id, token_hash, created_at, last_seen_at, expires_at)
+         VALUES ($1, $2, $3, $4, $4, $5)`,
+        [member.sessionId, memberId, Buffer.alloc(32, 8), now, later],
+      );
+      await client.query(
+        `DELETE FROM workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, memberId],
+      );
+      const transactionRepository = new WorkspaceRepository(client as unknown as Pool);
+      const issued = await transactionRepository.issueRealtimeTicket(member);
+
+      expect(
+        (
+          await client.query(
+            `SELECT 1
+               FROM workspace_memberships
+              WHERE workspace_id = $1 AND user_id = $2`,
+            [workspaceId, memberId],
+          )
+        ).rowCount,
+      ).toBe(0);
+      await expect(transactionRepository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+      const ticketState = await client.query<{ consumed_at: Date | string | null }>(
+        `SELECT consumed_at
+           FROM realtime_tickets
+          WHERE token_hash = $1`,
+        [createHash("sha256").update(issued.ticket).digest()],
+      );
+      expect(ticketState.rows[0]?.consumed_at).not.toBeNull();
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 
   it("bootstraps one bounded page past the response cap and pages every conversation exactly once", async () => {

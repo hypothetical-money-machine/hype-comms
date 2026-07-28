@@ -83,7 +83,7 @@ at the current 25-member scale.
 | Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active member, while `members` is readable only by active conversation memberships. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted pair and is readable only by that pair. Archived channels remain readable but reject writes. |
 | Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
-| Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                                                                   |
+| Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
 | Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
 | Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments.                                                                            |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
@@ -140,6 +140,7 @@ returns the original result. Reuse with a different fingerprint returns `409 CON
 | `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
 | `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
 | `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation.                                                                  |
+| `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
 | `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
 | `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
 | `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
@@ -177,6 +178,12 @@ domain events are:
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
+Reaction events are capability-gated for rolling compatibility. A client advertises
+`reaction-events-v1` through `X-HMM-Chat-Capabilities` on both `GET /v1/sync` and
+`POST /v1/realtime/tickets`. Clients without that capability do not receive reaction events,
+but the server still advances their scanned cursor past those events so released clients neither
+fail strict parsing nor loop on an unsupported event.
+
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
 and optional conversation IDs, and a typed payload. Workspace-channel events target active
 workspace members; members-only channel events target active channel members. Membership
@@ -196,8 +203,8 @@ renderer does not get direct production-network access.
 
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message
-bodies, member/workspace display data, attachment metadata, and queued mutation payloads are
-encrypted as AES-256-GCM values with a fresh nonce and store/key/schema version as
+bodies, reaction emoji, member/workspace display data, attachment metadata, and queued mutation
+payloads are encrypted as AES-256-GCM values with a fresh nonce and store/key/schema version as
 authenticated additional data.
 
 Electron main generates the cache data key, wraps it with `safeStorage`, and exposes only
@@ -210,8 +217,9 @@ requires explicit confirmation. A missing key or authentication-tag failure stop
 and presents an explicit recovery/reset choice instead of silently dropping an outbox.
 
 The persistent cache retains at most the newest 90 days or 20,000 acknowledged messages,
-whichever is smaller. Eviction never touches outbox entries. Older history remains available
-from the server while online. File bytes are not persisted in IndexedDB; main-managed
+whichever is smaller. Reactions are evicted with their message; eviction never touches outbox
+entries. Older history remains available from the server while online. File bytes are not
+persisted in IndexedDB; main-managed
 temporary downloads are removed on logout and on the next startup. Offline full-text search
 and offline attachment uploads are deferred: queued sends contain text, mentions, and thread
 context only, and the UI requires connectivity before attaching a file.
@@ -273,6 +281,9 @@ devices is private to that user.
 - Search covers message bodies in every channel and DM visible at request time. Results use
   PostgreSQL full-text ranking and stable cursor pagination; selecting one opens the conversation,
   inserts an older hit into the cached timeline when needed, and highlights it.
+- Reactions are grouped by emoji beneath each main-timeline message. The quick picker toggles the
+  current member's reaction, archived conversations expose reactions read-only, history pages
+  batch-hydrate current state, and capability-gated sync/realtime events converge other devices.
 - Upload URLs accept one exact content length/type/checksum into an S3 quarantine prefix.
   Completion enqueues an isolated scanner; only a clean verdict atomically changes status
   to ready and emits an event. EICAR/unknown executable content becomes failed, is deleted,

@@ -7,7 +7,7 @@ on:
       - "v*"
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-release
   cancel-in-progress: false
 
 permissions:
@@ -16,19 +16,21 @@ permissions:
 jobs:
   validate:
     name: Validate release version
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, hmm-chat-release, docker]
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
-          cache: npm
+          package-manager-cache: false
 
       - name: Require a tag matching the desktop package version
         id: version
@@ -47,29 +49,42 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match desktop version ${desktop_version}." >&2
             exit 1
           fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "Release tag ${GITHUB_REF_NAME} is not on origin/main." >&2
+            exit 1
+          fi
           echo "desktop-version=${desktop_version}" >> "$GITHUB_OUTPUT"
 
   package:
-    name: Release on ${{ matrix.os }}
+    name: Release ${{ matrix.platform }}
     needs: validate
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+        include:
+          - platform: macOS
+            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            artifact_os: mac
+            manifest: latest-mac.yml
+          - platform: Windows
+            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+            artifact_os: win
+            manifest: latest.yml
+          - platform: Linux
+            runner: '["self-hosted", "Linux", "X64", "hmm-chat-release", "docker"]'
+            artifact_os: linux
+            manifest: latest-linux.yml
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
-      HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
-      HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
-      HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
-      HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
-      HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
       # Endpoint, bucket, and region are not secret and live as repository variables. Only the
       # key pair is a secret, and it is scoped to write this one bucket.
       HMM_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
       HMM_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+      HMM_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
+      UPDATE_ARTIFACT_OS: ${{ matrix.artifact_os }}
+      UPDATE_MANIFEST: ${{ matrix.manifest }}
       AWS_REGION: ${{ vars.GARAGE_S3_REGION }}
       AWS_DEFAULT_REGION: ${{ vars.GARAGE_S3_REGION }}
       AWS_EC2_METADATA_DISABLED: "true"
@@ -81,117 +96,255 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
-          cache: npm
+          package-manager-cache: false
+
+      # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
+      # Its PowerShell execution policy also rejects the generated scripts used by Actions.
+      - name: Expose MinGit sh on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: |
+          if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
+          if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
+          if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
+          where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
+          aws --version
+          echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
 
       - name: Install dependencies
+        if: matrix.platform != 'Windows'
+        shell: sh
         run: npm ci
 
-      - name: Configure macOS signing and optional notarization
-        if: >-
-          runner.os == 'macOS' &&
-          env.HMM_MACOS_CSC_LINK != '' &&
-          env.HMM_MACOS_CSC_KEY_PASSWORD != ''
-        shell: bash
-        run: |
-          echo "CSC_LINK=${HMM_MACOS_CSC_LINK}" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=${HMM_MACOS_CSC_KEY_PASSWORD}" >> "$GITHUB_ENV"
+      # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
+      # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
+      - name: Install dependencies on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm ci
 
-          if [[ -n "$HMM_MACOS_APPLE_API_KEY_BASE64" &&
-                -n "$HMM_MACOS_APPLE_API_KEY_ID" &&
-                -n "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
-            umask 077
-            api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
-            printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
-            echo "APPLE_API_KEY=${api_key_path}" >> "$GITHUB_ENV"
-            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}" >> "$GITHUB_ENV"
-            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}" >> "$GITHUB_ENV"
+      - name: Configure macOS signing and notarization
+        if: matrix.platform == 'macOS'
+        shell: bash
+        env:
+          HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
+          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
+          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
+          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
+          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
+          EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
+        run: |
+          if [[ -z "$HMM_MACOS_CSC_LINK" ||
+                -z "$HMM_MACOS_CSC_KEY_PASSWORD" ||
+                -z "$HMM_MACOS_APPLE_API_KEY_BASE64" ||
+                -z "$HMM_MACOS_APPLE_API_KEY_ID" ||
+                -z "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
+            echo "The macOS release requires signing and all notarization secrets." >&2
+            exit 1
           fi
 
+          umask 077
+          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          original_keychains_pending_path="${original_keychains_path}.pending"
+          root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
+          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+
+          # electron-builder's implicit keychain setup can pass the PKCS#12 password to
+          # set-key-partition-list instead of its generated keychain password. Own the keychain
+          # lifecycle here so signing works consistently on a clean self-hosted runner.
+          printf '%s' "${HMM_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+
+          security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
+          rm -f "$original_keychains_path" "$original_keychains_pending_path"
+          security list-keychains -d user > "$original_keychains_pending_path"
+          mv "$original_keychains_pending_path" "$original_keychains_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$HMM_MACOS_CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          additional_keychains=()
+          parsed_keychain_count=0
+          unparsed_keychain_count=0
+          while IFS= read -r item; do
+            if [[ "$item" =~ \"(.*)\" ]]; then
+              keychain="${BASH_REMATCH[1]}"
+              parsed_keychain_count=$((parsed_keychain_count + 1))
+              if [[ "$keychain" != "$keychain_path" &&
+                    "$keychain" != "$root_certs_keychain" ]]; then
+                additional_keychains+=("$keychain")
+              fi
+            elif [[ "$item" == *[![:space:]]* ]]; then
+              unparsed_keychain_count=$((unparsed_keychain_count + 1))
+            fi
+          done < "$original_keychains_path"
+          if [[ "$unparsed_keychain_count" -ne 0 ||
+                ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
+            echo "Could not parse the original macOS keychain search list." >&2
+            exit 1
+          fi
+          security list-keychains -d user -s \
+            "$keychain_path" \
+            "$root_certs_keychain" \
+            "${additional_keychains[@]}"
+
+          signing_identities="$(security find-identity -v -p codesigning "$keychain_path")"
+          identity_regex="^[[:space:]]*[0-9]+\\)[[:space:]]+([[:xdigit:]]{40})[[:space:]]+\"Developer ID Application: .+ \\(${EXPECTED_MACOS_TEAM_ID}\\)\"$"
+          expected_identity_hashes=()
+          while IFS= read -r item; do
+            if [[ "$item" =~ $identity_regex ]]; then
+              expected_identity_hashes+=("${BASH_REMATCH[1]}")
+            fi
+          done <<< "$signing_identities"
+          if [[ "${#expected_identity_hashes[@]}" -ne 1 ]]; then
+            echo "The signing keychain must contain exactly one ${EXPECTED_MACOS_TEAM_ID} Developer ID Application identity." >&2
+            printf '%s\n' "$signing_identities" >&2
+            exit 1
+          fi
+
+          {
+            echo "CSC_KEYCHAIN=${keychain_path}"
+            echo "CSC_NAME=${expected_identity_hashes[0]}"
+            echo "APPLE_API_KEY=${api_key_path}"
+            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
+          } >> "$GITHUB_ENV"
+
       - name: Package desktop application
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run package:desktop
+
+      - name: Package desktop application on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
         run: npm run package:desktop
 
       - name: Verify packaged application contents, updater, and fuses
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run verify:desktop-package
+
+      - name: Verify packaged application contents, updater, and fuses on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
         run: npm run verify:desktop-package
 
       - name: Verify macOS release signing and notarization
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macOS'
+        shell: bash
         run: npm run verify:desktop-package:macos-release
 
+      # Artifact names are predictable, so a request made before upload can leave a CDN-cached
+      # 404 at the bare path. The content hash gives every advertised URL a value known only after
+      # packaging while the underlying object name remains stable.
+      - name: Bind manifest artifact URLs to their content
+        shell: sh
+        run: node scripts/desktop-release.mjs cache-key-manifest
+
       - name: Address the update bucket by path
-        shell: bash
-        run: |
-          # Self-hosted S3-compatible stores are addressed by path. The AWS CLI otherwise defaults
-          # to virtual-host style and resolves <bucket>.<endpoint>, which has no DNS record.
-          aws configure set default.s3.addressing_style path
+        shell: sh
+        # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
+        # under RUNNER_TEMP so every platform reuses this setting without shell-specific exports.
+        run: node scripts/desktop-release.mjs configure-s3
 
       # Artifacts are served with a one-year immutable cache while the manifests are no-cache.
-      # Re-publishing a version with different bytes would leave caches serving the old file
-      # against a manifest advertising a new checksum, which fails verification on every client
-      # until someone bumps the version. Refuse rather than corrupt the channel.
-      - name: Refuse to overwrite an already published version
-        shell: bash
+      # The platform manifest is the commit marker: an orphan artifact from a failed run was never
+      # advertised to clients and may be replaced on retry, but a manifested version is immutable.
+      - name: Refuse to overwrite a published platform version
+        shell: sh
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: |
-          existing="$(aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 ls \
-            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/hmm-chat-${DESKTOP_VERSION}-" 2>/dev/null | wc -l | tr -d ' ')"
-          if [[ "$existing" != "0" ]]; then
-            echo "Version ${DESKTOP_VERSION} is already published. Bump the version rather than re-running this tag." >&2
-            exit 1
-          fi
+        run: node scripts/desktop-release.mjs assert-unpublished
 
-      - name: Upload versioned artifacts to the update bucket
-        shell: bash
+      - name: Upload platform artifacts to the update bucket
+        shell: sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        run: node scripts/desktop-release.mjs upload-artifacts
+
+      - name: Upload the platform manifest last
+        shell: sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        run: node scripts/desktop-release.mjs upload-manifest
+
+      - name: Verify the public platform release
+        shell: sh
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: |
-          artifact_count=0
-          while IFS= read -r artifact; do
-            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-              "$artifact" \
-              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/$(basename "$artifact")" \
-              --cache-control "public, max-age=31536000, immutable" \
-              --no-progress
-            artifact_count=$((artifact_count + 1))
-          done < <(
-            find apps/desktop/release -maxdepth 1 -type f \
-              -name "hmm-chat-${DESKTOP_VERSION}-*" -print
-          )
-
-          if [[ "$artifact_count" -eq 0 ]]; then
-            echo "No versioned desktop artifacts were produced." >&2
-            exit 1
-          fi
-
-      - name: Upload update metadata last
-        shell: bash
-        run: |
-          metadata_count=0
-          for metadata in apps/desktop/release/latest*.yml; do
-            [[ -f "$metadata" ]] || continue
-            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-              "$metadata" \
-              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/$(basename "$metadata")" \
-              --cache-control "no-cache" \
-              --content-type "application/yaml" \
-              --no-progress
-            metadata_count=$((metadata_count + 1))
-          done
-
-          if [[ "$metadata_count" -eq 0 ]]; then
-            echo "No latest update metadata was produced." >&2
-            exit 1
-          fi
+        run: node scripts/verify-published-desktop-release.mjs
 
       # The page reads the manifests at load time, so it does not go stale between releases and
       # one runner publishing it is enough.
       - name: Publish the download page
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'Linux'
+        shell: sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+        run: node scripts/desktop-release.mjs publish-download-page
+
+      - name: Remove temporary macOS signing keychain
+        if: always() && matrix.platform == 'macOS'
         shell: bash
         run: |
-          aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-            downloads/index.html \
-            "s3://${HMM_UPDATE_S3_BUCKET}/index.html" \
-            --cache-control "no-cache" \
-            --content-type "text/html; charset=utf-8" \
-            --no-progress
+          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          original_keychains_pending_path="${original_keychains_path}.pending"
+          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+          cleanup_status=0
+          set +e
+          if [[ -f "$original_keychains_path" ]]; then
+            original_keychains=()
+            parsed_keychain_count=0
+            unparsed_keychain_count=0
+            while IFS= read -r item; do
+              if [[ "$item" =~ \"(.*)\" ]]; then
+                keychain="${BASH_REMATCH[1]}"
+                parsed_keychain_count=$((parsed_keychain_count + 1))
+                if [[ "$keychain" != "$keychain_path" ]]; then
+                  original_keychains+=("$keychain")
+                fi
+              elif [[ "$item" == *[![:space:]]* ]]; then
+                unparsed_keychain_count=$((unparsed_keychain_count + 1))
+              fi
+            done < "$original_keychains_path"
+            if [[ "$unparsed_keychain_count" -ne 0 ||
+                  ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
+              echo "Could not parse the original macOS keychain search list." >&2
+              cleanup_status=1
+            elif ! security list-keychains -d user -s "${original_keychains[@]}"; then
+              cleanup_status=1
+            fi
+          fi
+          security delete-keychain "$keychain_path" 2>/dev/null || true
+          rm -f \
+            "$certificate_path" \
+            "$keychain_path" \
+            "$original_keychains_pending_path" \
+            "$api_key_path" || cleanup_status=1
+          if [[ "$cleanup_status" -eq 0 ]]; then
+            rm -f "$original_keychains_path" || cleanup_status=1
+          else
+            echo "Preserving ${original_keychains_path} for manual keychain-list recovery." >&2
+          fi
+          exit "$cleanup_status"

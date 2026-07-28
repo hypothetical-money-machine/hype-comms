@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { SendMessageOperation } from "@hmm-chat/contracts";
+import { REACTION_EVENTS_CAPABILITY, type SendMessageOperation } from "@hmm-chat/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -10,6 +10,7 @@ const NOW = "2026-07-24T12:00:00.000Z";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
+const REACTION_ID = "10000000-0000-4000-8000-000000000012";
 
 const CURRENT_USER = {
   user: {
@@ -115,6 +116,14 @@ const SEARCH_RESPONSE = {
   nextCursor: "next-page",
 } as const;
 
+const REACTION = {
+  id: REACTION_ID,
+  messageId: CLIENT_MESSAGE_ID,
+  userId: CURRENT_USER.user.id,
+  emoji: "👩🏽‍💻",
+  createdAt: NOW,
+} as const;
+
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
   readonly removals: string[] = [];
@@ -180,16 +189,41 @@ describe("WorkspaceTransport sync classification", () => {
     });
   });
 
-  it("sends the requested cursor and limit", async () => {
-    const requests: string[] = [];
+  it("sends the requested cursor, limit, and supported event capabilities", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
-      requests.push(`${init.method} ${url}`);
+      requests.push({ url, init });
       return jsonResponse(SYNC_RESPONSE);
     });
 
     await transport.sync("41", 25);
 
-    expect(requests).toEqual(["GET https://chat.example/v1/sync?after=41&limit=25"]);
+    expect(requests).toEqual([
+      {
+        url: "https://chat.example/v1/sync?after=41&limit=25",
+        init: expect.objectContaining({
+          method: "GET",
+          headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+        }),
+      },
+    ]);
+  });
+
+  it("advertises supported event capabilities when issuing a realtime ticket", async () => {
+    const requests: RequestInit[] = [];
+    const { transport } = createTransport(async (_url, init) => {
+      requests.push(init);
+      return jsonResponse({ ticket: "a".repeat(32), expiresAt: NOW });
+    });
+
+    await transport.ticket();
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+      }),
+    ]);
   });
 
   it("reports a revoked membership (403) as permanent instead of retryable", async () => {
@@ -386,6 +420,61 @@ describe("WorkspaceTransport conversations", () => {
       "GET https://chat.example/v1/conversations?after=cursor-2&limit=10",
       "GET https://chat.example/v1/conversations?limit=50",
     ]);
+  });
+});
+
+describe("WorkspaceTransport reactions", () => {
+  it("hydrates and mutates encoded Unicode reactions through the scoped routes", async () => {
+    const requests: { method: string; url: string; body: string | null }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+      });
+      if (init.method === "POST") return jsonResponse({ reactions: [REACTION] });
+      if (init.method === "PUT") return jsonResponse({ reaction: REACTION, syncCursor: "43" });
+      return jsonResponse({ removed: true, syncCursor: "44" });
+    });
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).resolves.toEqual({
+      reactions: [REACTION],
+    });
+    await expect(transport.addReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
+      reaction: REACTION,
+      syncCursor: "43",
+    });
+    await expect(transport.removeReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
+      removed: true,
+      syncCursor: "44",
+    });
+
+    const reactionUrl = `https://chat.example/v1/messages/${CLIENT_MESSAGE_ID}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "https://chat.example/v1/reactions/query",
+        body: JSON.stringify({ messageIds: [CLIENT_MESSAGE_ID] }),
+      },
+      { method: "PUT", url: reactionUrl, body: null },
+      { method: "DELETE", url: reactionUrl, body: null },
+    ]);
+  });
+
+  it("rejects malformed successful reaction responses", async () => {
+    const transport = transportAnswering(() => jsonResponse({ reactions: ["not-a-reaction"] }));
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).rejects.toThrow();
+  });
+
+  it("rejects reactions for a message outside the requested batch", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({
+        reactions: [{ ...REACTION, messageId: "10000000-0000-4000-8000-000000000099" }],
+      }),
+    );
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).rejects.toThrow("unrequested message");
   });
 });
 

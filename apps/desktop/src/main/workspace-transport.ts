@@ -1,4 +1,6 @@
 import {
+  REACTION_EVENTS_CAPABILITY,
+  addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
@@ -6,15 +8,18 @@ import {
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
+  listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
   messageSearchResponseSchema,
   realtimeTicketResponseSchema,
+  removeReactionResponseSchema,
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
   workspaceBootstrapResponseSchema,
   type AdvanceReadCursorResponse,
+  type AddReactionResponse,
   type ArchiveChannelRequest,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
@@ -24,10 +29,13 @@ import {
   type ListConversationsQuery,
   type ListConversationsResponse,
   type ListMembersResponse,
+  type ListMessageReactionsResponse,
   type MessageHistoryResponse,
   type MessageSearchQuery,
   type MessageSearchResponse,
   type RealtimeTicketResponse,
+  type ReactionEmoji,
+  type RemoveReactionResponse,
   type SendAttemptResult,
   type SendMessageOperation,
   type SyncAttemptResult,
@@ -226,6 +234,40 @@ export class WorkspaceTransport {
     return messageHistoryResponseSchema.parse(await this.#payload(response));
   }
 
+  async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/reactions/query").href, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageIds }),
+    });
+    const parsed = listMessageReactionsResponseSchema.parse(await this.#payload(response));
+    const requested = new Set(messageIds);
+    if (parsed.reactions.some((reaction) => !requested.has(reaction.messageId))) {
+      throw new Error("Reaction response included an unrequested message");
+    }
+    return parsed;
+  }
+
+  async addReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+      ).href,
+      { method: "PUT" },
+    );
+    return addReactionResponseSchema.parse(await this.#payload(response));
+  }
+
+  async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<RemoveReactionResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+      ).href,
+      { method: "DELETE" },
+    );
+    return removeReactionResponseSchema.parse(await this.#payload(response));
+  }
+
   async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
     const url = this.#url("/v1/search");
     url.searchParams.set("query", input.query);
@@ -302,7 +344,10 @@ export class WorkspaceTransport {
 
     let response: Response;
     try {
-      response = await this.session.fetch(url.href, { method: "GET" });
+      response = await this.session.fetch(url.href, {
+        method: "GET",
+        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+      });
     } catch (error) {
       // Only a transport failure is worth retrying; anything else would retry forever.
       return isNetworkFailure(error)
@@ -345,6 +390,7 @@ export class WorkspaceTransport {
   async ticket(): Promise<RealtimeTicketResponse> {
     const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
       method: "POST",
+      headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
     });
     return realtimeTicketResponseSchema.parse(await this.#payload(response));
   }

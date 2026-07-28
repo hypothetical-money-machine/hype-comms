@@ -85,6 +85,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       let flushAgain = false;
       let connectedSent = false;
       let pongReceived = true;
+      let initialRevalidationComplete = false;
 
       const sendConnected = (): void => {
         if (connectedSent || socket.readyState !== 1) return;
@@ -109,7 +110,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       };
 
       const flush = async (): Promise<void> => {
-        if (closed) return;
+        if (closed || !initialRevalidationComplete) return;
         if (flushing) {
           flushAgain = true;
           return;
@@ -165,22 +166,23 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       const unsubscribe = subscribe?.(principal.workspaceId, () => {
         void flush();
       });
-      const revalidatePrincipal = (): void => {
-        if (revalidate === undefined) return;
-        void revalidate(principal).then(
-          (result) => {
-            if (result.status === "valid" || closed || socket.readyState !== 1) return;
-            request.log.warn(
-              { reason: result.reason, userId: principal.userId },
-              "Closing a realtime socket whose session is no longer authorized",
-            );
-            socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
-          },
-          (error: unknown) => {
-            // A transient database failure must not sign a healthy device out.
-            request.log.error({ err: error }, "Realtime session revalidation failed");
-          },
-        );
+      const revalidatePrincipal = async (): Promise<boolean> => {
+        if (revalidate === undefined) return true;
+        try {
+          const result = await revalidate(principal);
+          if (result.status === "valid") return true;
+          if (closed || socket.readyState !== 1) return false;
+          request.log.warn(
+            { reason: result.reason, userId: principal.userId },
+            "Closing a realtime socket whose session is no longer authorized",
+          );
+          socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
+          return false;
+        } catch (error) {
+          // A transient database failure must not sign a healthy device out.
+          request.log.error({ err: error }, "Realtime session revalidation failed");
+          return true;
+        }
       };
 
       const heartbeat = setInterval(() => {
@@ -188,7 +190,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           socket.terminate();
           return;
         }
-        revalidatePrincipal();
+        void revalidatePrincipal();
         pongReceived = false;
         socket.ping();
       }, HEARTBEAT_INTERVAL_MS);
@@ -208,7 +210,11 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       });
       socket.once("close", teardown);
       socket.once("error", teardown);
-      void flush();
+      void revalidatePrincipal().then((mayReplay) => {
+        if (!mayReplay || closed || socket.readyState !== 1) return;
+        initialRevalidationComplete = true;
+        void flush();
+      });
     },
   );
 };

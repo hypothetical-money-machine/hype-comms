@@ -7,6 +7,8 @@ export interface RealtimePrincipal {
   readonly workspaceId: string;
   /** The device session the ticket was bound to, so a live socket stays revalidatable. */
   readonly deviceSessionId: string;
+  /** False/absent for tickets issued to clients predating reaction sync events. */
+  readonly reactionEvents?: boolean;
 }
 
 /**

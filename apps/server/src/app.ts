@@ -87,6 +87,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             userId: principal.userId,
             workspaceId: principal.workspaceId,
             deviceSessionId: principal.deviceSessionId,
+            reactionEvents: principal.reactionEvents,
           };
         };
   await app.register(

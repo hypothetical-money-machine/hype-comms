@@ -4,7 +4,16 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/coverage/**", "**/dist/**", "**/node_modules/**", "**/out/**", "**/release/**"],
+    ignores: [
+      "**/.claude/**",
+      "**/.clog/**",
+      "**/coverage/**",
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/out/**",
+      "**/release/**",
+      "**/worktrees/**",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

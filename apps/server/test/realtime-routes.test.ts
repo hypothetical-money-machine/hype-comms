@@ -10,6 +10,7 @@ import type {
   RealtimePrincipalRevalidation,
 } from "../src/modules/realtime/auth.js";
 import type { RealtimeEventHub } from "../src/modules/realtime/hub.js";
+import { REALTIME_SESSION_REVOKED_CLOSE_CODE } from "../src/modules/realtime/routes.js";
 import type { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 
 const userId = "10000000-0000-4000-8000-000000000001";
@@ -21,6 +22,7 @@ interface ConsumedTicket {
   readonly workspaceId: string;
   readonly userId: string;
   readonly deviceSessionId: string;
+  readonly reactionEvents: boolean;
 }
 
 class FakeWorkspaceRepository {
@@ -32,7 +34,7 @@ class FakeWorkspaceRepository {
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedTicket | null> {
     this.consumedTickets.push(token);
-    return { workspaceId, userId, deviceSessionId };
+    return { workspaceId, userId, deviceSessionId, reactionEvents: true };
   }
 
   async syncPrincipal(principal: RealtimePrincipal, after: string): Promise<SyncResponse> {
@@ -103,6 +105,50 @@ async function connectedApp(
 }
 
 describe("realtime session revalidation", () => {
+  it("closes an initially invalid principal before replaying any events", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.revalidation = { status: "invalid", reason: "membership_inactive" };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    const messages: string[] = [];
+    socket.on("message", (data) => messages.push(data.toString()));
+
+    const [code, reason] = await once(socket, "close");
+
+    expect(code).toBe(REALTIME_SESSION_REVOKED_CLOSE_CODE);
+    expect(reason.toString()).toBe("Session revoked");
+    expect(messages).toEqual([]);
+    expect(repository.syncedCursors).toEqual([]);
+    expect(repository.revalidations).toEqual([
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+    ]);
+  });
+
+  it("continues the initial replay when revalidation has a transient error", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.revalidationError = new Error("database unavailable");
+
+    const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
+
+    expect(repository.revalidations).toEqual([
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+    ]);
+    expect(repository.syncedCursors).toEqual(["9"]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("closes a live socket with 4401 once its device session is revoked", async () => {
     const repository = new FakeWorkspaceRepository();
     const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
@@ -115,7 +161,10 @@ describe("realtime session revalidation", () => {
     expect(code).toBe(4401);
     expect(reason.toString()).toBe("Session revoked");
     // The principal must carry the device session the ticket was bound to, or nothing is checkable.
-    expect(repository.revalidations).toEqual([{ userId, workspaceId, deviceSessionId }]);
+    expect(repository.revalidations).toEqual([
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+    ]);
   });
 
   it("closes a live socket whose workspace membership is no longer active", async () => {
@@ -136,18 +185,18 @@ describe("realtime session revalidation", () => {
 
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(repository.revalidations).toHaveLength(1);
+    expect(repository.revalidations).toHaveLength(2);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("does not sign a device out when revalidation itself fails", async () => {
     const repository = new FakeWorkspaceRepository();
-    repository.revalidationError = new Error("database unavailable");
     const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
+    repository.revalidationError = new Error("database unavailable");
 
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(repository.revalidations).toHaveLength(1);
+    expect(repository.revalidations).toHaveLength(2);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 });

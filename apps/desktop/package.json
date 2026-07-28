@@ -1,6 +1,6 @@
 {
   "name": "@hmm-chat/desktop",
-  "version": "0.1.0",
+  "version": "0.1.9",
   "private": true,
   "description": "Secure Electron desktop client for HMM Chat",
   "author": {
@@ -32,12 +32,12 @@
     "package:linux:appimage": "npm run build && electron-builder --linux AppImage --x64 --publish never"
   },
   "devDependencies": {
-    "@testing-library/react": "^16.3.0",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.0",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@vitejs/plugin-react": "^6.0.4",
     "electron": "43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
