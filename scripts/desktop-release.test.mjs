@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  addArtifactCacheKeys,
   assertVersionCanPublish,
+  cacheKeyPlatformManifest,
   parseManifestVersion,
   runAws,
   runAwsWithRetry,
@@ -27,6 +29,75 @@ test("parses quoted and unquoted manifest versions", () => {
   assert.equal(parseManifestVersion("version: 1.2.3\n"), "1.2.3");
   assert.equal(parseManifestVersion('version: "1.2.3"\n'), "1.2.3");
   assert.throws(() => parseManifestVersion("path: app.zip\n"), /no valid version/);
+});
+
+test("binds every manifest artifact URL and path to its SHA-512", () => {
+  const manifest = [
+    "version: 1.2.3",
+    "files:",
+    "  - url: hmm-chat-1.2.3-mac-arm64.zip",
+    "    sha512: arm+/=",
+    "    size: 123",
+    "  - url: hmm-chat-1.2.3-mac-x64.zip",
+    "    sha512: intel+/=",
+    "    size: 456",
+    "path: hmm-chat-1.2.3-mac-arm64.zip",
+    "sha512: arm+/=",
+    "",
+  ].join("\n");
+
+  const cacheKeyedManifest = addArtifactCacheKeys(manifest);
+
+  assert.match(cacheKeyedManifest, /url: hmm-chat-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
+  assert.match(cacheKeyedManifest, /url: hmm-chat-1\.2\.3-mac-x64\.zip\?sha512=intel%2B%2F%3D/u);
+  assert.match(cacheKeyedManifest, /path: hmm-chat-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
+  assert.equal(cacheKeyedManifest.match(/sha512: arm\+\/=/gu)?.length, 2);
+  assert.equal(cacheKeyedManifest.match(/sha512: intel\+\/=/gu)?.length, 1);
+  assert.throws(() => addArtifactCacheKeys(cacheKeyedManifest), /already has a SHA-512 cache key/);
+});
+
+test("rejects a manifest artifact without an adjacent SHA-512", () => {
+  assert.throws(
+    () =>
+      addArtifactCacheKeys(
+        ["version: 1.2.3", "files:", "  - url: app.zip", "    size: 123", ""].join("\n"),
+      ),
+    /only 0 immediately precede a SHA-512 hash/,
+  );
+});
+
+test("rejects ambiguous artifact URL scalars", () => {
+  for (const artifactUrl of [
+    "app.zip?channel=latest",
+    "app.zip#download",
+    "'app.zip'",
+    '"app.zip"',
+  ]) {
+    assert.throws(
+      () =>
+        addArtifactCacheKeys(
+          ["version: 1.2.3", "files:", `  - url: ${artifactUrl}`, "    sha512: hash", ""].join(
+            "\n",
+          ),
+        ),
+      /must be an unquoted artifact URL without a query or fragment/,
+    );
+  }
+});
+
+test("rewrites the selected generated platform manifest", async () => {
+  const releaseDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-release-"));
+  try {
+    const manifestPath = path.join(releaseDirectory, "latest.yml");
+    await writeFile(
+      manifestPath,
+      ["version: 1.2.3", "files:", "  - url: app.exe", "    sha512: hash+/=", ""].join("\n"),
+    );
+    await cacheKeyPlatformManifest({ environment, releaseDirectory });
+    assert.match(await readFile(manifestPath, "utf8"), /url: app\.exe\?sha512=hash%2B%2F%3D/u);
+  } finally {
+    await rm(releaseDirectory, { force: true, recursive: true });
+  }
 });
 
 test("selects only exact version and platform artifacts", () => {

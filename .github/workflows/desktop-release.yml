@@ -105,6 +105,8 @@ jobs:
         shell: cmd
         run: |
           if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
+          if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
+          if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
           where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
           aws --version
           echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
@@ -245,6 +247,13 @@ jobs:
         if: matrix.platform == 'macOS'
         shell: bash
         run: npm run verify:desktop-package:macos-release
+
+      # Artifact names are predictable, so a request made before upload can leave a CDN-cached
+      # 404 at the bare path. The content hash gives every advertised URL a value known only after
+      # packaging while the underlying object name remains stable.
+      - name: Bind manifest artifact URLs to their content
+        shell: sh
+        run: node scripts/desktop-release.mjs cache-key-manifest
 
       - name: Address the update bucket by path
         shell: sh

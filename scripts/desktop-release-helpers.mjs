@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import semver from "semver";
@@ -20,6 +20,51 @@ export function parseManifestVersion(manifest) {
     throw new Error("Manifest has no valid version");
   }
   return match[1];
+}
+
+export function addArtifactCacheKeys(manifest) {
+  const artifactLinePattern = /^[ \t]*(?:-[ \t]+)?(?:url|path):[ \t]+\S+[ \t]*\r?$/gmu;
+  const artifactPairPattern =
+    /^([ \t]*(?:-[ \t]+)?(?:url|path):[ \t]+)(\S+)([ \t]*\r?\n[ \t]*sha512:[ \t]+)(\S+)([ \t]*\r?$)/gmu;
+  const artifactLineCount = [...manifest.matchAll(artifactLinePattern)].length;
+  let replacementCount = 0;
+
+  const cacheKeyedManifest = manifest.replace(
+    artifactPairPattern,
+    (match, prefix, artifactUrl, hashPrefix, hash, suffix) => {
+      if (/[?&]sha512=/u.test(artifactUrl)) {
+        throw new Error(`${artifactUrl} already has a SHA-512 cache key`);
+      }
+      if (/["'?#]/u.test(artifactUrl)) {
+        throw new Error(
+          `${artifactUrl} must be an unquoted artifact URL without a query or fragment`,
+        );
+      }
+      replacementCount += 1;
+      return `${prefix}${artifactUrl}?sha512=${encodeURIComponent(hash)}${hashPrefix}${hash}${suffix}`;
+    },
+  );
+
+  if (artifactLineCount === 0) {
+    throw new Error("Manifest contains no artifact URLs");
+  }
+  if (replacementCount !== artifactLineCount) {
+    throw new Error(
+      `Manifest contains ${artifactLineCount} artifact URL(s), but only ` +
+        `${replacementCount} immediately precede a SHA-512 hash`,
+    );
+  }
+  return cacheKeyedManifest;
+}
+
+export async function cacheKeyPlatformManifest({
+  environment = process.env,
+  releaseDirectory = defaultReleaseDirectory,
+} = {}) {
+  const updateManifest = requireEnvironment("UPDATE_MANIFEST", environment);
+  const manifestPath = path.join(releaseDirectory, updateManifest);
+  const manifest = await readFile(manifestPath, "utf8");
+  await writeFile(manifestPath, addArtifactCacheKeys(manifest));
 }
 
 export function selectArtifactNames(entries, desktopVersion, artifactOs) {

@@ -1,5 +1,6 @@
 import {
   assertVersionCanPublish,
+  cacheKeyPlatformManifest,
   configureBucketByPath,
   publishDownloadPage,
   uploadPlatformArtifacts,
@@ -12,6 +13,9 @@ try {
   switch (command) {
     case "assert-unpublished":
       await assertVersionCanPublish();
+      break;
+    case "cache-key-manifest":
+      await cacheKeyPlatformManifest();
       break;
     case "configure-s3":
       configureBucketByPath();

@@ -68,6 +68,18 @@ if (files.length === 0) throw new Error("Published manifest contains no files");
 
 for (const file of files) {
   const artifactUrl = new URL(file.url, feedRoot);
+  const decodedHash = Buffer.from(file.sha512, "base64");
+  if (decodedHash.length !== 64 || decodedHash.toString("base64") !== file.sha512) {
+    throw new Error(`${file.url} does not contain a canonical SHA-512 hash`);
+  }
+  const cacheKeyHashes = artifactUrl.searchParams.getAll("sha512");
+  if (
+    [...artifactUrl.searchParams].length !== 1 ||
+    cacheKeyHashes.length !== 1 ||
+    cacheKeyHashes[0] !== file.sha512
+  ) {
+    throw new Error(`${file.url} is not cache-keyed by its manifest SHA-512`);
+  }
   if (
     artifactUrl.origin !== feedRoot.origin ||
     !artifactUrl.pathname.startsWith(feedRoot.pathname)
