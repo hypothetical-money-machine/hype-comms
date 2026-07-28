@@ -4,6 +4,8 @@ import type {
   ChannelAccess,
   ChatSessionState,
   Message,
+  Reaction,
+  ReactionEmoji,
   UpdateState,
   User,
 } from "@hmm-chat/contracts";
@@ -12,6 +14,7 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { MessageReactions } from "./message-reactions";
 import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
@@ -174,10 +177,20 @@ function Avatar({ user }: { user: User | undefined }) {
 function MessageRow({
   message,
   members,
+  reactions,
+  currentUserId,
+  reactionsDisabled,
+  onAddReaction,
+  onRemoveReaction,
   highlighted,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
+  readonly reactions: readonly Reaction[];
+  readonly currentUserId: string;
+  readonly reactionsDisabled: boolean;
+  readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
+  readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly highlighted: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
@@ -193,6 +206,14 @@ function MessageRow({
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
         <p>{message.body}</p>
+        <MessageReactions
+          reactions={reactions}
+          members={members}
+          currentUserId={currentUserId}
+          disabled={reactionsDisabled}
+          onAdd={onAddReaction}
+          onRemove={onRemoveReaction}
+        />
       </div>
     </article>
   );
@@ -257,6 +278,15 @@ export function App({ client }: AppProps) {
   const messages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
   );
+  const reactionsByMessage = useMemo(() => {
+    const grouped = new Map<string, Reaction[]>();
+    for (const reaction of runtimeState.reactions) {
+      const values = grouped.get(reaction.messageId) ?? [];
+      values.push(reaction);
+      grouped.set(reaction.messageId, values);
+    }
+    return grouped;
+  }, [runtimeState.reactions]);
   const pending = runtimeState.outbox.filter(
     (item) => item.operation.conversationId === runtimeState.selectedConversationId,
   );
@@ -624,6 +654,11 @@ export function App({ client }: AppProps) {
                 <MessageRow
                   message={message}
                   members={bootstrap.members}
+                  reactions={reactionsByMessage.get(message.id) ?? []}
+                  currentUserId={currentUserId}
+                  reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                  onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
+                  onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                   highlighted={message.id === runtimeState.focusedMessageId}
                 />
               </Fragment>

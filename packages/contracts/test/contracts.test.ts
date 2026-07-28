@@ -15,6 +15,7 @@ import {
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMessageReactionsRequestSchema,
+  messageReactionTargetSchema,
   messageHistoryResponseSchema,
   messageSchema,
   messageHistoryQuerySchema,
@@ -349,6 +350,13 @@ describe("transport contracts", () => {
     });
     expect(() =>
       messageHistoryResponseSchema.parse({ messages: [], reactions: [], nextCursor: null }),
+    ).toThrow();
+    expect(messageReactionTargetSchema.parse({ messageId: MESSAGE_ID, emoji: "👩🏽‍💻" })).toEqual({
+      messageId: MESSAGE_ID,
+      emoji: "👩🏽‍💻",
+    });
+    expect(() =>
+      messageReactionTargetSchema.parse({ messageId: MESSAGE_ID, emoji: "shipit" }),
     ).toThrow();
   });
 

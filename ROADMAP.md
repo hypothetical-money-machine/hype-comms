@@ -19,6 +19,8 @@ The implementation contract and security boundaries live in
 - Workspace-visible and members-only channels with owner-managed membership, server-enforced
   visibility at list/history/send/sync boundaries, and immediate cache purge on removal.
 - Date separators in the main message timeline, including pending outbox messages.
+- Unicode emoji reactions with grouped counts, quick add/remove controls, encrypted local
+  persistence, authorized batch hydration, and realtime convergence.
 - Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
   result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients
@@ -50,7 +52,7 @@ Roughly in order:
   copied and least good part of Slack, and a topic-first model with a single unified unread
   state is the stronger position. Decide, then update the contract — this is much cheaper
   to change now than after threads ship.
-- Emoji reactions and structured mentions on the existing message model.
+- Structured mention completion on the existing verified mention model.
 - File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
   authorized filename search.
 - Native notifications with focus and self suppression, and click-through to the

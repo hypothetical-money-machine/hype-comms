@@ -203,8 +203,8 @@ renderer does not get direct production-network access.
 
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message
-bodies, member/workspace display data, attachment metadata, and queued mutation payloads are
-encrypted as AES-256-GCM values with a fresh nonce and store/key/schema version as
+bodies, reaction emoji, member/workspace display data, attachment metadata, and queued mutation
+payloads are encrypted as AES-256-GCM values with a fresh nonce and store/key/schema version as
 authenticated additional data.
 
 Electron main generates the cache data key, wraps it with `safeStorage`, and exposes only
@@ -217,8 +217,9 @@ requires explicit confirmation. A missing key or authentication-tag failure stop
 and presents an explicit recovery/reset choice instead of silently dropping an outbox.
 
 The persistent cache retains at most the newest 90 days or 20,000 acknowledged messages,
-whichever is smaller. Eviction never touches outbox entries. Older history remains available
-from the server while online. File bytes are not persisted in IndexedDB; main-managed
+whichever is smaller. Reactions are evicted with their message; eviction never touches outbox
+entries. Older history remains available from the server while online. File bytes are not
+persisted in IndexedDB; main-managed
 temporary downloads are removed on logout and on the next startup. Offline full-text search
 and offline attachment uploads are deferred: queued sends contain text, mentions, and thread
 context only, and the UI requires connectivity before attaching a file.
@@ -280,6 +281,9 @@ devices is private to that user.
 - Search covers message bodies in every channel and DM visible at request time. Results use
   PostgreSQL full-text ranking and stable cursor pagination; selecting one opens the conversation,
   inserts an older hit into the cached timeline when needed, and highlights it.
+- Reactions are grouped by emoji beneath each main-timeline message. The quick picker toggles the
+  current member's reaction, archived conversations expose reactions read-only, history pages
+  batch-hydrate current state, and capability-gated sync/realtime events converge other devices.
 - Upload URLs accept one exact content length/type/checksum into an S3 quarantine prefix.
   Completion enqueues an isolated scanner; only a clean verdict atomically changes status
   to ready and emits an event. EICAR/unknown executable content becomes failed, is deleted,

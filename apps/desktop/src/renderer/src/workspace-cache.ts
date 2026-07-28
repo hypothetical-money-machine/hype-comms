@@ -3,6 +3,7 @@ import Dexie, { type Table } from "dexie";
 import {
   conversationSummarySchema,
   messageSchema,
+  reactionSchema,
   sendMessageOperationSchema,
   userSchema,
   workspaceEventSchema,
@@ -16,6 +17,7 @@ import {
   type CacheScope,
   type ConversationSummary,
   type Message,
+  type Reaction,
   type SendMessageOperation,
   type User,
   type WorkspaceBootstrapResponse,
@@ -47,6 +49,7 @@ export interface CachedWorkspaceState {
    */
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
+  readonly reactions: readonly Reaction[];
   readonly outbox: readonly OutboxItem[];
   readonly syncCursor: string | null;
   readonly lastSyncedAt: string | null;
@@ -63,12 +66,17 @@ export interface WorkspaceCache {
   replaceSnapshot(
     snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
+    reactions?: readonly Reaction[],
   ): Promise<void>;
   /** Persists a mutation projection without claiming that its workspace cursor was applied. */
   upsertConversation(summary: ConversationSummary): Promise<void>;
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
   advanceCursor(syncCursor: string): Promise<void>;
-  upsertHistory(messages: readonly Message[]): Promise<void>;
+  upsertHistory(messages: readonly Message[], reactions?: readonly Reaction[]): Promise<void>;
+  /** Projects a mutation response without advancing the workspace event cursor. */
+  upsertReaction(reaction: Reaction): Promise<void>;
+  /** Projects a mutation response without advancing the workspace event cursor. */
+  removeReaction(reactionId: string): Promise<void>;
   upsertAcknowledgedMessage(message: Message, syncCursor: string): Promise<void>;
   enqueue(operation: SendMessageOperation, createdAt?: string): Promise<void>;
   updateOutbox(
@@ -131,6 +139,14 @@ interface MessageRow {
   readonly value: CacheCiphertext;
 }
 
+interface ReactionRow {
+  readonly id: string;
+  readonly messageId: string;
+  readonly userId: string;
+  readonly createdAt: string;
+  readonly value: CacheCiphertext;
+}
+
 interface OutboxRow {
   readonly clientMessageId: string;
   readonly conversationId: string;
@@ -153,6 +169,7 @@ class WorkspaceCacheDatabase extends Dexie {
   members!: Table<MemberRow, string>;
   conversations!: Table<ConversationRow, string>;
   messages!: Table<MessageRow, string>;
+  reactions!: Table<ReactionRow, string>;
   outbox!: Table<OutboxRow, string>;
   events!: Table<EventRow, string>;
 
@@ -172,10 +189,13 @@ class WorkspaceCacheDatabase extends Dexie {
     this.version(2).stores({
       messages: "&id,&clientMessageId,conversationId,createdAt,conversationSequence",
     });
+    this.version(3).stores({
+      reactions: "&id,messageId,userId,createdAt",
+    });
   }
 }
 
-type ProtectedStore = "workspace" | "member" | "conversation" | "message" | "outbox";
+type ProtectedStore = "workspace" | "member" | "conversation" | "message" | "reaction" | "outbox";
 
 function compareSequence(left: string, right: string): number {
   const leftValue = BigInt(left);
@@ -194,6 +214,13 @@ function compareText(left: string, right: string): number {
  */
 function compareMessages(left: Message, right: Message): number {
   return compareSequence(left.conversationSequence, right.conversationSequence);
+}
+
+function compareReactions(left: Reaction, right: Reaction): number {
+  const byMessage = compareText(left.messageId, right.messageId);
+  if (byMessage !== 0) return byMessage;
+  const byCreatedAt = compareText(left.createdAt, right.createdAt);
+  return byCreatedAt !== 0 ? byCreatedAt : compareText(left.id, right.id);
 }
 
 /**
@@ -352,6 +379,19 @@ function messageRow(message: Message, encrypted: ReadonlyMap<string, CacheCipher
   };
 }
 
+function reactionRow(
+  reaction: Reaction,
+  encrypted: ReadonlyMap<string, CacheCiphertext>,
+): ReactionRow {
+  return {
+    id: reaction.id,
+    messageId: reaction.messageId,
+    userId: reaction.userId,
+    createdAt: reaction.createdAt,
+    value: encryptedValue(encrypted, "reaction", reaction.id),
+  };
+}
+
 function mergeConversationProjection(
   incoming: ConversationSummary,
   current: ConversationSummary | null,
@@ -398,52 +438,68 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async load(): Promise<CachedWorkspaceState> {
-    const [metadata, workspaceRows, memberRows, conversationRows, messageRows, outboxRows] =
-      await Promise.all([
-        this.#database.metadata.get("state"),
-        this.#database.workspaces.toArray(),
-        this.#database.members.toArray(),
-        this.#database.conversations.toArray(),
-        this.#database.messages.toArray(),
-        this.#database.outbox.orderBy("createdAt").toArray(),
-      ]);
-    const [workspacePayloads, members, conversations, messages, operations] = await Promise.all([
-      decryptRows(
-        this.#crypto,
-        "workspace",
-        workspaceRows,
-        workspaceRows.map((row) => row.id),
-        (value) => value as WorkspacePayload,
-      ),
-      decryptRows(
-        this.#crypto,
-        "member",
-        memberRows,
-        memberRows.map((row) => row.id),
-        (value) => userSchema.parse(value),
-      ),
-      decryptRows(
-        this.#crypto,
-        "conversation",
-        conversationRows,
-        conversationRows.map((row) => row.id),
-        (value) => conversationSummarySchema.parse(value),
-      ),
-      decryptRows(
-        this.#crypto,
-        "message",
-        messageRows,
-        messageRows.map((row) => row.id),
-        (value) => messageSchema.parse(value),
-      ),
-      decryptRows(
-        this.#crypto,
-        "outbox",
-        outboxRows,
-        outboxRows.map((row) => row.clientMessageId),
-        (value) => sendMessageOperationSchema.parse(value),
-      ),
+    const [
+      metadata,
+      workspaceRows,
+      memberRows,
+      conversationRows,
+      messageRows,
+      reactionRows,
+      outboxRows,
+    ] = await Promise.all([
+      this.#database.metadata.get("state"),
+      this.#database.workspaces.toArray(),
+      this.#database.members.toArray(),
+      this.#database.conversations.toArray(),
+      this.#database.messages.toArray(),
+      this.#database.reactions.toArray(),
+      this.#database.outbox.orderBy("createdAt").toArray(),
     ]);
+    const [workspacePayloads, members, conversations, messages, reactions, operations] =
+      await Promise.all([
+        decryptRows(
+          this.#crypto,
+          "workspace",
+          workspaceRows,
+          workspaceRows.map((row) => row.id),
+          (value) => value as WorkspacePayload,
+        ),
+        decryptRows(
+          this.#crypto,
+          "member",
+          memberRows,
+          memberRows.map((row) => row.id),
+          (value) => userSchema.parse(value),
+        ),
+        decryptRows(
+          this.#crypto,
+          "conversation",
+          conversationRows,
+          conversationRows.map((row) => row.id),
+          (value) => conversationSummarySchema.parse(value),
+        ),
+        decryptRows(
+          this.#crypto,
+          "message",
+          messageRows,
+          messageRows.map((row) => row.id),
+          (value) => messageSchema.parse(value),
+        ),
+        decryptRows(
+          this.#crypto,
+          "reaction",
+          reactionRows,
+          reactionRows.map((row) => row.id),
+          (value) => reactionSchema.parse(value),
+        ),
+        decryptRows(
+          this.#crypto,
+          "outbox",
+          outboxRows,
+          outboxRows.map((row) => row.clientMessageId),
+          (value) => sendMessageOperationSchema.parse(value),
+        ),
+      ]);
     const workspace = workspacePayloads[0];
     // Dexie reads return primary-key (UUID) order, so both collections are re-sorted into the
     // order the server sent them; the renderer does not sort.
@@ -461,6 +517,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     return {
       bootstrap,
       messages: messages.sort(compareMessages),
+      reactions: reactions.sort(compareReactions),
       outbox: outboxRows.map((row, index) => ({
         operation: operations[index] as SendMessageOperation,
         createdAt: row.createdAt,
@@ -477,9 +534,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   async replaceSnapshot(
     snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
+    reactions: readonly Reaction[] = [],
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
     const encrypted = await encryptRecords(this.#crypto, [
       protectedRecord("workspace", parsed.workspace.id, {
         currentUser: parsed.currentUser,
@@ -491,6 +550,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         protectedRecord("conversation", conversation.conversation.id, conversation),
       ),
       ...parsedMessages.map((message) => protectedRecord("message", message.id, message)),
+      ...parsedReactions.map((reaction) => protectedRecord("reaction", reaction.id, reaction)),
     ]);
     await this.#database.transaction(
       "rw",
@@ -500,6 +560,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.members,
         this.#database.conversations,
         this.#database.messages,
+        this.#database.reactions,
         this.#database.events,
       ],
       async () => {
@@ -508,6 +569,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           this.#database.members.clear(),
           this.#database.conversations.clear(),
           this.#database.messages.clear(),
+          this.#database.reactions.clear(),
           this.#database.events.clear(),
         ]);
         await this.#database.workspaces.put({
@@ -531,6 +593,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         );
         await this.#database.messages.bulkPut(
           parsedMessages.map((message) => messageRow(message, encrypted)),
+        );
+        await this.#database.reactions.bulkPut(
+          parsedReactions.map((reaction) => reactionRow(reaction, encrypted)),
         );
         await this.#database.metadata.put({
           id: "state",
@@ -646,14 +711,28 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           await this.#recordEvent(parsed);
         },
       );
-    } else if (parsed.type === "reaction.added" || parsed.type === "reaction.removed") {
-      // Reaction storage and rendering land in the desktop slice. Until then, accepting and
-      // recording the event keeps this client forward-compatible and its sync cursor moving.
+    } else if (parsed.type === "reaction.added") {
+      const encrypted = await encryptRecords(this.#crypto, [
+        protectedRecord("reaction", parsed.payload.reaction.id, parsed.payload.reaction),
+      ]);
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
+        this.#database.reactions,
         this.#database.events,
         async () => {
+          await this.#database.reactions.put(reactionRow(parsed.payload.reaction, encrypted));
+          await this.#recordEvent(parsed);
+        },
+      );
+    } else if (parsed.type === "reaction.removed") {
+      await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.reactions,
+        this.#database.events,
+        async () => {
+          await this.#database.reactions.delete(parsed.payload.reaction.id);
           await this.#recordEvent(parsed);
         },
       );
@@ -753,15 +832,49 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     );
   }
 
-  async upsertHistory(messages: readonly Message[]): Promise<void> {
+  async upsertHistory(
+    messages: readonly Message[],
+    reactions?: readonly Reaction[],
+  ): Promise<void> {
     const parsed = messages.map((message) => messageSchema.parse(message));
     if (parsed.length === 0) return;
-    const encrypted = await encryptRecords(
-      this.#crypto,
-      parsed.map((message) => protectedRecord("message", message.id, message)),
+    const parsedReactions = reactions?.map((reaction) => reactionSchema.parse(reaction));
+    const encrypted = await encryptRecords(this.#crypto, [
+      ...parsed.map((message) => protectedRecord("message", message.id, message)),
+      ...(parsedReactions ?? []).map((reaction) =>
+        protectedRecord("reaction", reaction.id, reaction),
+      ),
+    ]);
+    await this.#database.transaction(
+      "rw",
+      this.#database.messages,
+      this.#database.reactions,
+      async () => {
+        await this.#database.messages.bulkPut(
+          parsed.map((message) => messageRow(message, encrypted)),
+        );
+        if (parsedReactions !== undefined) {
+          const messageIds = parsed.map((message) => message.id);
+          await this.#database.reactions.where("messageId").anyOf(messageIds).delete();
+          await this.#database.reactions.bulkPut(
+            parsedReactions.map((reaction) => reactionRow(reaction, encrypted)),
+          );
+        }
+      },
     );
-    await this.#database.messages.bulkPut(parsed.map((message) => messageRow(message, encrypted)));
     await this.#evictMessages();
+  }
+
+  async upsertReaction(reaction: Reaction): Promise<void> {
+    const parsed = reactionSchema.parse(reaction);
+    const encrypted = await encryptRecords(this.#crypto, [
+      protectedRecord("reaction", parsed.id, parsed),
+    ]);
+    await this.#database.reactions.put(reactionRow(parsed, encrypted));
+  }
+
+  async removeReaction(reactionId: string): Promise<void> {
+    await this.#database.reactions.delete(reactionId);
   }
 
   async enqueue(
@@ -809,6 +922,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.members,
         this.#database.conversations,
         this.#database.messages,
+        this.#database.reactions,
         this.#database.events,
       ],
       async () => {
@@ -818,6 +932,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           this.#database.members.clear(),
           this.#database.conversations.clear(),
           this.#database.messages.clear(),
+          this.#database.reactions.clear(),
           this.#database.events.clear(),
         ]);
       },
@@ -880,7 +995,17 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     const expired = rows.filter(
       (row, index) => index >= MAX_ACKNOWLEDGED_MESSAGES || Date.parse(row.createdAt) < cutoff,
     );
-    await this.#database.messages.bulkDelete(expired.map((row) => row.id));
+    const expiredIds = expired.map((row) => row.id);
+    if (expiredIds.length === 0) return;
+    await this.#database.transaction(
+      "rw",
+      this.#database.messages,
+      this.#database.reactions,
+      async () => {
+        await this.#database.messages.bulkDelete(expiredIds);
+        await this.#database.reactions.where("messageId").anyOf(expiredIds).delete();
+      },
+    );
   }
 }
 
@@ -888,6 +1013,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   #snapshot: WorkspaceSnapshot | null = null;
   readonly #messages = new Map<string, Message>();
+  readonly #reactions = new Map<string, Reaction>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
   #syncCursor: string | null = null;
@@ -905,6 +1031,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // messages" cannot append history below newer messages and so `messages.at(-1)` is really
       // the newest message, exactly like PersistentWorkspaceCache.
       messages: [...this.#messages.values()].sort(compareMessages),
+      reactions: [...this.#reactions.values()].sort(compareReactions),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       ),
@@ -916,11 +1043,17 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   async replaceSnapshot(
     snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
+    reactions: readonly Reaction[] = [],
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
     this.#snapshot = parsed;
     this.#messages.clear();
     for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
+    this.#reactions.clear();
+    for (const reaction of reactions) {
+      const parsedReaction = reactionSchema.parse(reaction);
+      this.#reactions.set(parsedReaction.id, parsedReaction);
+    }
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
   }
@@ -986,8 +1119,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     } else if (parsed.type === "channel.membership_changed") {
       // WorkspaceRuntime replaces the snapshot because the current conversation may have become
       // invisible. Advancing the cursor above keeps this event idempotent until that refresh.
-    } else if (parsed.type === "reaction.added" || parsed.type === "reaction.removed") {
-      // The backend reaction slice is intentionally safe for this cache version to ignore.
+    } else if (parsed.type === "reaction.added") {
+      this.#reactions.set(parsed.payload.reaction.id, parsed.payload.reaction);
+    } else if (parsed.type === "reaction.removed") {
+      this.#reactions.delete(parsed.payload.reaction.id);
     } else if (this.#snapshot !== null && parsed.type === "member.updated") {
       const members = new Map(this.#snapshot.members.map((member) => [member.id, member]));
       members.set(parsed.payload.member.id, parsed.payload.member);
@@ -1036,11 +1171,33 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     await this.advanceCursor(syncCursor);
   }
 
-  async upsertHistory(messages: readonly Message[]): Promise<void> {
+  async upsertHistory(
+    messages: readonly Message[],
+    reactions?: readonly Reaction[],
+  ): Promise<void> {
     for (const message of messages) {
       const parsed = messageSchema.parse(message);
       this.#messages.set(parsed.id, parsed);
     }
+    if (reactions !== undefined) {
+      const messageIds = new Set(messages.map((message) => message.id));
+      for (const [id, reaction] of this.#reactions) {
+        if (messageIds.has(reaction.messageId)) this.#reactions.delete(id);
+      }
+      for (const reaction of reactions) {
+        const parsed = reactionSchema.parse(reaction);
+        this.#reactions.set(parsed.id, parsed);
+      }
+    }
+  }
+
+  async upsertReaction(reaction: Reaction): Promise<void> {
+    const parsed = reactionSchema.parse(reaction);
+    this.#reactions.set(parsed.id, parsed);
+  }
+
+  async removeReaction(reactionId: string): Promise<void> {
+    this.#reactions.delete(reactionId);
   }
 
   async enqueue(
@@ -1080,6 +1237,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   async clearServerStatePreservingOutbox(): Promise<void> {
     this.#snapshot = null;
     this.#messages.clear();
+    this.#reactions.clear();
     this.#events.clear();
     this.#syncCursor = null;
     this.#lastSyncedAt = null;

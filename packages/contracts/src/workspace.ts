@@ -12,6 +12,7 @@ import {
   conversationMembershipRoleSchema,
   conversationSchema,
   messageSchema,
+  reactionEmojiSchema,
   reactionSchema,
   readCursorSchema,
   sendMessageRequestSchema,
@@ -225,7 +226,29 @@ export const listMessageReactionsRequestSchema = z
 
 export const listMessageReactionsResponseSchema = z
   .object({
-    reactions: z.array(reactionSchema).max(MESSAGE_HISTORY_MAX_LIMIT * REACTIONS_PER_MESSAGE_MAX),
+    reactions: z
+      .array(reactionSchema)
+      .max(MESSAGE_HISTORY_MAX_LIMIT * REACTIONS_PER_MESSAGE_MAX)
+      .refine(
+        (reactions) => new Set(reactions.map((reaction) => reaction.id)).size === reactions.length,
+        "Reaction IDs must be unique",
+      )
+      .refine(
+        (reactions) =>
+          new Set(
+            reactions.map(
+              (reaction) => `${reaction.messageId}:${reaction.userId}:${reaction.emoji}`,
+            ),
+          ).size === reactions.length,
+        "Member reactions must be unique per message and emoji",
+      ),
+  })
+  .strict();
+
+export const messageReactionTargetSchema = z
+  .object({
+    messageId: entityIdSchema,
+    emoji: reactionEmojiSchema,
   })
   .strict();
 
@@ -466,6 +489,7 @@ export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;
 export type ListMessageReactionsRequest = z.infer<typeof listMessageReactionsRequestSchema>;
 export type ListMessageReactionsResponse = z.infer<typeof listMessageReactionsResponseSchema>;
+export type MessageReactionTarget = z.infer<typeof messageReactionTargetSchema>;
 export type AddReactionResponse = z.infer<typeof addReactionResponseSchema>;
 export type RemoveReactionResponse = z.infer<typeof removeReactionResponseSchema>;
 export type MessageSearchQuery = z.infer<typeof messageSearchQuerySchema>;

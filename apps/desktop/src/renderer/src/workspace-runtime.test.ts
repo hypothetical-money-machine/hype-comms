@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type {
   AdvanceReadCursorResponse,
+  AddReactionResponse,
   CacheCryptoStatus,
   CacheDecryptBatchResponse,
   CacheEncryptBatchResponse,
@@ -14,12 +15,16 @@ import type {
   CreateChannelRequest,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   Message,
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
   ProductRealtimeEvent,
+  Reaction,
+  ReactionEmoji,
+  RemoveReactionResponse,
   RealtimeConnectionState,
   SendAttemptResult,
   SendMessageOperation,
@@ -52,6 +57,9 @@ const PEER_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000b";
 const CONNECTED_EVENT_ID = "20000000-0000-4000-8000-00000000000c";
 const CONNECTION_ID = "20000000-0000-4000-8000-00000000000d";
 const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
+const REACTION_ID = "20000000-0000-4000-8000-000000000011";
+const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
+const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -148,6 +156,34 @@ function message(
 
 const peerMessage = message(PEER_MESSAGE_ID, PEER_ID, "1", PEER_CLIENT_MESSAGE_ID);
 const ownMessage = message(OWN_MESSAGE_ID, USER_ID, "2", OWN_CLIENT_MESSAGE_ID);
+const ownReaction: Reaction = {
+  id: REACTION_ID,
+  messageId: OWN_MESSAGE_ID,
+  userId: USER_ID,
+  emoji: "🎉",
+  createdAt: NOW,
+};
+
+const reactionAddedEvent: WorkspaceEvent = {
+  version: 1,
+  id: REACTION_EVENT_ID,
+  type: "reaction.added",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: CONVERSATION_ID,
+  workspaceSequence: "11",
+  conversationSequence: "2",
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: { reaction: ownReaction },
+};
+
+const reactionRemovedEvent: WorkspaceEvent = {
+  ...reactionAddedEvent,
+  id: REACTION_REMOVED_EVENT_ID,
+  type: "reaction.removed",
+  workspaceSequence: "12",
+};
 
 /** A peer's event whose workspace sequence is below the sequence a send response reports. */
 const peerEvent: WorkspaceEvent = {
@@ -208,6 +244,7 @@ type ReplaceSnapshotArgs = Parameters<WorkspaceCache["replaceSnapshot"]>;
 class FakeWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   loadCount = 0;
+  reactionUpsertFailures = 0;
   readonly outboxMutations: {
     readonly type: "enqueue" | "remove";
     readonly clientMessageId: string;
@@ -215,6 +252,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   #snapshot: CachedWorkspaceState["bootstrap"] = null;
   #syncCursor: string | null = null;
   readonly #messages = new Map<string, Message>();
+  readonly #reactions = new Map<string, Reaction>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
   upsertFailure: Error | null = null;
@@ -228,6 +266,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
+      reactions: [...this.#reactions.values()],
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       ),
@@ -237,10 +276,12 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
-    const [snapshot, messages] = args;
+    const [snapshot, messages, reactions = []] = args;
     this.#snapshot = snapshot;
     this.#messages.clear();
     for (const item of messages) this.#messages.set(item.id, item);
+    this.#reactions.clear();
+    for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     this.#syncCursor = snapshot.syncCursor;
   }
 
@@ -268,6 +309,10 @@ class FakeWorkspaceCache implements WorkspaceCache {
     if (event.type === "message.created") {
       this.#messages.set(event.payload.message.id, event.payload.message);
       this.#outbox.delete(event.payload.message.clientMessageId);
+    } else if (event.type === "reaction.added") {
+      this.#reactions.set(event.payload.reaction.id, event.payload.reaction);
+    } else if (event.type === "reaction.removed") {
+      this.#reactions.delete(event.payload.reaction.id);
     }
     return true;
   }
@@ -278,8 +323,30 @@ class FakeWorkspaceCache implements WorkspaceCache {
     }
   }
 
-  async upsertHistory(messages: readonly Message[]): Promise<void> {
+  async upsertHistory(
+    messages: readonly Message[],
+    reactions?: readonly Reaction[],
+  ): Promise<void> {
     for (const item of messages) this.#messages.set(item.id, item);
+    if (reactions !== undefined) {
+      const messageIds = new Set(messages.map((message) => message.id));
+      for (const [id, reaction] of this.#reactions) {
+        if (messageIds.has(reaction.messageId)) this.#reactions.delete(id);
+      }
+      for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
+    }
+  }
+
+  async upsertReaction(reaction: Reaction): Promise<void> {
+    if (this.reactionUpsertFailures > 0) {
+      this.reactionUpsertFailures -= 1;
+      throw new Error("The encrypted reaction cache is unavailable");
+    }
+    this.#reactions.set(reaction.id, reaction);
+  }
+
+  async removeReaction(reactionId: string): Promise<void> {
+    this.#reactions.delete(reactionId);
   }
 
   async upsertAcknowledgedMessage(item: Message, syncCursor: string): Promise<void> {
@@ -316,6 +383,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   async clearServerStatePreservingOutbox(): Promise<void> {
     this.#snapshot = null;
     this.#messages.clear();
+    this.#reactions.clear();
     this.#events.clear();
     this.#syncCursor = null;
   }
@@ -344,6 +412,15 @@ class FakeDesktopApi implements DesktopApi {
   connectedOnStart = false;
   readonly conversationPages = new Map<string, ListConversationsResponse>();
   readonly histories = new Map<string, MessageHistoryResponse>();
+  readonly reactions: Reaction[] = [];
+  readonly reactionResults: (
+    ListMessageReactionsResponse | Promise<ListMessageReactionsResponse>
+  )[] = [];
+  readonly reactionRequests: string[][] = [];
+  readonly addReactionResults: AddReactionResponse[] = [];
+  readonly removeReactionResults: RemoveReactionResponse[] = [];
+  readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
+  readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly syncResults: SyncAttemptResult[] = [];
   readonly sendResults: SendAttemptResult[] = [];
   readonly channelResults: (
@@ -476,6 +553,32 @@ class FakeDesktopApi implements DesktopApi {
     return this.histories.get(input.conversationId) ?? { messages: [], nextCursor: null };
   }
 
+  async listMessageReactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
+    this.reactionRequests.push([...messageIds]);
+    const queued = this.reactionResults.shift();
+    if (queued !== undefined) return queued;
+    return {
+      reactions: this.reactions.filter((reaction) => messageIds.includes(reaction.messageId)),
+    };
+  }
+
+  async addMessageReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
+    this.addedReactions.push({ messageId, emoji });
+    const result = this.addReactionResults.shift();
+    if (result === undefined) throw new Error("The test queued no add-reaction result");
+    return result;
+  }
+
+  async removeMessageReaction(
+    messageId: string,
+    emoji: ReactionEmoji,
+  ): Promise<RemoveReactionResponse> {
+    this.removedReactions.push({ messageId, emoji });
+    const result = this.removeReactionResults.shift();
+    if (result === undefined) throw new Error("The test queued no remove-reaction result");
+    return result;
+  }
+
   async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
     this.searchRequests.push(input);
     const response = this.searchResults.shift();
@@ -601,6 +704,17 @@ async function drain(): Promise<void> {
   for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
 }
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function runtimeWith(api: FakeDesktopApi, cache: WorkspaceCache): WorkspaceRuntime {
   return new WorkspaceRuntime(api, { createCache: () => cache });
 }
@@ -640,6 +754,84 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("hydrates reactions with initial history and restores them from the cache", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.reactions.push(ownReaction);
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.reactionRequests).toEqual([[OWN_MESSAGE_ID]]);
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect((await cache.load()).reactions).toEqual([ownReaction]);
+  });
+
+  it("projects idempotent reaction mutations and their realtime echoes", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.addReactionResults.push({ reaction: ownReaction, syncCursor: "11" });
+    api.removeReactionResults.push({ removed: true, syncCursor: "12" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.addReaction(OWN_MESSAGE_ID, "🎉");
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect(api.addedReactions).toEqual([{ messageId: OWN_MESSAGE_ID, emoji: "🎉" }]);
+
+    api.emitWorkspaceEvent(reactionAddedEvent);
+    await settle(() => api.acknowledged.includes("11"), "reaction-added acknowledgement");
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+
+    await runtime.removeReaction(OWN_MESSAGE_ID, "🎉");
+    expect(runtime.state.reactions).toEqual([]);
+    expect(api.removedReactions).toEqual([{ messageId: OWN_MESSAGE_ID, emoji: "🎉" }]);
+
+    api.emitWorkspaceEvent(reactionRemovedEvent);
+    await settle(() => api.acknowledged.includes("12"), "reaction-removed acknowledgement");
+    expect(runtime.state.reactions).toEqual([]);
+    expect((await cache.load()).reactions).toEqual([]);
+  });
+
+  it("keeps realtime events newer than an in-flight search reaction hydration", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const hydration = deferred<ListMessageReactionsResponse>();
+    api.reactionResults.push(hydration.promise);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const opening = runtime.openSearchResult({ message: ownMessage });
+    await settle(() => api.reactionRequests.length === 1, "search reaction hydration");
+    api.emitWorkspaceEvent(reactionAddedEvent);
+    hydration.resolve({ reactions: [] });
+
+    await opening;
+    await settle(() => api.acknowledged.includes("11"), "queued reaction event");
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect((await cache.load()).reactions).toEqual([ownReaction]);
+  });
+
+  it("keeps the realtime queue usable after a reaction projection fails", async () => {
+    const cache = new FakeWorkspaceCache();
+    cache.reactionUpsertFailures = 1;
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.addReactionResults.push({ reaction: ownReaction, syncCursor: "11" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await expect(runtime.addReaction(OWN_MESSAGE_ID, "🎉")).rejects.toThrow(
+      "encrypted reaction cache",
+    );
+    api.emitWorkspaceEvent(reactionAddedEvent);
+
+    await settle(() => api.acknowledged.includes("11"), "reaction after cache failure");
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect((await cache.load()).reactions).toEqual([ownReaction]);
+  });
+
   it("keeps an abandoned failed-message edit recoverable across a restart", async () => {
     const cache = new FakeWorkspaceCache();
     await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Authored while offline");

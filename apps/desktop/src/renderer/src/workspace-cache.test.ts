@@ -9,6 +9,7 @@ import {
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
   type Message,
+  type Reaction,
   type SendMessageOperation,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
@@ -112,6 +113,14 @@ const message: Message = {
   updatedAt: NOW,
 };
 
+const reaction: Reaction = {
+  id: "10000000-0000-4000-8000-000000000006",
+  messageId: MESSAGE_ID,
+  userId: USER_ID,
+  emoji: "🎉",
+  createdAt: NOW,
+};
+
 class FakeCrypto {
   async encryptCacheRecords(input: CacheEncryptBatchRequest) {
     return cacheEncryptBatchResponseSchema.parse({
@@ -124,7 +133,7 @@ class FakeCrypto {
           keyVersion: 1,
           schemaVersion: 1,
           nonce: "AAAAAAAAAAAAAAAA",
-          ciphertext: btoa(item.plaintext)
+          ciphertext: btoa(String.fromCharCode(...new TextEncoder().encode(item.plaintext)))
             .replaceAll("+", "-")
             .replaceAll("/", "_")
             .replaceAll("=", ""),
@@ -139,11 +148,16 @@ class FakeCrypto {
         store: item.store,
         recordId: item.recordId,
         schemaVersion: 1,
-        plaintext: atob(
-          item.value.ciphertext
-            .replaceAll("-", "+")
-            .replaceAll("_", "/")
-            .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+        plaintext: new TextDecoder().decode(
+          Uint8Array.from(
+            atob(
+              item.value.ciphertext
+                .replaceAll("-", "+")
+                .replaceAll("_", "/")
+                .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+            ),
+            (character) => character.charCodeAt(0),
+          ),
         ),
       })),
     });
@@ -169,6 +183,23 @@ describe("PersistentWorkspaceCache", () => {
     expect(recovered.outbox).toEqual([]);
     expect(recovered.messages).toEqual([message]);
     expect(recovered.syncCursor).toBe("1");
+  });
+
+  it("restores encrypted reactions without exposing the emoji in IndexedDB indexes", async () => {
+    const crypto = new FakeCrypto();
+    const first = new PersistentWorkspaceCache({ crypto, scope });
+    await first.replaceSnapshot(bootstrap, [message], [reaction]);
+
+    const restarted = new PersistentWorkspaceCache({ crypto, scope });
+    expect((await restarted.load()).reactions).toEqual([reaction]);
+
+    const name = `hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`;
+    const database = new Dexie(name);
+    await database.open();
+    const rows = await database.table("reactions").toArray();
+    database.close();
+    expect(JSON.stringify(rows)).not.toContain(reaction.emoji);
+    expect(rows[0]).toMatchObject({ id: reaction.id, messageId: reaction.messageId });
   });
 
   it("applies duplicate events once and preserves queued sends during snapshot reset", async () => {
@@ -225,7 +256,7 @@ describe("PersistentWorkspaceCache", () => {
     expect(reopenedTheirs.outbox[0]?.operation.message.body).toBe("Survive restart");
   });
 
-  it("upgrades a version 1 database in place and indexes the message sequence", async () => {
+  it("upgrades a version 1 database in place with message and reaction indexes", async () => {
     // A scope of its own, so no cache opened by an earlier test can still hold this database.
     const upgradeScope = {
       userId: "10000000-0000-4000-8000-000000000007",
@@ -254,7 +285,9 @@ describe("PersistentWorkspaceCache", () => {
     const upgraded = new Dexie(name);
     await upgraded.open();
     const indexes = upgraded.table("messages").schema.indexes.map((index) => index.name);
+    const reactionIndexes = upgraded.table("reactions").schema.indexes.map((index) => index.name);
     upgraded.close();
     expect(indexes).toContain("conversationSequence");
+    expect(reactionIndexes).toContain("messageId");
   });
 });

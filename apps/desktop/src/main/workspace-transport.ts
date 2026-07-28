@@ -1,5 +1,6 @@
 import {
   REACTION_EVENTS_CAPABILITY,
+  addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
@@ -7,15 +8,18 @@ import {
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
+  listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
   messageSearchResponseSchema,
   realtimeTicketResponseSchema,
+  removeReactionResponseSchema,
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
   workspaceBootstrapResponseSchema,
   type AdvanceReadCursorResponse,
+  type AddReactionResponse,
   type ArchiveChannelRequest,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
@@ -25,10 +29,13 @@ import {
   type ListConversationsQuery,
   type ListConversationsResponse,
   type ListMembersResponse,
+  type ListMessageReactionsResponse,
   type MessageHistoryResponse,
   type MessageSearchQuery,
   type MessageSearchResponse,
   type RealtimeTicketResponse,
+  type ReactionEmoji,
+  type RemoveReactionResponse,
   type SendAttemptResult,
   type SendMessageOperation,
   type SyncAttemptResult,
@@ -225,6 +232,40 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(input.limit ?? 50));
     const response = await this.session.fetch(url.href, { method: "GET" });
     return messageHistoryResponseSchema.parse(await this.#payload(response));
+  }
+
+  async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/reactions/query").href, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageIds }),
+    });
+    const parsed = listMessageReactionsResponseSchema.parse(await this.#payload(response));
+    const requested = new Set(messageIds);
+    if (parsed.reactions.some((reaction) => !requested.has(reaction.messageId))) {
+      throw new Error("Reaction response included an unrequested message");
+    }
+    return parsed;
+  }
+
+  async addReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+      ).href,
+      { method: "PUT" },
+    );
+    return addReactionResponseSchema.parse(await this.#payload(response));
+  }
+
+  async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<RemoveReactionResponse> {
+    const response = await this.session.fetch(
+      this.#url(
+        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+      ).href,
+      { method: "DELETE" },
+    );
+    return removeReactionResponseSchema.parse(await this.#payload(response));
   }
 
   async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {

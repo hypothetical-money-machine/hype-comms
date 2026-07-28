@@ -11,6 +11,8 @@ import {
   type MessageSearchResponse,
   type MessageSearchResult,
   type ProductRealtimeEvent,
+  type Reaction,
+  type ReactionEmoji,
   type SyncAttemptResult,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
@@ -34,6 +36,7 @@ export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_onl
 export interface WorkspaceRuntimeState {
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
+  readonly reactions: readonly Reaction[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
@@ -80,6 +83,7 @@ const RESYNC_CHAIN_RESET_MS = 60_000;
 const INITIAL_STATE: WorkspaceRuntimeState = {
   bootstrap: null,
   messages: [],
+  reactions: [],
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
@@ -131,6 +135,28 @@ function mergeMessages(
   for (const message of incoming) byId.set(message.id, message);
   return [...byId.values()].sort((left, right) =>
     compareSequence(left.conversationSequence, right.conversationSequence),
+  );
+}
+
+function mergeReactions(
+  reactions: readonly Reaction[],
+  incoming: readonly Reaction[],
+): readonly Reaction[] {
+  if (incoming.length === 0) return reactions;
+  const byId = new Map(reactions.map((reaction) => [reaction.id, reaction]));
+  for (const reaction of incoming) byId.set(reaction.id, reaction);
+  return [...byId.values()];
+}
+
+function replaceMessageReactions(
+  reactions: readonly Reaction[],
+  messageIds: readonly string[],
+  incoming: readonly Reaction[],
+): readonly Reaction[] {
+  const replaced = new Set(messageIds);
+  return mergeReactions(
+    reactions.filter((reaction) => !replaced.has(reaction.messageId)),
+    incoming,
   );
 }
 
@@ -281,6 +307,19 @@ export class WorkspaceRuntime {
     for (const listener of this.#listeners) listener(this.#state);
   }
 
+  /**
+   * Runs renderer-initiated cache projections in the same order as realtime events. The caller
+   * still observes a failure, while the shared queue remains usable for the next event or action.
+   */
+  #serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#eventQueue.then(operation);
+    this.#eventQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
     const generation = ++this.#generation;
     this.#clearRetryTimer();
@@ -323,6 +362,7 @@ export class WorkspaceRuntime {
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
+        reactions: cached.reactions,
         outbox: cached.outbox,
         selectedConversationId:
           this.#state.selectedConversationId ??
@@ -481,22 +521,42 @@ export class WorkspaceRuntime {
   async openSearchResult(result: MessageSearchResult): Promise<void> {
     const cache = this.#cache;
     const snapshot = this.#state.bootstrap;
+    const generation = this.#generation;
     if (cache === null || snapshot === null) throw new Error("Workspace is still loading");
     const conversationId = result.message.conversationId;
     if (!snapshot.conversations.some((summary) => summary.conversation.id === conversationId)) {
       throw new Error("This conversation is no longer available");
     }
-    await cache.upsertHistory([result.message]);
-    const messages = mergeMessages(this.#state.messages, [result.message]);
-    this.#setState({
-      messages,
-      selectedConversationId: conversationId,
-      focusedMessageId: result.message.id,
+    await this.#serialize(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      const currentSnapshot = this.#state.bootstrap;
+      if (
+        currentSnapshot === null ||
+        !currentSnapshot.conversations.some((summary) => summary.conversation.id === conversationId)
+      ) {
+        throw new Error("This conversation is no longer available");
+      }
+      // Keep the query inside the event queue. Events already received are applied first, while
+      // events committed during the query queue behind this projection and therefore win after it.
+      const hydrated = await this.#client.listMessageReactions([result.message.id]);
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      await cache.upsertHistory([result.message], hydrated.reactions);
+      const messages = mergeMessages(this.#state.messages, [result.message]);
+      this.#setState({
+        messages,
+        reactions: replaceMessageReactions(
+          this.#state.reactions,
+          [result.message.id],
+          hydrated.reactions,
+        ),
+        selectedConversationId: conversationId,
+        focusedMessageId: result.message.id,
+      });
+      const latest = messages.filter((message) => message.conversationId === conversationId).at(-1);
+      if (latest !== undefined) {
+        void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
+      }
     });
-    const latest = messages.filter((message) => message.conversationId === conversationId).at(-1);
-    if (latest !== undefined) {
-      void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
-    }
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
@@ -512,6 +572,60 @@ export class WorkspaceRuntime {
   async discardMessage(clientMessageId: string): Promise<void> {
     await this.#cache?.removeOutbox(clientMessageId);
     this.#setState({ outbox: this.#withoutOutbox([clientMessageId]) });
+  }
+
+  async addReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
+    const generation = this.#generation;
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
+    const result = await this.#client.addMessageReaction(messageId, emoji);
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    await this.#serialize(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
+        return;
+      }
+      await cache.upsertReaction(result.reaction);
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#setState({ reactions: mergeReactions(this.#state.reactions, [result.reaction]) });
+    });
+  }
+
+  async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
+    const generation = this.#generation;
+    const cache = this.#cache;
+    const currentUserId = this.#state.bootstrap?.currentUser.user.id;
+    if (cache === null || currentUserId === undefined) {
+      throw new Error("Workspace is still loading");
+    }
+    const existing = this.#state.reactions.find(
+      (reaction) =>
+        reaction.messageId === messageId &&
+        reaction.userId === currentUserId &&
+        reaction.emoji === emoji,
+    );
+    const result = await this.#client.removeMessageReaction(messageId, emoji);
+    if (!result.removed || generation !== this.#generation || cache !== this.#cache) return;
+    await this.#serialize(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
+        return;
+      }
+      if (existing !== undefined) await cache.removeReaction(existing.id);
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#setState({
+        reactions: this.#state.reactions.filter(
+          (reaction) =>
+            !(
+              reaction.messageId === messageId &&
+              reaction.userId === currentUserId &&
+              reaction.emoji === emoji
+            ),
+        ),
+      });
+    });
   }
 
   async createChannel(name: string, slug: string, access: ChannelAccess): Promise<void> {
@@ -599,6 +713,7 @@ export class WorkspaceRuntime {
 
   async loadOlder(conversationId: string): Promise<void> {
     const cache = this.#cache;
+    const generation = this.#generation;
     const before = this.#historyCursors.get(conversationId);
     if (cache === null || before === null) return;
     const history = await this.#client.getConversationMessages({
@@ -606,9 +721,21 @@ export class WorkspaceRuntime {
       ...(before === undefined ? {} : { before }),
       limit: 50,
     });
-    this.#historyCursors.set(conversationId, history.nextCursor);
-    await cache.upsertHistory(history.messages);
-    this.#setState({ messages: mergeMessages(this.#state.messages, history.messages) });
+    await this.#serialize(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      const messageIds = history.messages.map((message) => message.id);
+      const hydrated =
+        messageIds.length === 0
+          ? { reactions: [] }
+          : await this.#client.listMessageReactions(messageIds);
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#historyCursors.set(conversationId, history.nextCursor);
+      await cache.upsertHistory(history.messages, hydrated.reactions);
+      this.#setState({
+        messages: mergeMessages(this.#state.messages, history.messages),
+        reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+      });
+    });
   }
 
   hasOlder(conversationId: string): boolean {
@@ -677,6 +804,7 @@ export class WorkspaceRuntime {
     if (cache === null) return;
     const snapshot = await this.#fetchSnapshot();
     const messages: Message[] = [];
+    const reactions: Reaction[] = [];
     this.#historyCursors.clear();
     for (const summary of snapshot.conversations) {
       const history = await this.#client.getConversationMessages({
@@ -685,9 +813,15 @@ export class WorkspaceRuntime {
       });
       this.#historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
+      if (history.messages.length > 0) {
+        const hydrated = await this.#client.listMessageReactions(
+          history.messages.map((message) => message.id),
+        );
+        reactions.push(...hydrated.reactions);
+      }
     }
     if (generation !== this.#generation) return;
-    await cache.replaceSnapshot(snapshot, messages);
+    await cache.replaceSnapshot(snapshot, messages, reactions);
     const loaded = await cache.load();
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
@@ -706,6 +840,7 @@ export class WorkspaceRuntime {
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
+      reactions: loaded.reactions,
       outbox: loaded.outbox,
       selectedConversationId,
       focusedMessageId,
@@ -901,7 +1036,20 @@ export class WorkspaceRuntime {
       });
       return;
     }
-    if (event.type === "reaction.added" || event.type === "reaction.removed") return;
+    if (event.type === "reaction.added") {
+      this.#setState({
+        reactions: mergeReactions(this.#state.reactions, [event.payload.reaction]),
+      });
+      return;
+    }
+    if (event.type === "reaction.removed") {
+      this.#setState({
+        reactions: this.#state.reactions.filter(
+          (reaction) => reaction.id !== event.payload.reaction.id,
+        ),
+      });
+      return;
+    }
     if (snapshot === null) return;
     if (event.type === "member.updated") {
       const member = event.payload.member;
@@ -1042,6 +1190,7 @@ export class WorkspaceRuntime {
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
+      reactions: loaded.reactions,
       outbox: loaded.outbox,
     });
   }

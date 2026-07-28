@@ -10,6 +10,7 @@ const NOW = "2026-07-24T12:00:00.000Z";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
+const REACTION_ID = "10000000-0000-4000-8000-000000000012";
 
 const CURRENT_USER = {
   user: {
@@ -113,6 +114,14 @@ const SEARCH_RESPONSE = {
     },
   ],
   nextCursor: "next-page",
+} as const;
+
+const REACTION = {
+  id: REACTION_ID,
+  messageId: CLIENT_MESSAGE_ID,
+  userId: CURRENT_USER.user.id,
+  emoji: "👩🏽‍💻",
+  createdAt: NOW,
 } as const;
 
 class MemoryCookies implements SessionCookieStore {
@@ -411,6 +420,61 @@ describe("WorkspaceTransport conversations", () => {
       "GET https://chat.example/v1/conversations?after=cursor-2&limit=10",
       "GET https://chat.example/v1/conversations?limit=50",
     ]);
+  });
+});
+
+describe("WorkspaceTransport reactions", () => {
+  it("hydrates and mutates encoded Unicode reactions through the scoped routes", async () => {
+    const requests: { method: string; url: string; body: string | null }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+      });
+      if (init.method === "POST") return jsonResponse({ reactions: [REACTION] });
+      if (init.method === "PUT") return jsonResponse({ reaction: REACTION, syncCursor: "43" });
+      return jsonResponse({ removed: true, syncCursor: "44" });
+    });
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).resolves.toEqual({
+      reactions: [REACTION],
+    });
+    await expect(transport.addReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
+      reaction: REACTION,
+      syncCursor: "43",
+    });
+    await expect(transport.removeReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
+      removed: true,
+      syncCursor: "44",
+    });
+
+    const reactionUrl = `https://chat.example/v1/messages/${CLIENT_MESSAGE_ID}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "https://chat.example/v1/reactions/query",
+        body: JSON.stringify({ messageIds: [CLIENT_MESSAGE_ID] }),
+      },
+      { method: "PUT", url: reactionUrl, body: null },
+      { method: "DELETE", url: reactionUrl, body: null },
+    ]);
+  });
+
+  it("rejects malformed successful reaction responses", async () => {
+    const transport = transportAnswering(() => jsonResponse({ reactions: ["not-a-reaction"] }));
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).rejects.toThrow();
+  });
+
+  it("rejects reactions for a message outside the requested batch", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({
+        reactions: [{ ...REACTION, messageId: "10000000-0000-4000-8000-000000000099" }],
+      }),
+    );
+
+    await expect(transport.reactions([CLIENT_MESSAGE_ID])).rejects.toThrow("unrequested message");
   });
 });
 
