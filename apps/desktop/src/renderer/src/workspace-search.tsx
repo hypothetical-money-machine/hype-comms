@@ -79,8 +79,10 @@ export function WorkspaceSearch({
   return (
     <>
       <button className="workspace-search-button" type="button" onClick={() => setOpen(true)}>
-        <span aria-hidden="true">⌕</span>
-        Search messages
+        <span>
+          <span aria-hidden="true">⌕</span>
+          Search messages
+        </span>
       </button>
       {open &&
         createPortal(
