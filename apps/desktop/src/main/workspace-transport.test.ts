@@ -421,6 +421,48 @@ describe("WorkspaceTransport conversations", () => {
       "GET https://chat.example/v1/conversations?limit=50",
     ]);
   });
+
+  it("retries an ambiguous channel create with the same idempotency key", async () => {
+    const requests: { readonly key: string | null; readonly body: string | null }[] = [];
+    const { transport } = createTransport(async (_url, init) => {
+      requests.push({
+        key: new Headers(init.headers).get("idempotency-key"),
+        body: typeof init.body === "string" ? init.body : null,
+      });
+      if (requests.length === 1) throw new TypeError("connection reset after commit");
+      return jsonResponse({ conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" });
+    });
+
+    await expect(
+      transport.createChannel({
+        name: "Alpha Team",
+        slug: "alpha-team",
+        topic: null,
+        access: "workspace",
+        idempotencyKey: CLIENT_MESSAGE_ID,
+      }),
+    ).resolves.toMatchObject({ syncCursor: "43" });
+    expect(requests).toEqual([
+      {
+        key: CLIENT_MESSAGE_ID,
+        body: JSON.stringify({
+          name: "Alpha Team",
+          slug: "alpha-team",
+          topic: null,
+          access: "workspace",
+        }),
+      },
+      {
+        key: CLIENT_MESSAGE_ID,
+        body: JSON.stringify({
+          name: "Alpha Team",
+          slug: "alpha-team",
+          topic: null,
+          access: "workspace",
+        }),
+      },
+    ]);
+  });
 });
 
 describe("WorkspaceTransport reactions", () => {

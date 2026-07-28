@@ -13,7 +13,7 @@ import {
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
   conversationMutationResponseSchema,
-  createChannelRequestSchema,
+  createChannelOperationSchema,
   directConversationRequestSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
@@ -41,7 +41,7 @@ import {
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
   type CacheScope,
-  type CreateChannelRequest,
+  type CreateChannelOperation,
   type DirectConversationRequest,
   type ListConversationsQuery,
   type MessageSearchQuery,
@@ -202,11 +202,11 @@ const desktopApi: DesktopApi = Object.freeze({
         sendMessageOperationSchema.parse(input),
       ),
     ),
-  createChannel: async (input: CreateChannelRequest) =>
+  createChannel: async (input: CreateChannelOperation) =>
     conversationMutationResponseSchema.parse(
       await ipcRenderer.invoke(
         DESKTOP_CHANNELS.workspaceChannelCreate,
-        createChannelRequestSchema.parse(input),
+        createChannelOperationSchema.parse(input),
       ),
     ),
   archiveChannel: async (conversationId: string) =>

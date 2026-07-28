@@ -11,7 +11,7 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ConversationMutationResponse,
-  CreateChannelRequest,
+  CreateChannelOperation,
   DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
@@ -92,7 +92,7 @@ export interface DesktopApi extends SessionTransport {
   ) => Promise<RemoveReactionResponse>;
   readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
   readonly sendConversationMessage: (input: SendMessageOperation) => Promise<SendAttemptResult>;
-  readonly createChannel: (input: CreateChannelRequest) => Promise<ConversationMutationResponse>;
+  readonly createChannel: (input: CreateChannelOperation) => Promise<ConversationMutationResponse>;
   readonly archiveChannel: (conversationId: string) => Promise<ConversationMutationResponse>;
   readonly getChannelMembers: (conversationId: string) => Promise<ChannelMembersResponse>;
   readonly upsertChannelMember: (

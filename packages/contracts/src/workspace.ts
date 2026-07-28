@@ -136,6 +136,10 @@ export const createChannelRequestSchema = z
   })
   .strict();
 
+export const createChannelOperationSchema = createChannelRequestSchema
+  .extend({ idempotencyKey: idempotencyKeySchema })
+  .strict();
+
 export const channelMemberSchema = z
   .object({
     user: userSchema,
@@ -474,6 +478,7 @@ export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
+export type CreateChannelOperation = z.infer<typeof createChannelOperationSchema>;
 export type ChannelMember = z.infer<typeof channelMemberSchema>;
 export type ChannelMembersResponse = z.infer<typeof channelMembersResponseSchema>;
 export type UpsertChannelMemberRequest = z.infer<typeof upsertChannelMemberRequestSchema>;

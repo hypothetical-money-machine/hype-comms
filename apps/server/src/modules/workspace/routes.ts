@@ -6,6 +6,7 @@ import {
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
+  idempotencyKeySchema,
   listConversationsQuerySchema,
   listMessageReactionsRequestSchema,
   messageHistoryQuerySchema,
@@ -25,6 +26,13 @@ import type { WorkspaceRepository } from "./repository.js";
 interface WorkspaceRoutesOptions {
   readonly identityService: IdentityService;
   readonly repository: WorkspaceRepository;
+}
+
+function optionalIdempotencyKey(value: string | string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const parsed = idempotencyKeySchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid Idempotency-Key");
+  return parsed.data;
 }
 
 function parameters(value: unknown): { readonly id: string } {
@@ -94,7 +102,15 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     const result = createChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
-    return reply.code(201).send(await repository.createChannel(identity, result.data));
+    return reply
+      .code(201)
+      .send(
+        await repository.createChannel(
+          identity,
+          result.data,
+          optionalIdempotencyKey(request.headers["idempotency-key"]),
+        ),
+      );
   });
 
   app.patch("/channels/:id", async (request) => {

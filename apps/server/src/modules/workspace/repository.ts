@@ -61,6 +61,11 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { ApiError } from "../../errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
+import {
+  fingerprintApiRequest,
+  lockIdempotencyScope,
+  runIdempotentMutation,
+} from "./idempotency.js";
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
@@ -535,54 +540,70 @@ export class WorkspaceRepository {
   async createChannel(
     identity: AuthenticatedIdentity,
     input: CreateChannelRequest,
+    idempotencyKey?: string,
   ): Promise<ConversationMutationResponse> {
     return this.#transaction(async (client) => {
-      const created = await client
-        .query<ConversationRow>(
-          `INSERT INTO conversations
+      const create = async (): Promise<ConversationMutationResponse> => {
+        const created = await client
+          .query<ConversationRow>(
+            `INSERT INTO conversations
            (id, workspace_id, kind, name, slug, topic, channel_access, created_by)
          VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7)
          RETURNING *`,
-          [
-            randomUUID(),
-            identity.currentUser.workspaceId,
-            input.name,
-            input.slug,
-            input.topic,
-            input.access,
-            identity.currentUser.user.id,
-          ],
-        )
-        .catch((error: unknown) => {
-          if (error instanceof Error && "code" in error && error.code === "23505") {
-            throw new ApiError(409, "CONFLICT", "A channel with that slug already exists");
-          }
-          throw error;
-        });
-      const row = created.rows[0];
-      if (row === undefined) throw new Error("Channel insert returned no row");
-      if (input.access === "members") {
-        await client.query(
-          `INSERT INTO conversation_memberships
+            [
+              randomUUID(),
+              identity.currentUser.workspaceId,
+              input.name,
+              input.slug,
+              input.topic,
+              input.access,
+              identity.currentUser.user.id,
+            ],
+          )
+          .catch((error: unknown) => {
+            if (error instanceof Error && "code" in error && error.code === "23505") {
+              throw new ApiError(409, "CONFLICT", "A channel with that slug already exists");
+            }
+            throw error;
+          });
+        const row = created.rows[0];
+        if (row === undefined) throw new Error("Channel insert returned no row");
+        if (input.access === "members") {
+          await client.query(
+            `INSERT INTO conversation_memberships
              (conversation_id, workspace_id, user_id, role)
            VALUES ($1, $2, $3, 'owner')`,
-          [row.id, row.workspace_id, identity.currentUser.user.id],
-        );
-      }
-      const audienceUserIds = await this.#conversationAudience(client, row);
-      const event = await this.#insertEvent(client, identity, {
-        type: "channel.created",
-        conversation: row,
-        payload: {
-          conversation: mapConversation(row),
-          participantIds: audienceUserIds,
+            [row.id, row.workspace_id, identity.currentUser.user.id],
+          );
+        }
+        const audienceUserIds = await this.#conversationAudience(client, row);
+        const event = await this.#insertEvent(client, identity, {
+          type: "channel.created",
+          conversation: row,
+          payload: {
+            conversation: mapConversation(row),
+            participantIds: audienceUserIds,
+          },
+          audienceUserIds,
+        });
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, row),
+          syncCursor: event.workspaceSequence,
+        });
+      };
+      if (idempotencyKey === undefined) return create();
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: "/v1/channels",
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 201,
+          responseSchema: conversationMutationResponseSchema,
         },
-        audienceUserIds,
-      });
-      return conversationMutationResponseSchema.parse({
-        conversation: await this.#conversationSummary(client, identity, row),
-        syncCursor: event.workspaceSequence,
-      });
+        create,
+      );
     });
   }
 
@@ -625,6 +646,8 @@ export class WorkspaceRepository {
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
 
+      await lockIdempotencyScope(client, `channel-membership:${conversationId}:${memberId}`);
+
       const existing = await client.query<ConversationMembershipRow>(
         `SELECT *
            FROM conversation_memberships
@@ -634,6 +657,12 @@ export class WorkspaceRepository {
         [conversationId, memberId],
       );
       const current = existing.rows[0];
+      if (current?.left_at === null && current.role === input.role) {
+        return channelMembershipMutationResponseSchema.parse({
+          channelMembers: await this.#channelMembers(client, identity, conversation),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
       if (current?.left_at === null && current.role === "owner" && input.role === "member") {
         await this.#requireAnotherChannelOwner(client, conversationId, memberId);
       }
@@ -675,6 +704,7 @@ export class WorkspaceRepository {
   ): Promise<ChannelMembershipMutationResponse> {
     return this.#transaction(async (client) => {
       const conversation = await this.#requireManagedChannel(client, identity, conversationId);
+      await lockIdempotencyScope(client, `channel-membership:${conversationId}:${memberId}`);
       const existing = await client.query<ConversationMembershipRow>(
         `SELECT *
            FROM conversation_memberships
@@ -685,7 +715,12 @@ export class WorkspaceRepository {
         [conversationId, memberId],
       );
       const current = existing.rows[0];
-      if (current === undefined) throw new ApiError(404, "NOT_FOUND", "Channel member not found");
+      if (current === undefined) {
+        return channelMembershipMutationResponseSchema.parse({
+          channelMembers: await this.#channelMembers(client, identity, conversation),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
       if (current.role === "owner") {
         await this.#requireAnotherChannelOwner(client, conversationId, memberId);
       }
@@ -726,13 +761,34 @@ export class WorkspaceRepository {
             AND conversation.workspace_id = $2
             AND conversation.kind = 'channel'
             AND conversation.slug <> 'general'
+            AND conversation.is_archived = false
             AND ${conversationVisibilitySql("conversation", "$3")}
           RETURNING *`,
         [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
-      const row = updated.rows[0];
+      let row = updated.rows[0];
+      if (row === undefined) {
+        const replay = await client.query<ConversationRow>(
+          `SELECT *
+             FROM conversations AS conversation
+            WHERE conversation.id = $1
+              AND conversation.workspace_id = $2
+              AND conversation.kind = 'channel'
+              AND conversation.slug <> 'general'
+              AND conversation.is_archived = true
+              AND ${conversationVisibilitySql("conversation", "$3")}`,
+          [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+        );
+        row = replay.rows[0];
+      }
       if (row === undefined) {
         throw new ApiError(404, "NOT_FOUND", "Channel not found or cannot be archived");
+      }
+      if (row.is_archived && updated.rows[0] === undefined) {
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, row),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
       }
       const audienceUserIds = await this.#conversationAudience(client, row);
       const event = await this.#insertEvent(client, identity, {

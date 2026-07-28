@@ -7,7 +7,7 @@ import {
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
   channelMemberTargetSchema,
-  createChannelRequestSchema,
+  createChannelOperationSchema,
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
@@ -490,7 +490,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelCreate, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel creation sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.createChannel(createChannelRequestSchema.parse(input));
+    return workspaceTransport.createChannel(createChannelOperationSchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelArchive);

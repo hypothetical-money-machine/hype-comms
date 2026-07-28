@@ -12,7 +12,7 @@ import type {
   ChatSessionState,
   ConversationMutationResponse,
   ConversationSummary,
-  CreateChannelRequest,
+  CreateChannelOperation,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMessageReactionsResponse,
@@ -429,7 +429,7 @@ class FakeDesktopApi implements DesktopApi {
   readonly startedCursors: string[] = [];
   readonly acknowledged: string[] = [];
   readonly sent: SendMessageOperation[] = [];
-  readonly createdChannels: CreateChannelRequest[] = [];
+  readonly createdChannels: CreateChannelOperation[] = [];
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
   readonly historyRequests: string[] = [];
@@ -601,7 +601,7 @@ class FakeDesktopApi implements DesktopApi {
     };
   }
 
-  async createChannel(input: CreateChannelRequest): Promise<ConversationMutationResponse> {
+  async createChannel(input: CreateChannelOperation): Promise<ConversationMutationResponse> {
     this.createdChannels.push(input);
     const result = this.channelResults.shift();
     if (result === undefined) throw new Error("The test queued no channel result");
@@ -1075,7 +1075,13 @@ describe("WorkspaceRuntime", () => {
     await runtime.createChannel("Alpha Team", "alpha-team", "workspace");
 
     expect(api.createdChannels).toEqual([
-      { name: "Alpha Team", slug: "alpha-team", topic: null, access: "workspace" },
+      {
+        name: "Alpha Team",
+        slug: "alpha-team",
+        topic: null,
+        access: "workspace",
+        idempotencyKey: expect.any(String),
+      },
     ]);
     expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
     expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);

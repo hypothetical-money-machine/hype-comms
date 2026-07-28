@@ -634,7 +634,13 @@ export class WorkspaceRuntime {
     if (cache === null || this.#state.bootstrap === null) {
       throw new Error("Workspace is still loading");
     }
-    const result = await this.#client.createChannel({ name, slug, topic: null, access });
+    const result = await this.#client.createChannel({
+      name,
+      slug,
+      topic: null,
+      access,
+      idempotencyKey: crypto.randomUUID(),
+    });
     if (generation !== this.#generation || cache !== this.#cache) return;
     const conversationId = result.conversation.conversation.id;
 
