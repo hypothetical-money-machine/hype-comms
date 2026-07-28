@@ -77,11 +77,6 @@ jobs:
             manifest: latest-linux.yml
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
-    # The self-hosted Windows VM disables generated PowerShell scripts; Git Bash also keeps one
-    # shell contract for the manifest guards and uploads on every platform.
-    defaults:
-      run:
-        shell: bash
     env:
       # Endpoint, bucket, and region are not secret and live as repository variables. Only the
       # key pair is a secret, and it is scoped to write this one bucket.
@@ -103,7 +98,27 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
+      # Its PowerShell execution policy also rejects the generated scripts used by Actions.
+      - name: Expose MinGit sh on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: |
+          if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
+          where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
+          aws --version
+          echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
+
       - name: Install dependencies
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm ci
+
+      # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
+      # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
+      - name: Install dependencies on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
         run: npm ci
 
       - name: Configure macOS signing and notarization
@@ -131,6 +146,7 @@ jobs:
           keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
           original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          original_keychains_pending_path="${original_keychains_path}.pending"
           root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
 
@@ -141,7 +157,9 @@ jobs:
           printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
           security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
-          security list-keychains -d user > "$original_keychains_path"
+          rm -f "$original_keychains_path" "$original_keychains_pending_path"
+          security list-keychains -d user > "$original_keychains_pending_path"
+          mv "$original_keychains_pending_path" "$original_keychains_path"
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
           security unlock-keychain -p "$keychain_password" "$keychain_path"
@@ -156,26 +174,37 @@ jobs:
             -k "$keychain_password" \
             "$keychain_path"
 
-          original_keychains=()
+          additional_keychains=()
+          parsed_keychain_count=0
+          unparsed_keychain_count=0
           while IFS= read -r item; do
             if [[ "$item" =~ \"(.*)\" ]]; then
-              original_keychains+=("${BASH_REMATCH[1]}")
+              keychain="${BASH_REMATCH[1]}"
+              parsed_keychain_count=$((parsed_keychain_count + 1))
+              if [[ "$keychain" != "$keychain_path" &&
+                    "$keychain" != "$root_certs_keychain" ]]; then
+                additional_keychains+=("$keychain")
+              fi
+            elif [[ "$item" == *[![:space:]]* ]]; then
+              unparsed_keychain_count=$((unparsed_keychain_count + 1))
             fi
           done < "$original_keychains_path"
+          if [[ "$unparsed_keychain_count" -ne 0 ||
+                ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
+            echo "Could not parse the original macOS keychain search list." >&2
+            exit 1
+          fi
           security list-keychains -d user -s \
             "$keychain_path" \
             "$root_certs_keychain" \
-            "${original_keychains[@]}"
+            "${additional_keychains[@]}"
 
           signing_identities="$(security find-identity -v -p codesigning "$keychain_path")"
+          identity_regex="^[[:space:]]*[0-9]+\\)[[:space:]]+([[:xdigit:]]{40})[[:space:]]+\"Developer ID Application: .+ \\(${EXPECTED_MACOS_TEAM_ID}\\)\"$"
           expected_identity_hashes=()
           while IFS= read -r item; do
-            if [[ "$item" == *"Developer ID Application:"*"(${EXPECTED_MACOS_TEAM_ID})"* ]]; then
-              identity_hash="${item#*) }"
-              identity_hash="${identity_hash%% *}"
-              if [[ "$identity_hash" =~ ^[[:xdigit:]]{40}$ ]]; then
-                expected_identity_hashes+=("$identity_hash")
-              fi
+            if [[ "$item" =~ $identity_regex ]]; then
+              expected_identity_hashes+=("${BASH_REMATCH[1]}")
             fi
           done <<< "$signing_identities"
           if [[ "${#expected_identity_hashes[@]}" -ne 1 ]]; then
@@ -193,135 +222,63 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Package desktop application
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run package:desktop
+
+      - name: Package desktop application on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
         run: npm run package:desktop
 
       - name: Verify packaged application contents, updater, and fuses
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run verify:desktop-package
+
+      - name: Verify packaged application contents, updater, and fuses on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
         run: npm run verify:desktop-package
 
       - name: Verify macOS release signing and notarization
         if: matrix.platform == 'macOS'
+        shell: bash
         run: npm run verify:desktop-package:macos-release
 
       - name: Address the update bucket by path
-        shell: bash
-        run: |
-          # Self-hosted S3-compatible stores are addressed by path. The AWS CLI otherwise defaults
-          # to virtual-host style and resolves <bucket>.<endpoint>, which has no DNS record.
-          echo "AWS_CONFIG_FILE=${RUNNER_TEMP}/hmm-chat-aws-config" >> "$GITHUB_ENV"
-          export AWS_CONFIG_FILE="${RUNNER_TEMP}/hmm-chat-aws-config"
-          aws configure set default.s3.addressing_style path
+        shell: sh
+        # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
+        # under RUNNER_TEMP so every platform reuses this setting without shell-specific exports.
+        run: node scripts/desktop-release.mjs configure-s3
 
       # Artifacts are served with a one-year immutable cache while the manifests are no-cache.
       # The platform manifest is the commit marker: an orphan artifact from a failed run was never
       # advertised to clients and may be replaced on retry, but a manifested version is immutable.
       - name: Refuse to overwrite a published platform version
-        shell: bash
+        shell: sh
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: |
-          node <<'NODE'
-          const semver = require("semver");
-
-          async function main() {
-            const manifestUrl = new URL(
-              process.env.UPDATE_MANIFEST,
-              `${process.env.HMM_UPDATE_PUBLIC_ROOT}/`,
-            );
-            const response = await fetch(manifestUrl, {
-              headers: { "cache-control": "no-cache" },
-              redirect: "error",
-              signal: AbortSignal.timeout(30_000),
-            });
-            if (response.status === 404) return;
-            if (!response.ok) {
-              throw new Error(`Could not inspect ${manifestUrl}: HTTP ${response.status}`);
-            }
-
-            const text = await response.text();
-            const match = text.match(/^version:\s*['"]?([^'"\s]+)['"]?\s*$/m);
-            if (match === null) throw new Error("Published manifest has no valid version");
-
-            const publishedVersion = match[1];
-            const desktopVersion = process.env.DESKTOP_VERSION;
-            if (publishedVersion === desktopVersion) {
-              throw new Error(
-                `${process.env.UPDATE_MANIFEST} already publishes version ${desktopVersion}. ` +
-                  "Bump the version rather than replacing it.",
-              );
-            }
-            if (!semver.gt(desktopVersion, publishedVersion)) {
-              throw new Error(
-                `Refusing to move ${process.env.UPDATE_MANIFEST} backward from ` +
-                  `${publishedVersion} to ${desktopVersion}.`,
-              );
-            }
-          }
-
-          main().catch((error) => {
-            console.error(error);
-            process.exitCode = 1;
-          });
-          NODE
+        run: node scripts/desktop-release.mjs assert-unpublished
 
       - name: Upload platform artifacts to the update bucket
-        shell: bash
+        shell: sh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: |
-          artifact_count=0
-          while IFS= read -r artifact; do
-            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-              "$artifact" \
-              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/$(basename "$artifact")" \
-              --cache-control "public, max-age=31536000, immutable" \
-              --no-progress
-            artifact_count=$((artifact_count + 1))
-          done < <(
-            find apps/desktop/release -maxdepth 1 -type f \
-              -name "hmm-chat-${DESKTOP_VERSION}-${UPDATE_ARTIFACT_OS}-*" -print
-          )
-
-          if [[ "$artifact_count" -eq 0 ]]; then
-            echo "No ${UPDATE_ARTIFACT_OS} artifacts were produced for ${DESKTOP_VERSION}." >&2
-            exit 1
-          fi
+        run: node scripts/desktop-release.mjs upload-artifacts
 
       - name: Upload the platform manifest last
-        shell: bash
+        shell: sh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: |
-          metadata="apps/desktop/release/${UPDATE_MANIFEST}"
-          if [[ ! -f "$metadata" ]]; then
-            echo "${UPDATE_MANIFEST} was not produced." >&2
-            exit 1
-          fi
-          metadata_version="$(
-            node -e '
-              const text = require("node:fs").readFileSync(process.argv[1], "utf8");
-              const match = text.match(/^version:\s*['\''"]?([^'\''"\s]+)['\''"]?\s*$/m);
-              if (match === null) throw new Error("Generated manifest has no valid version");
-              process.stdout.write(match[1]);
-            ' "$metadata"
-          )"
-          if [[ "$metadata_version" != "$DESKTOP_VERSION" ]]; then
-            echo "${UPDATE_MANIFEST} contains ${metadata_version}, expected ${DESKTOP_VERSION}." >&2
-            exit 1
-          fi
-
-          aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-            "$metadata" \
-            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/${UPDATE_MANIFEST}" \
-            --cache-control "no-cache" \
-            --content-type "application/yaml" \
-            --no-progress
+        run: node scripts/desktop-release.mjs upload-manifest
 
       - name: Verify the public platform release
-        shell: bash
+        shell: sh
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: node scripts/verify-published-desktop-release.mjs
@@ -330,17 +287,11 @@ jobs:
       # one runner publishing it is enough.
       - name: Publish the download page
         if: matrix.platform == 'Linux'
-        shell: bash
+        shell: sh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-        run: |
-          aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-            downloads/index.html \
-            "s3://${HMM_UPDATE_S3_BUCKET}/index.html" \
-            --cache-control "no-cache" \
-            --content-type "text/html; charset=utf-8" \
-            --no-progress
+        run: node scripts/desktop-release.mjs publish-download-page
 
       - name: Remove temporary macOS signing keychain
         if: always() && matrix.platform == 'macOS'
@@ -349,25 +300,42 @@ jobs:
           certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
           keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
           original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          original_keychains_pending_path="${original_keychains_path}.pending"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
           cleanup_status=0
+          set +e
           if [[ -f "$original_keychains_path" ]]; then
             original_keychains=()
+            parsed_keychain_count=0
+            unparsed_keychain_count=0
             while IFS= read -r item; do
               if [[ "$item" =~ \"(.*)\" ]]; then
                 keychain="${BASH_REMATCH[1]}"
+                parsed_keychain_count=$((parsed_keychain_count + 1))
                 if [[ "$keychain" != "$keychain_path" ]]; then
                   original_keychains+=("$keychain")
                 fi
+              elif [[ "$item" == *[![:space:]]* ]]; then
+                unparsed_keychain_count=$((unparsed_keychain_count + 1))
               fi
             done < "$original_keychains_path"
-            security list-keychains -d user -s "${original_keychains[@]}" || cleanup_status=1
+            if [[ "$unparsed_keychain_count" -ne 0 ||
+                  ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
+              echo "Could not parse the original macOS keychain search list." >&2
+              cleanup_status=1
+            elif ! security list-keychains -d user -s "${original_keychains[@]}"; then
+              cleanup_status=1
+            fi
           fi
-          if ! security delete-keychain "$keychain_path" 2>/dev/null; then
-            rm -f "$keychain_path" || cleanup_status=1
-          fi
+          security delete-keychain "$keychain_path" 2>/dev/null || true
           rm -f \
             "$certificate_path" \
-            "$original_keychains_path" \
+            "$keychain_path" \
+            "$original_keychains_pending_path" \
             "$api_key_path" || cleanup_status=1
+          if [[ "$cleanup_status" -eq 0 ]]; then
+            rm -f "$original_keychains_path" || cleanup_status=1
+          else
+            echo "Preserving ${original_keychains_path} for manual keychain-list recovery." >&2
+          fi
           exit "$cleanup_status"
