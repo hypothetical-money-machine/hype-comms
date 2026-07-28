@@ -1,0 +1,111 @@
+name: Desktop package smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - apps/desktop/**
+      - packages/contracts/**
+      - package.json
+      - package-lock.json
+      - .node-version
+      - .npmrc
+      - scripts/verify-desktop-package.mjs
+      - scripts/verify-vite-stack.mjs
+      - scripts/verify-vite-stack.test.mjs
+      - .github/dependabot.yml
+      - .github/workflows/desktop-package-smoke.yml
+  pull_request:
+    paths:
+      - apps/desktop/**
+      - packages/contracts/**
+      - package.json
+      - package-lock.json
+      - .node-version
+      - .npmrc
+      - scripts/verify-desktop-package.mjs
+      - scripts/verify-vite-stack.mjs
+      - scripts/verify-vite-stack.test.mjs
+      - .github/dependabot.yml
+      - .github/workflows/desktop-package-smoke.yml
+
+concurrency:
+  group: desktop-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package on ${{ matrix.platform }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+          - platform: Windows
+            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+          - platform: Linux
+            runner: '["self-hosted", "Linux", "X64", "hmm-chat-release", "docker"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
+      # Its PowerShell execution policy also rejects the generated scripts used by Actions.
+      - name: Expose MinGit sh on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: |
+          if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
+          if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
+          if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
+          echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
+
+      - name: Install dependencies
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm ci
+
+      # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
+      # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
+      - name: Install dependencies on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm ci
+
+      - name: Package unsigned desktop application
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run package:desktop
+
+      - name: Package unsigned desktop application on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm run package:desktop
+
+      - name: Verify packaged application contents, updater, and fuses
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run verify:desktop-package
+
+      - name: Verify packaged application contents, updater, and fuses on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm run verify:desktop-package
