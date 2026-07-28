@@ -13,6 +13,8 @@ import type {
 import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
+import { ClientVersion } from "./client-version";
+import { ConversationSwitcher } from "./conversation-switcher";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageReactions } from "./message-reactions";
 import { WorkspaceSearch } from "./workspace-search";
@@ -161,6 +163,7 @@ function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage
         {status !== "" && <p className="signin-status">{status}</p>}
 
         <UpdateControl client={client} />
+        <ClientVersion client={client} />
       </section>
     </main>
   );
@@ -417,6 +420,7 @@ export function App({ client }: AppProps) {
           <button type="button" onClick={() => void retrySession()}>
             Try again
           </button>
+          <ClientVersion client={client} />
         </section>
       </main>
     );
@@ -430,6 +434,7 @@ export function App({ client }: AppProps) {
           <button type="button" onClick={() => void client.signOut()}>
             Continue to member sign-in
           </button>
+          <ClientVersion client={client} />
         </section>
       </main>
     );
@@ -454,6 +459,7 @@ export function App({ client }: AppProps) {
               </button>
             </div>
           )}
+          <ClientVersion client={client} />
         </section>
       </main>
     );
@@ -483,6 +489,18 @@ export function App({ client }: AppProps) {
             {signingOut ? "…" : "Sign out"}
           </button>
         </header>
+
+        <ConversationSwitcher
+          conversations={bootstrap.conversations.map((summary) => ({
+            id: summary.conversation.id,
+            name: runtime.conversationName(summary),
+            kind: summary.conversation.kind,
+            isArchived: summary.conversation.isArchived,
+          }))}
+          selectedConversationId={runtimeState.selectedConversationId}
+          platform={client.platform}
+          onSelect={(conversationId) => runtime.selectConversation(conversationId)}
+        />
 
         <WorkspaceSearch
           members={bootstrap.members}
@@ -563,7 +581,10 @@ export function App({ client }: AppProps) {
             ))}
         </section>
 
-        <UpdateControl client={client} />
+        <footer className="sidebar-footer">
+          <UpdateControl client={client} />
+          <ClientVersion client={client} />
+        </footer>
       </aside>
 
       <section className="conversation-pane">
