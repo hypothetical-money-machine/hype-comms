@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 const releaseRoot = path.resolve("apps/desktop/release");
+const expectedTeamIdentifier = "5LTMYWRTYR";
 
 async function collectAppBundles(directory) {
   const appBundles = [];
@@ -59,6 +60,11 @@ for (const appBundle of appBundles) {
   if (!/^Authority=Developer ID Application:/mu.test(signingDetails)) {
     throw new Error(`${appBundle} is not signed by a Developer ID Application authority`);
   }
+  if (!signingDetails.split("\n").includes(`TeamIdentifier=${expectedTeamIdentifier}`)) {
+    throw new Error(
+      `${appBundle} is not signed by the expected ${expectedTeamIdentifier} developer team`,
+    );
+  }
 
   runCommand(
     "/usr/bin/xcrun",
@@ -68,5 +74,5 @@ for (const appBundle of appBundles) {
 }
 
 console.log(
-  `Verified Developer ID signatures and stapled notarization tickets in ${appBundles.length} packaged macOS app(s).`,
+  `Verified ${expectedTeamIdentifier} Developer ID signatures and stapled notarization tickets in ${appBundles.length} packaged macOS app(s).`,
 );

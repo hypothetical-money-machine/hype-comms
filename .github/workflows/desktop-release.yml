@@ -77,6 +77,11 @@ jobs:
             manifest: latest-linux.yml
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
+    # The self-hosted Windows VM disables generated PowerShell scripts; Git Bash also keeps one
+    # shell contract for the manifest guards and uploads on every platform.
+    defaults:
+      run:
+        shell: bash
     env:
       # Endpoint, bucket, and region are not secret and live as repository variables. Only the
       # key pair is a secret, and it is scoped to write this one bucket.
@@ -110,6 +115,7 @@ jobs:
           HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
           HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
           HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
+          EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
         run: |
           if [[ -z "$HMM_MACOS_CSC_LINK" ||
                 -z "$HMM_MACOS_CSC_KEY_PASSWORD" ||
@@ -124,6 +130,8 @@ jobs:
           certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
           keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
+          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
 
           # electron-builder's implicit keychain setup can pass the PKCS#12 password to
@@ -133,6 +141,7 @@ jobs:
           printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
           security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
+          security list-keychains -d user > "$original_keychains_path"
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
           security unlock-keychain -p "$keychain_password" "$keychain_path"
@@ -147,14 +156,37 @@ jobs:
             -k "$keychain_password" \
             "$keychain_path"
 
+          original_keychains=()
+          while IFS= read -r item; do
+            if [[ "$item" =~ \"(.*)\" ]]; then
+              original_keychains+=("${BASH_REMATCH[1]}")
+            fi
+          done < "$original_keychains_path"
+          security list-keychains -d user -s \
+            "$keychain_path" \
+            "$root_certs_keychain" \
+            "${original_keychains[@]}"
+
           signing_identities="$(security find-identity -v -p codesigning "$keychain_path")"
-          if [[ "$signing_identities" != *"Developer ID Application"* ]]; then
-            echo "The signing certificate did not provide a Developer ID Application identity." >&2
+          expected_identity_hashes=()
+          while IFS= read -r item; do
+            if [[ "$item" == *"Developer ID Application:"*"(${EXPECTED_MACOS_TEAM_ID})"* ]]; then
+              identity_hash="${item#*) }"
+              identity_hash="${identity_hash%% *}"
+              if [[ "$identity_hash" =~ ^[[:xdigit:]]{40}$ ]]; then
+                expected_identity_hashes+=("$identity_hash")
+              fi
+            fi
+          done <<< "$signing_identities"
+          if [[ "${#expected_identity_hashes[@]}" -ne 1 ]]; then
+            echo "The signing keychain must contain exactly one ${EXPECTED_MACOS_TEAM_ID} Developer ID Application identity." >&2
+            printf '%s\n' "$signing_identities" >&2
             exit 1
           fi
 
           {
             echo "CSC_KEYCHAIN=${keychain_path}"
+            echo "CSC_NAME=${expected_identity_hashes[0]}"
             echo "APPLE_API_KEY=${api_key_path}"
             echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
             echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
@@ -316,6 +348,26 @@ jobs:
         run: |
           certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
           keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
-          security delete-keychain "$keychain_path" 2>/dev/null || true
-          rm -f "$certificate_path" "$keychain_path" "$api_key_path"
+          cleanup_status=0
+          if [[ -f "$original_keychains_path" ]]; then
+            original_keychains=()
+            while IFS= read -r item; do
+              if [[ "$item" =~ \"(.*)\" ]]; then
+                keychain="${BASH_REMATCH[1]}"
+                if [[ "$keychain" != "$keychain_path" ]]; then
+                  original_keychains+=("$keychain")
+                fi
+              fi
+            done < "$original_keychains_path"
+            security list-keychains -d user -s "${original_keychains[@]}" || cleanup_status=1
+          fi
+          if ! security delete-keychain "$keychain_path" 2>/dev/null; then
+            rm -f "$keychain_path" || cleanup_status=1
+          fi
+          rm -f \
+            "$certificate_path" \
+            "$original_keychains_path" \
+            "$api_key_path" || cleanup_status=1
+          exit "$cleanup_status"
