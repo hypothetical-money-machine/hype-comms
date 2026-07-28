@@ -846,10 +846,35 @@ button:disabled {
 }
 
 .message {
+  position: relative;
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr);
   gap: 11px;
   padding: 9px 0;
+}
+
+.message-continuation {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.message-continuation > div {
+  padding-right: 34px;
+}
+
+.message-continuation-time {
+  align-self: start;
+  padding-top: 4px;
+  color: #737f9d;
+  font-size: 9px;
+  line-height: 1.45;
+  opacity: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.message-continuation:hover .message-continuation-time {
+  opacity: 1;
 }
 
 .message.search-target {
@@ -898,9 +923,31 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.message-continuation p {
+  margin-top: 0;
+}
+
 .message-reactions {
   position: relative;
   margin-top: 7px;
+}
+
+.message-continuation .message-reactions.empty {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  margin: 0;
+  transform: translateY(-50%);
+}
+
+.message-continuation .message-reactions.empty .reaction-add {
+  opacity: 0;
+}
+
+.message-continuation:hover .message-reactions.empty .reaction-add,
+.message-continuation .message-reactions.empty .reaction-add:focus-visible,
+.message-continuation .message-reactions.empty .reaction-add[aria-expanded="true"] {
+  opacity: 1;
 }
 
 .reaction-chips {
@@ -995,6 +1042,11 @@ button:disabled {
 
 .pending-message {
   opacity: 0.72;
+}
+
+.pending-status {
+  color: #737f9d;
+  font-size: 11px;
 }
 
 .message-actions {

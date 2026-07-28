@@ -14,6 +14,7 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { isMessageContinuation } from "./message-grouping";
 import { MessageReactions } from "./message-reactions";
 import { WorkspaceSearch } from "./workspace-search";
 import {
@@ -183,6 +184,7 @@ function MessageRow({
   onAddReaction,
   onRemoveReaction,
   highlighted,
+  continuation,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -192,16 +194,25 @@ function MessageRow({
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly highlighted: boolean;
+  readonly continuation: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   return (
     <article
-      className={highlighted ? "message search-target" : "message"}
+      className={`message${continuation ? " message-continuation" : ""}${
+        highlighted ? " search-target" : ""
+      }`}
       id={`message-${message.id}`}
     >
-      <Avatar user={author} />
+      {continuation ? (
+        <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
+          {messageTime(message.createdAt)}
+        </time>
+      ) : (
+        <Avatar user={author} />
+      )}
       <div>
-        <header>
+        <header className={continuation ? "sr-only" : undefined}>
           <strong>{author?.displayName ?? "Former member"}</strong>
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
@@ -660,6 +671,7 @@ export function App({ client }: AppProps) {
                   onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                   onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                   highlighted={message.id === runtimeState.focusedMessageId}
+                  continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
                 />
               </Fragment>
             ))
@@ -667,23 +679,54 @@ export function App({ client }: AppProps) {
           {pending.map((item, index) => {
             const previousTimestamp =
               pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
+            const continuation = isMessageContinuation(
+              {
+                authorId: currentUserId,
+                createdAt: item.createdAt,
+                conversationSequence: null,
+              },
+              index > 0
+                ? {
+                    authorId: currentUserId,
+                    createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
+                    conversationSequence: null,
+                  }
+                : (messages.at(-1) ?? null),
+            );
+            const pendingStatus =
+              editingClientMessageId === item.operation.message.clientMessageId
+                ? "editing"
+                : item.status.replaceAll("_", " ");
             return (
               <Fragment key={item.operation.message.clientMessageId}>
                 {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
                   <MessageDateSeparator value={item.createdAt} />
                 )}
-                <article className="message pending-message">
-                  <Avatar user={bootstrap.currentUser.user} />
+                <article
+                  className={`message pending-message${
+                    continuation ? " message-continuation" : ""
+                  }`}
+                >
+                  {continuation ? (
+                    <time
+                      className="message-continuation-time"
+                      dateTime={item.createdAt}
+                      aria-hidden="true"
+                    >
+                      {messageTime(item.createdAt)}
+                    </time>
+                  ) : (
+                    <Avatar user={bootstrap.currentUser.user} />
+                  )}
                   <div>
-                    <header>
+                    <header className={continuation ? "sr-only" : undefined}>
                       <strong>{bootstrap.currentUser.user.displayName}</strong>
-                      <span>
-                        {editingClientMessageId === item.operation.message.clientMessageId
-                          ? "editing"
-                          : item.status.replaceAll("_", " ")}
-                      </span>
+                      <span>{pendingStatus}</span>
                     </header>
-                    <p>{item.operation.message.body}</p>
+                    <p>
+                      {item.operation.message.body}
+                      {continuation && <span className="pending-status"> · {pendingStatus}</span>}
+                    </p>
                     {item.status === "permanent_failure" && (
                       <div className="message-actions">
                         <button
