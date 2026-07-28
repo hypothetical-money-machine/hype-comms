@@ -1,0 +1,25 @@
+name: hmm-chat-actions-runner
+
+services:
+  linux-x64:
+    platform: linux/amd64
+    build:
+      context: .github/runner
+      args:
+        AWS_CLI_VERSION: 2.36.9
+        RUNNER_VERSION: 2.336.0
+        RUNNER_SHA256: 04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
+    image: hmm-chat-actions-runner:2.336.0
+    container_name: hmm-chat-actions-runner-linux-x64
+    init: true
+    restart: unless-stopped
+    environment:
+      RUNNER_LABELS: hmm-chat-release,docker
+      RUNNER_NAME: hmm-chat-docker-linux-x64
+      RUNNER_URL: https://github.com/hype-comms/hmm-chat
+    volumes:
+      - runner-data:/runner
+
+volumes:
+  runner-data:
+    name: hmm-chat-runner-data

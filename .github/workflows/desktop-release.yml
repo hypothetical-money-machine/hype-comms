@@ -16,7 +16,7 @@ permissions:
 jobs:
   validate:
     name: Validate release version
-    runs-on: [self-hosted, macOS, ARM64, notarize]
+    runs-on: [self-hosted, Linux, X64, hmm-chat-release, docker]
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
@@ -30,7 +30,6 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
-          cache: npm
 
       - name: Require a tag matching the desktop package version
         id: version
@@ -72,7 +71,7 @@ jobs:
             artifact_os: win
             manifest: latest.yml
           - platform: Linux
-            runner: '["ubuntu-24.04"]'
+            runner: '["self-hosted", "Linux", "X64", "hmm-chat-release", "docker"]'
             artifact_os: linux
             manifest: latest-linux.yml
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -96,7 +95,6 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
-          cache: npm
 
       - name: Install dependencies
         run: npm ci
