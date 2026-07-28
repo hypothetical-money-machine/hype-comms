@@ -30,6 +30,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
+          package-manager-cache: false
 
       - name: Require a tag matching the desktop package version
         id: version
@@ -67,7 +68,7 @@ jobs:
             artifact_os: mac
             manifest: latest-mac.yml
           - platform: Windows
-            runner: '["windows-latest"]'
+            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
             artifact_os: win
             manifest: latest.yml
           - platform: Linux
@@ -95,6 +96,7 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
+          package-manager-cache: false
 
       - name: Install dependencies
         run: npm ci
@@ -119,11 +121,40 @@ jobs:
           fi
 
           umask 077
+          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+
+          # electron-builder's implicit keychain setup can pass the PKCS#12 password to
+          # set-key-partition-list instead of its generated keychain password. Own the keychain
+          # lifecycle here so signing works consistently on a clean self-hosted runner.
+          printf '%s' "${HMM_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
           printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+
+          security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$HMM_MACOS_CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          signing_identities="$(security find-identity -v -p codesigning "$keychain_path")"
+          if [[ "$signing_identities" != *"Developer ID Application"* ]]; then
+            echo "The signing certificate did not provide a Developer ID Application identity." >&2
+            exit 1
+          fi
+
           {
-            echo "CSC_LINK=${HMM_MACOS_CSC_LINK}"
-            echo "CSC_KEY_PASSWORD=${HMM_MACOS_CSC_KEY_PASSWORD}"
+            echo "CSC_KEYCHAIN=${keychain_path}"
             echo "APPLE_API_KEY=${api_key_path}"
             echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
             echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
@@ -278,3 +309,13 @@ jobs:
             --cache-control "no-cache" \
             --content-type "text/html; charset=utf-8" \
             --no-progress
+
+      - name: Remove temporary macOS signing keychain
+        if: always() && matrix.platform == 'macOS'
+        shell: bash
+        run: |
+          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+          security delete-keychain "$keychain_path" 2>/dev/null || true
+          rm -f "$certificate_path" "$keychain_path" "$api_key_path"
