@@ -335,7 +335,19 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
 
     const advanced = await repository.advanceReadCursor(member, generalId, rendered.message.id);
-    const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100);
+    const legacySync = await repository.sync(member, committedAfterRender.syncCursor, 100);
+    const legacyReadEvent = legacySync.events.find((event) => event.type === "read_cursor.updated");
+    expect(legacyReadEvent?.payload).toEqual({
+      readCursor: expect.objectContaining({ lastReadMessageId: rendered.message.id }),
+    });
+
+    const memberSync = await repository.sync(
+      member,
+      committedAfterRender.syncCursor,
+      100,
+      false,
+      true,
+    );
     const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
     expect(readEvent).toMatchObject({
       workspaceSequence: advanced.syncCursor,
@@ -978,15 +990,17 @@ describeWithPostgres("WorkspaceRepository", () => {
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       reactionEvents: false,
+      readStateEvents: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       reactionEvents: true,
+      readStateEvents: true,
     });
   });
 

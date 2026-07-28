@@ -9,6 +9,8 @@ export interface RealtimePrincipal {
   readonly deviceSessionId: string;
   /** False/absent for tickets issued to clients predating reaction sync events. */
   readonly reactionEvents?: boolean;
+  /** False/absent for tickets issued to clients predating canonical read-state events. */
+  readonly readStateEvents?: boolean;
 }
 
 /**

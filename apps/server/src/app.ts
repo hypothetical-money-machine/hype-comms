@@ -88,6 +88,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             workspaceId: principal.workspaceId,
             deviceSessionId: principal.deviceSessionId,
             reactionEvents: principal.reactionEvents,
+            readStateEvents: principal.readStateEvents,
           };
         };
   await app.register(

@@ -403,6 +403,36 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
+  it("preserves counts when replaying a legacy read_cursor.updated event", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          { ...alphaSummary, unreadCount: 4, mentionCount: 3 },
+        ],
+      },
+      [],
+    );
+
+    await expect(
+      cache.applyEvent({
+        ...readCursorEvent,
+        payload: { readCursor: readCursorEvent.payload.readCursor },
+      }),
+    ).resolves.toBe(true);
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      readCursor: readCursorEvent.payload.readCursor,
+      unreadCount: 4,
+      mentionCount: 3,
+    });
+  });
+
   it("does not replay a message already reflected by the bootstrap cursor", async () => {
     const cache = create();
     await cache.replaceSnapshot(

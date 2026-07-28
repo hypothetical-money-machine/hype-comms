@@ -181,6 +181,7 @@ interface TicketRow extends QueryResultRow {
   user_id: string;
   device_session_id: string;
   reaction_events: boolean;
+  read_state_events: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -214,12 +215,14 @@ export interface ConsumedRealtimeTicket {
   readonly userId: string;
   readonly deviceSessionId: string;
   readonly reactionEvents: boolean;
+  readonly readStateEvents: boolean;
 }
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
   readonly userId: string;
   readonly reactionEvents?: boolean;
+  readonly readStateEvents?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -1282,12 +1285,14 @@ export class WorkspaceRepository {
     after: string,
     limit: number,
     reactionEvents = false,
+    readStateEvents = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
         workspaceId: identity.currentUser.workspaceId,
         userId: identity.currentUser.user.id,
         reactionEvents,
+        readStateEvents,
       },
       after,
       limit,
@@ -1364,7 +1369,9 @@ export class WorkspaceRepository {
       const scanned = rows.rows.slice(0, limit);
       const nextCursor = scanned.at(-1)?.workspace_sequence ?? after;
       return syncResponseSchema.parse({
-        events: scanned.filter((row) => row.visible).map((row) => this.#mapEvent(row)),
+        events: scanned
+          .filter((row) => row.visible)
+          .map((row) => this.#mapEvent(row, principal.readStateEvents ?? false)),
         nextCursor,
         highWaterCursor,
         hasMore: rows.rows.length > limit,
@@ -1374,14 +1381,19 @@ export class WorkspaceRepository {
     }
   }
 
-  async issueRealtimeTicket(identity: AuthenticatedIdentity, reactionEvents = false) {
+  async issueRealtimeTicket(
+    identity: AuthenticatedIdentity,
+    reactionEvents = false,
+    readStateEvents = false,
+  ) {
     const token = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(token).digest();
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
-         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events,
+          read_state_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -1390,6 +1402,7 @@ export class WorkspaceRepository {
         hash,
         expiresAt,
         reactionEvents,
+        readStateEvents,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -1408,10 +1421,10 @@ export class WorkspaceRepository {
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
          RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-                   ticket.reaction_events
+                   ticket.reaction_events, ticket.read_state_events
        )
        SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-              ticket.reaction_events
+              ticket.reaction_events, ticket.read_state_events
          FROM consumed_ticket AS ticket
          JOIN device_sessions AS session
            ON session.id = ticket.device_session_id
@@ -1432,6 +1445,7 @@ export class WorkspaceRepository {
           userId: row.user_id,
           deviceSessionId: row.device_session_id,
           reactionEvents: row.reaction_events,
+          readStateEvents: row.read_state_events,
         };
   }
 
@@ -1986,8 +2000,8 @@ export class WorkspaceRepository {
     return value;
   }
 
-  #mapEvent(row: EventRow): WorkspaceEvent {
-    return workspaceEventSchema.parse({
+  #mapEvent(row: EventRow, readStateEvents: boolean): WorkspaceEvent {
+    const event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
       type: row.event_type,
@@ -2000,6 +2014,13 @@ export class WorkspaceRepository {
       delivery: "at_least_once",
       payload: row.payload,
     });
+    if (event.type !== "read_cursor.updated" || readStateEvents) return event;
+    // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
+    // projecting its legacy shape for devices that did not negotiate read-state events.
+    return {
+      ...event,
+      payload: { readCursor: event.payload.readCursor },
+    };
   }
 
   async #transaction<T>(

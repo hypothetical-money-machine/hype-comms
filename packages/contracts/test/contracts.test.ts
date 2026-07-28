@@ -4,6 +4,7 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
   apiErrorEnvelopeSchema,
   channelSlugFromName,
   channelSlugSchema,
@@ -411,10 +412,51 @@ describe("transport contracts", () => {
     expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
   });
 
+  it("accepts legacy and canonical read-state events but rejects partial counts", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000007",
+      type: "read_cursor.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "44",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        readCursor: {
+          conversationId: CONVERSATION_ID,
+          userId: USER_ID,
+          lastReadMessageId: MESSAGE_ID,
+          lastReadConversationSequence: "42",
+          lastReadAt: NOW,
+          updatedAt: NOW,
+        },
+      },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toMatchObject({ payload: event.payload });
+    expect(
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, unreadCount: 2, mentionCount: 1 },
+      }),
+    ).toMatchObject({ payload: { unreadCount: 2, mentionCount: 1 } });
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, unreadCount: 2 },
+      }),
+    ).toThrow();
+  });
+
   it("validates bounded client capability headers", () => {
     expect(
-      clientCapabilitiesHeaderSchema.parse(`${REACTION_EVENTS_CAPABILITY}, future-events-v2`),
-    ).toEqual([REACTION_EVENTS_CAPABILITY, "future-events-v2"]);
+      clientCapabilitiesHeaderSchema.parse(
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}`,
+      ),
+    ).toEqual([REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
     }

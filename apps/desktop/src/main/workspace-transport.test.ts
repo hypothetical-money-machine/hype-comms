@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { REACTION_EVENTS_CAPABILITY, type SendMessageOperation } from "@hmm-chat/contracts";
+import {
+  REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
+  type SendMessageOperation,
+} from "@hmm-chat/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -11,6 +15,7 @@ const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
 const REACTION_ID = "10000000-0000-4000-8000-000000000012";
+const CLIENT_CAPABILITIES = [REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY].join(",");
 
 const CURRENT_USER = {
   user: {
@@ -203,7 +208,7 @@ describe("WorkspaceTransport sync classification", () => {
         url: "https://chat.example/v1/sync?after=41&limit=25",
         init: expect.objectContaining({
           method: "GET",
-          headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+          headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
         }),
       },
     ]);
@@ -221,7 +226,7 @@ describe("WorkspaceTransport sync classification", () => {
     expect(requests).toEqual([
       expect.objectContaining({
         method: "POST",
-        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+        headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
       }),
     ]);
   });

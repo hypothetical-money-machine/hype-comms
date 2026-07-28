@@ -1066,7 +1066,12 @@ export class WorkspaceRuntime {
       this.#setState({
         bootstrap: replaceConversation(snapshot, event.conversationId, (current) => {
           if (current === undefined) return null;
-          return { ...current, readCursor, unreadCount, mentionCount };
+          return {
+            ...current,
+            readCursor,
+            unreadCount: unreadCount ?? current.unreadCount,
+            mentionCount: mentionCount ?? current.mentionCount,
+          };
         }),
       });
       return;
