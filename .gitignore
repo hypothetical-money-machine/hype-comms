@@ -4,8 +4,10 @@ out/
 release/
 coverage/
 .vite/
-.jj/
 *.tsbuildinfo
+.claude/
+worktrees/
+.clog/
 
 .env
 .env.*

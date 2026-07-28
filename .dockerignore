@@ -10,7 +10,9 @@ coverage
 
 .git
 .github
-.jj
+.claude
+worktrees
+.clog
 
 .env
 .env.*
