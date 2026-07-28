@@ -5,6 +5,8 @@ import { listPackage } from "@electron/asar";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
 const releaseRoot = path.resolve("apps/desktop/release");
+const expectedUpdateProvider = "generic";
+const expectedUpdateUrl = "https://updates.hypemm.com/desktop";
 const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/preload/index.js",
@@ -61,27 +63,34 @@ async function executableForAsar(asarPath) {
 async function verifyUpdateConfiguration(asarPath) {
   const updateConfigurationPath = path.join(path.dirname(asarPath), "app-update.yml");
   const updateConfiguration = await readFile(updateConfigurationPath, "utf8");
-  const urlLine = updateConfiguration
-    .split(/\r?\n/u)
-    .find((line) => line.trimStart().startsWith("url:"));
-  if (urlLine === undefined) {
-    throw new Error(`${updateConfigurationPath} has no update feed URL`);
-  }
 
-  const value = urlLine.slice(urlLine.indexOf(":") + 1).trim();
-  const unquotedValue =
-    (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))
+  const valueFor = (key) => {
+    const lines = updateConfiguration
+      .split(/\r?\n/u)
+      .filter((line) => line.trimStart().startsWith(`${key}:`));
+    if (lines.length !== 1) {
+      throw new Error(`${updateConfigurationPath} must contain exactly one ${key}`);
+    }
+
+    const value = lines[0].slice(lines[0].indexOf(":") + 1).trim();
+    return (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
       ? value.slice(1, -1)
       : value;
+  };
 
-  let updateUrl;
-  try {
-    updateUrl = new URL(unquotedValue);
-  } catch {
-    throw new Error(`${updateConfigurationPath} has an invalid update feed URL`);
+  const provider = valueFor("provider");
+  if (provider !== expectedUpdateProvider) {
+    throw new Error(
+      `${updateConfigurationPath} provider must be ${expectedUpdateProvider}; found ${provider}`,
+    );
   }
-  if (updateUrl.protocol !== "https:") {
-    throw new Error(`${updateConfigurationPath} update feed must use HTTPS`);
+
+  const updateUrl = valueFor("url");
+  if (updateUrl !== expectedUpdateUrl) {
+    throw new Error(
+      `${updateConfigurationPath} update feed must be ${expectedUpdateUrl}; found ${updateUrl}`,
+    );
   }
 }
 

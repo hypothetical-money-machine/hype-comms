@@ -16,13 +16,15 @@ permissions:
 jobs:
   validate:
     name: Validate release version
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, macOS, ARM64, notarize]
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -47,29 +49,42 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match desktop version ${desktop_version}." >&2
             exit 1
           fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "Release tag ${GITHUB_REF_NAME} is not on origin/main." >&2
+            exit 1
+          fi
           echo "desktop-version=${desktop_version}" >> "$GITHUB_OUTPUT"
 
   package:
-    name: Release on ${{ matrix.os }}
+    name: Release ${{ matrix.platform }}
     needs: validate
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+        include:
+          - platform: macOS
+            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            artifact_os: mac
+            manifest: latest-mac.yml
+          - platform: Windows
+            runner: '["windows-latest"]'
+            artifact_os: win
+            manifest: latest.yml
+          - platform: Linux
+            runner: '["ubuntu-24.04"]'
+            artifact_os: linux
+            manifest: latest-linux.yml
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
-      HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
-      HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
-      HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
-      HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
-      HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
       # Endpoint, bucket, and region are not secret and live as repository variables. Only the
       # key pair is a secret, and it is scoped to write this one bucket.
       HMM_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
       HMM_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+      HMM_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
+      UPDATE_ARTIFACT_OS: ${{ matrix.artifact_os }}
+      UPDATE_MANIFEST: ${{ matrix.manifest }}
       AWS_REGION: ${{ vars.GARAGE_S3_REGION }}
       AWS_DEFAULT_REGION: ${{ vars.GARAGE_S3_REGION }}
       AWS_EC2_METADATA_DISABLED: "true"
@@ -86,26 +101,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Configure macOS signing and optional notarization
-        if: >-
-          runner.os == 'macOS' &&
-          env.HMM_MACOS_CSC_LINK != '' &&
-          env.HMM_MACOS_CSC_KEY_PASSWORD != ''
+      - name: Configure macOS signing and notarization
+        if: matrix.platform == 'macOS'
         shell: bash
+        env:
+          HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
+          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
+          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
+          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
+          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
         run: |
-          echo "CSC_LINK=${HMM_MACOS_CSC_LINK}" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=${HMM_MACOS_CSC_KEY_PASSWORD}" >> "$GITHUB_ENV"
-
-          if [[ -n "$HMM_MACOS_APPLE_API_KEY_BASE64" &&
-                -n "$HMM_MACOS_APPLE_API_KEY_ID" &&
-                -n "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
-            umask 077
-            api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
-            printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
-            echo "APPLE_API_KEY=${api_key_path}" >> "$GITHUB_ENV"
-            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}" >> "$GITHUB_ENV"
-            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}" >> "$GITHUB_ENV"
+          if [[ -z "$HMM_MACOS_CSC_LINK" ||
+                -z "$HMM_MACOS_CSC_KEY_PASSWORD" ||
+                -z "$HMM_MACOS_APPLE_API_KEY_BASE64" ||
+                -z "$HMM_MACOS_APPLE_API_KEY_ID" ||
+                -z "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
+            echo "The macOS release requires signing and all notarization secrets." >&2
+            exit 1
           fi
+
+          umask 077
+          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+          printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+          {
+            echo "CSC_LINK=${HMM_MACOS_CSC_LINK}"
+            echo "CSC_KEY_PASSWORD=${HMM_MACOS_CSC_KEY_PASSWORD}"
+            echo "APPLE_API_KEY=${api_key_path}"
+            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
+          } >> "$GITHUB_ENV"
 
       - name: Package desktop application
         run: npm run package:desktop
@@ -114,7 +138,7 @@ jobs:
         run: npm run verify:desktop-package
 
       - name: Verify macOS release signing and notarization
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macOS'
         run: npm run verify:desktop-package:macos-release
 
       - name: Address the update bucket by path
@@ -122,27 +146,55 @@ jobs:
         run: |
           # Self-hosted S3-compatible stores are addressed by path. The AWS CLI otherwise defaults
           # to virtual-host style and resolves <bucket>.<endpoint>, which has no DNS record.
+          echo "AWS_CONFIG_FILE=${RUNNER_TEMP}/hmm-chat-aws-config" >> "$GITHUB_ENV"
+          export AWS_CONFIG_FILE="${RUNNER_TEMP}/hmm-chat-aws-config"
           aws configure set default.s3.addressing_style path
 
       # Artifacts are served with a one-year immutable cache while the manifests are no-cache.
-      # Re-publishing a version with different bytes would leave caches serving the old file
-      # against a manifest advertising a new checksum, which fails verification on every client
-      # until someone bumps the version. Refuse rather than corrupt the channel.
-      - name: Refuse to overwrite an already published version
+      # The platform manifest is the commit marker: an orphan artifact from a failed run was never
+      # advertised to clients and may be replaced on retry, but a manifested version is immutable.
+      - name: Refuse to overwrite a published platform version
         shell: bash
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: |
-          existing="$(aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 ls \
-            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/hmm-chat-${DESKTOP_VERSION}-" 2>/dev/null | wc -l | tr -d ' ')"
-          if [[ "$existing" != "0" ]]; then
-            echo "Version ${DESKTOP_VERSION} is already published. Bump the version rather than re-running this tag." >&2
-            exit 1
+          published_manifest="${RUNNER_TEMP}/published-${UPDATE_MANIFEST}"
+          if aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
+            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/${UPDATE_MANIFEST}" \
+            "$published_manifest" \
+            --no-progress 2>/dev/null; then
+            published_version="$(
+              node -e '
+                const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+                const match = text.match(/^version:\s*['\''"]?([^'\''"\s]+)['\''"]?\s*$/m);
+                if (match === null) throw new Error("Published manifest has no valid version");
+                process.stdout.write(match[1]);
+              ' "$published_manifest"
+            )"
+            if [[ "$published_version" == "$DESKTOP_VERSION" ]]; then
+              echo "${UPDATE_MANIFEST} already publishes version ${DESKTOP_VERSION}. Bump the version rather than replacing it." >&2
+              exit 1
+            fi
+            if ! node -e '
+              const semver = require("semver");
+              if (!semver.gt(process.argv[2], process.argv[1])) process.exit(1);
+            ' "$published_version" "$DESKTOP_VERSION"; then
+              echo "Refusing to move ${UPDATE_MANIFEST} backward from ${published_version} to ${DESKTOP_VERSION}." >&2
+              exit 1
+            fi
+          else
+            # Distinguish a missing manifest from an unavailable or unauthorized bucket.
+            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 ls \
+              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/" >/dev/null
           fi
 
-      - name: Upload versioned artifacts to the update bucket
+      - name: Upload platform artifacts to the update bucket
         shell: bash
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: |
           artifact_count=0
@@ -155,39 +207,149 @@ jobs:
             artifact_count=$((artifact_count + 1))
           done < <(
             find apps/desktop/release -maxdepth 1 -type f \
-              -name "hmm-chat-${DESKTOP_VERSION}-*" -print
+              -name "hmm-chat-${DESKTOP_VERSION}-${UPDATE_ARTIFACT_OS}-*" -print
           )
 
           if [[ "$artifact_count" -eq 0 ]]; then
-            echo "No versioned desktop artifacts were produced." >&2
+            echo "No ${UPDATE_ARTIFACT_OS} artifacts were produced for ${DESKTOP_VERSION}." >&2
             exit 1
           fi
 
-      - name: Upload update metadata last
+      - name: Upload the platform manifest last
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: |
-          metadata_count=0
-          for metadata in apps/desktop/release/latest*.yml; do
-            [[ -f "$metadata" ]] || continue
-            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-              "$metadata" \
-              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/$(basename "$metadata")" \
-              --cache-control "no-cache" \
-              --content-type "application/yaml" \
-              --no-progress
-            metadata_count=$((metadata_count + 1))
-          done
-
-          if [[ "$metadata_count" -eq 0 ]]; then
-            echo "No latest update metadata was produced." >&2
+          metadata="apps/desktop/release/${UPDATE_MANIFEST}"
+          if [[ ! -f "$metadata" ]]; then
+            echo "${UPDATE_MANIFEST} was not produced." >&2
             exit 1
           fi
+          metadata_version="$(
+            node -e '
+              const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+              const match = text.match(/^version:\s*['\''"]?([^'\''"\s]+)['\''"]?\s*$/m);
+              if (match === null) throw new Error("Generated manifest has no valid version");
+              process.stdout.write(match[1]);
+            ' "$metadata"
+          )"
+          if [[ "$metadata_version" != "$DESKTOP_VERSION" ]]; then
+            echo "${UPDATE_MANIFEST} contains ${metadata_version}, expected ${DESKTOP_VERSION}." >&2
+            exit 1
+          fi
+
+          aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
+            "$metadata" \
+            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/${UPDATE_MANIFEST}" \
+            --cache-control "no-cache" \
+            --content-type "application/yaml" \
+            --no-progress
+
+      - name: Verify the public platform release
+        shell: bash
+        env:
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        run: |
+          node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const { readFileSync } = require("node:fs");
+
+          const localManifest = readFileSync(
+            `apps/desktop/release/${process.env.UPDATE_MANIFEST}`,
+            "utf8",
+          );
+          const feedRoot = new URL(`${process.env.HMM_UPDATE_PUBLIC_ROOT}/`);
+          const manifestUrl = new URL(process.env.UPDATE_MANIFEST, feedRoot);
+          const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+          async function fetchOk(url) {
+            let failure = "no response";
+            for (let attempt = 1; attempt <= 12; attempt += 1) {
+              try {
+                const response = await fetch(url, {
+                  headers: { "cache-control": "no-cache" },
+                  redirect: "error",
+                  signal: AbortSignal.timeout(10 * 60 * 1_000),
+                });
+                if (response.ok) return response;
+                failure = `HTTP ${response.status}`;
+                await response.body?.cancel();
+              } catch (error) {
+                failure = error instanceof Error ? error.message : String(error);
+              }
+              if (attempt < 12) await sleep(5_000);
+            }
+            throw new Error(`Could not fetch ${url.href}: ${failure}`);
+          }
+
+          let manifestResponse;
+          let publishedManifest = "";
+          for (let attempt = 1; attempt <= 12; attempt += 1) {
+            manifestResponse = await fetchOk(manifestUrl);
+            publishedManifest = await manifestResponse.text();
+            if (publishedManifest === localManifest) break;
+            if (attempt < 12) await sleep(5_000);
+          }
+          if (publishedManifest !== localManifest) {
+            throw new Error(`${manifestUrl.href} does not contain the manifest just published`);
+          }
+          if (!/\bno-cache\b/i.test(manifestResponse.headers.get("cache-control") ?? "")) {
+            throw new Error(`${manifestUrl.href} is not served with Cache-Control: no-cache`);
+          }
+
+          const lines = localManifest.split(/\r?\n/u);
+          const files = [];
+          for (let index = 0; index < lines.length; index += 1) {
+            const url = lines[index].match(/^  - url:\s*(.+)\s*$/u);
+            if (url === null) continue;
+            const sha512 = lines[index + 1]?.match(/^    sha512:\s*(\S+)\s*$/u);
+            const size = lines[index + 2]?.match(/^    size:\s*(\d+)\s*$/u);
+            if (sha512 === null || sha512 === undefined || size === null || size === undefined) {
+              throw new Error(`Could not parse the file entry for ${url[1]}`);
+            }
+            files.push({ url: url[1], sha512: sha512[1], size: Number(size[1]) });
+          }
+          if (files.length === 0) throw new Error("Published manifest contains no files");
+
+          for (const file of files) {
+            const artifactUrl = new URL(file.url, feedRoot);
+            if (
+              artifactUrl.origin !== feedRoot.origin ||
+              !artifactUrl.pathname.startsWith(feedRoot.pathname)
+            ) {
+              throw new Error(`Manifest artifact escapes the canonical feed: ${file.url}`);
+            }
+            const response = await fetchOk(artifactUrl);
+            if (!/\bimmutable\b/i.test(response.headers.get("cache-control") ?? "")) {
+              throw new Error(`${artifactUrl.href} is not served with immutable caching`);
+            }
+
+            const hash = createHash("sha512");
+            let size = 0;
+            for await (const chunk of response.body) {
+              hash.update(chunk);
+              size += chunk.length;
+            }
+            if (size !== file.size || hash.digest("base64") !== file.sha512) {
+              throw new Error(`${artifactUrl.href} does not match ${process.env.UPDATE_MANIFEST}`);
+            }
+          }
+
+          console.log(
+            `Verified ${process.env.UPDATE_MANIFEST} and ${files.length} public artifact(s) for ${process.env.DESKTOP_VERSION}.`,
+          );
+          NODE
 
       # The page reads the manifests at load time, so it does not go stale between releases and
       # one runner publishing it is enough.
       - name: Publish the download page
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'Linux'
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
         run: |
           aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
             downloads/index.html \

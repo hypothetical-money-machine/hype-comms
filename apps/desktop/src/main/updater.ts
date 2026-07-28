@@ -37,6 +37,15 @@ interface UpdateProgress {
   readonly percent: number;
 }
 
+export interface UpdateCancellationToken {
+  readonly cancel: () => void;
+}
+
+export interface UpdateCheckResult {
+  readonly downloadPromise?: Promise<unknown> | null;
+  readonly cancellationToken?: UpdateCancellationToken;
+}
+
 export interface UpdateSource {
   readonly configure: (configuration: UpdateSourceConfiguration) => void;
   readonly onCheckingForUpdate: (listener: () => void) => () => void;
@@ -46,8 +55,14 @@ export interface UpdateSource {
   readonly onUpdateDownloaded: (listener: (info: UpdateInfo) => void) => () => void;
   readonly onUpdateCancelled: (listener: () => void) => () => void;
   readonly onError: (listener: (error: unknown) => void) => () => void;
-  readonly checkForUpdates: () => Promise<unknown>;
+  readonly checkForUpdates: () => Promise<UpdateCheckResult | null>;
   readonly quitAndInstall: (isSilent: boolean, isForceRunAfter: boolean) => void;
+}
+
+interface ActiveDownload {
+  readonly request: Promise<void>;
+  readonly cancellationToken: UpdateCancellationToken | null;
+  cancelled: boolean;
 }
 
 interface UpdateControllerOptions {
@@ -120,6 +135,9 @@ export class UpdateController {
   #periodicCheckTimer: ReturnType<typeof setInterval> | null = null;
   #stallTimer: ReturnType<typeof setTimeout> | null = null;
   #checkRequest: Promise<void> | null = null;
+  #activeDownload: ActiveDownload | null = null;
+  #installRequested = false;
+  #disposed = false;
   #state: UpdateState;
 
   constructor(options: UpdateControllerOptions) {
@@ -158,6 +176,9 @@ export class UpdateController {
   }
 
   #setState(state: UpdateState): void {
+    if (this.#disposed) {
+      return;
+    }
     this.#state = state;
     // Arming here rather than at each call site means a download can never be left without a way
     // out, including on paths added later.
@@ -175,6 +196,7 @@ export class UpdateController {
       this.#stallTimer = null;
       if (this.#state.status === "available" || this.#state.status === "downloading") {
         this.#setState({ status: "error", message: UPDATE_DOWNLOAD_ERROR_MESSAGE });
+        this.#cancelActiveDownload();
       }
     }, DOWNLOAD_STALL_TIMEOUT_MS);
   }
@@ -186,12 +208,64 @@ export class UpdateController {
     }
   }
 
+  #isCancellingDownload(): boolean {
+    return this.#activeDownload?.cancelled === true;
+  }
+
+  #cancelActiveDownload(): void {
+    const activeDownload = this.#activeDownload;
+    if (activeDownload === null || activeDownload.cancelled) {
+      return;
+    }
+
+    activeDownload.cancelled = true;
+    try {
+      activeDownload.cancellationToken?.cancel();
+    } catch {
+      // The controller is already moving to a curated error state; cancellation is best-effort.
+    }
+  }
+
+  #trackDownload(result: UpdateCheckResult | null): void {
+    const downloadPromise = result?.downloadPromise;
+    if (downloadPromise === undefined || downloadPromise === null) {
+      return;
+    }
+
+    let activeDownload: ActiveDownload | null = null;
+    const request = downloadPromise
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          // electron-updater emits an error event and then rejects this nested promise. Owning the
+          // rejection here prevents Node from treating a handled updater failure as unhandled.
+          if (activeDownload?.cancelled !== true) {
+            this.#handleFailure(error, "download");
+          }
+        },
+      )
+      .then(() => {
+        if (activeDownload !== null && this.#activeDownload === activeDownload) {
+          this.#activeDownload = null;
+        }
+      });
+    activeDownload = {
+      request,
+      cancellationToken: result?.cancellationToken ?? null,
+      cancelled: false,
+    };
+    this.#activeDownload = activeDownload;
+  }
+
   #subscribeToUpdater(): void {
     this.#unsubscribe.push(
       this.#updater.onCheckingForUpdate(() => {
+        if (this.#isCancellingDownload()) return;
+        this.#installRequested = false;
         this.#setState({ status: "checking" });
       }),
       this.#updater.onUpdateAvailable((info) => {
+        if (this.#isCancellingDownload()) return;
         if (updateVersionSchema.safeParse(info.version).success) {
           this.#setState({ status: "available" });
         } else {
@@ -199,33 +273,39 @@ export class UpdateController {
         }
       }),
       this.#updater.onUpdateNotAvailable(() => {
+        if (this.#isCancellingDownload()) return;
         this.#setState({ status: "idle" });
       }),
       this.#updater.onDownloadProgress((progress) => {
+        if (this.#isCancellingDownload()) return;
         const percentage = Number.isFinite(progress.percent)
           ? Math.min(100, Math.max(0, Math.round(progress.percent)))
           : 0;
         this.#setState({ status: "downloading", percentage });
       }),
       this.#updater.onUpdateDownloaded((info) => {
+        if (this.#isCancellingDownload()) return;
         const version = updateVersionSchema.safeParse(info.version);
         if (version.success) {
+          this.#installRequested = false;
           this.#setState({ status: "ready", version: version.data });
         } else {
           this.#setState({ status: "error", message: UPDATE_DOWNLOAD_ERROR_MESSAGE });
         }
       }),
       this.#updater.onUpdateCancelled(() => {
+        if (this.#isCancellingDownload()) return;
         this.#setState({ status: "error", message: UPDATE_DOWNLOAD_ERROR_MESSAGE });
       }),
       this.#updater.onError((error) => {
+        if (this.#isCancellingDownload()) return;
         this.#handleFailure(error);
       }),
     );
   }
 
-  #handleFailure(error: unknown): void {
-    if (this.#state.status === "unsupported" || this.#state.status === "error") {
+  #handleFailure(error: unknown, phase?: "download"): void {
+    if (this.#disposed || this.#state.status === "unsupported" || this.#state.status === "error") {
       return;
     }
     if (this.#platform === "darwin" && isMacSignatureFailure(error)) {
@@ -238,19 +318,37 @@ export class UpdateController {
       return;
     }
 
-    const message =
-      this.#state.status === "available" ||
-      this.#state.status === "downloading" ||
-      this.#state.status === "ready"
+    const message = this.#installRequested
+      ? UPDATE_INSTALL_ERROR_MESSAGE
+      : phase === "download" ||
+          this.#state.status === "available" ||
+          this.#state.status === "downloading" ||
+          this.#state.status === "ready"
         ? UPDATE_DOWNLOAD_ERROR_MESSAGE
         : UPDATE_CHECK_ERROR_MESSAGE;
+    this.#installRequested = false;
     this.#setState({ status: "error", message });
   }
 
   async checkNow(): Promise<void> {
+    if (!this.#supported || this.#disposed) {
+      return;
+    }
+
+    const activeDownload = this.#activeDownload;
+    if (activeDownload !== null) {
+      if (this.#state.status !== "error") {
+        return;
+      }
+      // A retry must not race electron-updater's still-live downloadPromise. Cancellation settles
+      // that promise, after which electron-updater can safely create a fresh request.
+      await activeDownload.request;
+    }
+
     if (
-      !this.#supported ||
+      this.#disposed ||
       this.#checkRequest !== null ||
+      this.#activeDownload !== null ||
       this.#state.status === "unsupported" ||
       this.#state.status === "available" ||
       this.#state.status === "downloading" ||
@@ -259,9 +357,10 @@ export class UpdateController {
       return;
     }
 
+    this.#installRequested = false;
     this.#setState({ status: "checking" });
 
-    let request: Promise<unknown>;
+    let request: Promise<UpdateCheckResult | null>;
     try {
       request = this.#updater.checkForUpdates();
     } catch (error) {
@@ -270,7 +369,12 @@ export class UpdateController {
     }
 
     const checkRequest = request
-      .then(() => {
+      .then((result) => {
+        this.#trackDownload(result);
+        if (this.#disposed) {
+          this.#cancelActiveDownload();
+          return;
+        }
         if (this.#state.status === "checking") {
           this.#setState({ status: "idle" });
         }
@@ -290,9 +394,11 @@ export class UpdateController {
       return;
     }
 
+    this.#installRequested = true;
     try {
       this.#updater.quitAndInstall(true, true);
     } catch {
+      this.#installRequested = false;
       this.#setState({ status: "error", message: UPDATE_INSTALL_ERROR_MESSAGE });
     }
   }
@@ -310,8 +416,13 @@ export class UpdateController {
   }
 
   dispose(): void {
+    if (this.#disposed) {
+      return;
+    }
+    this.#disposed = true;
     this.#stopChecking();
     this.#clearStallTimer();
     for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+    this.#cancelActiveDownload();
   }
 }

@@ -25,6 +25,11 @@ interface AppProps {
   readonly client: DesktopApi;
 }
 
+type UpdateClient = Pick<
+  DesktopApi,
+  "getUpdateState" | "checkForUpdates" | "restartToInstallUpdate" | "onUpdateStateChanged"
+>;
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
 }
@@ -36,19 +41,24 @@ function messageTime(value: string): string {
   }).format(new Date(value));
 }
 
-function UpdateControl({ client }: { readonly client: DesktopApi }) {
+export function UpdateControl({ client }: { readonly client: UpdateClient }) {
   const [update, setUpdate] = useState<UpdateState | null>(null);
 
   useEffect(() => {
     let active = true;
-    const stopUpdateListener = client.onUpdateStateChanged(setUpdate);
+    let receivedLiveState = false;
+    const stopUpdateListener = client.onUpdateStateChanged((state) => {
+      if (!active) return;
+      receivedLiveState = true;
+      setUpdate(state);
+    });
     void client
       .getUpdateState()
       .then((state) => {
-        if (active) setUpdate(state);
+        if (active && !receivedLiveState) setUpdate(state);
       })
       .catch(() => {
-        if (active) setUpdate({ status: "unsupported" });
+        if (active && !receivedLiveState) setUpdate({ status: "unsupported" });
       });
 
     return () => {
