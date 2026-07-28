@@ -7,7 +7,7 @@ on:
       - "v*"
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-release
   cancel-in-progress: false
 
 permissions:
@@ -156,39 +156,51 @@ jobs:
       - name: Refuse to overwrite a published platform version
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: |
-          published_manifest="${RUNNER_TEMP}/published-${UPDATE_MANIFEST}"
-          if aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 cp \
-            "s3://${HMM_UPDATE_S3_BUCKET}/desktop/${UPDATE_MANIFEST}" \
-            "$published_manifest" \
-            --no-progress 2>/dev/null; then
-            published_version="$(
-              node -e '
-                const text = require("node:fs").readFileSync(process.argv[1], "utf8");
-                const match = text.match(/^version:\s*['\''"]?([^'\''"\s]+)['\''"]?\s*$/m);
-                if (match === null) throw new Error("Published manifest has no valid version");
-                process.stdout.write(match[1]);
-              ' "$published_manifest"
-            )"
-            if [[ "$published_version" == "$DESKTOP_VERSION" ]]; then
-              echo "${UPDATE_MANIFEST} already publishes version ${DESKTOP_VERSION}. Bump the version rather than replacing it." >&2
-              exit 1
-            fi
-            if ! node -e '
-              const semver = require("semver");
-              if (!semver.gt(process.argv[2], process.argv[1])) process.exit(1);
-            ' "$published_version" "$DESKTOP_VERSION"; then
-              echo "Refusing to move ${UPDATE_MANIFEST} backward from ${published_version} to ${DESKTOP_VERSION}." >&2
-              exit 1
-            fi
-          else
-            # Distinguish a missing manifest from an unavailable or unauthorized bucket.
-            aws --endpoint-url "$HMM_UPDATE_S3_ENDPOINT" s3 ls \
-              "s3://${HMM_UPDATE_S3_BUCKET}/desktop/" >/dev/null
-          fi
+          node <<'NODE'
+          const semver = require("semver");
+
+          async function main() {
+            const manifestUrl = new URL(
+              process.env.UPDATE_MANIFEST,
+              `${process.env.HMM_UPDATE_PUBLIC_ROOT}/`,
+            );
+            const response = await fetch(manifestUrl, {
+              headers: { "cache-control": "no-cache" },
+              redirect: "error",
+              signal: AbortSignal.timeout(30_000),
+            });
+            if (response.status === 404) return;
+            if (!response.ok) {
+              throw new Error(`Could not inspect ${manifestUrl}: HTTP ${response.status}`);
+            }
+
+            const text = await response.text();
+            const match = text.match(/^version:\s*['"]?([^'"\s]+)['"]?\s*$/m);
+            if (match === null) throw new Error("Published manifest has no valid version");
+
+            const publishedVersion = match[1];
+            const desktopVersion = process.env.DESKTOP_VERSION;
+            if (publishedVersion === desktopVersion) {
+              throw new Error(
+                `${process.env.UPDATE_MANIFEST} already publishes version ${desktopVersion}. ` +
+                  "Bump the version rather than replacing it.",
+              );
+            }
+            if (!semver.gt(desktopVersion, publishedVersion)) {
+              throw new Error(
+                `Refusing to move ${process.env.UPDATE_MANIFEST} backward from ` +
+                  `${publishedVersion} to ${desktopVersion}.`,
+              );
+            }
+          }
+
+          main().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          NODE
 
       - name: Upload platform artifacts to the update bucket
         shell: bash
