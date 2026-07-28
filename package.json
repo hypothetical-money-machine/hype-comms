@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "check": "npm run verify:vite-stack && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "demo": "node --env-file-if-exists=.env.local scripts/demo.mjs",
     "demo:reset": "node --env-file-if-exists=.env.local scripts/demo-reset.mjs",
@@ -39,6 +39,7 @@
     "test:scripts": "node --test scripts/*.test.mjs",
     "test:db": "scripts/test-database.sh",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs"
   },

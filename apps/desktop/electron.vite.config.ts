@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import react from "@vitejs/plugin-react";
-import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { defineConfig } from "electron-vite";
 import type { Plugin } from "vite";
 
 import {
@@ -47,14 +47,13 @@ export default defineConfig(({ command }) => {
 
   return {
     main: {
-      plugins: [externalizeDepsPlugin()],
       define: {
         __HMM_CHAT_API_ORIGIN__: JSON.stringify(apiOrigin),
         __HMM_CHAT_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
       },
       build: {
         outDir: path.join(desktopRoot, "dist/main"),
-        rollupOptions: {
+        rolldownOptions: {
           input: path.join(desktopRoot, "src/main/index.ts"),
           output: {
             entryFileNames: "index.js",
@@ -66,10 +65,12 @@ export default defineConfig(({ command }) => {
     preload: {
       // The sandboxed preload cannot require arbitrary packages at runtime. Bundle the
       // validators used at the IPC boundary instead of externalizing them.
-      plugins: [externalizeDepsPlugin({ exclude: ["@hmm-chat/contracts", "zod"] })],
       build: {
+        externalizeDeps: {
+          exclude: ["@hmm-chat/contracts", "zod"],
+        },
         outDir: path.join(desktopRoot, "dist/preload"),
-        rollupOptions: {
+        rolldownOptions: {
           input: path.join(desktopRoot, "src/preload/index.ts"),
           output: {
             entryFileNames: "index.js",
