@@ -182,7 +182,12 @@
       // The manifests are the source of truth for what has been published, so this page never
       // goes stale and never needs regenerating for a new release.
       const FEED = "desktop/";
-      const MANIFESTS = ["latest-mac.yml", "latest.yml", "latest-linux.yml"];
+      const MANIFESTS = [
+        "latest-mac.yml",
+        "latest.yml",
+        "latest-linux.yml",
+        "latest-linux-arm64.yml",
+      ];
 
       function artifactPath(file) {
         return new URL(file, window.location.href).pathname;
@@ -210,9 +215,14 @@
           id: "linux",
           title: "Linux",
           match: (f) => artifactPath(f).endsWith(".AppImage") || artifactPath(f).endsWith(".deb"),
-          label: (f) =>
-            artifactPath(f).endsWith(".AppImage") ? "AppImage (recommended)" : "Debian package",
-          note: "Choose the AppImage — it is the only Linux build that updates itself. Keep it somewhere stable such as ~/Applications, since it replaces its own file. On Arch you may need fuse2.",
+          label: (f) => {
+            const artifact = artifactPath(f);
+            const architecture = artifact.includes("arm64") ? "ARM64" : "x64";
+            return artifact.endsWith(".AppImage")
+              ? `AppImage (${architecture}, recommended)`
+              : `Debian package (${architecture})`;
+          },
+          note: "Choose the AppImage for your architecture — it is the only Linux build that updates itself. Keep it somewhere stable such as ~/Applications, since it replaces its own file. On Arch you may need fuse2.",
           detect: (ua) => ua.includes("linux") || ua.includes("x11"),
         },
       ];

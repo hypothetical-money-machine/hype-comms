@@ -1,13 +1,15 @@
 # Local Linux release runner
 
-This runner replaces the GitHub-hosted Linux release lane with an isolated x64 Ubuntu
-container. It uses the official GitHub Actions runner binary, stores only runner state in a
-named Docker volume, and does not mount the host filesystem or Docker socket.
+The ARM64 runner replaces the GitHub-hosted Linux release lane with an isolated Ubuntu
+container running natively on the Apple-silicon Mac Mini. The legacy x64 service remains
+available for compatibility checks. Each service uses the matching official GitHub Actions
+runner and AWS CLI binaries, stores only runner state in its own named Docker volume, and
+does not mount the host filesystem or Docker socket.
 
-Build and register it once:
+Build and register the ARM64 runner once:
 
 ```bash
-docker compose -f docker-compose.runner.yml build
+docker compose -f docker-compose.runner.yml build linux-arm64
 runner_token="$(
   gh api -X POST \
     repos/hype-comms/hmm-chat/actions/runners/registration-token \
@@ -17,24 +19,24 @@ RUNNER_TOKEN="$runner_token" docker compose -f docker-compose.runner.yml run \
   --rm \
   --env RUNNER_TOKEN \
   --env RUNNER_CONFIGURE_ONLY=true \
-  linux-x64
+  linux-arm64
 unset runner_token
-docker compose -f docker-compose.runner.yml up --detach
+docker compose -f docker-compose.runner.yml up --detach linux-arm64
 ```
 
 Check the local container and GitHub registration:
 
 ```bash
-docker compose -f docker-compose.runner.yml ps
+docker compose -f docker-compose.runner.yml ps linux-arm64
 gh api repos/hype-comms/hmm-chat/actions/runners \
-  --jq '.runners[] | select(.name == "hmm-chat-docker-linux-x64")'
+  --jq '.runners[] | select(.name == "hmm-chat-docker-linux-arm64")'
 ```
 
 The registration survives container and Docker Desktop restarts in the
-`hmm-chat-runner-data` volume. To remove it, first remove the runner in the repository's
-Actions settings, then run:
+`hmm-chat-runner-data-arm64` volume. To remove it, first remove the runner in the
+repository's Actions settings, then run:
 
 ```bash
-docker compose -f docker-compose.runner.yml down
-docker volume rm hmm-chat-runner-data
+docker compose -f docker-compose.runner.yml rm --stop --force linux-arm64
+docker volume rm hmm-chat-runner-data-arm64
 ```

@@ -152,10 +152,11 @@ insecure `basic_text` backend.
 
 Packaged production clients read a public, flat update feed at
 `https://updates.hypemm.com/desktop`. The feed contains `latest-mac.yml`, `latest.yml`,
-`latest-linux.yml`, and the versioned installers those files name. Its URL is baked into the
-package: there is intentionally no runtime setting that could redirect an installed client to a
-different update server. Object storage is only the origin; clients need no bucket credential, and
-the read path is deliberately unauthenticated because a packaged app cannot hold a secret.
+`latest-linux.yml`, `latest-linux-arm64.yml`, and the versioned installers those files name. Its
+URL is baked into the package: there is intentionally no runtime setting that could redirect an
+installed client to a different update server. Object storage is only the origin; clients need no
+bucket credential, and the read path is deliberately unauthenticated because a packaged app
+cannot hold a secret.
 
 To cut a release:
 
@@ -165,10 +166,11 @@ To cut a release:
 3. Land that focused version change, then create and push `v<version>` at the exact revision. The
    release workflow rejects a tag whose value does not exactly match the desktop package version.
 
-The workflow packages on native macOS, Windows, and Ubuntu runners with `--publish never`, verifies
-the ASAR, update configuration, and Electron fuses, and then copies the results to the
-S3-compatible bucket described below. The pilot serves this from a self-hosted S3-compatible storage instance on
-the example-project cluster; any S3-compatible endpoint works, and the bucket is addressed by path.
+The workflow packages x64 and ARM64 clients on native macOS, Windows ARM64, and Ubuntu ARM64
+runners with `--publish never`, verifies the ASAR, update configuration, and Electron fuses, and
+then copies the results to the S3-compatible bucket described below. The pilot serves this from a
+self-hosted S3-compatible storage instance on the example-project cluster; any S3-compatible endpoint works, and the
+bucket is addressed by path.
 
 The endpoint, bucket, and region are not secret and are repository **variables**:
 

@@ -27,9 +27,12 @@
     "test:watch": "vitest",
     "package": "npm run build && electron-builder --publish never",
     "package:mac": "npm run build && electron-builder --mac --publish never",
-    "package:win": "npm run build && electron-builder --win --x64 --publish never",
-    "package:linux": "npm run build && electron-builder --linux --x64 --publish never",
-    "package:linux:appimage": "npm run build && electron-builder --linux AppImage --x64 --publish never"
+    "package:win": "npm run build && electron-builder --win --x64 --arm64 --publish never",
+    "package:win:arm64": "npm run build && electron-builder --win nsis:arm64 --publish never",
+    "package:linux": "npm run build && electron-builder --linux --x64 --arm64 --publish never",
+    "package:linux:arm64": "npm run build && electron-builder --linux AppImage:arm64 deb:arm64 --publish never",
+    "package:linux:appimage": "npm run build && electron-builder --linux AppImage --x64 --arm64 --publish never",
+    "package:linux:appimage:arm64": "npm run build && electron-builder --linux AppImage:arm64 --publish never"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
@@ -121,12 +124,14 @@
         {
           "target": "nsis",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         }
       ]
     },
     "nsis": {
+      "buildUniversalInstaller": false,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
@@ -138,13 +143,15 @@
         {
           "target": "AppImage",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         },
         {
           "target": "deb",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         }
       ]
