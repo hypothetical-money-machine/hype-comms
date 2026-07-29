@@ -1,0 +1,120 @@
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { MAX_THEME_PREFERENCE_FILE_BYTES, ThemePreferenceStore } from "./theme-preference-store";
+
+const directories: string[] = [];
+
+async function scratchDirectory(): Promise<string> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-theme-preference-"));
+  directories.push(directory);
+  return directory;
+}
+
+function preferenceDirectory(userDataPath: string): string {
+  return path.join(userDataPath, "hmm-chat-settings");
+}
+
+function preferenceFile(userDataPath: string): string {
+  return path.join(preferenceDirectory(userDataPath), "theme.json");
+}
+
+async function writeStoredValue(userDataPath: string, value: string): Promise<void> {
+  await mkdir(preferenceDirectory(userDataPath), { recursive: true });
+  await writeFile(preferenceFile(userDataPath), value, "utf8");
+}
+
+afterEach(async () => {
+  await Promise.all(
+    directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
+  );
+});
+
+describe("ThemePreferenceStore", () => {
+  it("uses the system preference when the file is missing", async () => {
+    const store = new ThemePreferenceStore({ userDataPath: await scratchDirectory() });
+    await expect(store.load()).resolves.toBe("system");
+  });
+
+  it("round-trips a versioned preference in a private file", async () => {
+    const userDataPath = await scratchDirectory();
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await store.save("dark");
+
+    expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual({
+      version: 1,
+      preference: "dark",
+    });
+    await expect(new ThemePreferenceStore({ userDataPath }).load()).resolves.toBe("dark");
+
+    if (process.platform !== "win32") {
+      expect((await stat(preferenceDirectory(userDataPath))).mode & 0o777).toBe(0o700);
+      expect((await stat(preferenceFile(userDataPath))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("does not collide with an existing application preferences file", async () => {
+    const userDataPath = await scratchDirectory();
+    const existingPreferences = path.join(userDataPath, "preferences");
+    const existingValue = JSON.stringify({ spellcheck: { dictionaries: ["en-US"] } });
+    await writeFile(existingPreferences, existingValue, "utf8");
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await expect(store.save("dark")).resolves.toBeUndefined();
+    await expect(store.load()).resolves.toBe("dark");
+    await expect(readFile(existingPreferences, "utf8")).resolves.toBe(existingValue);
+  });
+
+  it("falls back safely for malformed, unversioned, non-strict, and oversized data", async () => {
+    const userDataPath = await scratchDirectory();
+    const store = new ThemePreferenceStore({ userDataPath });
+    const invalidValues = [
+      "not json",
+      JSON.stringify({ preference: "dark" }),
+      JSON.stringify({ version: 2, preference: "dark" }),
+      JSON.stringify({ version: 1, preference: "midnight" }),
+      JSON.stringify({ version: 1, preference: "dim" }),
+      JSON.stringify({ version: 1, preference: "dark", extra: true }),
+      "x".repeat(MAX_THEME_PREFERENCE_FILE_BYTES + 1),
+    ];
+
+    for (const value of invalidValues) {
+      await writeStoredValue(userDataPath, value);
+      await expect(store.load()).resolves.toBe("system");
+    }
+  });
+
+  it("serializes rapid saves so the last requested preference wins", async () => {
+    const userDataPath = await scratchDirectory();
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await Promise.all([store.save("dark"), store.save("light"), store.save("system")]);
+
+    await expect(store.load()).resolves.toBe("system");
+    expect(await readdir(preferenceDirectory(userDataPath))).toEqual(["theme.json"]);
+  });
+
+  it("rejects syntactically valid theme IDs that are not in the bundled registry", async () => {
+    const userDataPath = await scratchDirectory();
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await expect(store.save("dim")).rejects.toThrow(/Unknown built-in theme: dim/u);
+    await expect(store.load()).resolves.toBe("system");
+  });
+
+  it("continues saving after an earlier write fails", async () => {
+    const userDataPath = await scratchDirectory();
+    await writeFile(preferenceDirectory(userDataPath), "not a directory", "utf8");
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await expect(store.save("dark")).rejects.toThrow();
+
+    await rm(preferenceDirectory(userDataPath));
+    await expect(store.save("light")).resolves.toBeUndefined();
+    await expect(store.load()).resolves.toBe("light");
+  });
+});

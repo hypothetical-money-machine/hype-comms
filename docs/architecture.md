@@ -74,14 +74,14 @@ The packaged client API is `https://chat-api.example.invalid`; realtime uses
 `https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
 `hmm-chat://auth/callback`.
 
-| Component      | Responsibility                                                                                                                     | Must not do                                                                                                               |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Electron main  | Window lifecycle, session/token storage, authenticated HTTP/WSS, deep links, cache cryptography, native notifications, and updates | Render remote content or expose tokens, raw filesystem, shell, or arbitrary network calls to the renderer                 |
-| Preload        | Frozen, typed, request/response IPC facade with runtime validation and unsubscribe handles                                         | Pass through arbitrary channel names, URLs, headers, or Electron objects                                                  |
-| Renderer       | React UI, normalized state, renderer-owned IndexedDB cache/outbox, optimistic state, and routing behind a transport interface      | Import Node/Electron, receive credentials, connect to production origins directly, or treat cache/events as authoritative |
-| Fastify        | Authentication, authorization, validation, business transactions, search, sync, signed URL issuance, and WebSocket fanout          | Trust client workspace/user IDs or use WebSocket delivery as durable state                                                |
-| PostgreSQL     | Canonical domain state, idempotency records, read cursors, search vectors, and ordered sync events                                 | Store raw magic-link/refresh tokens or public object URLs                                                                 |
-| S3/scan worker | Private quarantine and clean attachment/update objects; asynchronous malware verdicts                                              | Make an upload downloadable before a clean verdict                                                                        |
+| Component      | Responsibility                                                                                                                                                       | Must not do                                                                                                               |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Electron main  | Window lifecycle, native appearance and local preferences, session/token storage, authenticated HTTP/WSS, deep links, cache cryptography, notifications, and updates | Render remote content or expose tokens, raw filesystem, shell, arbitrary CSS, or network calls to the renderer            |
+| Preload        | Frozen, typed, request/response IPC facade with runtime validation and unsubscribe handles                                                                           | Pass through arbitrary channel names, URLs, headers, or Electron objects                                                  |
+| Renderer       | React UI, semantic theme rendering, normalized state, renderer-owned IndexedDB cache/outbox, optimistic state, and routing behind a transport interface              | Import Node/Electron, receive credentials, connect to production origins directly, or treat cache/events as authoritative |
+| Fastify        | Authentication, authorization, validation, business transactions, search, sync, signed URL issuance, and WebSocket fanout                                            | Trust client workspace/user IDs or use WebSocket delivery as durable state                                                |
+| PostgreSQL     | Canonical domain state, idempotency records, read cursors, search vectors, and ordered sync events                                                                   | Store raw magic-link/refresh tokens or public object URLs                                                                 |
+| S3/scan worker | Private quarantine and clean attachment/update objects; asynchronous malware verdicts                                                                                | Make an upload downloadable before a clean verdict                                                                        |
 
 The hosted target follows the organization's AWS+Cloudflare convention: a versioned
 CloudFormation entry stack at `deploy/poc/stack.yml`, with nested stacks and small scripts
@@ -284,6 +284,35 @@ newest message actually rendered, never blindly to the server head; the API appl
 to conversation unread count, while explicit mentions have a separate count. Sending a
 message does not mark unseen incoming messages as read. Read-cursor sync across a user's
 devices is private to that user.
+
+## Desktop appearance contract
+
+Appearance is an app/profile-local preference for `system` or one registered built-in theme ID.
+The current built-ins are `light` and `dark`; the selector is generated from the ordered theme
+registry. Electron main owns its strict, versioned preference file under `userData`, applies the
+choice's light/dark color scheme to `nativeTheme` before creating a window, and keeps the native
+window background synchronized. Missing, malformed, or unregistered preference data falls back to
+`system`; a failed write leaves the last canonical state unchanged. Sign-out does not clear this
+non-secret device preference.
+
+IPC carries only the validated preference, resolved theme ID, and resolved light/dark scheme. It
+never carries arbitrary colors or CSS. The renderer maps that ID to one bundled theme definition
+whose exact semantic-token contract covers surfaces, text hierarchy, borders, actions, status
+colors, focus, elevation, brand effects, and scrollbars. Theme identity is independent from its
+light/dark color scheme, so multiple named themes may share a native scheme. Component CSS consumes
+only those semantic variables; palette values live only in the complete built-in definitions.
+Tokens are installed on the document root so ordinary views and body-level portals inherit the
+same theme.
+
+The current dark appearance is the reference theme and light is a fully defined peer. A new named
+theme becomes selectable by adding one complete validated definition to the registry; its label,
+tokens, color scheme, and native window background travel together. Main passes its exact
+initialized state to the sandboxed preload as a validated, non-secret renderer argument, so named
+themes that share a native color scheme still paint with the correct identity before React mounts.
+Theme state is subscribed before hydration so a stale startup response cannot replace a newer
+native update. `system` follows operating-system appearance changes live; explicit built-in choices
+remain fixed. Every theme must meet the tested text/action/status/control contrast pairs and use the
+shared focus treatment before it can be added to the built-in registry.
 
 ## Feature behavior
 
