@@ -280,10 +280,15 @@ jobs:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: node scripts/desktop-release.mjs assert-unpublished
 
-      - name: Refuse to overwrite a published Linux ARM64 version
+      # Only one manifest per lane can be the commit marker, and on Linux that is latest-linux.yml
+      # below. The ARM64 manifest is published before it, so a run interrupted between the two must
+      # be able to replace the ARM64 manifest on retry; refusing here would strand ARM64 clients on
+      # the previous release until someone cut an entirely new version.
+      - name: Refuse to roll back the published Linux ARM64 version
         if: matrix.platform == 'Linux'
         shell: sh
         env:
+          ALLOW_REPUBLISH: "true"
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
           UPDATE_MANIFEST: latest-linux-arm64.yml
         run: node scripts/desktop-release.mjs assert-unpublished
@@ -296,6 +301,24 @@ jobs:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: node scripts/desktop-release.mjs upload-artifacts
 
+      - name: Upload the Linux ARM64 manifest before the commit marker
+        if: matrix.platform == 'Linux'
+        shell: sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+          UPDATE_MANIFEST: latest-linux-arm64.yml
+        run: node scripts/desktop-release.mjs upload-manifest
+
+      - name: Verify the public Linux ARM64 release
+        if: matrix.platform == 'Linux'
+        shell: sh
+        env:
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+          UPDATE_MANIFEST: latest-linux-arm64.yml
+        run: node scripts/verify-published-desktop-release.mjs
+
       - name: Upload the platform manifest last
         shell: sh
         env:
@@ -304,28 +327,10 @@ jobs:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: node scripts/desktop-release.mjs upload-manifest
 
-      - name: Upload the Linux ARM64 manifest last
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-          UPDATE_MANIFEST: latest-linux-arm64.yml
-        run: node scripts/desktop-release.mjs upload-manifest
-
       - name: Verify the public platform release
         shell: sh
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: node scripts/verify-published-desktop-release.mjs
-
-      - name: Verify the public Linux ARM64 release
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-          UPDATE_MANIFEST: latest-linux-arm64.yml
         run: node scripts/verify-published-desktop-release.mjs
 
       # The page reads the manifests at load time, so it does not go stale between releases and

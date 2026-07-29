@@ -166,11 +166,13 @@ To cut a release:
 3. Land that focused version change, then create and push `v<version>` at the exact revision. The
    release workflow rejects a tag whose value does not exactly match the desktop package version.
 
-The workflow packages x64 and ARM64 clients on native macOS, Windows ARM64, and Ubuntu ARM64
-runners with `--publish never`, verifies the ASAR, update configuration, and Electron fuses, and
-then copies the results to the S3-compatible bucket described below. The pilot serves this from a
-self-hosted S3-compatible storage instance on the example-project cluster; any S3-compatible endpoint works, and the
-bucket is addressed by path.
+The workflow packages x64 and ARM64 clients on macOS, Windows ARM64, and Ubuntu ARM64 runners with
+`--publish never`, verifies the ASAR, update configuration, and Electron fuses, and then copies the
+results to the S3-compatible bucket described below. Only the ARM64 clients are built natively:
+there is no longer an x64 runner in the release path, so the x64 Windows and Linux artifacts are
+cross-built and fuse-verified on those same ARM64 hosts and no x64 machine exercises them before
+publishing. The pilot serves this from a self-hosted S3-compatible storage instance on the example-project cluster; any
+S3-compatible endpoint works, and the bucket is addressed by path.
 
 The endpoint, bucket, and region are not secret and are repository **variables**:
 

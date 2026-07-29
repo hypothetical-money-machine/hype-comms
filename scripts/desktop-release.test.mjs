@@ -195,6 +195,22 @@ test("allows a missing or older feed and rejects replacement or rollback", async
   );
 });
 
+test("lets a manifest published before the commit marker be replaced on retry", async () => {
+  const resumable = { ...environment, ALLOW_REPUBLISH: "true" };
+
+  await assertVersionCanPublish({
+    environment: resumable,
+    fetchImplementation: async () => new Response("version: 1.2.3\n"),
+  });
+  await assert.rejects(
+    assertVersionCanPublish({
+      environment: resumable,
+      fetchImplementation: async () => new Response("version: 2.0.0\n"),
+    }),
+    /Refusing to move latest\.yml backward/,
+  );
+});
+
 test("runs AWS without a shell and pins its config to runner temp", () => {
   let invocation;
   runAws(["configure", "set", "default.s3.addressing_style", "path"], {

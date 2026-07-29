@@ -193,6 +193,17 @@
         return new URL(file, window.location.href).pathname;
       }
 
+      function artifactArchitecture(file) {
+        return artifactPath(file).includes("arm64") ? "arm64" : "x64";
+      }
+
+      // Browsers do not report the CPU reliably — Windows on ARM even claims x64 — so an ARM user
+      // agent is trusted when it says so and x64 is assumed otherwise. Guessing wrong only demotes
+      // a button; guessing nothing would hand every x64 visitor an ARM64 binary that cannot run.
+      function detectArchitecture(ua) {
+        return /aarch64|arm64|armv8/u.test(ua) ? "arm64" : "x64";
+      }
+
       const PLATFORMS = [
         {
           id: "mac",
@@ -216,10 +227,9 @@
           title: "Linux",
           match: (f) => artifactPath(f).endsWith(".AppImage") || artifactPath(f).endsWith(".deb"),
           label: (f) => {
-            const artifact = artifactPath(f);
-            const architecture = artifact.includes("arm64") ? "ARM64" : "x64";
-            return artifact.endsWith(".AppImage")
-              ? `AppImage (${architecture}, recommended)`
+            const architecture = artifactArchitecture(f) === "arm64" ? "ARM64" : "x64";
+            return artifactPath(f).endsWith(".AppImage")
+              ? `AppImage (${architecture})`
               : `Debian package (${architecture})`;
           },
           note: "Choose the AppImage for your architecture — it is the only Linux build that updates itself. Keep it somewhere stable such as ~/Applications, since it replaces its own file. On Arch you may need fuse2.",
@@ -281,10 +291,18 @@
         }
 
         const ua = navigator.userAgent.toLowerCase();
+        const architecture = detectArchitecture(ua);
         const container = document.getElementById("platforms");
 
         for (const platform of PLATFORMS) {
-          const matches = files.filter(platform.match).sort();
+          // The first link is the highlighted one, so the visitor's own architecture must lead.
+          // Sorting by name alone put every ARM64 build ahead of the x64 build it shipped beside.
+          const matches = files.filter(platform.match).sort((left, right) => {
+            const preference =
+              Number(artifactArchitecture(left) !== architecture) -
+              Number(artifactArchitecture(right) !== architecture);
+            return preference === 0 ? left.localeCompare(right) : preference;
+          });
           if (matches.length === 0) continue;
 
           const card = document.createElement("div");
