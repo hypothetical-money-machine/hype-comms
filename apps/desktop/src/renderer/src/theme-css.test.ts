@@ -144,7 +144,7 @@ describe("renderer theme CSS", () => {
 
   it("preserves pending-state and reaction-reveal cues across themes", () => {
     const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
-    const reactionAddRule = /\.reaction-add\s*\{(?<body>[^}]*)\}/u.exec(styles);
+    const reactionAddRule = /^\.reaction-add\s*\{(?<body>[^}]*)\}/mu.exec(styles);
     const reactionRevealRule =
       /\.message:hover \.reaction-add,\s*\.reaction-add:focus-visible,\s*\.reaction-add\[aria-expanded="true"\]\s*\{(?<body>[^}]*)\}/u.exec(
         styles,

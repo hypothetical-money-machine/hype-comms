@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAX_THEME_PREFERENCE_FILE_BYTES, ThemePreferenceStore } from "./theme-preference-store";
 
@@ -117,4 +117,20 @@ describe("ThemePreferenceStore", () => {
     await expect(store.save("light")).resolves.toBeUndefined();
     await expect(store.load()).resolves.toBe("light");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "keeps a renamed preference committed when directory syncing fails",
+    async () => {
+      const userDataPath = await scratchDirectory();
+      const syncDirectory = vi.fn(() => Promise.reject(new Error("directory sync unavailable")));
+      const store = new ThemePreferenceStore({ userDataPath, syncDirectory });
+
+      await expect(store.save("dark")).resolves.toBeUndefined();
+
+      expect(syncDirectory).toHaveBeenCalledOnce();
+      expect(syncDirectory).toHaveBeenCalledWith(preferenceDirectory(userDataPath));
+      await expect(store.load()).resolves.toBe("dark");
+      expect(await readdir(preferenceDirectory(userDataPath))).toEqual(["theme.json"]);
+    },
+  );
 });

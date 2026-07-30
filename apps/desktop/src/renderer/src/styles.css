@@ -1031,7 +1031,7 @@ button:disabled {
 .message-continuation-time {
   align-self: start;
   padding-top: 4px;
-  color: #737f9d;
+  color: var(--theme-text-subtle);
   font-size: 9px;
   line-height: 1.45;
   opacity: 0;
@@ -1211,7 +1211,7 @@ button:disabled {
 }
 
 .pending-status {
-  color: #737f9d;
+  color: var(--theme-text-subtle);
   font-size: 11px;
 }
 

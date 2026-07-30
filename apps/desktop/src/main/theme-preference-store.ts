@@ -15,6 +15,8 @@ interface StoredThemePreference {
   readonly preference: ThemePreference;
 }
 
+type SyncDirectory = (directory: string) => Promise<void>;
+
 function parseStoredThemePreference(value: unknown): ThemePreference | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
@@ -72,7 +74,23 @@ async function readStoredThemePreference(filePath: string): Promise<ThemePrefere
   }
 }
 
-async function atomicWrite(filePath: string, value: string): Promise<void> {
+async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  let directoryHandle: FileHandle | undefined;
+  try {
+    directoryHandle = await open(directory, "r");
+    await directoryHandle.sync();
+  } catch {
+    // The preference is already committed by rename; directory durability is best effort.
+  } finally {
+    await directoryHandle?.close().catch(() => undefined);
+  }
+}
+
+async function atomicWrite(
+  filePath: string,
+  value: string,
+  syncDirectory: SyncDirectory,
+): Promise<void> {
   const directory = path.dirname(filePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
@@ -92,12 +110,7 @@ async function atomicWrite(filePath: string, value: string): Promise<void> {
     isOpen = false;
     await rename(temporaryPath, filePath);
     if (process.platform !== "win32") {
-      const directoryHandle = await open(directory, "r");
-      try {
-        await directoryHandle.sync();
-      } finally {
-        await directoryHandle.close();
-      }
+      await syncDirectory(directory).catch(() => undefined);
     }
   } catch (error) {
     if (isOpen) {
@@ -110,10 +123,12 @@ async function atomicWrite(filePath: string, value: string): Promise<void> {
 
 export class ThemePreferenceStore {
   readonly #filePath: string;
+  readonly #syncDirectory: SyncDirectory;
   #saveTail: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly userDataPath: string }) {
+  constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
     this.#filePath = path.join(options.userDataPath, "hmm-chat-settings", "theme.json");
+    this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
   }
 
   async load(): Promise<ThemePreference> {
@@ -130,7 +145,9 @@ export class ThemePreferenceStore {
       preference: parsedPreference,
     };
     const source = `${JSON.stringify(stored)}\n`;
-    const request = this.#saveTail.then(() => atomicWrite(this.#filePath, source));
+    const request = this.#saveTail.then(() =>
+      atomicWrite(this.#filePath, source, this.#syncDirectory),
+    );
     this.#saveTail = request.catch(() => undefined);
     return request;
   }
