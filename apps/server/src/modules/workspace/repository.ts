@@ -181,6 +181,7 @@ interface TicketRow extends QueryResultRow {
   user_id: string;
   device_session_id: string;
   reaction_events: boolean;
+  read_state_events: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -196,17 +197,32 @@ interface ConversationPage {
   readonly hasMore: boolean;
 }
 
+interface UnreadCounts {
+  readonly unreadCount: number;
+  readonly mentionCount: number;
+}
+
+export interface WorkspaceRepositoryHooks {
+  /**
+   * Test seam for deterministically interleaving a committed write after bootstrap establishes
+   * its transaction snapshot.
+   */
+  readonly afterBootstrapCursorRead?: () => Promise<void>;
+}
+
 export interface ConsumedRealtimeTicket {
   readonly workspaceId: string;
   readonly userId: string;
   readonly deviceSessionId: string;
   readonly reactionEvents: boolean;
+  readonly readStateEvents: boolean;
 }
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
   readonly userId: string;
   readonly reactionEvents?: boolean;
+  readonly readStateEvents?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -461,45 +477,49 @@ function mentionPattern(username: string): RegExp {
 }
 
 export class WorkspaceRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly hooks: WorkspaceRepositoryHooks = {},
+  ) {}
 
   async bootstrap(identity: AuthenticatedIdentity): Promise<WorkspaceBootstrapResponse> {
-    const client = await this.pool.connect();
-    try {
-      const workspaceResult = await client.query<WorkspaceRow>(
-        `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence
+    return this.#transaction(
+      async (client) => {
+        const workspaceResult = await client.query<WorkspaceRow>(
+          `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence
            FROM workspaces
           WHERE id = $1`,
-        [identity.currentUser.workspaceId],
-      );
-      const workspace = workspaceResult.rows[0];
-      if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
-      const members = await this.#members(client, workspace.id);
-      // Bootstrap only ever carries the first page; the client pages the rest through
-      // GET /v1/conversations, so a workspace can grow past the response cap without bricking.
-      const page = await this.#conversationSummaries(
-        client,
-        identity,
-        null,
-        CONVERSATION_PAGE_DEFAULT_LIMIT,
-      );
-      return workspaceBootstrapResponseSchema.parse({
-        currentUser: identity.currentUser,
-        workspace: mapWorkspace(workspace),
-        members,
-        conversations: page.conversations,
-        conversationsNextCursor: page.nextCursor,
-        conversationsHasMore: page.hasMore,
-        syncCursor: workspace.last_event_sequence,
-        featureFlags: {
-          channels: true,
-          directMessages: true,
-          mentions: true,
-        },
-      });
-    } finally {
-      client.release();
-    }
+          [identity.currentUser.workspaceId],
+        );
+        const workspace = workspaceResult.rows[0];
+        if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+        await this.hooks.afterBootstrapCursorRead?.();
+        const members = await this.#members(client, workspace.id);
+        // Bootstrap only ever carries the first page; the client pages the rest through
+        // GET /v1/conversations, so a workspace can grow past the response cap without bricking.
+        const page = await this.#conversationSummaries(
+          client,
+          identity,
+          null,
+          CONVERSATION_PAGE_DEFAULT_LIMIT,
+        );
+        return workspaceBootstrapResponseSchema.parse({
+          currentUser: identity.currentUser,
+          workspace: mapWorkspace(workspace),
+          members,
+          conversations: page.conversations,
+          conversationsNextCursor: page.nextCursor,
+          conversationsHasMore: page.hasMore,
+          syncCursor: workspace.last_event_sequence,
+          featureFlags: {
+            channels: true,
+            directMessages: true,
+            mentions: true,
+          },
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listMembers(identity: AuthenticatedIdentity): Promise<ListMembersResponse> {
@@ -1184,7 +1204,12 @@ export class WorkspaceRepository {
     messageId: string,
   ): Promise<AdvanceReadCursorResponse> {
     return this.#transaction(async (client) => {
-      await this.#requireVisibleConversation(client, identity, conversationId, false);
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+      );
       const target = await client.query<MessageRow>(
         `SELECT *
            FROM messages
@@ -1216,17 +1241,24 @@ export class WorkspaceRepository {
         ],
       );
       let cursor = updated.rows[0];
-      let syncCursor = await this.#highWater(client, identity.currentUser.workspaceId);
+      let syncCursor: string;
       if (cursor !== undefined) {
-        const event = await this.#insertEvent(client, identity, {
+        // Allocate the read event's sequence before counting. Every message allocates its sequence
+        // under the same workspace-row lock, so messages ordered before this event are visible to
+        // these counts and messages ordered after it will be projected by their own events.
+        const workspaceSequence = await this.#nextWorkspaceSequence(
+          client,
+          identity.currentUser.workspaceId,
+        );
+        const counts = await this.#unreadCounts(
+          client,
+          identity.currentUser.user.id,
+          conversationId,
+        );
+        const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
           type: "read_cursor.updated",
-          conversation: await this.#requireVisibleConversation(
-            client,
-            identity,
-            conversationId,
-            false,
-          ),
-          payload: { readCursor: mapReadCursor(cursor) },
+          conversation,
+          payload: { readCursor: mapReadCursor(cursor), ...counts },
           audienceUserIds: [identity.currentUser.user.id],
         });
         syncCursor = event.workspaceSequence;
@@ -1238,6 +1270,7 @@ export class WorkspaceRepository {
           [conversationId, identity.currentUser.user.id],
         );
         cursor = current.rows[0];
+        syncCursor = await this.#highWater(client, identity.currentUser.workspaceId);
       }
       if (cursor === undefined) throw new Error("Read cursor was not persisted");
       return advanceReadCursorResponseSchema.parse({
@@ -1252,12 +1285,14 @@ export class WorkspaceRepository {
     after: string,
     limit: number,
     reactionEvents = false,
+    readStateEvents = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
         workspaceId: identity.currentUser.workspaceId,
         userId: identity.currentUser.user.id,
         reactionEvents,
+        readStateEvents,
       },
       after,
       limit,
@@ -1334,7 +1369,9 @@ export class WorkspaceRepository {
       const scanned = rows.rows.slice(0, limit);
       const nextCursor = scanned.at(-1)?.workspace_sequence ?? after;
       return syncResponseSchema.parse({
-        events: scanned.filter((row) => row.visible).map((row) => this.#mapEvent(row)),
+        events: scanned
+          .filter((row) => row.visible)
+          .map((row) => this.#mapEvent(row, principal.readStateEvents ?? false)),
         nextCursor,
         highWaterCursor,
         hasMore: rows.rows.length > limit,
@@ -1344,14 +1381,19 @@ export class WorkspaceRepository {
     }
   }
 
-  async issueRealtimeTicket(identity: AuthenticatedIdentity, reactionEvents = false) {
+  async issueRealtimeTicket(
+    identity: AuthenticatedIdentity,
+    reactionEvents = false,
+    readStateEvents = false,
+  ) {
     const token = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(token).digest();
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
-         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events,
+          read_state_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -1360,6 +1402,7 @@ export class WorkspaceRepository {
         hash,
         expiresAt,
         reactionEvents,
+        readStateEvents,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -1378,10 +1421,10 @@ export class WorkspaceRepository {
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
          RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-                   ticket.reaction_events
+                   ticket.reaction_events, ticket.read_state_events
        )
        SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-              ticket.reaction_events
+              ticket.reaction_events, ticket.read_state_events
          FROM consumed_ticket AS ticket
          JOIN device_sessions AS session
            ON session.id = ticket.device_session_id
@@ -1402,6 +1445,7 @@ export class WorkspaceRepository {
           userId: row.user_id,
           deviceSessionId: row.device_session_id,
           reactionEvents: row.reaction_events,
+          readStateEvents: row.read_state_events,
         };
   }
 
@@ -1553,6 +1597,22 @@ export class WorkspaceRepository {
         WHERE conversation_id = $1 AND user_id = $2`,
       [conversation.id, identity.currentUser.user.id],
     );
+    const counts = await this.#unreadCounts(client, identity.currentUser.user.id, conversation.id);
+    return conversationSummarySchema.parse({
+      conversation: mapConversation(conversation),
+      participantIds: await this.#conversationAudience(client, conversation),
+      membershipRole: await this.#membershipRole(client, identity, conversation),
+      lastMessage: latestResult.rows[0] === undefined ? null : mapMessage(latestResult.rows[0]),
+      ...counts,
+      readCursor: cursorResult.rows[0] === undefined ? null : mapReadCursor(cursorResult.rows[0]),
+    });
+  }
+
+  async #unreadCounts(
+    client: PoolClient,
+    userId: string,
+    conversationId: string,
+  ): Promise<UnreadCounts> {
     const unreadResult = await client.query<{ count: string } & QueryResultRow>(
       `SELECT count(*)::text AS count
          FROM messages AS message
@@ -1563,7 +1623,7 @@ export class WorkspaceRepository {
           AND message.author_id <> $2
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
-      [conversation.id, identity.currentUser.user.id],
+      [conversationId, userId],
     );
     const mentionResult = await client.query<{ count: string } & QueryResultRow>(
       `SELECT count(*)::text AS count
@@ -1577,17 +1637,12 @@ export class WorkspaceRepository {
           AND message.author_id <> $2
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
-      [conversation.id, identity.currentUser.user.id],
+      [conversationId, userId],
     );
-    return conversationSummarySchema.parse({
-      conversation: mapConversation(conversation),
-      participantIds: await this.#conversationAudience(client, conversation),
-      membershipRole: await this.#membershipRole(client, identity, conversation),
-      lastMessage: latestResult.rows[0] === undefined ? null : mapMessage(latestResult.rows[0]),
+    return {
       unreadCount: Number(unreadResult.rows[0]?.count ?? "0"),
       mentionCount: Number(mentionResult.rows[0]?.count ?? "0"),
-      readCursor: cursorResult.rows[0] === undefined ? null : mapReadCursor(cursorResult.rows[0]),
-    });
+    };
   }
 
   async #requireVisibleConversation(
@@ -1945,8 +2000,8 @@ export class WorkspaceRepository {
     return value;
   }
 
-  #mapEvent(row: EventRow): WorkspaceEvent {
-    return workspaceEventSchema.parse({
+  #mapEvent(row: EventRow, readStateEvents: boolean): WorkspaceEvent {
+    const event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
       type: row.event_type,
@@ -1959,12 +2014,28 @@ export class WorkspaceRepository {
       delivery: "at_least_once",
       payload: row.payload,
     });
+    if (event.type !== "read_cursor.updated" || readStateEvents) return event;
+    // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
+    // projecting its legacy shape for devices that did not negotiate read-state events.
+    return {
+      ...event,
+      payload: { readCursor: event.payload.readCursor },
+    };
   }
 
-  async #transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
+  async #transaction<T>(
+    operation: (client: PoolClient) => Promise<T>,
+    options: {
+      readonly isolationLevel?: "repeatable_read";
+      readonly readOnly?: boolean;
+    } = {},
+  ): Promise<T> {
     const client = await this.pool.connect();
     try {
-      await client.query("BEGIN");
+      const isolation =
+        options.isolationLevel === "repeatable_read" ? " ISOLATION LEVEL REPEATABLE READ" : "";
+      const accessMode = options.readOnly === true ? " READ ONLY" : "";
+      await client.query(`BEGIN TRANSACTION${isolation}${accessMode}`);
       const result = await operation(client);
       await client.query("COMMIT");
       return result;

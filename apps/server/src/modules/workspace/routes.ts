@@ -1,5 +1,6 @@
 import {
   REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
   advanceReadCursorRequestSchema,
   archiveChannelRequestSchema,
   clientCapabilitiesHeaderSchema,
@@ -59,14 +60,14 @@ function reactionParameters(value: unknown): { readonly id: string; readonly emo
   return { id: id.data, emoji: emoji.data };
 }
 
-function supportsReactionEvents(value: string | string[] | undefined): boolean {
-  if (value === undefined) return false;
+function capabilities(value: string | string[] | undefined): readonly string[] {
+  if (value === undefined) return [];
   if (typeof value !== "string") {
     throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
   }
   const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  return parsed.data.includes(REACTION_EVENTS_CAPABILITY);
+  return parsed.data;
 }
 
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (
@@ -197,19 +198,23 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
     return repository.sync(
       identity,
       query.data.after,
       query.data.limit,
-      supportsReactionEvents(request.headers["x-hmm-chat-capabilities"]),
+      supported.includes(REACTION_EVENTS_CAPABILITY),
+      supported.includes(READ_STATE_EVENTS_CAPABILITY),
     );
   });
 
   app.post("/realtime/tickets", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
     return repository.issueRealtimeTicket(
       identity,
-      supportsReactionEvents(request.headers["x-hmm-chat-capabilities"]),
+      supported.includes(REACTION_EVENTS_CAPABILITY),
+      supported.includes(READ_STATE_EVENTS_CAPABILITY),
     );
   });
 };
