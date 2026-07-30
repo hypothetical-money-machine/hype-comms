@@ -13,8 +13,8 @@ these invariants require a reviewed architecture change and matching contract te
   members-only channel always retains at least one channel owner, and only its owners can
   add, remove, promote, or demote members. Direct conversations contain exactly two active
   members and are unique for that unordered pair. Group DMs are not yet supported.
-- The supported clients are macOS (Apple silicon and Intel), Windows 11 x64, and Linux x64
-  AppImage/Debian packages. Electron is currently the only client.
+- The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
+  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
@@ -400,10 +400,10 @@ Only a protected version tag may invoke release jobs and credentials:
 
 - macOS produces Developer ID signed/notarized/stapled DMG and update artifacts for arm64
   and x64. Gatekeeper verification runs on clean supported macOS hosts.
-- Windows produces an Authenticode-signed per-machine NSIS x64 installer and update package;
-  SmartScreen/signature verification runs on a clean Windows 11 host.
-- Linux produces x64 AppImage and Debian packages, SHA-512 checksums, an SBOM, and detached
-  GPG signatures. The public verification key ships out-of-band and in the app.
+- Windows produces Authenticode-signed per-machine NSIS x64 and ARM64 installers and update
+  packages; SmartScreen/signature verification runs on clean Windows 11 hosts.
+- Linux produces x64 and ARM64 AppImage and Debian packages, SHA-512 checksums, an SBOM, and
+  detached GPG signatures. The public verification key ships out-of-band and in the app.
 
 Release jobs generate provenance and an SBOM, then place immutable artifacts in a private,
 versioned S3 release bucket. The authenticated latest-release endpoint returns version,
@@ -423,16 +423,16 @@ downgrade.
 
 ## Required test matrix
 
-| Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                        |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                    |
-| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                  |
-| Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                       |
-| Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                 |
-| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                         |
-| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 x64, and Ubuntu 24.04 x64 AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
-| Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                         |
-| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                       |
+| Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                                            |
+| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                                          |
+| Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
+| Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
+| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                                                 |
+| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 (x64 and ARM64), and Ubuntu 24.04 (x64 and ARM64) AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
+| Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
+| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
 
 No release may waive authorization, idempotency/data-loss, artifact-signature, or restore
 tests. Flaky tests are treated as failed gates until fixed or replaced with an equivalent

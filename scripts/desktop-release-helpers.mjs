@@ -82,6 +82,10 @@ export async function assertVersionCanPublish({
   const updateManifest = requireEnvironment("UPDATE_MANIFEST", environment);
   const publicRoot = requireEnvironment("HMM_UPDATE_PUBLIC_ROOT", environment);
   const desktopVersion = requireEnvironment("DESKTOP_VERSION", environment);
+  // A lane that publishes several manifests commits one of them last as the release marker. Only
+  // that marker is immutable; the manifests published before it may be replaced so that a run
+  // interrupted mid-publish can be retried at the same tag instead of stranding an architecture.
+  const allowRepublish = environment.ALLOW_REPUBLISH === "true";
   const manifestUrl = new URL(updateManifest, `${publicRoot}/`);
   const response = await fetchImplementation(manifestUrl, {
     headers: { "cache-control": "no-cache" },
@@ -96,6 +100,13 @@ export async function assertVersionCanPublish({
 
   const publishedVersion = parseManifestVersion(await response.text());
   if (publishedVersion === desktopVersion) {
+    if (allowRepublish) {
+      console.error(
+        `${updateManifest} already publishes version ${desktopVersion}; replacing it to finish ` +
+          "an interrupted release.",
+      );
+      return;
+    }
     throw new Error(
       `${updateManifest} already publishes version ${desktopVersion}. ` +
         "Bump the version rather than replacing it.",
