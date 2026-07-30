@@ -33,6 +33,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     new URL("../.github/workflows/desktop-release.yml", import.meta.url),
     "utf8",
   );
+  const packageSmokeWorkflow = await readFile(
+    new URL("../.github/workflows/desktop-package-smoke.yml", import.meta.url),
+    "utf8",
+  );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
   const targetArchitectures = (platform) =>
     desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
@@ -50,6 +54,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(
     releaseWorkflow,
     /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
+  );
+  assert.match(
+    packageSmokeWorkflow,
+    /runner: '\["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"\]'/u,
+  );
+  assert.doesNotMatch(
+    packageSmokeWorkflow,
+    /runner: '\["self-hosted", "Linux", "X64", "hmm-chat-release"/u,
   );
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);

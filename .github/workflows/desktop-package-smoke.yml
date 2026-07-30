@@ -52,7 +52,9 @@ jobs:
           - platform: Windows
             runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
           - platform: Linux
-            runner: '["self-hosted", "Linux", "X64", "hmm-chat-release", "docker"]'
+            # Smoke packages do not need release credentials. Keep them on the always-on CI
+            # runner so an unavailable legacy release runner cannot block pull requests.
+            runner: '["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
