@@ -14,6 +14,7 @@ const rawConfigSchema = z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
       .default("info"),
     shutdownTimeoutMs: z.coerce.number().int().min(100).max(60_000).default(10_000),
+    metricsToken: optionalString(z.string().min(32).max(256)),
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
     webRoot: optionalString(z.string().min(1)),
@@ -61,6 +62,8 @@ export interface ServerConfig {
   readonly port: number;
   readonly logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   readonly shutdownTimeoutMs: number;
+  /** Enables the private Prometheus endpoint when configured. */
+  readonly metricsToken?: string;
   readonly allowedOrigins: readonly string[];
   readonly publicApiUrl: string;
   /**
@@ -112,6 +115,7 @@ export function loadConfig(
     port: env.HMM_PORT,
     logLevel: env.HMM_LOG_LEVEL,
     shutdownTimeoutMs: env.HMM_SHUTDOWN_TIMEOUT_MS,
+    metricsToken: env.HMM_METRICS_TOKEN,
     allowedOrigins: env.HMM_ALLOWED_ORIGINS,
     publicApiUrl: env.HMM_PUBLIC_API_URL,
     databaseUrl: env.HMM_DATABASE_URL,
@@ -207,6 +211,7 @@ export function loadConfig(
     port: result.data.port,
     logLevel: result.data.logLevel,
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
+    ...(result.data.metricsToken === undefined ? {} : { metricsToken: result.data.metricsToken }),
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,
     cookieSecure: parsedPublicApiUrl.protocol === "https:",

@@ -1,8 +1,9 @@
 # Architecture implementation contract
 
-This document is the decision record for HMM Chat. It describes the
-target implementation, not the capabilities of the initial repository scaffold. Changes to
-these invariants require a reviewed architecture change and matching contract tests.
+This document is the decision record for HMM Chat. It distinguishes the current pilot deployment
+from the hosted target; a target statement is not evidence that its infrastructure or release gate
+exists today. Changes to these invariants require a reviewed architecture change and matching
+contract tests.
 
 ## Product and platform invariants
 
@@ -35,6 +36,26 @@ these invariants require a reviewed architecture change and matching contract te
 
 ## System shape and trust boundaries
 
+### Current pilot delivery
+
+```text
+main -> Woodpecker check -> Kaniko -> registry.example.invalid
+                                      |
+                                      v
+deployment-repository promotion -> Argo CD -> production-cluster cluster
+
+v* tag -> GitHub Actions native runners -> updates.hypemm.com (S3-compatible storage)
+```
+
+The server image and GitOps promotion are implemented by `.woodpecker.yml`. Runtime manifests,
+ingress, PostgreSQL, secret injection, backup policy, and rollback controls live in the separate
+`hype-comms/deployment-repository` repository; they must be verified there and cannot
+be inferred from this checkout. Desktop releases use native self-hosted runners and a public
+S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
+and the controls that still need external evidence.
+
+### Hosted target
+
 ```text
 renderer (React + IndexedDB)
         | validated, allowlisted IPC
@@ -48,8 +69,8 @@ Cloudflare DNS/WAF/TLS  --->  AWS ALB  --->  Fastify on ECS Fargate
                                             sync/event log  scan worker
 ```
 
-The production API is `https://api.chat.hypemm.com`; realtime uses
-`wss://api.chat.hypemm.com/v1/realtime`. The email landing page is
+The packaged client API is `https://chat-api.example.invalid`; realtime uses
+`wss://chat-api.example.invalid/v1/realtime`. The email landing page is
 `https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
 `hmm-chat://auth/callback`.
 
@@ -62,7 +83,7 @@ The production API is `https://api.chat.hypemm.com`; realtime uses
 | PostgreSQL     | Canonical domain state, idempotency records, read cursors, search vectors, and ordered sync events                                 | Store raw magic-link/refresh tokens or public object URLs                                                                 |
 | S3/scan worker | Private quarantine and clean attachment/update objects; asynchronous malware verdicts                                              | Make an upload downloadable before a clean verdict                                                                        |
 
-Infrastructure follows the organization's existing AWS+Cloudflare convention: a versioned
+The hosted target follows the organization's AWS+Cloudflare convention: a versioned
 CloudFormation entry stack at `deploy/poc/stack.yml`, with nested stacks and small scripts
 only where a
 Cloudflare or release operation cannot be expressed in a stack. GitHub OIDC assumes the
@@ -161,7 +182,7 @@ path to Fastify's verification handler; the page does not store a cookie, token,
 state.
 
 Main obtains a single-use realtime ticket over authenticated HTTP, then opens
-`wss://api.chat.hypemm.com/v1/realtime?ticket=...&after=...`. The ticket expires after 30
+`wss://chat-api.example.invalid/v1/realtime?ticket=...&after=...`. The ticket expires after 30
 seconds, is stored only as a hash, is consumed atomically during upgrade, and is bound to the
 issuing member/device session. Bearer and refresh credentials never appear in WebSocket
 headers, URLs, or subprotocols. The server first replays authorized retained events after
@@ -370,10 +391,11 @@ deletes active data and objects within 30 days; encrypted backups age out within
 - `/livez` checks only the process. `/readyz` checks database connectivity and migration
   compatibility and removes an unhealthy task from service. Deploys drain WebSockets and
   clients reconnect/sync; no sticky-session correctness is assumed.
-- JSON logs carry request, session, user, workspace, conversation, and event IDs where
-  relevant. Metrics cover HTTP error/latency, WebSocket connects/disconnects, event lag,
-  sends/retries/idempotency replays, auth/rate-limit outcomes, search latency, scan age and
-  failures, SES bounces, RDS connections/storage, and desktop crash/update versions.
+- JSON logs carry request, session, user, workspace, conversation, and event IDs where relevant.
+  The current service exposes bearer-protected Prometheus metrics for HTTP request count/duration,
+  authenticated WebSocket connections, and PostgreSQL pool total/idle/waiting connections when
+  `HMM_METRICS_TOKEN` is configured. Event lag, mutation/auth outcomes, search latency, email,
+  attachment scanning, and desktop crash/update metrics remain target coverage.
 - Page the operator for sustained availability/error-budget burn, database or event-log
   capacity, event lag above 30 seconds, backup failure, scan backlog above five minutes,
   or suspected credential abuse. User-level send and email failures create non-paging
@@ -395,15 +417,24 @@ service and reported alongside error rates rather than inferred from anecdotes.
 
 ## Signing, distribution, and compatibility
 
-Pull requests build unsigned, short-retention smoke artifacts on native GitHub runners.
-Only a protected version tag may invoke release jobs and credentials:
+Pull requests build unsigned smoke packages on native self-hosted runners. Only a version tag on
+`main` whose name matches the desktop package version may invoke release jobs and credentials.
+The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
+feed. Its platform-signature status is:
 
-- macOS produces Developer ID signed/notarized/stapled DMG and update artifacts for arm64
-  and x64. Gatekeeper verification runs on clean supported macOS hosts.
-- Windows produces Authenticode-signed per-machine NSIS x64 and ARM64 installers and update
-  packages; SmartScreen/signature verification runs on clean Windows 11 hosts.
-- Linux produces x64 and ARM64 AppImage and Debian packages, SHA-512 checksums, an SBOM, and
-  detached GPG signatures. The public verification key ships out-of-band and in the app.
+- macOS application bundles are Developer ID signed, notarized, stapled, and independently
+  verified by the release workflow for arm64 and x64. The DMG container itself still needs
+  fresh-download Gatekeeper evidence.
+- Windows x64 and ARM64 NSIS artifacts are currently unsigned. Authenticode requires an externally
+  procured code-signing certificate, its publisher subject, protected runner credentials, and an
+  independent `Get-AuthenticodeSignature` release gate. Until then Windows updates rely on HTTPS
+  plus the manifest checksum and do not meet the hosted target.
+- Linux x64 and ARM64 AppImage and Debian packages carry the updater manifest's SHA-512 digest but
+  do not yet have a detached GPG signature or SBOM gate.
+
+The hosted target adds Windows Authenticode/SmartScreen verification, Linux detached signatures,
+SBOM and provenance generation, protected release-environment approval, authenticated rollout
+metadata, and clean-host upgrade tests before publishing.
 
 Release jobs generate provenance and an SBOM, then place immutable artifacts in a private,
 versioned S3 release bucket. The authenticated latest-release endpoint returns version,

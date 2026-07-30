@@ -28,6 +28,8 @@ The implementation contract and security boundaries live in
 - An encrypted IndexedDB cache and a restart-safe outbox: one UUID serves as both client
   message ID and idempotency key, so a retried send never duplicates and a failed send is
   never silently discarded.
+- Structured request logs, liveness/readiness probes, and an optional authenticated Prometheus
+  endpoint for HTTP, realtime-connection, and PostgreSQL-pool health.
 
 Deliberate current constraints: one workspace, at most 25 active members, immutable
 messages, desktop only. Each is enforced in code and gets lifted on purpose, not by
@@ -57,8 +59,9 @@ Roughly in order:
   authorized filename search.
 - Native notifications with focus and self suppression, and click-through to the
   conversation.
-- Signed macOS/Windows/Linux builds with authenticated auto-update, so using the app stops
-  requiring a local toolchain.
+- Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
+  an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
+  and notarization plus the cross-platform update feed are already running.
 - A small hosted deployment (the AWS/Cloudflare target in `docs/architecture.md`) once
   daily use justifies it.
 
