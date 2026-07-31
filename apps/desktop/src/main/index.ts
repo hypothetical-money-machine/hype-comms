@@ -60,6 +60,7 @@ import {
   resolveDevelopmentProfile,
   resolveDevelopmentUserDataPath,
 } from "./development-profile";
+import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
 import {
@@ -754,7 +755,20 @@ function handleAuthCallback(value: string): boolean {
   return true;
 }
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+let userDataMigrationFailed = false;
+if (app.isPackaged) {
+  try {
+    migrateLegacyUserData({
+      currentPath: app.getPath("userData"),
+      legacyPath: path.join(app.getPath("appData"), LEGACY_PRODUCT_NAME),
+    });
+  } catch (error) {
+    userDataMigrationFailed = true;
+    console.error("Failed to migrate legacy HMM Chat user data", error);
+  }
+}
+
+const hasSingleInstanceLock = !userDataMigrationFailed && app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
   app.quit();
