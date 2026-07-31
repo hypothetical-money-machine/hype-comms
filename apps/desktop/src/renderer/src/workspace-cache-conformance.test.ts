@@ -192,6 +192,8 @@ const readCursorEvent: WorkspaceEvent = {
       lastReadAt: NOW,
       updatedAt: NOW,
     },
+    unreadCount: 1,
+    mentionCount: 1,
   },
 };
 
@@ -374,6 +376,92 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(alpha?.unreadCount).toBe(1);
     expect(alpha?.mentionCount).toBe(1);
     expect(state.messages).toHaveLength(1);
+  });
+
+  it("projects the canonical counts carried by read_cursor.updated", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          { ...alphaSummary, unreadCount: 4, mentionCount: 3 },
+        ],
+      },
+      [],
+    );
+
+    await expect(cache.applyEvent(readCursorEvent)).resolves.toBe(true);
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      readCursor: readCursorEvent.payload.readCursor,
+      unreadCount: 1,
+      mentionCount: 1,
+    });
+  });
+
+  it("preserves counts when replaying a legacy read_cursor.updated event", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          { ...alphaSummary, unreadCount: 4, mentionCount: 3 },
+        ],
+      },
+      [],
+    );
+
+    await expect(
+      cache.applyEvent({
+        ...readCursorEvent,
+        payload: { readCursor: readCursorEvent.payload.readCursor },
+      }),
+    ).resolves.toBe(true);
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      readCursor: readCursorEvent.payload.readCursor,
+      unreadCount: 4,
+      mentionCount: 3,
+    });
+  });
+
+  it("does not replay a message already reflected by the bootstrap cursor", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence2,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: messageCreatedEvent.workspaceSequence,
+      },
+      [],
+    );
+
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(false);
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      lastMessage: { id: MESSAGE_SEQUENCE_2_ID },
+      unreadCount: 1,
+      mentionCount: 1,
+    });
   });
 
   it("persists reaction events idempotently without corrupting message projections", async () => {

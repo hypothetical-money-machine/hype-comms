@@ -25,6 +25,36 @@ const environment = {
   UPDATE_MANIFEST: "latest.yml",
 };
 
+test("configures native ARM64 and x64 desktop release targets", async () => {
+  const desktopPackage = JSON.parse(
+    await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
+  );
+  const releaseWorkflow = await readFile(
+    new URL("../.github/workflows/desktop-release.yml", import.meta.url),
+    "utf8",
+  );
+  const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
+  const targetArchitectures = (platform) =>
+    desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
+
+  assert.deepEqual(targetArchitectures("win"), [["nsis", ["x64", "arm64"]]]);
+  assert.deepEqual(targetArchitectures("linux"), [
+    ["AppImage", ["x64", "arm64"]],
+    ["deb", ["x64", "arm64"]],
+  ]);
+  assert.match(desktopPackage.scripts["package:win"], /--x64 --arm64/u);
+  assert.match(desktopPackage.scripts["package:linux"], /--x64 --arm64/u);
+  assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
+  assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
+  assert.equal(desktopPackage.build.nsis.buildUniversalInstaller, false);
+  assert.match(
+    releaseWorkflow,
+    /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
+  );
+  assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
+  assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
+});
+
 test("parses quoted and unquoted manifest versions", () => {
   assert.equal(parseManifestVersion("version: 1.2.3\n"), "1.2.3");
   assert.equal(parseManifestVersion('version: "1.2.3"\n'), "1.2.3");
@@ -107,7 +137,10 @@ test("selects only exact version and platform artifacts", () => {
     selectArtifactNames(
       [
         file("hype-comms-1.2.3-win-arm64.exe.blockmap"),
+        file("hype-comms-1.2.3-linux-arm64.AppImage"),
+        file("hype-comms-1.2.3-linux-arm64.deb"),
         file("hype-comms-1.2.3-linux-x64.AppImage"),
+        file("hype-comms-1.2.3-linux-x64.deb"),
         directory("hype-comms-1.2.3-win-unpacked"),
         file("hype-comms-1.2.3-win-arm64.exe"),
       ],
@@ -115,6 +148,25 @@ test("selects only exact version and platform artifacts", () => {
       "win",
     ),
     ["hype-comms-1.2.3-win-arm64.exe", "hype-comms-1.2.3-win-arm64.exe.blockmap"],
+  );
+  assert.deepEqual(
+    selectArtifactNames(
+      [
+        file("hype-comms-1.2.3-linux-arm64.AppImage"),
+        file("hype-comms-1.2.3-linux-arm64.deb"),
+        file("hype-comms-1.2.3-linux-x64.AppImage"),
+        file("hype-comms-1.2.3-linux-x64.deb"),
+        file("hype-comms-1.2.4-linux-arm64.AppImage"),
+      ],
+      "1.2.3",
+      "linux",
+    ),
+    [
+      "hype-comms-1.2.3-linux-arm64.AppImage",
+      "hype-comms-1.2.3-linux-arm64.deb",
+      "hype-comms-1.2.3-linux-x64.AppImage",
+      "hype-comms-1.2.3-linux-x64.deb",
+    ],
   );
 });
 
@@ -137,6 +189,22 @@ test("allows a missing or older feed and rejects replacement or rollback", async
   await assert.rejects(
     assertVersionCanPublish({
       environment,
+      fetchImplementation: async () => new Response("version: 2.0.0\n"),
+    }),
+    /Refusing to move latest\.yml backward/,
+  );
+});
+
+test("lets a manifest published before the commit marker be replaced on retry", async () => {
+  const resumable = { ...environment, ALLOW_REPUBLISH: "true" };
+
+  await assertVersionCanPublish({
+    environment: resumable,
+    fetchImplementation: async () => new Response("version: 1.2.3\n"),
+  });
+  await assert.rejects(
+    assertVersionCanPublish({
+      environment: resumable,
       fetchImplementation: async () => new Response("version: 2.0.0\n"),
     }),
     /Refusing to move latest\.yml backward/,

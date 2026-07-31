@@ -9,6 +9,7 @@ import {
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import type { MetricsRegistry } from "../../metrics.js";
 import type {
   ConsumeRealtimeTicket,
   RealtimePrincipal,
@@ -33,11 +34,12 @@ interface RealtimeRoutesOptions {
   subscribe?: (workspaceId: string, listener: () => void) => () => void;
   /** Re-checks the device session and membership of an already-connected socket. */
   revalidate?: RevalidateRealtimePrincipal;
+  metrics?: MetricsRegistry;
 }
 
 export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
   app,
-  { allowedOrigins, consumeTicket, loadEvents, subscribe, revalidate },
+  { allowedOrigins, consumeTicket, loadEvents, subscribe, revalidate, metrics },
 ) => {
   app.decorateRequest("realtimePrincipal", null);
   app.decorateRequest("realtimeCursor", null);
@@ -78,6 +80,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         socket.close(1011, "Authentication context unavailable");
         return;
       }
+      metrics?.realtimeConnected();
 
       let cursor = initialCursor;
       let closed = false;
@@ -203,6 +206,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         closed = true;
         clearInterval(heartbeat);
         unsubscribe?.();
+        metrics?.realtimeDisconnected();
       };
 
       socket.on("pong", () => {

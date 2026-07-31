@@ -34,6 +34,13 @@ describe("loadConfig", () => {
     );
   });
 
+  it("requires an unguessable metrics token", () => {
+    expect(() => loadConfig({ HMM_METRICS_TOKEN: "too-short" })).toThrow(ConfigError);
+    expect(loadConfig({ HMM_METRICS_TOKEN: "m".repeat(32) })).toMatchObject({
+      metricsToken: "m".repeat(32),
+    });
+  });
+
   it("requires a safe, environment-appropriate public API origin", () => {
     expect(() =>
       loadConfig({ HMM_PUBLIC_API_URL: "http://example.com/path?secret=value" }),

@@ -33,6 +33,7 @@ export const paginationCursorSchema = z
   .regex(/^[A-Za-z0-9_-]+$/);
 
 export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
+export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -412,8 +413,20 @@ export const readCursorUpdatedEventSchema = workspaceEventBaseSchema.extend({
   payload: z
     .object({
       readCursor: readCursorSchema,
+      // Optional for retained events and clients predating capability negotiation. New capable
+      // clients receive both fields; the refinement prevents half-populated canonical state.
+      unreadCount: z.number().int().nonnegative().optional(),
+      mentionCount: z.number().int().nonnegative().optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((value, context) => {
+      if ((value.unreadCount === undefined) !== (value.mentionCount === undefined)) {
+        context.addIssue({
+          code: "custom",
+          message: "Unread and mention counts must be provided together",
+        });
+      }
+    }),
 });
 
 export const workspaceEventSchema = z.discriminatedUnion("type", [

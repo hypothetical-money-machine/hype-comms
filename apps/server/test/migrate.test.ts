@@ -46,7 +46,8 @@ describeWithPostgres("runMigrations", () => {
           "0004_channel_memberships.sql",
           "0005_message_search.sql",
           "0006_message_reactions.sql",
-          "0007_hype_comms_rebrand.sql",
+          "0007_read_state_event_capability.sql",
+          "0008_hype_comms_rebrand.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -61,7 +62,8 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0004_channel_memberships.sql" },
         { filename: "0005_message_search.sql" },
         { filename: "0006_message_reactions.sql" },
-        { filename: "0007_hype_comms_rebrand.sql" },
+        { filename: "0007_read_state_event_capability.sql" },
+        { filename: "0008_hype_comms_rebrand.sql" },
       ]);
 
       const userId = randomUUID();
@@ -137,7 +139,7 @@ describeWithPostgres("runMigrations", () => {
       );
 
       const migration = await readFile(
-        new URL("../src/db/migrations/0007_hype_comms_rebrand.sql", import.meta.url),
+        new URL("../src/db/migrations/0008_hype_comms_rebrand.sql", import.meta.url),
         "utf8",
       );
       await pool.query(migration);

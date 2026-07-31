@@ -1,8 +1,9 @@
 # Architecture implementation contract
 
-This document is the decision record for Hype Comms. It describes the
-target implementation, not the capabilities of the initial repository scaffold. Changes to
-these invariants require a reviewed architecture change and matching contract tests.
+This document is the decision record for Hype Comms. It distinguishes the current pilot deployment
+from the hosted target; a target statement is not evidence that its infrastructure or release gate
+exists today. Changes to these invariants require a reviewed architecture change and matching
+contract tests.
 
 ## Product and platform invariants
 
@@ -13,8 +14,8 @@ these invariants require a reviewed architecture change and matching contract te
   members-only channel always retains at least one channel owner, and only its owners can
   add, remove, promote, or demote members. Direct conversations contain exactly two active
   members and are unique for that unordered pair. Group DMs are not yet supported.
-- The supported clients are macOS (Apple silicon and Intel), Windows 11 x64, and Linux x64
-  AppImage/Debian packages. Electron is currently the only client.
+- The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
+  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
@@ -35,6 +36,26 @@ these invariants require a reviewed architecture change and matching contract te
 
 ## System shape and trust boundaries
 
+### Current pilot delivery
+
+```text
+main -> Woodpecker check -> Kaniko -> registry.example.invalid
+                                      |
+                                      v
+deployment-repository promotion -> Argo CD -> production-cluster cluster
+
+v* tag -> GitHub Actions native runners -> updates.hypemm.com (S3-compatible storage)
+```
+
+The server image and GitOps promotion are implemented by `.woodpecker.yml`. Runtime manifests,
+ingress, PostgreSQL, secret injection, backup policy, and rollback controls live in the separate
+`hype-comms/deployment-repository` repository; they must be verified there and cannot
+be inferred from this checkout. Desktop releases use native self-hosted runners and a public
+S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
+and the controls that still need external evidence.
+
+### Hosted target
+
 ```text
 renderer (React + IndexedDB)
         | validated, allowlisted IPC
@@ -48,8 +69,8 @@ Cloudflare DNS/WAF/TLS  --->  AWS ALB  --->  Fastify on ECS Fargate
                                             sync/event log  scan worker
 ```
 
-The production API is `https://api.chat.hypemm.com`; realtime uses
-`wss://api.chat.hypemm.com/v1/realtime`. The email landing page is
+The packaged client API is `https://chat-api.example.invalid`; realtime uses
+`wss://chat-api.example.invalid/v1/realtime`. The email landing page is
 `https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
 `hmm-chat://auth/callback`.
 
@@ -60,16 +81,16 @@ technical identifiers retain their original names for compatibility: the applica
 would break installed-client upgrades, sign-in links, deployments, or local encrypted state and
 requires a separately versioned migration.
 
-| Component      | Responsibility                                                                                                                     | Must not do                                                                                                               |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Electron main  | Window lifecycle, session/token storage, authenticated HTTP/WSS, deep links, cache cryptography, native notifications, and updates | Render remote content or expose tokens, raw filesystem, shell, or arbitrary network calls to the renderer                 |
-| Preload        | Frozen, typed, request/response IPC facade with runtime validation and unsubscribe handles                                         | Pass through arbitrary channel names, URLs, headers, or Electron objects                                                  |
-| Renderer       | React UI, normalized state, renderer-owned IndexedDB cache/outbox, optimistic state, and routing behind a transport interface      | Import Node/Electron, receive credentials, connect to production origins directly, or treat cache/events as authoritative |
-| Fastify        | Authentication, authorization, validation, business transactions, search, sync, signed URL issuance, and WebSocket fanout          | Trust client workspace/user IDs or use WebSocket delivery as durable state                                                |
-| PostgreSQL     | Canonical domain state, idempotency records, read cursors, search vectors, and ordered sync events                                 | Store raw magic-link/refresh tokens or public object URLs                                                                 |
-| S3/scan worker | Private quarantine and clean attachment/update objects; asynchronous malware verdicts                                              | Make an upload downloadable before a clean verdict                                                                        |
+| Component      | Responsibility                                                                                                                                                       | Must not do                                                                                                               |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Electron main  | Window lifecycle, native appearance and local preferences, session/token storage, authenticated HTTP/WSS, deep links, cache cryptography, notifications, and updates | Render remote content or expose tokens, raw filesystem, shell, arbitrary CSS, or network calls to the renderer            |
+| Preload        | Frozen, typed, request/response IPC facade with runtime validation and unsubscribe handles                                                                           | Pass through arbitrary channel names, URLs, headers, or Electron objects                                                  |
+| Renderer       | React UI, semantic theme rendering, normalized state, renderer-owned IndexedDB cache/outbox, optimistic state, and routing behind a transport interface              | Import Node/Electron, receive credentials, connect to production origins directly, or treat cache/events as authoritative |
+| Fastify        | Authentication, authorization, validation, business transactions, search, sync, signed URL issuance, and WebSocket fanout                                            | Trust client workspace/user IDs or use WebSocket delivery as durable state                                                |
+| PostgreSQL     | Canonical domain state, idempotency records, read cursors, search vectors, and ordered sync events                                                                   | Store raw magic-link/refresh tokens or public object URLs                                                                 |
+| S3/scan worker | Private quarantine and clean attachment/update objects; asynchronous malware verdicts                                                                                | Make an upload downloadable before a clean verdict                                                                        |
 
-Infrastructure follows the organization's existing AWS+Cloudflare convention: a versioned
+The hosted target follows the organization's AWS+Cloudflare convention: a versioned
 CloudFormation entry stack at `deploy/poc/stack.yml`, with nested stacks and small scripts
 only where a
 Cloudflare or release operation cannot be expressed in a stack. GitHub OIDC assumes the
@@ -168,7 +189,7 @@ path to Fastify's verification handler; the page does not store a cookie, token,
 state.
 
 Main obtains a single-use realtime ticket over authenticated HTTP, then opens
-`wss://api.chat.hypemm.com/v1/realtime?ticket=...&after=...`. The ticket expires after 30
+`wss://chat-api.example.invalid/v1/realtime?ticket=...&after=...`. The ticket expires after 30
 seconds, is stored only as a hash, is consumed atomically during upgrade, and is bound to the
 issuing member/device session. Bearer and refresh credentials never appear in WebSocket
 headers, URLs, or subprotocols. The server first replays authorized retained events after
@@ -270,6 +291,35 @@ newest message actually rendered, never blindly to the server head; the API appl
 to conversation unread count, while explicit mentions have a separate count. Sending a
 message does not mark unseen incoming messages as read. Read-cursor sync across a user's
 devices is private to that user.
+
+## Desktop appearance contract
+
+Appearance is an app/profile-local preference for `system` or one registered built-in theme ID.
+The current built-ins are `light` and `dark`; the selector is generated from the ordered theme
+registry. Electron main owns its strict, versioned preference file under `userData`, applies the
+choice's light/dark color scheme to `nativeTheme` before creating a window, and keeps the native
+window background synchronized. Missing, malformed, or unregistered preference data falls back to
+`system`; a failed write leaves the last canonical state unchanged. Sign-out does not clear this
+non-secret device preference.
+
+IPC carries only the validated preference, resolved theme ID, and resolved light/dark scheme. It
+never carries arbitrary colors or CSS. The renderer maps that ID to one bundled theme definition
+whose exact semantic-token contract covers surfaces, text hierarchy, borders, actions, status
+colors, focus, elevation, brand effects, and scrollbars. Theme identity is independent from its
+light/dark color scheme, so multiple named themes may share a native scheme. Component CSS consumes
+only those semantic variables; palette values live only in the complete built-in definitions.
+Tokens are installed on the document root so ordinary views and body-level portals inherit the
+same theme.
+
+The current dark appearance is the reference theme and light is a fully defined peer. A new named
+theme becomes selectable by adding one complete validated definition to the registry; its label,
+tokens, color scheme, and native window background travel together. Main passes its exact
+initialized state to the sandboxed preload as a validated, non-secret renderer argument, so named
+themes that share a native color scheme still paint with the correct identity before React mounts.
+Theme state is subscribed before hydration so a stale startup response cannot replace a newer
+native update. `system` follows operating-system appearance changes live; explicit built-in choices
+remain fixed. Every theme must meet the tested text/action/status/control contrast pairs and use the
+shared focus treatment before it can be added to the built-in registry.
 
 ## Feature behavior
 
@@ -377,10 +427,11 @@ deletes active data and objects within 30 days; encrypted backups age out within
 - `/livez` checks only the process. `/readyz` checks database connectivity and migration
   compatibility and removes an unhealthy task from service. Deploys drain WebSockets and
   clients reconnect/sync; no sticky-session correctness is assumed.
-- JSON logs carry request, session, user, workspace, conversation, and event IDs where
-  relevant. Metrics cover HTTP error/latency, WebSocket connects/disconnects, event lag,
-  sends/retries/idempotency replays, auth/rate-limit outcomes, search latency, scan age and
-  failures, SES bounces, RDS connections/storage, and desktop crash/update versions.
+- JSON logs carry request, session, user, workspace, conversation, and event IDs where relevant.
+  The current service exposes bearer-protected Prometheus metrics for HTTP request count/duration,
+  authenticated WebSocket connections, and PostgreSQL pool total/idle/waiting connections when
+  `HMM_METRICS_TOKEN` is configured. Event lag, mutation/auth outcomes, search latency, email,
+  attachment scanning, and desktop crash/update metrics remain target coverage.
 - Page the operator for sustained availability/error-budget burn, database or event-log
   capacity, event lag above 30 seconds, backup failure, scan backlog above five minutes,
   or suspected credential abuse. User-level send and email failures create non-paging
@@ -402,15 +453,24 @@ service and reported alongside error rates rather than inferred from anecdotes.
 
 ## Signing, distribution, and compatibility
 
-Pull requests build unsigned, short-retention smoke artifacts on native GitHub runners.
-Only a protected version tag may invoke release jobs and credentials:
+Pull requests build unsigned smoke packages on native self-hosted runners. Only a version tag on
+`main` whose name matches the desktop package version may invoke release jobs and credentials.
+The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
+feed. Its platform-signature status is:
 
-- macOS produces Developer ID signed/notarized/stapled DMG and update artifacts for arm64
-  and x64. Gatekeeper verification runs on clean supported macOS hosts.
-- Windows produces an Authenticode-signed per-machine NSIS x64 installer and update package;
-  SmartScreen/signature verification runs on a clean Windows 11 host.
-- Linux produces x64 AppImage and Debian packages, SHA-512 checksums, an SBOM, and detached
-  GPG signatures. The public verification key ships out-of-band and in the app.
+- macOS application bundles are Developer ID signed, notarized, stapled, and independently
+  verified by the release workflow for arm64 and x64. The DMG container itself still needs
+  fresh-download Gatekeeper evidence.
+- Windows x64 and ARM64 NSIS artifacts are currently unsigned. Authenticode requires an externally
+  procured code-signing certificate, its publisher subject, protected runner credentials, and an
+  independent `Get-AuthenticodeSignature` release gate. Until then Windows updates rely on HTTPS
+  plus the manifest checksum and do not meet the hosted target.
+- Linux x64 and ARM64 AppImage and Debian packages carry the updater manifest's SHA-512 digest but
+  do not yet have a detached GPG signature or SBOM gate.
+
+The hosted target adds Windows Authenticode/SmartScreen verification, Linux detached signatures,
+SBOM and provenance generation, protected release-environment approval, authenticated rollout
+metadata, and clean-host upgrade tests before publishing.
 
 Release jobs generate provenance and an SBOM, then place immutable artifacts in a private,
 versioned S3 release bucket. The authenticated latest-release endpoint returns version,
@@ -430,16 +490,16 @@ downgrade.
 
 ## Required test matrix
 
-| Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                        |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                    |
-| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                  |
-| Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                       |
-| Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                 |
-| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                         |
-| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 x64, and Ubuntu 24.04 x64 AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
-| Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                         |
-| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                       |
+| Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                                            |
+| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                                          |
+| Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
+| Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
+| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                                                 |
+| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 (x64 and ARM64), and Ubuntu 24.04 (x64 and ARM64) AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
+| Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
+| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
 
 No release may waive authorization, idempotency/data-loss, artifact-signature, or restore
 tests. Flaky tests are treated as failed gates until fixed or replaced with an equivalent

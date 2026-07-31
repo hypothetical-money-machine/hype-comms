@@ -1,5 +1,6 @@
 import {
   REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
@@ -44,6 +45,8 @@ import {
 } from "@hmm-chat/contracts";
 
 import type { ChatSession } from "./chat-session";
+
+const CLIENT_CAPABILITIES = [REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY].join(",");
 
 function retryAfter(response: Response): number | null {
   const value = response.headers.get("retry-after");
@@ -346,7 +349,7 @@ export class WorkspaceTransport {
     try {
       response = await this.session.fetch(url.href, {
         method: "GET",
-        headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+        headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
       });
     } catch (error) {
       // Only a transport failure is worth retrying; anything else would retry forever.
@@ -390,7 +393,7 @@ export class WorkspaceTransport {
   async ticket(): Promise<RealtimeTicketResponse> {
     const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
       method: "POST",
-      headers: { "x-hmm-chat-capabilities": REACTION_EVENTS_CAPABILITY },
+      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
     });
     return realtimeTicketResponseSchema.parse(await this.#payload(response));
   }

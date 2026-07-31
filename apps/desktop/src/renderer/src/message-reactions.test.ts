@@ -102,7 +102,9 @@ describe("MessageReactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add reaction" }));
     fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Add 👍 reaction" }));
 
-    expect((await screen.findByRole("alert")).textContent).toContain("Reaction limit reached");
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Reaction limit reached");
+    expect(alert.closest(".message-reactions")?.classList.contains("empty")).toBe(false);
     expect(screen.getByRole("menu", { name: "Choose a reaction" })).toBeTruthy();
   });
 

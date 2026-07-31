@@ -284,6 +284,97 @@ describeWithPostgres("WorkspaceRepository", () => {
     });
   });
 
+  it("bootstraps its cursor and summaries from one repeatable-read snapshot", async () => {
+    const cursorRead = Promise.withResolvers<void>();
+    const continueBootstrap = Promise.withResolvers<void>();
+    const racingRepository = new WorkspaceRepository(pool, {
+      afterBootstrapCursorRead: async () => {
+        cursorRead.resolve();
+        await continueBootstrap.promise;
+      },
+    });
+
+    const bootstrapping = racingRepository.bootstrap(member);
+    await cursorRead.promise;
+    let sent: Awaited<ReturnType<WorkspaceRepository["sendMessage"]>>;
+    try {
+      sent = await repository.sendMessage(owner, generalId, message(randomUUID()));
+    } finally {
+      continueBootstrap.resolve();
+    }
+    const bootstrap = await bootstrapping;
+    expect(bootstrap).toMatchObject({
+      syncCursor: "0",
+      conversations: [
+        {
+          lastMessage: null,
+          unreadCount: 0,
+          mentionCount: 0,
+        },
+      ],
+    });
+
+    const replay = await repository.sync(member, bootstrap.syncCursor, 100);
+    expect(replay.events).toContainEqual(
+      expect.objectContaining({
+        type: "message.created",
+        workspaceSequence: sent.syncCursor,
+        payload: expect.objectContaining({
+          message: expect.objectContaining({ id: sent.message.id }),
+        }),
+      }),
+    );
+  });
+
+  it("emits remaining canonical counts only to the member advancing the cursor", async () => {
+    const rendered = await repository.sendMessage(owner, generalId, message(randomUUID()));
+    const committedAfterRender = await repository.sendMessage(
+      owner,
+      generalId,
+      message(randomUUID(), "still unread @member"),
+    );
+
+    const advanced = await repository.advanceReadCursor(member, generalId, rendered.message.id);
+    const legacySync = await repository.sync(member, committedAfterRender.syncCursor, 100);
+    const legacyReadEvent = legacySync.events.find((event) => event.type === "read_cursor.updated");
+    expect(legacyReadEvent?.payload).toEqual({
+      readCursor: expect.objectContaining({ lastReadMessageId: rendered.message.id }),
+    });
+
+    const memberSync = await repository.sync(
+      member,
+      committedAfterRender.syncCursor,
+      100,
+      false,
+      true,
+    );
+    const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
+    expect(readEvent).toMatchObject({
+      workspaceSequence: advanced.syncCursor,
+      payload: {
+        readCursor: {
+          userId: memberId,
+          lastReadMessageId: rendered.message.id,
+          lastReadConversationSequence: rendered.message.conversationSequence,
+        },
+        unreadCount: 1,
+        mentionCount: 1,
+      },
+    });
+
+    const [ownerSync, observerSync] = await Promise.all([
+      repository.sync(owner, committedAfterRender.syncCursor, 100),
+      repository.sync(observer, committedAfterRender.syncCursor, 100),
+    ]);
+    for (const sync of [ownerSync, observerSync]) {
+      expect(sync.events.some((event) => event.id === readEvent?.id)).toBe(false);
+    }
+    expect(
+      (await repository.listConversations(member, undefined, CONVERSATION_PAGE_DEFAULT_LIMIT))
+        .conversations[0],
+    ).toMatchObject({ unreadCount: 1, mentionCount: 1 });
+  });
+
   it("returns one canonical message for concurrent retries and conflicts on changed input", async () => {
     const clientMessageId = randomUUID();
     const [first, second] = await Promise.all([
@@ -899,15 +990,17 @@ describeWithPostgres("WorkspaceRepository", () => {
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       reactionEvents: false,
+      readStateEvents: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       reactionEvents: true,
+      readStateEvents: true,
     });
   });
 

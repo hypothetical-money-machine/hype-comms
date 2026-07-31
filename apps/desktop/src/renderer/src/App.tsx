@@ -16,7 +16,10 @@ import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ClientVersion } from "./client-version";
 import { ConversationSwitcher } from "./conversation-switcher";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { isMessageContinuation } from "./message-grouping";
 import { MessageReactions } from "./message-reactions";
+import { ThemeSelector } from "./theme-selector";
+import type { ThemeRuntime } from "./theme-runtime";
 import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
@@ -28,6 +31,7 @@ type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: 
 
 interface AppProps {
   readonly client: DesktopApi;
+  readonly theme: ThemeRuntime;
 }
 
 type UpdateClient = Pick<
@@ -112,7 +116,15 @@ export function UpdateControl({ client }: { readonly client: UpdateClient }) {
   );
 }
 
-function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage?: string }) {
+function SignIn({
+  client,
+  theme,
+  sessionMessage,
+}: {
+  client: DesktopApi;
+  theme: ThemeRuntime;
+  sessionMessage?: string;
+}) {
   const [email, setEmail] = useState("");
   const [requesting, setRequesting] = useState(false);
   const [status, setStatus] = useState(sessionMessage ?? "");
@@ -162,6 +174,7 @@ function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage
         </form>
         {status !== "" && <p className="signin-status">{status}</p>}
 
+        <ThemeSelector theme={theme} />
         <UpdateControl client={client} />
         <ClientVersion client={client} />
       </section>
@@ -186,6 +199,7 @@ function MessageRow({
   onAddReaction,
   onRemoveReaction,
   highlighted,
+  continuation,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -195,16 +209,25 @@ function MessageRow({
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly highlighted: boolean;
+  readonly continuation: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   return (
     <article
-      className={highlighted ? "message search-target" : "message"}
+      className={`message${continuation ? " message-continuation" : ""}${
+        highlighted ? " search-target" : ""
+      }`}
       id={`message-${message.id}`}
     >
-      <Avatar user={author} />
+      {continuation ? (
+        <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
+          {messageTime(message.createdAt)}
+        </time>
+      ) : (
+        <Avatar user={author} />
+      )}
       <div>
-        <header>
+        <header className={continuation ? "sr-only" : undefined}>
           <strong>{author?.displayName ?? "Former member"}</strong>
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
@@ -222,7 +245,7 @@ function MessageRow({
   );
 }
 
-export function App({ client }: AppProps) {
+export function App({ client, theme }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
@@ -409,7 +432,7 @@ export function App({ client }: AppProps) {
 
   if (session === null) return <main className="signin-shell" aria-busy="true" />;
   if (session.status === "signed-out") {
-    return <SignIn client={client} sessionMessage={session.message} />;
+    return <SignIn client={client} theme={theme} sessionMessage={session.message} />;
   }
   if (session.status === "session-unavailable") {
     return (
@@ -420,6 +443,7 @@ export function App({ client }: AppProps) {
           <button type="button" onClick={() => void retrySession()}>
             Try again
           </button>
+          <ThemeSelector theme={theme} />
           <ClientVersion client={client} />
         </section>
       </main>
@@ -434,6 +458,7 @@ export function App({ client }: AppProps) {
           <button type="button" onClick={() => void client.signOut()}>
             Continue to member sign-in
           </button>
+          <ThemeSelector theme={theme} />
           <ClientVersion client={client} />
         </section>
       </main>
@@ -459,6 +484,7 @@ export function App({ client }: AppProps) {
               </button>
             </div>
           )}
+          <ThemeSelector theme={theme} />
           <ClientVersion client={client} />
         </section>
       </main>
@@ -582,6 +608,7 @@ export function App({ client }: AppProps) {
         </section>
 
         <footer className="sidebar-footer">
+          <ThemeSelector theme={theme} />
           <UpdateControl client={client} />
           <ClientVersion client={client} />
         </footer>
@@ -681,6 +708,7 @@ export function App({ client }: AppProps) {
                   onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                   onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                   highlighted={message.id === runtimeState.focusedMessageId}
+                  continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
                 />
               </Fragment>
             ))
@@ -688,23 +716,54 @@ export function App({ client }: AppProps) {
           {pending.map((item, index) => {
             const previousTimestamp =
               pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
+            const continuation = isMessageContinuation(
+              {
+                authorId: currentUserId,
+                createdAt: item.createdAt,
+                conversationSequence: null,
+              },
+              index > 0
+                ? {
+                    authorId: currentUserId,
+                    createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
+                    conversationSequence: null,
+                  }
+                : (messages.at(-1) ?? null),
+            );
+            const pendingStatus =
+              editingClientMessageId === item.operation.message.clientMessageId
+                ? "editing"
+                : item.status.replaceAll("_", " ");
             return (
               <Fragment key={item.operation.message.clientMessageId}>
                 {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
                   <MessageDateSeparator value={item.createdAt} />
                 )}
-                <article className="message pending-message">
-                  <Avatar user={bootstrap.currentUser.user} />
+                <article
+                  className={`message pending-message${
+                    continuation ? " message-continuation" : ""
+                  }`}
+                >
+                  {continuation ? (
+                    <time
+                      className="message-continuation-time"
+                      dateTime={item.createdAt}
+                      aria-hidden="true"
+                    >
+                      {messageTime(item.createdAt)}
+                    </time>
+                  ) : (
+                    <Avatar user={bootstrap.currentUser.user} />
+                  )}
                   <div>
-                    <header>
+                    <header className={continuation ? "sr-only" : undefined}>
                       <strong>{bootstrap.currentUser.user.displayName}</strong>
-                      <span>
-                        {editingClientMessageId === item.operation.message.clientMessageId
-                          ? "editing"
-                          : item.status.replaceAll("_", " ")}
-                      </span>
+                      <span>{pendingStatus}</span>
                     </header>
-                    <p>{item.operation.message.body}</p>
+                    <p>
+                      {item.operation.message.body}
+                      {continuation && <span className="pending-status"> · {pendingStatus}</span>}
+                    </p>
                     {item.status === "permanent_failure" && (
                       <div className="message-actions">
                         <button

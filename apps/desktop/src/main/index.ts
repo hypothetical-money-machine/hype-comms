@@ -17,12 +17,24 @@ import {
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
+  themePreferenceSchema,
   upsertChannelMemberOperationSchema,
   type ChatSessionState,
   type ProductRealtimeEvent,
+  type ThemeState,
   type UpdateState,
 } from "@hmm-chat/contracts";
-import { app, BrowserWindow, ipcMain, net, protocol, safeStorage, session, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  nativeTheme,
+  net,
+  protocol,
+  safeStorage,
+  session,
+  shell,
+} from "electron";
 import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
 import { autoUpdater } from "electron-updater";
 
@@ -33,6 +45,7 @@ import type {
   RealtimeConnectionState,
   ServerStatus,
 } from "../shared/desktop-api";
+import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
 import {
   parseAuthCallbackToken,
   processAuthCallback,
@@ -60,6 +73,8 @@ import {
   resolveRendererAssetPath,
 } from "./security";
 import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
+import { ThemeController } from "./theme-controller";
+import { ThemePreferenceStore } from "./theme-preference-store";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 
 protocol.registerSchemesAsPrivileged([
@@ -104,6 +119,8 @@ let workspaceRealtime: WorkspaceRealtime | null = null;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
 let updateController: UpdateController | null = null;
+let themeController: ThemeController | null = null;
+let stopThemeSubscription: (() => void) | null = null;
 
 function createUpdateSource(): UpdateSource {
   return {
@@ -195,12 +212,22 @@ function deliverUpdateState(state: UpdateState): void {
   sendToRenderer(DESKTOP_CHANNELS.updateChanged, state);
 }
 
+function deliverThemeState(state: ThemeState): void {
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(getThemeDefinition(state.resolvedThemeId).windowBackground);
+  }
+  sendToRenderer(DESKTOP_CHANNELS.themeChanged, state);
+}
+
 function flushPendingRendererEvents(): void {
   if (chatSession !== null) {
     sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
   }
   if (updateController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.updateChanged, updateController.state);
+  }
+  if (themeController !== null) {
+    sendToRenderer(DESKTOP_CHANNELS.themeChanged, themeController.state);
   }
   while (pendingNotificationActions.length > 0) {
     const action = pendingNotificationActions.shift();
@@ -346,6 +373,36 @@ function registerIpcHandlers(): void {
       throw new Error("Untrusted update-install IPC sender");
     }
     updateController?.quitAndInstall();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.themeState);
+  ipcMain.handle(DESKTOP_CHANNELS.themeState, (event): ThemeState => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted theme-state IPC sender");
+    }
+    if (themeController === null) {
+      throw new Error("Appearance is unavailable");
+    }
+    return themeController.state;
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.themeSet);
+  ipcMain.handle(DESKTOP_CHANNELS.themeSet, async (event, preference: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted theme-set IPC sender");
+    }
+    if (themeController === null) {
+      throw new Error("Appearance is unavailable");
+    }
+    const parsed = themePreferenceSchema.safeParse(preference);
+    if (!parsed.success) {
+      throw new Error("Invalid appearance preference");
+    }
+    try {
+      return await themeController.setPreference(parsed.data);
+    } catch (error) {
+      throw new Error("Could not save the appearance preference", { cause: error });
+    }
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
@@ -601,16 +658,20 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
 }
 
 async function createMainWindow(): Promise<BrowserWindow> {
+  if (themeController === null) {
+    throw new Error("Appearance must be initialized before creating a window");
+  }
   const window = new BrowserWindow({
     width: 1_280,
     height: 800,
     minWidth: 960,
     minHeight: 640,
     show: false,
-    backgroundColor: "#0b1020",
+    backgroundColor: getThemeDefinition(themeController.state.resolvedThemeId).windowBackground,
     title: "Hype Comms",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
+      additionalArguments: [createInitialThemeStateArgument(themeController.state)],
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -728,6 +789,13 @@ if (!hasSingleInstanceLock) {
       lockDownSession(session.defaultSession);
       await installBundledRendererProtocol(rendererRoot);
 
+      themeController = new ThemeController({
+        nativeTheme,
+        persistence: new ThemePreferenceStore({ userDataPath: app.getPath("userData") }),
+      });
+      await themeController.initialize();
+      stopThemeSubscription = themeController.subscribe(deliverThemeState);
+
       chatSession = new ChatSession({
         apiOrigin: __HMM_CHAT_API_ORIGIN__,
         cookies: session.defaultSession.cookies,
@@ -823,5 +891,8 @@ if (!hasSingleInstanceLock) {
   app.on("before-quit", () => {
     workspaceRealtime?.stop();
     updateController?.dispose();
+    stopThemeSubscription?.();
+    stopThemeSubscription = null;
+    themeController?.dispose();
   });
 }

@@ -4,6 +4,7 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
   apiErrorEnvelopeSchema,
   channelSlugFromName,
   channelSlugSchema,
@@ -27,6 +28,8 @@ import {
   syncAttemptResultSchema,
   syncQuerySchema,
   systemConnectedEventSchema,
+  themePreferenceSchema,
+  themeStateSchema,
   updateStateSchema,
   updateVersionSchema,
   userSchema,
@@ -93,6 +96,67 @@ const BOOTSTRAP = {
   syncCursor: "12",
   featureFlags: { channels: true, directMessages: true, mentions: true },
 };
+
+describe("desktop theme contracts", () => {
+  it.each(["system", "light", "dark", "dim"] as const)(
+    "accepts the %s preference",
+    (preference) => {
+      expect(themePreferenceSchema.parse(preference)).toBe(preference);
+    },
+  );
+
+  it("accepts strict canonical system, built-in, and named theme state", () => {
+    expect(
+      themeStateSchema.parse({
+        preference: "system",
+        resolvedThemeId: "dark",
+        resolvedColorScheme: "dark",
+      }),
+    ).toEqual({
+      preference: "system",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+    });
+    expect(
+      themeStateSchema.parse({
+        preference: "light",
+        resolvedThemeId: "light",
+        resolvedColorScheme: "light",
+      }),
+    ).toEqual({
+      preference: "light",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+    });
+    expect(
+      themeStateSchema.parse({
+        preference: "dim",
+        resolvedThemeId: "dim",
+        resolvedColorScheme: "dark",
+      }),
+    ).toEqual({
+      preference: "dim",
+      resolvedThemeId: "dim",
+      resolvedColorScheme: "dark",
+    });
+  });
+
+  it.each([
+    { preference: "Dim Theme", resolvedThemeId: "dim", resolvedColorScheme: "dark" },
+    { preference: "system", resolvedThemeId: "system", resolvedColorScheme: "dark" },
+    { preference: "system", resolvedThemeId: "dark", resolvedColorScheme: "sepia" },
+    { preference: "dark", resolvedThemeId: "light", resolvedColorScheme: "dark" },
+    { preference: "dim", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
+    {
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      css: "body {}",
+    },
+  ])("rejects an invalid or expanded theme wire value", (value) => {
+    expect(themeStateSchema.safeParse(value).success).toBe(false);
+  });
+});
 
 describe("entity contracts", () => {
   it("accepts representative entity payloads", () => {
@@ -411,10 +475,51 @@ describe("transport contracts", () => {
     expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
   });
 
+  it("accepts legacy and canonical read-state events but rejects partial counts", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000007",
+      type: "read_cursor.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "44",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        readCursor: {
+          conversationId: CONVERSATION_ID,
+          userId: USER_ID,
+          lastReadMessageId: MESSAGE_ID,
+          lastReadConversationSequence: "42",
+          lastReadAt: NOW,
+          updatedAt: NOW,
+        },
+      },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toMatchObject({ payload: event.payload });
+    expect(
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, unreadCount: 2, mentionCount: 1 },
+      }),
+    ).toMatchObject({ payload: { unreadCount: 2, mentionCount: 1 } });
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, unreadCount: 2 },
+      }),
+    ).toThrow();
+  });
+
   it("validates bounded client capability headers", () => {
     expect(
-      clientCapabilitiesHeaderSchema.parse(`${REACTION_EVENTS_CAPABILITY}, future-events-v2`),
-    ).toEqual([REACTION_EVENTS_CAPABILITY, "future-events-v2"]);
+      clientCapabilitiesHeaderSchema.parse(
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}`,
+      ),
+    ).toEqual([REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
     }

@@ -6,6 +6,7 @@ import { runMigrations } from "./db/migrate.js";
 import { createPool } from "./db/pool.js";
 import { Lifecycle } from "./lifecycle.js";
 import { createLoggerOptions } from "./logging.js";
+import { MetricsRegistry } from "./metrics.js";
 import {
   ConsoleEmailSender,
   ManualEmailSender,
@@ -69,11 +70,16 @@ async function main(): Promise<void> {
 
   let app: Awaited<ReturnType<typeof buildApp>>;
   try {
+    const metrics =
+      config.metricsToken === undefined
+        ? undefined
+        : { registry: new MetricsRegistry(pool), token: config.metricsToken };
     app = await buildApp({
       logger: createLoggerOptions(config),
       lifecycle,
       allowedOrigins: config.allowedOrigins,
       cookieSecure: config.cookieSecure,
+      ...(metrics === undefined ? {} : { metrics }),
       ...(identity === undefined ? {} : { identity }),
       ...(workspace === undefined ? {} : { workspace }),
       ...(config.webRoot === undefined ? {} : { webRoot: config.webRoot }),

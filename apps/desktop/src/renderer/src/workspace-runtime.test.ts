@@ -29,6 +29,7 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  ThemeState,
   UpdateState,
   WorkspaceBootstrapResponse,
   WorkspaceEvent,
@@ -396,6 +397,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
 class FakeDesktopApi implements DesktopApi {
   readonly platform: DesktopPlatform = "darwin";
+  readonly initialThemeState: ThemeState = {
+    preference: "system",
+    resolvedThemeId: "dark",
+    resolvedColorScheme: "dark",
+  };
   bootstrap: WorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -501,6 +507,18 @@ class FakeDesktopApi implements DesktopApi {
 
   onUpdateStateChanged(): () => void {
     throw new Error("The runtime test does not observe update state");
+  }
+
+  async getThemeState(): Promise<ThemeState> {
+    throw new Error("The runtime test does not report theme state");
+  }
+
+  async setThemePreference(): Promise<ThemeState> {
+    throw new Error("The runtime test does not set a theme");
+  }
+
+  onThemeStateChanged(): () => void {
+    throw new Error("The runtime test does not observe theme state");
   }
 
   onNotificationAction(listener: (action: NotificationAction) => void): () => void {
@@ -1054,6 +1072,106 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("projects canonical unread counts from read-cursor events", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            unreadCount: 4,
+            mentionCount: 3,
+          },
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-00000000000e",
+      type: "read_cursor.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        readCursor: {
+          conversationId: CONVERSATION_ID,
+          userId: USER_ID,
+          lastReadMessageId: PEER_MESSAGE_ID,
+          lastReadConversationSequence: "1",
+          lastReadAt: NOW,
+          updatedAt: NOW,
+        },
+        unreadCount: 1,
+        mentionCount: 1,
+      },
+    });
+    await settle(
+      () => runtime.state.bootstrap?.conversations[0]?.unreadCount === 1,
+      "read cursor projection",
+    );
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 1,
+      mentionCount: 1,
+      readCursor: { lastReadMessageId: PEER_MESSAGE_ID },
+    });
+  });
+
+  it("does not erase counts when a retained legacy read-cursor event replays", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            unreadCount: 4,
+            mentionCount: 3,
+          },
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-00000000000f",
+      type: "read_cursor.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        readCursor: {
+          conversationId: CONVERSATION_ID,
+          userId: USER_ID,
+          lastReadMessageId: PEER_MESSAGE_ID,
+          lastReadConversationSequence: "1",
+          lastReadAt: NOW,
+          updatedAt: NOW,
+        },
+      },
+    });
+    await settle(
+      () => runtime.state.bootstrap?.conversations[0]?.readCursor !== null,
+      "legacy read cursor projection",
+    );
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 4,
+      mentionCount: 3,
+      readCursor: { lastReadMessageId: PEER_MESSAGE_ID },
+    });
   });
 
   it("projects and selects a created channel without refreshing or skipping earlier events", async () => {

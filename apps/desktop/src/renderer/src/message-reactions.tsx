@@ -131,7 +131,12 @@ export function MessageReactions({
   };
 
   return (
-    <div className="message-reactions" ref={root}>
+    <div
+      className={
+        groups.length === 0 && error === "" ? "message-reactions empty" : "message-reactions"
+      }
+      ref={root}
+    >
       <div className="reaction-chips">
         {groups.map((group) => {
           const hasCurrentUser = group.currentUserReaction !== null;

@@ -33,6 +33,7 @@ import {
   sendMessageOperationSchema,
   sequenceSchema,
   syncAttemptResultSchema,
+  themePreferenceSchema,
   updateStateSchema,
   upsertChannelMemberRequestSchema,
   upsertChannelMemberOperationSchema,
@@ -48,6 +49,8 @@ import {
   type ReactionEmoji,
   type ProductRealtimeEvent,
   type SendMessageOperation,
+  type ThemePreference,
+  type ThemeState,
   type UpdateState,
 } from "@hmm-chat/contracts";
 
@@ -59,6 +62,11 @@ import type {
   RealtimeConnectionState,
   ServerStatus,
 } from "../shared/desktop-api";
+import {
+  isBuiltInThemeState,
+  parseBuiltInThemeState,
+  resolveInitialThemeStateArgument,
+} from "../shared/theme";
 
 function subscribe<T>(
   channel: string,
@@ -90,9 +98,11 @@ const platform = process.platform;
 if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
   throw new Error(`Unsupported desktop platform: ${platform}`);
 }
+const initialThemeState = resolveInitialThemeStateArgument(process.argv);
 
 const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
+  initialThemeState,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getUpdateState: async () =>
     updateStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.updateState)),
@@ -108,6 +118,14 @@ const desktopApi: DesktopApi = Object.freeze({
       listener,
       (value): value is UpdateState => updateStateSchema.safeParse(value).success,
     ),
+  getThemeState: async () =>
+    parseBuiltInThemeState(await ipcRenderer.invoke(DESKTOP_CHANNELS.themeState)),
+  setThemePreference: async (preference: ThemePreference) =>
+    parseBuiltInThemeState(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.themeSet, themePreferenceSchema.parse(preference)),
+    ),
+  onThemeStateChanged: (listener: (state: ThemeState) => void) =>
+    subscribe(DESKTOP_CHANNELS.themeChanged, listener, isBuiltInThemeState),
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
   getSessionState: async () =>
     chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),

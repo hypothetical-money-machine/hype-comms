@@ -88,13 +88,13 @@ async function reactionApp(repository: FakeWorkspaceRepository) {
   return app;
 }
 
-describe("reaction routes", () => {
-  it("negotiates reaction events independently for sync and realtime", async () => {
+describe("event capability routes", () => {
+  it("negotiates event payloads independently for sync and realtime", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hmm_session=${sessionToken}`,
-      "x-hmm-chat-capabilities": "reaction-events-v1, future-events-v2",
+      "x-hmm-chat-capabilities": "reaction-events-v1, read-state-events-v1",
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -111,9 +111,11 @@ describe("reaction routes", () => {
       "0",
       100,
       true,
+      true,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
+      true,
       true,
     );
   });
@@ -139,6 +141,7 @@ describe("reaction routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
     );
     expect(malformed.statusCode).toBe(400);

@@ -5,6 +5,7 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
+import type { MetricsRegistry } from "./metrics.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
@@ -20,6 +21,10 @@ export interface BuildAppOptions {
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
   readonly cookieSecure?: boolean;
+  readonly metrics?: {
+    readonly registry: MetricsRegistry;
+    readonly token: string;
+  };
   readonly identity?: {
     readonly service: IdentityService;
     /** False when links are issued by an administrator, which disables self-service requests. */
@@ -43,6 +48,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
   app.addHook("onRequest", async (request, reply) => {
     void reply.header("x-request-id", request.id);
   });
+  if (options.metrics !== undefined) {
+    app.addHook("onResponse", async (request, reply) => {
+      options.metrics?.registry.observeHttpRequest({
+        method: request.method,
+        route: request.routeOptions.url ?? "unmatched",
+        statusCode: reply.statusCode,
+        durationMs: reply.elapsedTime,
+      });
+    });
+  }
 
   await app.register(cors, {
     origin(origin, callback) {
@@ -74,7 +89,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
       },
     });
   }
-  await app.register(systemRoutes, { lifecycle });
+  await app.register(systemRoutes, {
+    lifecycle,
+    ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
+  });
   const consumeWorkspaceTicket: ConsumeRealtimeTicket | undefined =
     options.workspace === undefined
       ? undefined
@@ -88,6 +106,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             workspaceId: principal.workspaceId,
             deviceSessionId: principal.deviceSessionId,
             reactionEvents: principal.reactionEvents,
+            readStateEvents: principal.readStateEvents,
           };
         };
   await app.register(
@@ -105,6 +124,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
                 options.workspace!.realtimeHub.subscribe(workspaceId, listener),
               revalidate: (principal) =>
                 options.workspace!.repository.revalidateRealtimePrincipal(principal),
+              ...(options.metrics === undefined ? {} : { metrics: options.metrics.registry }),
             }),
       });
       if (options.identity !== undefined) {

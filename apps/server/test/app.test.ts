@@ -9,6 +9,7 @@ import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
 import { Lifecycle } from "../src/lifecycle.js";
+import { MetricsRegistry } from "../src/metrics.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -44,6 +45,38 @@ describe("operational routes", () => {
       status: "not_ready",
       checks: { server: "ok", database: "failed" },
     });
+  });
+
+  it("exposes bounded Prometheus metrics only with the configured bearer token", async () => {
+    const token = "metrics-token-that-is-at-least-32-characters";
+    const databasePool = { totalCount: 5, idleCount: 3, waitingCount: 1 };
+    const metrics = new MetricsRegistry(databasePool);
+    const app = await buildApp({ metrics: { registry: metrics, token } });
+    apps.push(app);
+    await app.inject({ method: "GET", url: "/livez" });
+
+    const [missing, incorrect, authorized] = await Promise.all([
+      app.inject({ method: "GET", url: "/metrics" }),
+      app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: `Bearer ${"x".repeat(token.length)}` },
+      }),
+      app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    ]);
+
+    expect(missing.statusCode).toBe(401);
+    expect(incorrect.statusCode).toBe(401);
+    expect(authorized.statusCode).toBe(200);
+    expect(authorized.headers["cache-control"]).toBe("no-store");
+    expect(authorized.body).toContain(
+      'hmm_chat_http_requests_total{method="GET",route="/livez",status_code="200"} 1',
+    );
+    expect(authorized.body).toContain('hmm_chat_postgres_pool_connections{state="waiting"} 1');
   });
 
   it("answers malformed bodies with 400 rather than an internal error", async () => {
