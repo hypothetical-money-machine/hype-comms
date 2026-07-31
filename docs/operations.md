@@ -11,7 +11,8 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   `registry.example.invalid/example-project/hmm-chat`, then a GitOps image promotion in
   `hype-comms/deployment-repository` for the `production-cluster` cluster.
 - A `v*` tag on `main` must exactly match `apps/desktop/package.json`. Native release jobs package
-  and publish platform artifacts and the platform manifest to the S3-compatible storage update bucket.
+  and publish platform artifacts and the platform manifest to the S3-compatible storage update bucket, then attach
+  the verified installers, blockmaps, and updater manifests to a GitHub Release for that tag.
 - Kubernetes manifests, ingress/TLS, database lifecycle, secret injection, Argo CD health, backup
   scheduling, and production rollback are owned by `deployment-repository`. A release review must link
   evidence from that repository rather than assuming these controls from application code.

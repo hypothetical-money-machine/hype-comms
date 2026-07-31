@@ -52,6 +52,17 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
   );
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
+  assert.match(
+    releaseWorkflow,
+    /uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /uses: actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093/u,
+  );
+  assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
+  assert.match(releaseWorkflow, /gh release create[\s\S]*--generate-notes/u);
+  assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
 });
 

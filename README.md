@@ -168,7 +168,10 @@ To cut a release:
 
 The workflow packages x64 and ARM64 clients on macOS, Windows ARM64, and Ubuntu ARM64 runners with
 `--publish never`, verifies the ASAR, update configuration, and Electron fuses, and then copies the
-results to the S3-compatible bucket described below. Only the ARM64 clients are built natively:
+results to the S3-compatible bucket described below. It also creates or updates a GitHub Release for
+the tag with the versioned installers, blockmaps, and generated updater manifests. Those GitHub
+Release assets are a manual-download archive; installed clients continue to use the public feed.
+Only the ARM64 clients are built natively:
 there is no longer an x64 runner in the release path, so the x64 Windows and Linux artifacts are
 cross-built and fuse-verified on those same ARM64 hosts and no x64 machine exercises them before
 publishing. The pilot serves this from a self-hosted S3-compatible storage instance on the example-project cluster; any
