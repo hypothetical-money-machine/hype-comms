@@ -265,6 +265,18 @@ jobs:
           UPDATE_MANIFEST: latest-linux-arm64.yml
         run: node scripts/desktop-release.mjs cache-key-manifest
 
+      # Stage before any update-bucket write. If this upload fails, the public feed remains
+      # untouched and retrying the package lane can still pass the publication guard.
+      - name: Stage GitHub Release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v7.0.1
+        with:
+          name: desktop-release-${{ matrix.artifact_os }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            apps/desktop/release/hmm-chat-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-*
+            apps/desktop/release/latest*.yml
+
       - name: Address the update bucket by path
         shell: sh
         # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
@@ -332,18 +344,6 @@ jobs:
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         run: node scripts/verify-published-desktop-release.mjs
-
-      # Keep a short-lived copy for the final GitHub Release job. The updater feed remains the
-      # authoritative distribution path; these assets provide a versioned manual-download archive.
-      - name: Stage GitHub Release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v7.0.1
-        with:
-          name: desktop-release-${{ matrix.artifact_os }}
-          if-no-files-found: error
-          retention-days: 1
-          path: |
-            apps/desktop/release/hmm-chat-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-*
-            apps/desktop/release/latest*.yml
 
       # The page reads the manifests at load time, so it does not go stale between releases and
       # one runner publishing it is enough.

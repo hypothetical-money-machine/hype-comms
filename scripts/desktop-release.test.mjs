@@ -60,6 +60,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     releaseWorkflow,
     /uses: actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093/u,
   );
+  const stagingIndex = releaseWorkflow.indexOf("Stage GitHub Release assets");
+  const publicationGuardIndex = releaseWorkflow.indexOf(
+    "Refuse to overwrite a published platform version",
+  );
+  assert.ok(
+    stagingIndex >= 0 && stagingIndex < publicationGuardIndex,
+    "GitHub Release assets must be staged before the public feed publication guard",
+  );
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
   assert.match(releaseWorkflow, /gh release create[\s\S]*--generate-notes/u);
   assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
