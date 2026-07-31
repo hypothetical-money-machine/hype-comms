@@ -103,7 +103,7 @@ describe("operational routes", () => {
 describe("static web client", () => {
   it("serves the browser client without exposing server files", async () => {
     const webRoot = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-web-"));
-    await writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>HMM Chat</title>");
+    await writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>Hype Comms</title>");
     const app = await buildApp({ webRoot });
     apps.push(app);
 
@@ -112,7 +112,7 @@ describe("static web client", () => {
     await rm(webRoot, { recursive: true, force: true });
 
     expect(root.statusCode).toBe(200);
-    expect(root.body).toContain("HMM Chat");
+    expect(root.body).toContain("Hype Comms");
     expect(root.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(traversal.statusCode).toBe(404);
   });

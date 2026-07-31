@@ -54,7 +54,7 @@ async function executableForAsar(asarPath) {
     return executables[0];
   }
 
-  const executableName = process.platform === "win32" ? "hmm-chat.exe" : "hmm-chat";
+  const executableName = process.platform === "win32" ? "hype-comms.exe" : "hype-comms";
   const executablePath = path.join(applicationDirectory, executableName);
   await access(executablePath);
   return executablePath;

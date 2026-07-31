@@ -126,7 +126,7 @@ function SignIn({ client, sessionMessage }: { client: DesktopApi; sessionMessage
       const delivery = await client.requestMagicLink(email);
       setStatus(
         delivery.status === "email-sent"
-          ? "Check your email, then open the HMM Chat sign-in link."
+          ? "Check your email, then open the Hype Comms sign-in link."
           : `${delivery.message} Open the private sign-in link an administrator sends you.`,
       );
     } catch (error) {

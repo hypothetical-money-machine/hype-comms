@@ -68,7 +68,7 @@ export async function cacheKeyPlatformManifest({
 }
 
 export function selectArtifactNames(entries, desktopVersion, artifactOs) {
-  const prefix = `hmm-chat-${desktopVersion}-${artifactOs}-`;
+  const prefix = `hype-comms-${desktopVersion}-${artifactOs}-`;
   return entries
     .filter((entry) => entry.isFile() && entry.name.startsWith(prefix))
     .map((entry) => entry.name)

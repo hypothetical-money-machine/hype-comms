@@ -1,6 +1,6 @@
 # Architecture implementation contract
 
-This document is the decision record for HMM Chat. It describes the
+This document is the decision record for Hype Comms. It describes the
 target implementation, not the capabilities of the initial repository scaffold. Changes to
 these invariants require a reviewed architecture change and matching contract tests.
 
@@ -22,7 +22,7 @@ these invariants require a reviewed architecture change and matching contract te
 - The target feature set is channels, 1:1 DMs, one-level threads, emoji reactions, user
   mentions, unread state, file attachments, message/filename search, and native
   notifications.
-- Transport and managed storage are encrypted, but HMM Chat is not end-to-end encrypted.
+- Transport and managed storage are encrypted, but Hype Comms is not end-to-end encrypted.
   The service necessarily processes plaintext for authorization, notifications, malware
   scanning, and search; operators with explicitly granted production access are inside the
   trust boundary.
@@ -52,6 +52,13 @@ The production API is `https://api.chat.hypemm.com`; realtime uses
 `wss://api.chat.hypemm.com/v1/realtime`. The email landing page is
 `https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
 `hmm-chat://auth/callback`.
+
+User-facing desktop executables and release artifacts use the `hype-comms` name. Stable
+technical identifiers retain their original names for compatibility: the application ID,
+`hmm-chat://` protocol, `@hmm-chat/*` package scope, `HMM_*` environment variables,
+`X-HMM-Chat-Capabilities` header, and existing cache/database names. Renaming those identifiers
+would break installed-client upgrades, sign-in links, deployments, or local encrypted state and
+requires a separately versioned migration.
 
 | Component      | Responsibility                                                                                                                     | Must not do                                                                                                               |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |

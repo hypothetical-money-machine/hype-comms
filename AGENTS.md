@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-HMM Chat is an npm-workspaces TypeScript monorepo. `apps/desktop` contains the Electron
+Hype Comms is an npm-workspaces TypeScript monorepo. `apps/desktop` contains the Electron
 main, preload, React renderer, and shared IPC types. `apps/server` contains the Fastify HTTP
 and WebSocket service. `packages/contracts` is the source of truth for strict Zod wire
 schemas shared by both apps. Tests live beside desktop source as `*.test.ts` or in each

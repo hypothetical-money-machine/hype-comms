@@ -1,6 +1,6 @@
 # Contributing
 
-HMM Chat currently accepts changes from members of the Hypothetical Money Machine GitHub
+Hype Comms currently accepts changes from members of the Hypothetical Money Machine GitHub
 organization.
 
 ## Workflow

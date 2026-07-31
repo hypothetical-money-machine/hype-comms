@@ -46,6 +46,7 @@ describeWithPostgres("runMigrations", () => {
           "0004_channel_memberships.sql",
           "0005_message_search.sql",
           "0006_message_reactions.sql",
+          "0007_hype_comms_rebrand.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -60,6 +61,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0004_channel_memberships.sql" },
         { filename: "0005_message_search.sql" },
         { filename: "0006_message_reactions.sql" },
+        { filename: "0007_hype_comms_rebrand.sql" },
       ]);
 
       const userId = randomUUID();
@@ -111,6 +113,54 @@ describeWithPostgres("runMigrations", () => {
           [randomUUID(), workspaceId, userId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
+    });
+  });
+
+  it("renames only the legacy default workspace", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+
+      const userId = randomUUID();
+      const defaultWorkspaceId = randomUUID();
+      const legacyNamedCustomWorkspaceId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'rebrand@example.test', 'rebrand', 'Rebrand')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES
+           ($1, 'HMM Chat', 'hmm-chat', $3),
+           ($2, 'HMM Chat', 'custom-workspace', $3)`,
+        [defaultWorkspaceId, legacyNamedCustomWorkspaceId, userId],
+      );
+
+      const migration = await readFile(
+        new URL("../src/db/migrations/0007_hype_comms_rebrand.sql", import.meta.url),
+        "utf8",
+      );
+      await pool.query(migration);
+
+      const renamed = await pool.query<{ id: string; name: string }>(
+        "SELECT id, name FROM workspaces ORDER BY id",
+      );
+      expect(new Map(renamed.rows.map((row) => [row.id, row.name]))).toEqual(
+        new Map([
+          [defaultWorkspaceId, "Hype Comms"],
+          [legacyNamedCustomWorkspaceId, "HMM Chat"],
+        ]),
+      );
+
+      await pool.query("UPDATE workspaces SET name = 'Morgan and Dan' WHERE id = $1", [
+        defaultWorkspaceId,
+      ]);
+      await pool.query(migration);
+      await expect(
+        pool.query<{ name: string }>("SELECT name FROM workspaces WHERE id = $1", [
+          defaultWorkspaceId,
+        ]),
+      ).resolves.toMatchObject({ rows: [{ name: "Morgan and Dan" }] });
     });
   });
 

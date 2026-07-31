@@ -608,7 +608,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     minHeight: 640,
     show: false,
     backgroundColor: "#0b1020",
-    title: "HMM Chat",
+    title: "Hype Comms",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -810,7 +810,7 @@ if (!hasSingleInstanceLock) {
       });
     })
     .catch((error: unknown) => {
-      console.error("Failed to initialize HMM Chat", error);
+      console.error("Failed to initialize Hype Comms", error);
       app.quit();
     });
 

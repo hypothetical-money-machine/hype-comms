@@ -34,9 +34,9 @@ export function ClientVersion({ client }: { readonly client: VersionClient }) {
     <p className="client-version" aria-live="polite">
       {version === null
         ? unavailable
-          ? "HMM Chat · version unavailable"
-          : "HMM Chat · checking version…"
-        : `HMM Chat · v${version}`}
+          ? "Hype Comms · version unavailable"
+          : "Hype Comms · checking version…"
+        : `Hype Comms · v${version}`}
     </p>
   );
 }

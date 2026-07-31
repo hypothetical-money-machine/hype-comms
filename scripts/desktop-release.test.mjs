@@ -35,22 +35,22 @@ test("binds every manifest artifact URL and path to its SHA-512", () => {
   const manifest = [
     "version: 1.2.3",
     "files:",
-    "  - url: hmm-chat-1.2.3-mac-arm64.zip",
+    "  - url: hype-comms-1.2.3-mac-arm64.zip",
     "    sha512: arm+/=",
     "    size: 123",
-    "  - url: hmm-chat-1.2.3-mac-x64.zip",
+    "  - url: hype-comms-1.2.3-mac-x64.zip",
     "    sha512: intel+/=",
     "    size: 456",
-    "path: hmm-chat-1.2.3-mac-arm64.zip",
+    "path: hype-comms-1.2.3-mac-arm64.zip",
     "sha512: arm+/=",
     "",
   ].join("\n");
 
   const cacheKeyedManifest = addArtifactCacheKeys(manifest);
 
-  assert.match(cacheKeyedManifest, /url: hmm-chat-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
-  assert.match(cacheKeyedManifest, /url: hmm-chat-1\.2\.3-mac-x64\.zip\?sha512=intel%2B%2F%3D/u);
-  assert.match(cacheKeyedManifest, /path: hmm-chat-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
+  assert.match(cacheKeyedManifest, /url: hype-comms-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
+  assert.match(cacheKeyedManifest, /url: hype-comms-1\.2\.3-mac-x64\.zip\?sha512=intel%2B%2F%3D/u);
+  assert.match(cacheKeyedManifest, /path: hype-comms-1\.2\.3-mac-arm64\.zip\?sha512=arm%2B%2F%3D/u);
   assert.equal(cacheKeyedManifest.match(/sha512: arm\+\/=/gu)?.length, 2);
   assert.equal(cacheKeyedManifest.match(/sha512: intel\+\/=/gu)?.length, 1);
   assert.throws(() => addArtifactCacheKeys(cacheKeyedManifest), /already has a SHA-512 cache key/);
@@ -106,15 +106,15 @@ test("selects only exact version and platform artifacts", () => {
   assert.deepEqual(
     selectArtifactNames(
       [
-        file("hmm-chat-1.2.3-win-arm64.exe.blockmap"),
-        file("hmm-chat-1.2.3-linux-x64.AppImage"),
-        directory("hmm-chat-1.2.3-win-unpacked"),
-        file("hmm-chat-1.2.3-win-arm64.exe"),
+        file("hype-comms-1.2.3-win-arm64.exe.blockmap"),
+        file("hype-comms-1.2.3-linux-x64.AppImage"),
+        directory("hype-comms-1.2.3-win-unpacked"),
+        file("hype-comms-1.2.3-win-arm64.exe"),
       ],
       "1.2.3",
       "win",
     ),
-    ["hmm-chat-1.2.3-win-arm64.exe", "hmm-chat-1.2.3-win-arm64.exe.blockmap"],
+    ["hype-comms-1.2.3-win-arm64.exe", "hype-comms-1.2.3-win-arm64.exe.blockmap"],
   );
 });
 

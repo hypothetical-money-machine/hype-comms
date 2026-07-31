@@ -13,7 +13,7 @@ export interface EmailSender {
 
 function magicLinkBody(input: SendMagicLinkInput): string {
   return [
-    "Use this single-use link to sign in to HMM Chat:",
+    "Use this single-use link to sign in to Hype Comms:",
     "",
     input.url,
     "",
@@ -66,7 +66,7 @@ export class SmtpEmailSender implements EmailSender {
     await this.#transporter.sendMail({
       from: this.#from,
       to: input.to,
-      subject: "Your HMM Chat sign-in link",
+      subject: "Your Hype Comms sign-in link",
       text: magicLinkBody(input),
     });
   }

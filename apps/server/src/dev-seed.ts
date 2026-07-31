@@ -49,7 +49,7 @@ const DEMO_MEMBERS = [
 
 const DEMO_OWNER: SeedOwnerInput = {
   email: DEMO_MEMBERS[0].email,
-  workspaceName: "HMM Chat",
+  workspaceName: "Hype Comms",
   workspaceSlug: "hmm-chat",
 };
 
@@ -57,7 +57,7 @@ const DEMO_CHANNELS = [
   {
     name: "Launch Planning",
     slug: "launch-planning",
-    topic: "Coordinates the next HMM Chat launch.",
+    topic: "Coordinates the next Hype Comms launch.",
   },
   {
     name: "Design",

@@ -115,7 +115,7 @@ function bootstrapAt(
     currentUser: { user, email: "morgan@example.com", workspaceId: WORKSPACE_ID, role: "owner" },
     workspace: {
       id: WORKSPACE_ID,
-      name: "HMM Chat",
+      name: "Hype Comms",
       slug: "hmm-chat",
       createdBy: USER_ID,
       createdAt: NOW,
