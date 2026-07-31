@@ -28,6 +28,8 @@ import {
   syncAttemptResultSchema,
   syncQuerySchema,
   systemConnectedEventSchema,
+  themePreferenceSchema,
+  themeStateSchema,
   updateStateSchema,
   updateVersionSchema,
   userSchema,
@@ -94,6 +96,67 @@ const BOOTSTRAP = {
   syncCursor: "12",
   featureFlags: { channels: true, directMessages: true, mentions: true },
 };
+
+describe("desktop theme contracts", () => {
+  it.each(["system", "light", "dark", "dim"] as const)(
+    "accepts the %s preference",
+    (preference) => {
+      expect(themePreferenceSchema.parse(preference)).toBe(preference);
+    },
+  );
+
+  it("accepts strict canonical system, built-in, and named theme state", () => {
+    expect(
+      themeStateSchema.parse({
+        preference: "system",
+        resolvedThemeId: "dark",
+        resolvedColorScheme: "dark",
+      }),
+    ).toEqual({
+      preference: "system",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+    });
+    expect(
+      themeStateSchema.parse({
+        preference: "light",
+        resolvedThemeId: "light",
+        resolvedColorScheme: "light",
+      }),
+    ).toEqual({
+      preference: "light",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+    });
+    expect(
+      themeStateSchema.parse({
+        preference: "dim",
+        resolvedThemeId: "dim",
+        resolvedColorScheme: "dark",
+      }),
+    ).toEqual({
+      preference: "dim",
+      resolvedThemeId: "dim",
+      resolvedColorScheme: "dark",
+    });
+  });
+
+  it.each([
+    { preference: "Dim Theme", resolvedThemeId: "dim", resolvedColorScheme: "dark" },
+    { preference: "system", resolvedThemeId: "system", resolvedColorScheme: "dark" },
+    { preference: "system", resolvedThemeId: "dark", resolvedColorScheme: "sepia" },
+    { preference: "dark", resolvedThemeId: "light", resolvedColorScheme: "dark" },
+    { preference: "dim", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
+    {
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      css: "body {}",
+    },
+  ])("rejects an invalid or expanded theme wire value", (value) => {
+    expect(themeStateSchema.safeParse(value).success).toBe(false);
+  });
+});
 
 describe("entity contracts", () => {
   it("accepts representative entity payloads", () => {

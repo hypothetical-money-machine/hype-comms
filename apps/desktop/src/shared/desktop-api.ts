@@ -27,6 +27,8 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  ThemePreference,
+  ThemeState,
   UpdateState,
   WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
@@ -50,7 +52,14 @@ export interface SessionTransport {
   readonly onSessionChanged: (listener: (state: ChatSessionState) => void) => () => void;
 }
 
-export interface DesktopApi extends SessionTransport {
+export interface ThemeTransport {
+  readonly initialThemeState: ThemeState;
+  readonly getThemeState: () => Promise<ThemeState>;
+  readonly setThemePreference: (preference: ThemePreference) => Promise<ThemeState>;
+  readonly onThemeStateChanged: (listener: (state: ThemeState) => void) => () => void;
+}
+
+export interface DesktopApi extends SessionTransport, ThemeTransport {
   readonly platform: DesktopPlatform;
   readonly getAppVersion: () => Promise<string>;
   readonly getUpdateState: () => Promise<UpdateState>;

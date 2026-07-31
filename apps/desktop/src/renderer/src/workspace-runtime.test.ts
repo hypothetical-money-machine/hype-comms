@@ -29,6 +29,7 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  ThemeState,
   UpdateState,
   WorkspaceBootstrapResponse,
   WorkspaceEvent,
@@ -396,6 +397,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
 class FakeDesktopApi implements DesktopApi {
   readonly platform: DesktopPlatform = "darwin";
+  readonly initialThemeState: ThemeState = {
+    preference: "system",
+    resolvedThemeId: "dark",
+    resolvedColorScheme: "dark",
+  };
   bootstrap: WorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -501,6 +507,18 @@ class FakeDesktopApi implements DesktopApi {
 
   onUpdateStateChanged(): () => void {
     throw new Error("The runtime test does not observe update state");
+  }
+
+  async getThemeState(): Promise<ThemeState> {
+    throw new Error("The runtime test does not report theme state");
+  }
+
+  async setThemePreference(): Promise<ThemeState> {
+    throw new Error("The runtime test does not set a theme");
+  }
+
+  onThemeStateChanged(): () => void {
+    throw new Error("The runtime test does not observe theme state");
   }
 
   onNotificationAction(listener: (action: NotificationAction) => void): () => void {
