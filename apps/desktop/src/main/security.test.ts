@@ -98,7 +98,9 @@ describe("authentication callback validation", () => {
 describe("authentication protocol registration", () => {
   it("keeps packaged registration on the scheme-only Electron path", () => {
     expect(
-      createProtocolClientRegistration(true, "/Applications/HMM Chat", ["/Applications/HMM Chat"]),
+      createProtocolClientRegistration(true, "/Applications/Hype Comms", [
+        "/Applications/Hype Comms",
+      ]),
     ).toEqual({ scheme: "hmm-chat" });
   });
 

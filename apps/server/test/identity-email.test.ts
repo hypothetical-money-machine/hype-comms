@@ -36,15 +36,15 @@ describe("identity email senders", () => {
     } as unknown as Transporter);
     const sender = new SmtpEmailSender({
       url: "smtp://mail.example.com:2525",
-      from: "HMM Chat <chat@example.com>",
+      from: "Hype Comms <chat@example.com>",
     });
 
     await sender.sendMagicLink(input);
 
     expect(sendMail).toHaveBeenCalledWith({
-      from: "HMM Chat <chat@example.com>",
+      from: "Hype Comms <chat@example.com>",
       to: "member@example.com",
-      subject: "Your HMM Chat sign-in link",
+      subject: "Your Hype Comms sign-in link",
       text: expect.stringContaining(input.url),
     });
     expect(sendMail.mock.calls[0]?.[0]).not.toHaveProperty("html");

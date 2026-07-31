@@ -165,7 +165,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
     await pool.query(
       `INSERT INTO workspaces (id, name, slug, created_by)
-       VALUES ($1, 'HMM Chat', 'hmm-chat', $2)`,
+       VALUES ($1, 'Hype Comms', 'hmm-chat', $2)`,
       [workspaceId, ownerId],
     );
     await pool.query(

@@ -1,6 +1,6 @@
-# HMM Chat
+# Hype Comms
 
-HMM Chat is a private, desktop-first team chat. We build it as our own daily communication
+Hype Comms is a private, desktop-first team chat. We build it as our own daily communication
 tool, designed so it can grow into something other small teams can use. The current
 implementation combines invited-member magic-link access with a PostgreSQL-backed
 conversation core, reconnecting realtime delivery, and a restart-safe encrypted desktop outbox.
@@ -12,7 +12,7 @@ cutover boundary.
 
 ## Joining a workspace
 
-If you only want to use HMM Chat, you do not need Docker, PostgreSQL, Node, or a local server.
+If you only want to use Hype Comms, you do not need Docker, PostgreSQL, Node, or a local server.
 Install the desktop build provided by the workspace owner, open it, enter your invited email
 address, and follow the sign-in link. The link creates or restores your per-person identity and
 revocable device session.
@@ -43,7 +43,7 @@ npm ci
 
 ## Local development
 
-Everything below is for working on HMM Chat. Create `.env.local` with local-only values:
+Everything below is for working on Hype Comms. Create `.env.local` with local-only values:
 
 ```dotenv
 HMM_POSTGRES_PASSWORD=local-password

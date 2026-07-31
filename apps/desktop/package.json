@@ -2,7 +2,7 @@
   "name": "@hmm-chat/desktop",
   "version": "0.1.11",
   "private": true,
-  "description": "Secure Electron desktop client for HMM Chat",
+  "description": "Secure Electron desktop client for Hype Comms",
   "author": {
     "name": "Hypothetical Money Machine",
     "email": "callmemorgan@users.noreply.github.com"
@@ -60,9 +60,9 @@
   },
   "build": {
     "appId": "com.hypotheticalmoneymachine.hmmchat",
-    "productName": "HMM Chat",
-    "executableName": "hmm-chat",
-    "artifactName": "hmm-chat-${version}-${os}-${arch}.${ext}",
+    "productName": "Hype Comms",
+    "executableName": "hype-comms",
+    "artifactName": "hype-comms-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "electronFuses": {
       "runAsNode": false,
@@ -90,7 +90,7 @@
     ],
     "protocols": [
       {
-        "name": "HMM Chat authentication callback",
+        "name": "Hype Comms authentication callback",
         "schemes": [
           "hmm-chat"
         ]

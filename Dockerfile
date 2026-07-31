@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Production image for the HMM Chat Fastify service.
+# Production image for the Hype Comms Fastify service.
 #
 # Only the server and contracts workspaces are installed. The desktop workspace's manifest is
 # copied so that `npm ci` sees the same workspace set the lockfile was generated against, but its

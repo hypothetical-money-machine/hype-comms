@@ -48,7 +48,7 @@ const bootstrap: WorkspaceBootstrapResponse = {
   },
   workspace: {
     id: WORKSPACE_ID,
-    name: "HMM Chat",
+    name: "Hype Comms",
     slug: "hmm-chat",
     createdBy: USER_ID,
     createdAt: NOW,

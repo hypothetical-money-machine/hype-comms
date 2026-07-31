@@ -113,13 +113,13 @@ function magicLinkPage(target: string): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="0; url=${escapedTarget}">
-  <title>Open HMM Chat</title>
+  <title>Open Hype Comms</title>
 </head>
 <body>
   <main>
-    <h1>Open HMM Chat</h1>
+    <h1>Open Hype Comms</h1>
     <p>Continue in the desktop app to finish signing in.</p>
-    <p><a href="${escapedTarget}">Open HMM Chat</a></p>
+    <p><a href="${escapedTarget}">Open Hype Comms</a></p>
   </main>
 </body>
 </html>`;

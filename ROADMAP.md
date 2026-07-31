@@ -1,6 +1,6 @@
-# HMM Chat roadmap
+# Hype Comms roadmap
 
-HMM Chat is the desktop team chat we (Morgan and Dan) build and use for our own day-to-day
+Hype Comms is the desktop team chat we (Morgan and Dan) build and use for our own day-to-day
 communication. It is one workspace and two people today, but it is written like a product:
 the identity, sync, and security models are the ones we would want at small-team scale, so
 growing it — or eventually selling it — should be a matter of adding capability, not

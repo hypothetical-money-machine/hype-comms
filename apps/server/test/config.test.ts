@@ -71,7 +71,7 @@ describe("loadConfig", () => {
     expect(
       loadConfig({
         HMM_SMTP_URL: "smtp://mail.example.com:2525",
-        HMM_EMAIL_FROM: "HMM Chat <chat@example.com>",
+        HMM_EMAIL_FROM: "Hype Comms <chat@example.com>",
         HMM_OWNER_EMAIL: "OWNER@EXAMPLE.COM",
         HMM_WORKSPACE_NAME: "Pilot",
         HMM_WORKSPACE_SLUG: "pilot",
@@ -79,7 +79,7 @@ describe("loadConfig", () => {
     ).toMatchObject({
       smtp: {
         url: "smtp://mail.example.com:2525",
-        from: "HMM Chat <chat@example.com>",
+        from: "Hype Comms <chat@example.com>",
       },
       owner: {
         email: "owner@example.com",

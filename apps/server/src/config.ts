@@ -24,7 +24,7 @@ const rawConfigSchema = z
     emailFrom: optionalString(z.string().min(1)),
     emailDelivery: z.enum(["smtp", "console", "manual"]).optional(),
     ownerEmail: optionalString(emailSchema),
-    workspaceName: z.string().trim().min(1).max(120).default("HMM Chat"),
+    workspaceName: z.string().trim().min(1).max(120).default("Hype Comms"),
     workspaceSlug: z
       .string()
       .trim()

@@ -16,8 +16,8 @@ describe("ClientVersion", () => {
     const getAppVersion = vi.fn().mockResolvedValue("2.4.1");
     render(createElement(ClientVersion, { client: { getAppVersion } }));
 
-    expect(screen.getByText("HMM Chat · checking version…")).toBeTruthy();
-    expect(await screen.findByText("HMM Chat · v2.4.1")).toBeTruthy();
+    expect(screen.getByText("Hype Comms · checking version…")).toBeTruthy();
+    expect(await screen.findByText("Hype Comms · v2.4.1")).toBeTruthy();
     expect(getAppVersion).toHaveBeenCalledOnce();
   });
 
@@ -31,13 +31,13 @@ describe("ClientVersion", () => {
     rendered.unmount();
 
     await act(async () => resolveVersion?.("9.9.9"));
-    expect(screen.queryByText("HMM Chat · v9.9.9")).toBeNull();
+    expect(screen.queryByText("Hype Comms · v9.9.9")).toBeNull();
   });
 
   it("keeps a useful fallback visible if the version cannot be read", async () => {
     const getAppVersion = vi.fn().mockRejectedValue(new Error("IPC unavailable"));
     render(createElement(ClientVersion, { client: { getAppVersion } }));
 
-    expect(await screen.findByText("HMM Chat · version unavailable")).toBeTruthy();
+    expect(await screen.findByText("Hype Comms · version unavailable")).toBeTruthy();
   });
 });

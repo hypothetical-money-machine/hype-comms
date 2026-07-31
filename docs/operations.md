@@ -38,7 +38,7 @@ broader SLO/alert set in `docs/architecture.md` remains future work until those 
 Before promoting a server change:
 
 1. Require `npm run check`, the complete PostgreSQL check, and relevant native package lanes.
-2. Confirm the new image is addressed by commit SHA and the GitOps commit changes only HMM Chat.
+2. Confirm the new image is addressed by commit SHA and the GitOps commit changes only Hype Comms.
 3. Confirm migrations are backward-compatible with the currently deployed server and immediately
    previous desktop version.
 4. Watch Argo CD health, `/readyz`, 5xx rate, PostgreSQL pool waiters, and realtime reconnects.

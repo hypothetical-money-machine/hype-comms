@@ -33,7 +33,7 @@ services:
       HMM_SMTP_URL: ${HMM_SMTP_URL:-}
       HMM_EMAIL_FROM: ${HMM_EMAIL_FROM:-}
       HMM_OWNER_EMAIL: ${HMM_OWNER_EMAIL:-}
-      HMM_WORKSPACE_NAME: ${HMM_WORKSPACE_NAME:-HMM Chat}
+      HMM_WORKSPACE_NAME: ${HMM_WORKSPACE_NAME:-Hype Comms}
       HMM_WORKSPACE_SLUG: ${HMM_WORKSPACE_SLUG:-hmm-chat}
     depends_on:
       postgres:
