@@ -37,6 +37,7 @@ class FakeIdentityService {
 }
 
 class FakeWorkspaceRepository {
+  readonly createChannel = vi.fn(async () => ({}));
   readonly sync = vi.fn(async () => ({
     events: [],
     nextCursor: "0",
@@ -226,5 +227,53 @@ describe("event capability routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(repository.listMessageReactions).not.toHaveBeenCalled();
+  });
+});
+
+describe("channel mutation routes", () => {
+  it("forwards a valid optional idempotency key and rejects a malformed one", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const payload = {
+      name: "Alpha Team",
+      slug: "alpha-team",
+      topic: null,
+      access: "workspace",
+    };
+    const headers = {
+      cookie: `hmm_session=${sessionToken}`,
+      "content-type": "application/json",
+      "idempotency-key": messageId,
+    };
+
+    const accepted = await app.inject({ method: "POST", url: "/v1/channels", headers, payload });
+    const legacy = await app.inject({
+      method: "POST",
+      url: "/v1/channels",
+      headers: { cookie: headers.cookie, "content-type": headers["content-type"] },
+      payload: { ...payload, slug: "legacy-channel" },
+    });
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/v1/channels",
+      headers: { ...headers, "idempotency-key": "bad key" },
+      payload,
+    });
+
+    expect(accepted.statusCode).toBe(201);
+    expect(legacy.statusCode).toBe(201);
+    expect(repository.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      payload,
+      messageId,
+    );
+    expect(malformed.statusCode).toBe(400);
+    expect(repository.createChannel).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ currentUser }),
+      { ...payload, slug: "legacy-channel" },
+      undefined,
+    );
+    expect(repository.createChannel).toHaveBeenCalledTimes(2);
   });
 });

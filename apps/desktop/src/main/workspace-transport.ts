@@ -25,7 +25,7 @@ import {
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type ConversationMutationResponse,
-  type CreateChannelRequest,
+  type CreateChannelOperation,
   type DirectConversationRequest,
   type ListConversationsQuery,
   type ListConversationsResponse,
@@ -129,6 +129,20 @@ export class WorkspaceTransport {
     return new URL(pathname, this.apiOrigin);
   }
 
+  async #fetchIdempotentMutation(url: string, init: RequestInit): Promise<Response> {
+    let response: Response;
+    try {
+      response = await this.session.fetch(url, init);
+    } catch (error) {
+      if (!isNetworkFailure(error)) throw error;
+      return this.session.fetch(url, init);
+    }
+    if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
+      return this.session.fetch(url, init);
+    }
+    return response;
+  }
+
   async bootstrap(): Promise<WorkspaceBootstrapResponse> {
     const response = await this.session.fetch(this.#url("/v1/bootstrap").href, { method: "GET" });
     return workspaceBootstrapResponseSchema.parse(
@@ -151,11 +165,12 @@ export class WorkspaceTransport {
     return listConversationsResponseSchema.parse(await this.#payload(response));
   }
 
-  async createChannel(input: CreateChannelRequest): Promise<ConversationMutationResponse> {
-    const response = await this.session.fetch(this.#url("/v1/channels").href, {
+  async createChannel(input: CreateChannelOperation): Promise<ConversationMutationResponse> {
+    const { idempotencyKey, ...request } = input;
+    const response = await this.#fetchIdempotentMutation(this.#url("/v1/channels").href, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
+      headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+      body: JSON.stringify(request),
     });
     return conversationMutationResponseSchema.parse(await this.#payload(response));
   }

@@ -11,6 +11,7 @@ import {
   clientCapabilitiesHeaderSchema,
   conversationSummarySchema,
   conversationSchema,
+  createChannelOperationSchema,
   displayNameSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
@@ -599,6 +600,22 @@ describe("transport contracts", () => {
         },
       }),
     ).toThrow();
+  });
+
+  it("keeps a validated idempotency key with a channel creation operation", () => {
+    const operation = createChannelOperationSchema.parse({
+      name: "Alpha Team",
+      slug: "alpha-team",
+      topic: null,
+      access: "members",
+      idempotencyKey: MESSAGE_ID,
+    });
+
+    expect(operation).toMatchObject({ slug: "alpha-team", idempotencyKey: MESSAGE_ID });
+    expect(() =>
+      createChannelOperationSchema.parse({ ...operation, idempotencyKey: "bad key" }),
+    ).toThrow();
+    expect(() => createChannelOperationSchema.parse({ ...operation, unexpected: true })).toThrow();
   });
 
   it("paginates conversation listing instead of capping it above what the server can return", () => {

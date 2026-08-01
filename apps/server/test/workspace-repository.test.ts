@@ -392,6 +392,58 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
   });
 
+  it("replays channel mutations without duplicating rows or sync events", async () => {
+    const idempotencyKey = randomUUID();
+    const input = {
+      name: "Reliable Operations",
+      slug: "reliable-operations",
+      topic: null,
+      access: "members",
+    } as const;
+    const [created, replayedCreate] = await Promise.all([
+      repository.createChannel(owner, input, idempotencyKey),
+      repository.createChannel(owner, input, idempotencyKey),
+    ]);
+    expect(replayedCreate).toEqual(created);
+    await expect(
+      repository.createChannel(owner, { ...input, slug: "different-channel" }, idempotencyKey),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+
+    const conversationId = created.conversation.conversation.id;
+    const [added, replayedAdd] = await Promise.all([
+      repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" }),
+      repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" }),
+    ]);
+    expect(replayedAdd).toEqual(added);
+    const [removed, replayedRemove] = await Promise.all([
+      repository.removeChannelMember(owner, conversationId, memberId),
+      repository.removeChannelMember(owner, conversationId, memberId),
+    ]);
+    expect(replayedRemove).toEqual(removed);
+    const [archived, replayedArchive] = await Promise.all([
+      repository.archiveChannel(owner, conversationId),
+      repository.archiveChannel(owner, conversationId),
+    ]);
+    expect(replayedArchive).toEqual(archived);
+
+    const counts = await pool.query<{ event_type: string; count: string }>(
+      `SELECT event_type, count(*)::text AS count
+         FROM sync_events
+        WHERE conversation_id = $1
+        GROUP BY event_type
+        ORDER BY event_type`,
+      [conversationId],
+    );
+    expect(counts.rows).toEqual([
+      { event_type: "channel.archived", count: "1" },
+      { event_type: "channel.created", count: "1" },
+      { event_type: "channel.membership_changed", count: "2" },
+    ]);
+    expect(
+      (await pool.query("SELECT id FROM conversations WHERE slug = $1", [input.slug])).rowCount,
+    ).toBe(1);
+  });
+
   it("adds and removes reactions idempotently while hydrating authorized messages", async () => {
     const sent = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "reaction target"),
