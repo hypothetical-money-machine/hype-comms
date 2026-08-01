@@ -2,9 +2,10 @@
 
 The ARM64 runner replaces the GitHub-hosted Linux release lane with an isolated Ubuntu
 container running natively on the Apple-silicon Mac Mini. The legacy x64 service remains
-available for compatibility checks. Each service uses the matching official GitHub Actions
-runner and AWS CLI binaries, stores only runner state in its own named Docker volume, and
-does not mount the host filesystem or Docker socket.
+available for ad hoc release-environment compatibility checks; pull-request smoke packaging
+runs on the separate always-on x64 CI runner. Each service uses the matching official GitHub
+Actions runner and AWS CLI binaries, stores only runner state in its own named Docker volume,
+and does not mount the host filesystem or Docker socket.
 
 Build and register the ARM64 runner once:
 
