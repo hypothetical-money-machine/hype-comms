@@ -57,3 +57,17 @@ commits append `Co-authored-by: Codex <codex@openai.com>` after a blank line. Pu
 must explain motivation and user-visible behavior, list verification, note security or
 compatibility impact, link relevant issues, and include screenshots for renderer changes.
 Never commit credentials, signing material, real message data, local databases, or installers.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
