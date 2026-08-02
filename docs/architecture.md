@@ -12,8 +12,9 @@ contract tests.
   Multi-workspace and open signup are deliberate future changes, not emergent ones.
 - Channels are either workspace-visible or restricted to an explicit member list. A
   members-only channel always retains at least one channel owner, and only its owners can
-  add, remove, promote, or demote members. Direct conversations contain exactly two active
-  members and are unique for that unordered pair. Group DMs are not yet supported.
+  add, remove, promote, or demote members. Direct conversations contain exactly two participant
+  slots; a self-DM uses the same active member in both slots, and conversations are unique for
+  that unordered pair. Group DMs are not yet supported.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
   Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on

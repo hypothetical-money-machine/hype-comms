@@ -774,6 +774,9 @@ export class WorkspaceRuntime {
     const otherId = summary.participantIds.find(
       (id) => id !== this.#state.bootstrap?.currentUser.user.id,
     );
+    if (otherId === undefined) {
+      return this.#state.bootstrap?.currentUser.user.displayName ?? "Direct message";
+    }
     return (
       this.#state.bootstrap?.members.find((member) => member.id === otherId)?.displayName ??
       "Direct message"
