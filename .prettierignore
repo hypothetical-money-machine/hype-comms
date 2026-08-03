@@ -5,3 +5,4 @@ release
 coverage
 package-lock.json
 .claude/
+docs/

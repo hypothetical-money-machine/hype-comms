@@ -49,7 +49,7 @@ for newly issued certs. Every 2025 option is therefore one of:
   $99.99/month (100,000). Basic is far more than enough for our release cadence (each release
   signs a handful of files per arch). Cheapest recurring option by an order of magnitude.
 - **electron-builder integration**: first-class. `win.sign: { type: "azure", endpoint,
-  codeSigningAccountName, certificateProfileName, publisherName }` plus three CI secrets
+codeSigningAccountName, certificateProfileName, publisherName }` plus three CI secrets
   (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) for an Entra app registration
   with the "Trusted Signing Certificate Profile Signer" role. In electron-builder v27 the
   `signtool /dlib` path is the default (winCodeSign toolset ≥ 1.3.0, .NET 8 runtime
@@ -142,7 +142,7 @@ sign no drivers).
    "Trusted Signing Certificate Profile Signer", store `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
    `AZURE_CLIENT_SECRET` as repo secrets (or use GitHub OIDC federation to avoid the secret).
 3. electron-builder config: `win.sign = { type: "azure", endpoint, codeSigningAccountName,
-   certificateProfileName, publisherName: "<exact certificate subject>" }`; set
+certificateProfileName, publisherName: "<exact certificate subject>" }`; set
    `forceCodeSigning: true` for the Windows release lane so a misconfiguration fails the build
    instead of silently shipping unsigned (mirrors the macOS lane's fail-closed behavior).
 4. Set `publisherName` so electron-updater writes it into `app-update.yml` and starts
