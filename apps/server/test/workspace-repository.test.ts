@@ -692,6 +692,29 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("creates one reusable direct conversation for messaging yourself", async () => {
+    const direct = await repository.createDirectConversation(owner, { memberId: ownerId });
+    const conversationId = direct.conversation.conversation.id;
+
+    expect(direct.conversation.participantIds).toEqual([ownerId]);
+    expect(
+      (await repository.bootstrap(owner)).conversations.find(
+        (summary) => summary.conversation.id === conversationId,
+      ),
+    ).toMatchObject({ participantIds: [ownerId] });
+
+    const replay = await repository.createDirectConversation(owner, { memberId: ownerId });
+    expect(replay).toEqual(direct);
+
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "note to self"),
+      mentionedUserIds: [],
+    });
+    await expect(repository.history(owner, conversationId, undefined, 50)).resolves.toMatchObject({
+      messages: [expect.objectContaining({ id: sent.message.id, body: "note to self" })],
+    });
+  });
+
   it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
     const [staleCursor] = await seedMessageEvents(2);
     if (staleCursor === undefined) throw new Error("Expected a stale sync cursor");

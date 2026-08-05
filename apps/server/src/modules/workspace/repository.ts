@@ -302,8 +302,9 @@ function conversationVisibilitySql(
 }
 
 function participants(row: ConversationRow): string[] {
-  return row.dm_user_low_id === null || row.dm_user_high_id === null
-    ? []
+  if (row.dm_user_low_id === null || row.dm_user_high_id === null) return [];
+  return row.dm_user_low_id === row.dm_user_high_id
+    ? [row.dm_user_low_id]
     : [row.dm_user_low_id, row.dm_user_high_id];
 }
 
@@ -831,9 +832,6 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse> {
-    if (input.memberId === identity.currentUser.user.id) {
-      throw new ApiError(400, "BAD_REQUEST", "A direct conversation requires another member");
-    }
     return this.#transaction(async (client) => {
       const target = await client.query(
         `SELECT 1
@@ -869,14 +867,15 @@ export class WorkspaceRepository {
         if (row === undefined) throw new Error("Direct conversation conflict returned no row");
         syncCursor = await this.#highWater(client, identity.currentUser.workspaceId);
       } else {
+        const participantIds = participants(row);
         const event = await this.#insertEvent(client, identity, {
           type: "direct_conversation.created",
           conversation: row,
           payload: {
             conversation: mapConversation(row),
-            participantIds: [low, high],
+            participantIds,
           },
-          audienceUserIds: [low, high],
+          audienceUserIds: participantIds,
         });
         syncCursor = event.workspaceSequence;
       }

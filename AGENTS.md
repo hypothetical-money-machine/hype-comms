@@ -58,6 +58,15 @@ must explain motivation and user-visible behavior, list verification, note secur
 compatibility impact, link relevant issues, and include screenshots for renderer changes.
 Never commit credentials, signing material, real message data, local databases, or installers.
 
+### Renderer review evidence
+
+Any change under `apps/desktop/src/renderer/`, or any desktop change that visibly changes the UI,
+must be accompanied by a screenshot before the work is considered complete. Run the relevant
+desktop/demo flow, capture the actual changed state (including the important interaction state when
+applicable), save reusable evidence under `docs/screenshots/`, and embed it in the pull request's
+Screenshots section with a short caption. If the app cannot be launched or the state cannot be
+captured, report that as a blocker; do not silently omit the screenshot or defer it to review.
+
 ## Agent skills
 
 ### Issue tracker

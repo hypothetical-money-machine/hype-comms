@@ -48,6 +48,7 @@ describeWithPostgres("runMigrations", () => {
           "0006_message_reactions.sql",
           "0007_read_state_event_capability.sql",
           "0008_hype_comms_rebrand.sql",
+          "0009_self_direct_messages.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -64,6 +65,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0006_message_reactions.sql" },
         { filename: "0007_read_state_event_capability.sql" },
         { filename: "0008_hype_comms_rebrand.sql" },
+        { filename: "0009_self_direct_messages.sql" },
       ]);
 
       const userId = randomUUID();
@@ -115,6 +117,14 @@ describeWithPostgres("runMigrations", () => {
           [randomUUID(), workspaceId, userId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversations
+             (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
+           VALUES ($1, $2, 'direct_message', $3, $3, $3)`,
+          [randomUUID(), workspaceId, userId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
     });
   });
 

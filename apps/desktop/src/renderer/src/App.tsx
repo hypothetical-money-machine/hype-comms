@@ -593,18 +593,19 @@ export function App({ client, theme }: AppProps) {
 
         <section className="member-list" aria-label="Members">
           <p className="nav-heading">Members</p>
-          {bootstrap.members
-            .filter((member) => member.id !== currentUserId)
-            .map((member) => (
-              <button
-                type="button"
-                key={member.id}
-                onClick={() => void startDirectMessage(member.id)}
-              >
-                <Avatar user={member} />
-                <span>{member.displayName}</span>
-              </button>
-            ))}
+          {bootstrap.members.map((member) => (
+            <button
+              type="button"
+              key={member.id}
+              onClick={() => void startDirectMessage(member.id)}
+            >
+              <Avatar user={member} />
+              <span>
+                {member.displayName}
+                {member.id === currentUserId ? " (you)" : ""}
+              </span>
+            </button>
+          ))}
         </section>
 
         <footer className="sidebar-footer">
