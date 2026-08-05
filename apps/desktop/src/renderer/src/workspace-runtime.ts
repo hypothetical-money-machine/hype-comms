@@ -834,7 +834,12 @@ export class WorkspaceRuntime {
     });
   }
 
-  async createChannel(name: string, slug: string, access: ChannelAccess): Promise<void> {
+  async createChannel(
+    name: string,
+    slug: string,
+    topic: string | null,
+    access: ChannelAccess,
+  ): Promise<void> {
     const generation = this.#generation;
     const cache = this.#cache;
     if (cache === null || this.#state.bootstrap === null) {
@@ -843,7 +848,7 @@ export class WorkspaceRuntime {
     const result = await this.#client.createChannel({
       name,
       slug,
-      topic: null,
+      topic,
       access,
       idempotencyKey: crypto.randomUUID(),
     });

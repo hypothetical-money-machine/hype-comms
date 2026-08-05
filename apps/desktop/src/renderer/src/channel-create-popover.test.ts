@@ -39,12 +39,16 @@ describe("ChannelCreatePopover", () => {
     const { trigger } = renderPopover();
     const input = open(trigger);
     fireEvent.change(input, { target: { value: "Launch Planning" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /topic/i }), {
+      target: { value: "Coordinate launch work" },
+    });
     expect(screen.getByText("#launch-planning")).toBeTruthy();
 
     fireEvent.click(trigger);
     expect(screen.queryByRole("dialog")).toBeNull();
     const reopened = open(trigger);
     expect(reopened.value).toBe("");
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: /topic/i }).value).toBe("");
     expect(screen.getByText("#channel-name")).toBeTruthy();
   });
 
@@ -75,7 +79,7 @@ describe("ChannelCreatePopover", () => {
     fireEvent.submit(screen.getByRole("dialog"));
 
     await waitFor(() =>
-      expect(onCreate).toHaveBeenCalledWith("Équipe Produit", "équipe-produit", "workspace"),
+      expect(onCreate).toHaveBeenCalledWith("Équipe Produit", "équipe-produit", null, "workspace"),
     );
     expect(trigger.hasAttribute("disabled")).toBe(true);
     expect(
@@ -123,7 +127,25 @@ describe("ChannelCreatePopover", () => {
     fireEvent.submit(screen.getByRole("dialog"));
 
     await waitFor(() =>
-      expect(onCreate).toHaveBeenCalledWith("Leadership", "leadership", "members"),
+      expect(onCreate).toHaveBeenCalledWith("Leadership", "leadership", null, "members"),
+    );
+  });
+
+  it("trims and submits an optional channel topic", async () => {
+    const { onCreate, trigger } = renderPopover();
+    fireEvent.change(open(trigger), { target: { value: "Product Feedback" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /topic/i }), {
+      target: { value: "  Share customer themes and research.  " },
+    });
+    fireEvent.submit(screen.getByRole("dialog"));
+
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(
+        "Product Feedback",
+        "product-feedback",
+        "Share customer themes and research.",
+        "workspace",
+      ),
     );
   });
 

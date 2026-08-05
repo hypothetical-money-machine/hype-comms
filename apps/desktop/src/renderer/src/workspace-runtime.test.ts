@@ -1336,13 +1336,18 @@ describe("WorkspaceRuntime", () => {
       syncCursor: "12",
     });
 
-    await runtime.createChannel("Alpha Team", "alpha-team", "workspace");
+    await runtime.createChannel(
+      "Alpha Team",
+      "alpha-team",
+      "Coordinate work across the alpha launch.",
+      "workspace",
+    );
 
     expect(api.createdChannels).toEqual([
       {
         name: "Alpha Team",
         slug: "alpha-team",
-        topic: null,
+        topic: "Coordinate work across the alpha launch.",
         access: "workspace",
         idempotencyKey: expect.any(String),
       },
@@ -1375,7 +1380,7 @@ describe("WorkspaceRuntime", () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
-    await expect(runtime.createChannel("Too Soon", "too-soon", "members")).rejects.toThrow(
+    await expect(runtime.createChannel("Too Soon", "too-soon", null, "members")).rejects.toThrow(
       "Workspace is still loading",
     );
     expect(api.createdChannels).toEqual([]);
@@ -1392,7 +1397,7 @@ describe("WorkspaceRuntime", () => {
         resolveResult = resolve;
       }),
     );
-    const creation = runtime.createChannel("Alpha Team", "alpha-team", "workspace");
+    const creation = runtime.createChannel("Alpha Team", "alpha-team", null, "workspace");
     await settle(() => api.createdChannels.length === 1, "channel request");
     await runtime.stop();
     const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
@@ -1412,7 +1417,7 @@ describe("WorkspaceRuntime", () => {
     api.channelResults.push({ conversation: createdSummary, syncCursor: "12" });
 
     await expect(
-      runtime.createChannel("Alpha Team", "alpha-team", "workspace"),
+      runtime.createChannel("Alpha Team", "alpha-team", null, "workspace"),
     ).resolves.toBeUndefined();
     expect(runtime.state.selectedConversationId).toBe(CREATED_CHANNEL_ID);
     expect(runtime.state.bootstrap?.conversations).toContainEqual(createdSummary);

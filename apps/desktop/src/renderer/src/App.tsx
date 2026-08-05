@@ -425,8 +425,13 @@ export function App({ client, theme }: AppProps) {
   };
 
   const createChannel = useCallback(
-    async (name: string, slug: string, access: ChannelAccess): Promise<void> => {
-      await runtime.createChannel(name, slug, access);
+    async (
+      name: string,
+      slug: string,
+      topic: string | null,
+      access: ChannelAccess,
+    ): Promise<void> => {
+      await runtime.createChannel(name, slug, topic, access);
     },
     [runtime],
   );
@@ -673,7 +678,13 @@ export function App({ client, theme }: AppProps) {
                 ? "Choose a conversation"
                 : runtime.conversationName(selectedSummary)}
             </h2>
-            <p>
+            {selectedSummary?.conversation.topic !== null &&
+              selectedSummary?.conversation.topic !== undefined && (
+                <p className="conversation-topic" title={selectedSummary.conversation.topic}>
+                  {selectedSummary.conversation.topic}
+                </p>
+              )}
+            <p className="conversation-connection">
               {runtimeState.connection}
               {runtimeState.stale ? " · cached state may be stale" : ""}
               {runtimeState.cacheMode === "memory_only" ? " · memory-only cache" : ""}
