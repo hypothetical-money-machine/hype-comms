@@ -14,6 +14,9 @@ import {
   type Reaction,
   type ReactionEmoji,
   type SyncAttemptResult,
+  type Task,
+  type TaskPriority,
+  type TaskStatus,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
 } from "@hmm-chat/contracts";
@@ -23,6 +26,7 @@ import {
   clearPersistentWorkspaceCache,
   compareConversations,
   compareMembers,
+  compareTasks,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   type OutboxItem,
@@ -37,6 +41,7 @@ export interface WorkspaceRuntimeState {
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
   readonly reactions: readonly Reaction[];
+  readonly tasks: readonly Task[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
@@ -45,6 +50,8 @@ export interface WorkspaceRuntimeState {
   readonly cacheFallbackReason: CacheFallbackReason | null;
   readonly stale: boolean;
   readonly busy: boolean;
+  readonly tasksBusy: boolean;
+  readonly taskError: string | null;
   readonly error: string | null;
 }
 
@@ -84,6 +91,7 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   bootstrap: null,
   messages: [],
   reactions: [],
+  tasks: [],
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
@@ -92,6 +100,8 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   cacheFallbackReason: null,
   stale: true,
   busy: false,
+  tasksBusy: false,
+  taskError: null,
   error: null,
 };
 
@@ -146,6 +156,16 @@ function mergeReactions(
   const byId = new Map(reactions.map((reaction) => [reaction.id, reaction]));
   for (const reaction of incoming) byId.set(reaction.id, reaction);
   return [...byId.values()];
+}
+
+function mergeTasks(tasks: readonly Task[], incoming: readonly Task[]): readonly Task[] {
+  if (incoming.length === 0) return tasks;
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  for (const task of incoming) {
+    const current = byId.get(task.id);
+    if (current === undefined || task.version >= current.version) byId.set(task.id, task);
+  }
+  return [...byId.values()].sort(compareTasks);
 }
 
 function replaceMessageReactions(
@@ -363,6 +383,7 @@ export class WorkspaceRuntime {
         bootstrap: cached.bootstrap,
         messages: cached.messages,
         reactions: cached.reactions,
+        tasks: cached.tasks,
         outbox: cached.outbox,
         selectedConversationId:
           this.#state.selectedConversationId ??
@@ -412,6 +433,19 @@ export class WorkspaceRuntime {
     const latest = messages.at(-1);
     if (latest !== undefined) {
       void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
+    }
+  }
+
+  openTaskSource(task: Task): void {
+    this.#setState({
+      selectedConversationId: task.conversationId,
+      focusedMessageId: task.sourceMessageId,
+    });
+    const latest = this.#state.messages
+      .filter((message) => message.conversationId === task.conversationId)
+      .at(-1);
+    if (latest !== undefined) {
+      void this.#client.advanceReadCursor(task.conversationId, latest.id).catch(() => undefined);
     }
   }
 
@@ -516,6 +550,178 @@ export class WorkspaceRuntime {
       ...(after === undefined ? {} : { after }),
       limit: 25,
     });
+  }
+
+  async loadConversationTasks(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    this.#setState({ tasksBusy: true, taskError: null });
+    try {
+      const tasks: Task[] = [];
+      let after: string | undefined;
+      for (;;) {
+        const page = await this.#client.listConversationTasks(conversationId, {
+          ...(after === undefined ? {} : { after }),
+          limit: 200,
+        });
+        tasks.push(...page.tasks);
+        if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
+        after = page.nextCursor;
+      }
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertTasks(tasks);
+        this.#setState({ tasks: mergeTasks(this.#state.tasks, tasks) });
+      });
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#setState({ taskError: errorMessage(error, "Could not load this task board") });
+      }
+      throw error;
+    } finally {
+      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+    }
+  }
+
+  async loadMyTasks(): Promise<void> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    this.#setState({ tasksBusy: true, taskError: null });
+    try {
+      const tasks: Task[] = [];
+      let after: string | undefined;
+      for (;;) {
+        const page = await this.#client.listMyTasks({
+          ...(after === undefined ? {} : { after }),
+          limit: 200,
+        });
+        tasks.push(...page.tasks);
+        if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
+        after = page.nextCursor;
+      }
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertTasks(tasks);
+        this.#setState({ tasks: mergeTasks(this.#state.tasks, tasks) });
+      });
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#setState({ taskError: errorMessage(error, "Could not load My Tasks") });
+      }
+      throw error;
+    } finally {
+      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+    }
+  }
+
+  async createTask(input: {
+    readonly conversationId: string;
+    readonly title: string;
+    readonly description?: string | null;
+    readonly priority?: TaskPriority;
+    readonly assigneeId?: string | null;
+    readonly dueOn?: string | null;
+    readonly sourceMessageId?: string | null;
+  }): Promise<Task> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    this.#setState({ tasksBusy: true, taskError: null });
+    try {
+      const result = await this.#client.createTask({
+        conversationId: input.conversationId,
+        idempotencyKey: crypto.randomUUID(),
+        title: input.title,
+        description: input.description ?? null,
+        priority: input.priority ?? "none",
+        assigneeId: input.assigneeId ?? null,
+        dueOn: input.dueOn ?? null,
+        sourceMessageId: input.sourceMessageId ?? null,
+      });
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertTasks([result.task]);
+        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+      });
+      return result.task;
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#setState({ taskError: errorMessage(error, "Could not create the task") });
+      }
+      throw error;
+    } finally {
+      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+    }
+  }
+
+  async updateTask(
+    taskId: string,
+    input: {
+      readonly title: string;
+      readonly description: string | null;
+      readonly priority: TaskPriority;
+      readonly assigneeId: string | null;
+      readonly dueOn: string | null;
+    },
+  ): Promise<Task> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    const current = this.#state.tasks.find((task) => task.id === taskId);
+    if (cache === null || current === undefined) throw new Error("Task is unavailable");
+    this.#setState({ tasksBusy: true, taskError: null });
+    try {
+      const result = await this.#client.updateTask({
+        taskId,
+        idempotencyKey: crypto.randomUUID(),
+        expectedVersion: current.version,
+        ...input,
+      });
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertTasks([result.task]);
+        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+      });
+      return result.task;
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#setState({ taskError: errorMessage(error, "Could not update the task") });
+      }
+      throw error;
+    } finally {
+      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+    }
+  }
+
+  async moveTask(taskId: string, status: TaskStatus, beforeTaskId: string | null): Promise<Task> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    const current = this.#state.tasks.find((task) => task.id === taskId);
+    if (cache === null || current === undefined) throw new Error("Task is unavailable");
+    this.#setState({ tasksBusy: true, taskError: null });
+    try {
+      const result = await this.#client.moveTask({
+        taskId,
+        idempotencyKey: crypto.randomUUID(),
+        expectedVersion: current.version,
+        status,
+        beforeTaskId,
+      });
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertTasks([result.task]);
+        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+      });
+      return result.task;
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#setState({ taskError: errorMessage(error, "Could not move the task") });
+      }
+      throw error;
+    } finally {
+      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+    }
   }
 
   async openSearchResult(result: MessageSearchResult): Promise<void> {
@@ -830,7 +1036,13 @@ export class WorkspaceRuntime {
       }
     }
     if (generation !== this.#generation) return;
-    await cache.replaceSnapshot(snapshot, messages, reactions);
+    const visibleConversationIds = new Set(
+      snapshot.conversations.map((summary) => summary.conversation.id),
+    );
+    const retainedTasks = this.#state.tasks.filter((task) =>
+      visibleConversationIds.has(task.conversationId),
+    );
+    await cache.replaceSnapshot(snapshot, messages, reactions, retainedTasks);
     const loaded = await cache.load();
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
@@ -850,6 +1062,7 @@ export class WorkspaceRuntime {
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       reactions: loaded.reactions,
+      tasks: loaded.tasks,
       outbox: loaded.outbox,
       selectedConversationId,
       focusedMessageId,
@@ -1059,6 +1272,10 @@ export class WorkspaceRuntime {
       });
       return;
     }
+    if (event.type === "task.created" || event.type === "task.updated") {
+      this.#setState({ tasks: mergeTasks(this.#state.tasks, [event.payload.task]) });
+      return;
+    }
     if (snapshot === null) return;
     if (event.type === "member.updated") {
       const member = event.payload.member;
@@ -1205,6 +1422,7 @@ export class WorkspaceRuntime {
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       reactions: loaded.reactions,
+      tasks: loaded.tasks,
       outbox: loaded.outbox,
     });
   }

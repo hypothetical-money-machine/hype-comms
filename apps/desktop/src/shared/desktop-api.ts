@@ -11,6 +11,7 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ConversationMutationResponse,
+  CreateTaskOperation,
   CreateChannelOperation,
   DirectConversationRequest,
   ListConversationsQuery,
@@ -20,6 +21,7 @@ import type {
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
+  MoveTaskOperation,
   ReactionEmoji,
   RemoveReactionResponse,
   ProductRealtimeEvent,
@@ -27,9 +29,13 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  TaskListQuery,
+  TaskListResponse,
+  TaskMutationResponse,
   ThemePreference,
   ThemeState,
   UpdateState,
+  UpdateTaskOperation,
   WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
@@ -100,6 +106,14 @@ export interface DesktopApi extends SessionTransport, ThemeTransport {
     emoji: ReactionEmoji,
   ) => Promise<RemoveReactionResponse>;
   readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
+  readonly listConversationTasks: (
+    conversationId: string,
+    input?: Partial<TaskListQuery>,
+  ) => Promise<TaskListResponse>;
+  readonly listMyTasks: (input?: Partial<TaskListQuery>) => Promise<TaskListResponse>;
+  readonly createTask: (input: CreateTaskOperation) => Promise<TaskMutationResponse>;
+  readonly updateTask: (input: UpdateTaskOperation) => Promise<TaskMutationResponse>;
+  readonly moveTask: (input: MoveTaskOperation) => Promise<TaskMutationResponse>;
   readonly sendConversationMessage: (input: SendMessageOperation) => Promise<SendAttemptResult>;
   readonly createChannel: (input: CreateChannelOperation) => Promise<ConversationMutationResponse>;
   readonly archiveChannel: (conversationId: string) => Promise<ConversationMutationResponse>;

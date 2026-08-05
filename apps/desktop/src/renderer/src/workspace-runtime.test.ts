@@ -13,6 +13,7 @@ import type {
   ConversationMutationResponse,
   ConversationSummary,
   CreateChannelOperation,
+  CreateTaskOperation,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMessageReactionsResponse,
@@ -21,6 +22,7 @@ import type {
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
+  MoveTaskOperation,
   ProductRealtimeEvent,
   Reaction,
   ReactionEmoji,
@@ -29,8 +31,12 @@ import type {
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
+  Task,
+  TaskListResponse,
+  TaskMutationResponse,
   ThemeState,
   UpdateState,
+  UpdateTaskOperation,
   WorkspaceBootstrapResponse,
   WorkspaceEvent,
 } from "@hmm-chat/contracts";
@@ -61,6 +67,7 @@ const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
 const REACTION_ID = "20000000-0000-4000-8000-000000000011";
 const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
 const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
+const TASK_ID = "20000000-0000-4000-8000-000000000014";
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -165,6 +172,26 @@ const ownReaction: Reaction = {
   createdAt: NOW,
 };
 
+const task: Task = {
+  id: TASK_ID,
+  workspaceId: WORKSPACE_ID,
+  conversationId: CONVERSATION_ID,
+  number: "1",
+  version: 1,
+  title: "Build the Kanban board",
+  description: null,
+  status: "todo",
+  priority: "high",
+  assigneeId: USER_ID,
+  dueOn: null,
+  sourceMessageId: OWN_MESSAGE_ID,
+  rank: "1024",
+  createdBy: USER_ID,
+  completedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
 const reactionAddedEvent: WorkspaceEvent = {
   version: 1,
   id: REACTION_EVENT_ID,
@@ -254,6 +281,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   #syncCursor: string | null = null;
   readonly #messages = new Map<string, Message>();
   readonly #reactions = new Map<string, Reaction>();
+  readonly #tasks = new Map<string, Task>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
   upsertFailure: Error | null = null;
@@ -268,6 +296,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
       reactions: [...this.#reactions.values()],
+      tasks: [...this.#tasks.values()],
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       ),
@@ -277,12 +306,14 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
-    const [snapshot, messages, reactions = []] = args;
+    const [snapshot, messages, reactions = [], tasks = []] = args;
     this.#snapshot = snapshot;
     this.#messages.clear();
     for (const item of messages) this.#messages.set(item.id, item);
     this.#reactions.clear();
     for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
+    this.#tasks.clear();
+    for (const task of tasks) this.#tasks.set(task.id, task);
     this.#syncCursor = snapshot.syncCursor;
   }
 
@@ -314,6 +345,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
       this.#reactions.set(event.payload.reaction.id, event.payload.reaction);
     } else if (event.type === "reaction.removed") {
       this.#reactions.delete(event.payload.reaction.id);
+    } else if (event.type === "task.created" || event.type === "task.updated") {
+      const current = this.#tasks.get(event.payload.task.id);
+      if (current === undefined || event.payload.task.version >= current.version) {
+        this.#tasks.set(event.payload.task.id, event.payload.task);
+      }
     }
     return true;
   }
@@ -348,6 +384,10 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
   async removeReaction(reactionId: string): Promise<void> {
     this.#reactions.delete(reactionId);
+  }
+
+  async upsertTasks(tasks: readonly Task[]): Promise<void> {
+    for (const task of tasks) this.#tasks.set(task.id, task);
   }
 
   async upsertAcknowledgedMessage(item: Message, syncCursor: string): Promise<void> {
@@ -385,6 +425,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     this.#snapshot = null;
     this.#messages.clear();
     this.#reactions.clear();
+    this.#tasks.clear();
     this.#events.clear();
     this.#syncCursor = null;
   }
@@ -441,6 +482,11 @@ class FakeDesktopApi implements DesktopApi {
   readonly historyRequests: string[] = [];
   readonly searchResults: MessageSearchResponse[] = [];
   readonly searchRequests: MessageSearchQuery[] = [];
+  readonly conversationTaskResults: TaskListResponse[] = [];
+  readonly myTaskResults: TaskListResponse[] = [];
+  readonly conversationTaskRequests: string[] = [];
+  readonly taskMutationResults: TaskMutationResponse[] = [];
+  readonly taskMutations: (CreateTaskOperation | UpdateTaskOperation | MoveTaskOperation)[] = [];
   readonly #eventListeners = new Set<(event: ProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
@@ -601,6 +647,36 @@ class FakeDesktopApi implements DesktopApi {
     this.searchRequests.push(input);
     const response = this.searchResults.shift();
     if (response === undefined) throw new Error("The test queued no search result");
+    return response;
+  }
+
+  async listConversationTasks(conversationId: string): Promise<TaskListResponse> {
+    this.conversationTaskRequests.push(conversationId);
+    return this.conversationTaskResults.shift() ?? { tasks: [], nextCursor: null, hasMore: false };
+  }
+
+  async listMyTasks(): Promise<TaskListResponse> {
+    return this.myTaskResults.shift() ?? { tasks: [], nextCursor: null, hasMore: false };
+  }
+
+  async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
+    this.taskMutations.push(input);
+    const response = this.taskMutationResults.shift();
+    if (response === undefined) throw new Error("The test queued no task mutation result");
+    return response;
+  }
+
+  async updateTask(input: UpdateTaskOperation): Promise<TaskMutationResponse> {
+    this.taskMutations.push(input);
+    const response = this.taskMutationResults.shift();
+    if (response === undefined) throw new Error("The test queued no task mutation result");
+    return response;
+  }
+
+  async moveTask(input: MoveTaskOperation): Promise<TaskMutationResponse> {
+    this.taskMutations.push(input);
+    const response = this.taskMutationResults.shift();
+    if (response === undefined) throw new Error("The test queued no task mutation result");
     return response;
   }
 
@@ -811,6 +887,76 @@ describe("WorkspaceRuntime", () => {
     await settle(() => api.acknowledged.includes("12"), "reaction-removed acknowledgement");
     expect(runtime.state.reactions).toEqual([]);
     expect((await cache.load()).reactions).toEqual([]);
+  });
+
+  it("loads and mutates tasks while keeping newer optimistic versions over stale events", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.loadConversationTasks(CONVERSATION_ID);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+    expect(runtime.state.tasks).toEqual([task]);
+
+    const updated: Task = {
+      ...task,
+      version: 2,
+      title: "Build and verify the Kanban board",
+      description: "Include keyboard moves.",
+      updatedAt: "2026-07-24T12:02:00.000Z",
+    };
+    api.taskMutationResults.push({ task: updated, syncCursor: "12" });
+    await runtime.updateTask(task.id, {
+      title: updated.title,
+      description: updated.description,
+      priority: updated.priority,
+      assigneeId: updated.assigneeId,
+      dueOn: updated.dueOn,
+    });
+    expect(api.taskMutations[0]).toMatchObject({ taskId: task.id, expectedVersion: 1 });
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000015",
+      type: "task.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: task.version,
+      delivery: "at_least_once",
+      payload: { task },
+    });
+    await settle(() => api.acknowledged.includes("11"), "stale task event acknowledgement");
+    expect(runtime.state.tasks).toEqual([updated]);
+    expect((await cache.load()).tasks).toEqual([updated]);
+
+    const moved: Task = {
+      ...updated,
+      version: 3,
+      status: "in_progress",
+      rank: "2048",
+      updatedAt: "2026-07-24T12:03:00.000Z",
+    };
+    api.taskMutationResults.push({ task: moved, syncCursor: "13" });
+    await runtime.moveTask(task.id, "in_progress", null);
+    expect(api.taskMutations[1]).toMatchObject({
+      taskId: task.id,
+      expectedVersion: 2,
+      status: "in_progress",
+      beforeTaskId: null,
+    });
+    expect(runtime.state.tasks).toEqual([moved]);
+
+    runtime.openTaskSource(moved);
+    expect(runtime.state).toMatchObject({
+      selectedConversationId: CONVERSATION_ID,
+      focusedMessageId: OWN_MESSAGE_ID,
+    });
   });
 
   it("keeps realtime events newer than an in-flight search reaction hydration", async () => {

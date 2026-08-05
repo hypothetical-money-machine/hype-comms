@@ -15,6 +15,7 @@ export const cacheStoreSchema = z.enum([
   "conversation",
   "message",
   "reaction",
+  "task",
   "read_cursor",
   "outbox",
 ]);

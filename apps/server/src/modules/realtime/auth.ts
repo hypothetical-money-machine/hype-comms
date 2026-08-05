@@ -11,6 +11,8 @@ export interface RealtimePrincipal {
   readonly reactionEvents?: boolean;
   /** False/absent for tickets issued to clients predating canonical read-state events. */
   readonly readStateEvents?: boolean;
+  /** False/absent for tickets issued to clients predating conversation task events. */
+  readonly taskEvents?: boolean;
 }
 
 /**

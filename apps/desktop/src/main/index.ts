@@ -8,16 +8,20 @@ import {
   cacheScopeSchema,
   channelMemberTargetSchema,
   createChannelOperationSchema,
+  createTaskOperationSchema,
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
   listMessageReactionsRequestSchema,
   messageReactionTargetSchema,
   messageSearchQuerySchema,
+  moveTaskOperationSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
+  taskListQuerySchema,
   themePreferenceSchema,
+  updateTaskOperationSchema,
   upsertChannelMemberOperationSchema,
   type ChatSessionState,
   type ProductRealtimeEvent,
@@ -60,6 +64,7 @@ import {
   resolveDevelopmentProfile,
   resolveDevelopmentUserDataPath,
 } from "./development-profile";
+import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -77,6 +82,8 @@ import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } f
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
+
+protectMainProcessLogStreams([process.stdout, process.stderr]);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -242,7 +249,7 @@ function safelyOpenExternal(url: string): void {
   const safeUrl = normalizeExternalHttpsUrl(url);
   if (safeUrl !== null) {
     void shell.openExternal(safeUrl).catch((error: unknown) => {
-      console.error("Failed to open an external link", error);
+      reportMainProcessError("Failed to open an external link", error);
     });
   }
 }
@@ -513,6 +520,52 @@ function registerIpcHandlers(): void {
     return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTasksList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceTasksList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace tasks sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !("conversationId" in input) ||
+      !("query" in input)
+    ) {
+      throw new Error("Invalid workspace task request");
+    }
+    return workspaceTransport.tasks(
+      entityIdSchema.parse(input.conversationId),
+      taskListQuerySchema.parse(input.query),
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMyTasksList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMyTasksList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted personal tasks sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.myTasks(taskListQuerySchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskCreate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskCreate, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task creation sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.createTask(createTaskOperationSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskUpdate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskUpdate, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task update sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.updateTask(updateTaskOperationSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskMove);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskMove, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task move sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.moveTask(moveTaskOperationSchema.parse(input));
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionsList);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionsList, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace reactions sender");
@@ -764,7 +817,7 @@ if (app.isPackaged) {
     });
   } catch (error) {
     userDataMigrationFailed = true;
-    console.error("Failed to migrate legacy HMM Chat user data", error);
+    reportMainProcessError("Failed to migrate legacy HMM Chat user data", error);
   }
 }
 
@@ -884,7 +937,7 @@ if (!hasSingleInstanceLock) {
       app.on("activate", () => {
         if (BrowserWindow.getAllWindows().length === 0) {
           void createMainWindow().catch((error: unknown) => {
-            console.error("Failed to recreate the main window", error);
+            reportMainProcessError("Failed to recreate the main window", error);
           });
         } else {
           focusMainWindow();
@@ -892,7 +945,7 @@ if (!hasSingleInstanceLock) {
       });
     })
     .catch((error: unknown) => {
-      console.error("Failed to initialize Hype Comms", error);
+      reportMainProcessError("Failed to initialize Hype Comms", error);
       app.quit();
     });
 

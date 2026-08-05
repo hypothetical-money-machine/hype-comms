@@ -6,6 +6,7 @@ export * from "./entities.js";
 export * from "./http.js";
 export * from "./identity.js";
 export * from "./realtime.js";
+export * from "./tasks.js";
 export * from "./theme.js";
 export * from "./update.js";
 export * from "./workspace.js";

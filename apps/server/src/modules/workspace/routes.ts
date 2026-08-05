@@ -1,10 +1,12 @@
 import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
   advanceReadCursorRequestSchema,
   archiveChannelRequestSchema,
   clientCapabilitiesHeaderSchema,
   createChannelRequestSchema,
+  createTaskRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
   idempotencyKeySchema,
@@ -12,9 +14,12 @@ import {
   listMessageReactionsRequestSchema,
   messageHistoryQuerySchema,
   messageSearchQuerySchema,
+  moveTaskRequestSchema,
   reactionEmojiSchema,
   sendConversationMessageRequestSchema,
   syncQuerySchema,
+  taskListQuerySchema,
+  updateTaskRequestSchema,
   upsertChannelMemberRequestSchema,
 } from "@hmm-chat/contracts";
 import type { FastifyPluginAsync } from "fastify";
@@ -34,6 +39,12 @@ function optionalIdempotencyKey(value: string | string[] | undefined): string | 
   const parsed = idempotencyKeySchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid Idempotency-Key");
   return parsed.data;
+}
+
+function requiredIdempotencyKey(value: string | string[] | undefined): string {
+  const parsed = optionalIdempotencyKey(value);
+  if (parsed === undefined) throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key is required");
+  return parsed;
 }
 
 function parameters(value: unknown): { readonly id: string } {
@@ -171,6 +182,64 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     );
   });
 
+  app.get("/conversations/:id/tasks", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    const query = taskListQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
+    return repository.listConversationTasks(identity, id, query.data.after, query.data.limit);
+  });
+
+  app.get("/tasks/mine", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const query = taskListQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
+    return repository.listMyTasks(identity, query.data.after, query.data.limit);
+  });
+
+  app.post("/conversations/:id/tasks", async (request, reply) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    const body = createTaskRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task");
+    return reply
+      .code(201)
+      .send(
+        await repository.createTask(
+          identity,
+          id,
+          body.data,
+          requiredIdempotencyKey(request.headers["idempotency-key"]),
+        ),
+      );
+  });
+
+  app.patch("/tasks/:id", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    const body = updateTaskRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task update");
+    return repository.updateTask(
+      identity,
+      id,
+      body.data,
+      requiredIdempotencyKey(request.headers["idempotency-key"]),
+    );
+  });
+
+  app.post("/tasks/:id/move", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    const body = moveTaskRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task move");
+    return repository.moveTask(
+      identity,
+      id,
+      body.data,
+      requiredIdempotencyKey(request.headers["idempotency-key"]),
+    );
+  });
+
   app.post("/conversations/:id/messages", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     const { id } = parameters(request.params);
@@ -221,6 +290,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       query.data.limit,
       supported.includes(REACTION_EVENTS_CAPABILITY),
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
+      supported.includes(TASK_EVENTS_CAPABILITY),
     );
   });
 
@@ -231,6 +301,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       identity,
       supported.includes(REACTION_EVENTS_CAPABILITY),
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
+      supported.includes(TASK_EVENTS_CAPABILITY),
     );
   });
 };

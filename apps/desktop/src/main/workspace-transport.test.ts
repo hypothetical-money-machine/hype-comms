@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
   type SendMessageOperation,
+  type Task,
 } from "@hmm-chat/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
@@ -15,7 +17,11 @@ const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
 const REACTION_ID = "10000000-0000-4000-8000-000000000012";
-const CLIENT_CAPABILITIES = [REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY].join(",");
+const CLIENT_CAPABILITIES = [
+  REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
+].join(",");
 
 const CURRENT_USER = {
   user: {
@@ -128,6 +134,26 @@ const REACTION = {
   emoji: "👩🏽‍💻",
   createdAt: NOW,
 } as const;
+
+const TASK: Task = {
+  id: "10000000-0000-4000-8000-000000000013",
+  workspaceId: CURRENT_USER.workspaceId,
+  conversationId: CONVERSATION_ID,
+  number: "1",
+  version: 1,
+  title: "Build Kanban",
+  description: null,
+  status: "todo",
+  priority: "high",
+  assigneeId: CURRENT_USER.user.id,
+  dueOn: null,
+  sourceMessageId: null,
+  rank: "1024",
+  createdBy: CURRENT_USER.user.id,
+  completedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
 
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
@@ -467,6 +493,73 @@ describe("WorkspaceTransport conversations", () => {
         }),
       },
     ]);
+  });
+});
+
+describe("WorkspaceTransport tasks", () => {
+  it("uses scoped list and idempotent mutation routes with canonical bodies", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      if (init.method === "GET") {
+        return jsonResponse({ tasks: [TASK], nextCursor: null, hasMore: false });
+      }
+      return jsonResponse({ task: TASK, syncCursor: "43" });
+    });
+
+    await expect(transport.tasks(CONVERSATION_ID, { after: "cursor", limit: 25 })).resolves.toEqual(
+      { tasks: [TASK], nextCursor: null, hasMore: false },
+    );
+    await transport.myTasks({ limit: 10 });
+    await transport.createTask({
+      conversationId: CONVERSATION_ID,
+      idempotencyKey: CLIENT_MESSAGE_ID,
+      title: TASK.title,
+      description: null,
+      priority: TASK.priority,
+      assigneeId: TASK.assigneeId,
+      dueOn: null,
+      sourceMessageId: null,
+    });
+    await transport.updateTask({
+      taskId: TASK.id,
+      idempotencyKey: CLIENT_MESSAGE_ID,
+      expectedVersion: 1,
+      title: TASK.title,
+      description: null,
+      priority: TASK.priority,
+      assigneeId: TASK.assigneeId,
+      dueOn: null,
+    });
+    await transport.moveTask({
+      taskId: TASK.id,
+      idempotencyKey: CLIENT_MESSAGE_ID,
+      expectedVersion: 1,
+      status: "in_progress",
+      beforeTaskId: null,
+    });
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      [
+        "GET",
+        "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25",
+      ],
+      ["GET", "https://chat.example/v1/tasks/mine?limit=10"],
+      ["POST", "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks"],
+      ["PATCH", `https://chat.example/v1/tasks/${TASK.id}`],
+      ["POST", `https://chat.example/v1/tasks/${TASK.id}/move`],
+    ]);
+    for (const request of requests.slice(2)) {
+      expect(request.init.headers).toMatchObject({ "idempotency-key": CLIENT_MESSAGE_ID });
+      expect(JSON.parse(String(request.init.body))).not.toHaveProperty("idempotencyKey");
+    }
+  });
+
+  it("rejects malformed successful task payloads", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ tasks: [{ ...TASK, rank: "0" }], nextCursor: null, hasMore: false }),
+    );
+    await expect(transport.tasks(CONVERSATION_ID)).rejects.toThrow();
   });
 });
 

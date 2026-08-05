@@ -5,6 +5,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
   apiErrorEnvelopeSchema,
   channelSlugFromName,
   channelSlugSchema,
@@ -12,6 +13,7 @@ import {
   conversationSummarySchema,
   conversationSchema,
   createChannelOperationSchema,
+  createTaskOperationSchema,
   displayNameSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
@@ -22,6 +24,7 @@ import {
   messageSchema,
   messageHistoryQuerySchema,
   messageSearchQuerySchema,
+  moveTaskOperationSchema,
   reactionEmojiSchema,
   reactionSchema,
   sendMessageOperationSchema,
@@ -29,9 +32,12 @@ import {
   syncAttemptResultSchema,
   syncQuerySchema,
   systemConnectedEventSchema,
+  taskListQuerySchema,
+  taskSchema,
   themePreferenceSchema,
   themeStateSchema,
   updateStateSchema,
+  updateTaskOperationSchema,
   updateVersionSchema,
   userSchema,
   workspaceEventSchema,
@@ -44,6 +50,7 @@ const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
 const REACTION_ID = "10000000-0000-4000-8000-000000000005";
+const TASK_ID = "10000000-0000-4000-8000-000000000006";
 const NOW = "2026-07-21T12:00:00.000Z";
 
 const CONVERSATION_SUMMARY = {
@@ -97,6 +104,26 @@ const BOOTSTRAP = {
   syncCursor: "12",
   featureFlags: { channels: true, directMessages: true, mentions: true },
 };
+
+const TASK = {
+  id: TASK_ID,
+  workspaceId: WORKSPACE_ID,
+  conversationId: CONVERSATION_ID,
+  number: "7",
+  version: 1,
+  title: "Ship the Kanban board",
+  description: "Keep the renderer unprivileged.",
+  status: "in_progress",
+  priority: "high",
+  assigneeId: USER_ID,
+  dueOn: "2026-08-15",
+  sourceMessageId: MESSAGE_ID,
+  rank: "2048",
+  createdBy: USER_ID,
+  completedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
 
 describe("desktop theme contracts", () => {
   it.each(["system", "light", "dark", "dim"] as const)(
@@ -238,6 +265,49 @@ describe("entity contracts", () => {
         createdAt: NOW,
       }),
     ).toMatchObject({ emoji: "❤️" });
+  });
+
+  it("validates strict task entities and optimistic mutation operations", () => {
+    expect(taskSchema.parse(TASK)).toEqual(TASK);
+    expect(() => taskSchema.parse({ ...TASK, rank: "0" })).toThrow();
+    expect(() => taskSchema.parse({ ...TASK, dueOn: "08/15/2026" })).toThrow();
+    expect(() => taskSchema.parse({ ...TASK, secret: true })).toThrow();
+
+    expect(
+      createTaskOperationSchema.parse({
+        conversationId: CONVERSATION_ID,
+        idempotencyKey: TASK_ID,
+        title: "  Follow up  ",
+      }),
+    ).toMatchObject({
+      title: "Follow up",
+      description: null,
+      priority: "none",
+      assigneeId: null,
+      dueOn: null,
+      sourceMessageId: null,
+    });
+    expect(
+      updateTaskOperationSchema.parse({
+        taskId: TASK_ID,
+        idempotencyKey: MESSAGE_ID,
+        expectedVersion: 1,
+        title: TASK.title,
+        description: null,
+        priority: "urgent",
+        assigneeId: null,
+        dueOn: null,
+      }),
+    ).toMatchObject({ taskId: TASK_ID, expectedVersion: 1 });
+    expect(() =>
+      moveTaskOperationSchema.parse({
+        taskId: TASK_ID,
+        idempotencyKey: MESSAGE_ID,
+        expectedVersion: 1,
+        status: "done",
+        beforeTaskId: TASK_ID,
+      }),
+    ).toThrow();
   });
 });
 
@@ -399,6 +469,8 @@ describe("transport contracts", () => {
       after: "4",
       limit: 100,
     });
+    expect(taskListQuerySchema.parse({ limit: "200" })).toEqual({ limit: 200 });
+    expect(() => taskListQuerySchema.parse({ limit: "201" })).toThrow();
     expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
   });
 
@@ -515,12 +587,34 @@ describe("transport contracts", () => {
     ).toThrow();
   });
 
+  it("validates versioned task events without a message sequence", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000007",
+      type: "task.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "45",
+      conversationSequence: null,
+      entityVersion: TASK.version,
+      delivery: "at_least_once",
+      payload: { task: TASK },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(workspaceEventSchema.parse({ ...event, type: "task.created" })).toMatchObject({
+      type: "task.created",
+    });
+    expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: "42" })).toThrow();
+  });
+
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}`,
       ),
-    ).toEqual([REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY]);
+    ).toEqual([REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY, TASK_EVENTS_CAPABILITY]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
     }

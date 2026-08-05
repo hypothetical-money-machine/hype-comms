@@ -8,6 +8,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
+  type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
 } from "@hmm-chat/contracts";
@@ -129,6 +130,18 @@ function message(clientMessageId: string, body = "hello @member"): SendConversat
     clientMessageId,
     mentionedUserIds: [memberId],
     attachmentIds: [],
+  };
+}
+
+function taskInput(title: string, overrides: Partial<CreateTaskRequest> = {}): CreateTaskRequest {
+  return {
+    title,
+    description: null,
+    priority: "none",
+    assigneeId: null,
+    dueOn: null,
+    sourceMessageId: null,
+    ...overrides,
   };
 }
 
@@ -715,6 +728,190 @@ describeWithPostgres("WorkspaceRepository", () => {
     });
   });
 
+  it("creates, pages, updates, and canonically reorders channel and personal tasks", async () => {
+    const source = await repository.sendMessage(
+      owner,
+      generalId,
+      message(randomUUID(), "Turn this decision into work @member"),
+    );
+    const createKey = randomUUID();
+    const [createdA, replayedA] = await Promise.all([
+      repository.createTask(
+        owner,
+        generalId,
+        taskInput("Draft the rollout", {
+          priority: "high",
+          assigneeId: memberId,
+          dueOn: "2026-09-01",
+          sourceMessageId: source.message.id,
+        }),
+        createKey,
+      ),
+      repository.createTask(
+        owner,
+        generalId,
+        taskInput("Draft the rollout", {
+          priority: "high",
+          assigneeId: memberId,
+          dueOn: "2026-09-01",
+          sourceMessageId: source.message.id,
+        }),
+        createKey,
+      ),
+    ]);
+    expect(replayedA).toEqual(createdA);
+    const createdB = await repository.createTask(
+      owner,
+      generalId,
+      taskInput("Prepare the announcement"),
+      randomUUID(),
+    );
+    const createdC = await repository.createTask(
+      owner,
+      generalId,
+      taskInput("Confirm launch metrics"),
+      randomUUID(),
+    );
+
+    const firstPage = await repository.listConversationTasks(owner, generalId, undefined, 2);
+    expect(firstPage.tasks).toHaveLength(2);
+    expect(firstPage.hasMore).toBe(true);
+    const secondPage = await repository.listConversationTasks(
+      owner,
+      generalId,
+      firstPage.nextCursor ?? undefined,
+      2,
+    );
+    expect(secondPage.hasMore).toBe(false);
+    expect(new Set([...firstPage.tasks, ...secondPage.tasks].map((task) => task.id))).toEqual(
+      new Set([createdA.task.id, createdB.task.id, createdC.task.id]),
+    );
+
+    const movedC = await repository.moveTask(
+      owner,
+      createdC.task.id,
+      {
+        expectedVersion: createdC.task.version,
+        status: "todo",
+        beforeTaskId: createdA.task.id,
+      },
+      randomUUID(),
+    );
+    expect(movedC.task.rank).not.toBe(createdC.task.rank);
+    const board = await pool.query<{ title: string }>(
+      `SELECT title FROM tasks
+        WHERE conversation_id = $1 AND status = 'todo'
+        ORDER BY rank, id`,
+      [generalId],
+    );
+    expect(board.rows.map((row) => row.title)).toEqual([
+      "Confirm launch metrics",
+      "Draft the rollout",
+      "Prepare the announcement",
+    ]);
+
+    const updatedA = await repository.updateTask(
+      owner,
+      createdA.task.id,
+      {
+        expectedVersion: createdA.task.version,
+        title: "Draft and review the rollout",
+        description: "Include rollback ownership.",
+        priority: "urgent",
+        assigneeId: memberId,
+        dueOn: "2026-09-02",
+      },
+      randomUUID(),
+    );
+    await expect(
+      repository.updateTask(
+        owner,
+        createdA.task.id,
+        {
+          expectedVersion: createdA.task.version,
+          title: "Stale edit",
+          description: null,
+          priority: "none",
+          assigneeId: null,
+          dueOn: null,
+        },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    const completedA = await repository.moveTask(
+      owner,
+      createdA.task.id,
+      { expectedVersion: updatedA.task.version, status: "done", beforeTaskId: null },
+      randomUUID(),
+    );
+    expect(completedA.task).toMatchObject({ status: "done" });
+    expect(completedA.task.completedAt).not.toBeNull();
+
+    const assigned = await repository.listMyTasks(member, undefined, 100);
+    expect(assigned.tasks).toContainEqual(
+      expect.objectContaining({ id: createdA.task.id, assigneeId: memberId }),
+    );
+    const legacySync = await repository.sync(owner, "0", 100, false, false, false);
+    expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(false);
+    const taskSync = await repository.sync(owner, "0", 100, false, false, true);
+    expect(taskSync.events).toContainEqual(
+      expect.objectContaining({
+        type: "task.updated",
+        entityVersion: completedA.task.version,
+        payload: { task: completedA.task },
+      }),
+    );
+
+    const ordinaryDirect = await repository.createDirectConversation(owner, { memberId });
+    await expect(
+      repository.createTask(
+        owner,
+        ordinaryDirect.conversation.conversation.id,
+        taskInput("Not a shared-DM task"),
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+
+    const selfDirect = await repository.createDirectConversation(owner, { memberId: ownerId });
+    const personal = await repository.createTask(
+      owner,
+      selfDirect.conversation.conversation.id,
+      taskInput("Remember the follow-up", { assigneeId: ownerId }),
+      randomUUID(),
+    );
+    expect((await repository.listMyTasks(owner, undefined, 100)).tasks).toContainEqual(
+      expect.objectContaining({ id: personal.task.id, assigneeId: ownerId }),
+    );
+  });
+
+  it("unassigns tasks before removing a member from a private channel", async () => {
+    const channel = await repository.createChannel(owner, {
+      name: "Task Crew",
+      slug: "task-crew",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = channel.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    const created = await repository.createTask(
+      owner,
+      conversationId,
+      taskInput("Member-owned work", { assigneeId: memberId }),
+      randomUUID(),
+    );
+
+    await repository.removeChannelMember(owner, conversationId, memberId);
+
+    const [task] = (await repository.listConversationTasks(owner, conversationId, undefined, 10))
+      .tasks;
+    expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
+    await expect(
+      repository.listConversationTasks(member, conversationId, undefined, 10),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    const memberSync = await repository.sync(member, created.syncCursor, 100, false, false, true);
+    expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
+  });
+
   it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
     const [staleCursor] = await seedMessageEvents(2);
     if (staleCursor === undefined) throw new Error("Expected a stale sync cursor");
@@ -1066,16 +1263,18 @@ describeWithPostgres("WorkspaceRepository", () => {
       deviceSessionId: ownerSessionId,
       reactionEvents: false,
       readStateEvents: false,
+      taskEvents: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       reactionEvents: true,
       readStateEvents: true,
+      taskEvents: true,
     });
   });
 

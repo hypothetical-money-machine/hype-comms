@@ -14,6 +14,7 @@ import {
   channelMembersResponseSchema,
   conversationMutationResponseSchema,
   createChannelOperationSchema,
+  createTaskOperationSchema,
   directConversationRequestSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
@@ -25,6 +26,7 @@ import {
   messageReactionTargetSchema,
   messageSearchQuerySchema,
   messageSearchResponseSchema,
+  moveTaskOperationSchema,
   productRealtimeEventSchema,
   realtimeConnectionStateSchema,
   requestMagicLinkSchema,
@@ -33,8 +35,12 @@ import {
   sendMessageOperationSchema,
   sequenceSchema,
   syncAttemptResultSchema,
+  taskListQuerySchema,
+  taskListResponseSchema,
+  taskMutationResponseSchema,
   themePreferenceSchema,
   updateStateSchema,
+  updateTaskOperationSchema,
   upsertChannelMemberRequestSchema,
   upsertChannelMemberOperationSchema,
   workspaceBootstrapResponseSchema,
@@ -43,15 +49,19 @@ import {
   type CacheEncryptBatchRequest,
   type CacheScope,
   type CreateChannelOperation,
+  type CreateTaskOperation,
   type DirectConversationRequest,
   type ListConversationsQuery,
   type MessageSearchQuery,
+  type MoveTaskOperation,
   type ReactionEmoji,
   type ProductRealtimeEvent,
   type SendMessageOperation,
   type ThemePreference,
   type ThemeState,
+  type TaskListQuery,
   type UpdateState,
+  type UpdateTaskOperation,
 } from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -211,6 +221,41 @@ const desktopApi: DesktopApi = Object.freeze({
       await ipcRenderer.invoke(
         DESKTOP_CHANNELS.workspaceMessageSearch,
         messageSearchQuerySchema.parse(input),
+      ),
+    ),
+  listConversationTasks: async (conversationId: string, input: Partial<TaskListQuery> = {}) =>
+    taskListResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceTasksList, {
+        conversationId,
+        query: taskListQuerySchema.parse(input),
+      }),
+    ),
+  listMyTasks: async (input: Partial<TaskListQuery> = {}) =>
+    taskListResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceMyTasksList,
+        taskListQuerySchema.parse(input),
+      ),
+    ),
+  createTask: async (input: CreateTaskOperation) =>
+    taskMutationResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceTaskCreate,
+        createTaskOperationSchema.parse(input),
+      ),
+    ),
+  updateTask: async (input: UpdateTaskOperation) =>
+    taskMutationResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceTaskUpdate,
+        updateTaskOperationSchema.parse(input),
+      ),
+    ),
+  moveTask: async (input: MoveTaskOperation) =>
+    taskMutationResponseSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceTaskMove,
+        moveTaskOperationSchema.parse(input),
       ),
     ),
   sendConversationMessage: async (input: SendMessageOperation) =>

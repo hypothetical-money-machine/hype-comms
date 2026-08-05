@@ -6,6 +6,7 @@ import {
 } from "@hmm-chat/contracts";
 
 import { getThemeDefinition, parseBuiltInThemeState, SYSTEM_THEME_IDS } from "../shared/theme";
+import { reportMainProcessError } from "./main-process-log";
 
 export interface NativeThemeAdapter {
   themeSource: "system" | ResolvedColorScheme;
@@ -84,7 +85,7 @@ export class ThemeController {
     this.#reportListenerError =
       options.reportListenerError ??
       ((error) => {
-        console.error("Theme state listener failed", error);
+        reportMainProcessError("Theme state listener failed", error);
       });
   }
 

@@ -1,6 +1,7 @@
 import { productRealtimeEventSchema, type ProductRealtimeEvent } from "@hmm-chat/contracts";
 import WebSocket, { type RawData } from "ws";
 
+import { reportMainProcessError } from "./main-process-log";
 import type { WorkspaceTransport } from "./workspace-transport";
 
 const INITIAL_RECONNECT_DELAY_MS = 500;
@@ -11,7 +12,7 @@ export type RealtimeConnectionState = "connecting" | "live" | "offline" | "recon
 export class WorkspaceRealtime {
   readonly #apiOrigin: string;
   readonly #rendererOrigin: string;
-  readonly #transport: WorkspaceTransport;
+  readonly #transport: Pick<WorkspaceTransport, "ticket">;
   readonly #onEvent: (event: ProductRealtimeEvent) => void;
   readonly #onState: (state: RealtimeConnectionState) => void;
   #cursor = "0";
@@ -23,7 +24,7 @@ export class WorkspaceRealtime {
   constructor(options: {
     readonly apiOrigin: string;
     readonly rendererOrigin: string;
-    readonly transport: WorkspaceTransport;
+    readonly transport: Pick<WorkspaceTransport, "ticket">;
     readonly onEvent: (event: ProductRealtimeEvent) => void;
     readonly onState: (state: RealtimeConnectionState) => void;
   }) {
@@ -76,24 +77,24 @@ export class WorkspaceRealtime {
         try {
           const parsed = productRealtimeEventSchema.safeParse(JSON.parse(data.toString()));
           if (!parsed.success) {
-            console.error("Ignored an invalid realtime event");
+            reportMainProcessError("Ignored an invalid realtime event");
             return;
           }
           if (parsed.data.type === "system.connected") this.#onState("live");
           this.#onEvent(parsed.data);
         } catch (error) {
-          console.error("Ignored an invalid realtime event", error);
+          reportMainProcessError("Ignored an invalid realtime event", error);
         }
       });
       socket.on("error", (error) => {
-        console.error("Workspace realtime connection failed", error.message);
+        reportMainProcessError("Workspace realtime connection failed", error.message);
       });
       socket.once("close", () => {
         if (this.#socket === socket) this.#socket = null;
         this.#scheduleReconnect();
       });
     } catch (error) {
-      console.error("Could not obtain a realtime ticket", error);
+      reportMainProcessError("Could not obtain a realtime ticket", error);
       this.#scheduleReconnect();
     }
   }
