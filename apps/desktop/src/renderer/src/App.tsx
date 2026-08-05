@@ -17,11 +17,14 @@ import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ClientVersion } from "./client-version";
 import { ConversationSwitcher } from "./conversation-switcher";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
+import { MessageBody } from "./message-body";
+import { MessageComposer } from "./message-composer";
 import { isMessageContinuation } from "./message-grouping";
 import { MessageReactions } from "./message-reactions";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
+import { useConversationDrafts } from "./use-conversation-drafts";
 import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
@@ -235,7 +238,7 @@ function MessageRow({
           <strong>{author?.displayName ?? "Former member"}</strong>
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
-        <p>{message.body}</p>
+        <MessageBody body={message.body} />
         <MessageReactions
           reactions={reactions}
           members={members}
@@ -258,7 +261,9 @@ export function App({ client, theme }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
-  const [draft, setDraft] = useState("");
+  const { draft, setDraft, clearDraft, resetDrafts } = useConversationDrafts(
+    runtimeState.selectedConversationId,
+  );
   const [editingClientMessageId, setEditingClientMessageId] = useState<string | null>(null);
   const [composerError, setComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
@@ -274,10 +279,13 @@ export function App({ client, theme }: AppProps) {
       if (next.status === "signed-in" && next.method === "email") {
         void runtime.start(next);
       } else if (next.status === "signed-out") {
+        resetDrafts();
+        setEditingClientMessageId(null);
+        setComposerError("");
         void runtime.stop();
       }
     },
-    [runtime],
+    [resetDrafts, runtime],
   );
 
   const retrySession = useCallback(async (): Promise<void> => {
@@ -375,9 +383,9 @@ export function App({ client, theme }: AppProps) {
     document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({ block: "center" });
   }, [messages.length, runtimeState.focusedMessageId, runtimeState.selectedConversationId]);
 
-  const send = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    const body = draft.trim();
+  const send = async (): Promise<void> => {
+    const submittedDraft = draft;
+    const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
     if (body === "" || conversationId === null || bootstrap === null) return;
     const visibleMemberIds = new Set(selectedSummary?.participantIds ?? []);
@@ -395,7 +403,7 @@ export function App({ client, theme }: AppProps) {
         await runtime.replaceFailedMessage(editingClientMessageId, body, mentionedUserIds);
         setEditingClientMessageId(null);
       }
-      setDraft("");
+      clearDraft(submittedDraft);
       setComposerError("");
     } catch (error) {
       setComposerError(errorMessage(error, "Could not queue the message"));
@@ -890,12 +898,14 @@ export function App({ client, theme }: AppProps) {
                           <strong>{bootstrap.currentUser.user.displayName}</strong>
                           <span>{pendingStatus}</span>
                         </header>
-                        <p>
-                          {item.operation.message.body}
-                          {continuation && (
-                            <span className="pending-status"> · {pendingStatus}</span>
-                          )}
-                        </p>
+                        <MessageBody
+                          body={item.operation.message.body}
+                          suffix={
+                            continuation ? (
+                              <span className="pending-status"> · {pendingStatus}</span>
+                            ) : undefined
+                          }
+                        />
                         {item.status === "permanent_failure" && (
                           <div className="message-actions">
                             <button
@@ -932,34 +942,16 @@ export function App({ client, theme }: AppProps) {
               })}
             </div>
 
-            <form className="composer" onSubmit={(event) => void send(event)}>
-              <label className="sr-only" htmlFor="message">
-                Message
-              </label>
-              <input
-                id="message"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder={
-                  selectedSummary === undefined
-                    ? "Choose a conversation"
-                    : `Message ${runtime.conversationName(selectedSummary)}`
-                }
-                disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
-                maxLength={4_000}
-              />
-              <button
-                type="submit"
-                disabled={
-                  draft.trim() === "" ||
-                  selectedSummary === undefined ||
-                  selectedSummary.conversation.isArchived
-                }
-              >
-                Send
-              </button>
-              {composerError !== "" && <p className="composer-error">{composerError}</p>}
-            </form>
+            <MessageComposer
+              conversationName={
+                selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
+              }
+              draft={draft}
+              disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
+              error={composerError}
+              onDraftChange={setDraft}
+              onSubmit={send}
+            />
           </>
         )}
       </section>
