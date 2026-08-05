@@ -299,6 +299,10 @@ export class WorkspaceRuntime {
   #syncCursor: string | null = null;
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
+  readonly #pendingReadTargets = new Map<
+    string,
+    { readonly messageId: string; readonly conversationSequence: string }
+  >();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -346,6 +350,7 @@ export class WorkspaceRuntime {
     this.#clearSyncRetryTimer();
     this.#resetResyncState();
     this.#syncAttempt = 0;
+    this.#pendingReadTargets.clear();
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
@@ -421,19 +426,13 @@ export class WorkspaceRuntime {
     await this.#client.stopWorkspaceRealtime();
     this.#cache = null;
     this.#syncCursor = null;
+    this.#pendingReadTargets.clear();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
   }
 
   selectConversation(conversationId: string): void {
     this.#setState({ selectedConversationId: conversationId, focusedMessageId: null });
-    const messages = this.#state.messages.filter(
-      (message) => message.conversationId === conversationId,
-    );
-    const latest = messages.at(-1);
-    if (latest !== undefined) {
-      void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
-    }
   }
 
   openTaskSource(task: Task): void {
@@ -441,12 +440,57 @@ export class WorkspaceRuntime {
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
     });
-    const latest = this.#state.messages
-      .filter((message) => message.conversationId === task.conversationId)
-      .at(-1);
-    if (latest !== undefined) {
-      void this.#client.advanceReadCursor(task.conversationId, latest.id).catch(() => undefined);
+  }
+
+  markConversationReadThrough(conversationId: string, messageId: string): void {
+    const message = this.#state.messages.find(
+      (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
+    );
+    const summary = this.#state.bootstrap?.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (message === undefined || summary === undefined) return;
+    const targetSequence = message.conversationSequence;
+    const currentSequence = summary.readCursor?.lastReadConversationSequence;
+    if (currentSequence !== undefined && BigInt(currentSequence) >= BigInt(targetSequence)) return;
+    const pending = this.#pendingReadTargets.get(conversationId);
+    if (pending !== undefined && BigInt(pending.conversationSequence) >= BigInt(targetSequence)) {
+      return;
     }
+
+    this.#pendingReadTargets.set(conversationId, {
+      messageId,
+      conversationSequence: targetSequence,
+    });
+    const generation = this.#generation;
+    void this.#client
+      .advanceReadCursor(conversationId, messageId)
+      .then((result) => {
+        if (generation !== this.#generation || this.#state.bootstrap === null) return;
+        this.#setState({
+          bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
+            if (current === undefined) return null;
+            const projectedSequence = result.readCursor.lastReadConversationSequence;
+            const existingSequence = current.readCursor?.lastReadConversationSequence;
+            if (
+              existingSequence !== undefined &&
+              BigInt(existingSequence) >= BigInt(projectedSequence)
+            ) {
+              return current;
+            }
+            return { ...current, readCursor: result.readCursor };
+          }),
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (
+          generation === this.#generation &&
+          this.#pendingReadTargets.get(conversationId)?.messageId === messageId
+        ) {
+          this.#pendingReadTargets.delete(conversationId);
+        }
+      });
   }
 
   async sendMessage(

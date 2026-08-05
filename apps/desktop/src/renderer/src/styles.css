@@ -1096,6 +1096,30 @@ button:disabled {
   flex: none;
 }
 
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px -10px 8px;
+  color: var(--theme-text-accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.unread-divider::before,
+.unread-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--theme-border-accent);
+  content: "";
+}
+
+.unread-divider span {
+  flex: none;
+}
+
 .message {
   position: relative;
   display: grid;

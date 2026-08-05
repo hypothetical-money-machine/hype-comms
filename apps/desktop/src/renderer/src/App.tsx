@@ -20,10 +20,12 @@ import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-se
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
 import { isMessageContinuation } from "./message-grouping";
+import { isTimelineAtBottom, lastFullyVisibleMessageId } from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
+import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
 import { useConversationDrafts } from "./use-conversation-drafts";
 import { WorkspaceSearch } from "./workspace-search";
 import {
@@ -225,6 +227,7 @@ function MessageRow({
         highlighted ? " search-target" : ""
       }`}
       id={`message-${message.id}`}
+      data-message-id={message.id}
     >
       {continuation ? (
         <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
@@ -270,6 +273,9 @@ export function App({ client, theme }: AppProps) {
   const [showChannelMembers, setShowChannelMembers] = useState(false);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
   const messageList = useRef<HTMLDivElement>(null);
+  const timelineConversationId = useRef<string | null>(null);
+  const stickToTimelineBottom = useRef(true);
+  const readTrackingFrame = useRef<number | null>(null);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -328,6 +334,11 @@ export function App({ client, theme }: AppProps) {
   const messages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
   );
+  const unreadDividerMessageId = useUnreadDividerMessageId(
+    runtimeState.selectedConversationId,
+    messages,
+    selectedSummary,
+  );
   const reactionsByMessage = useMemo(() => {
     const grouped = new Map<string, Reaction[]>();
     for (const reaction of runtimeState.reactions) {
@@ -372,10 +383,78 @@ export function App({ client, theme }: AppProps) {
     }
   }, [editingClientMessageId, editingItem, runtimeState.selectedConversationId]);
 
+  const markVisibleMessagesRead = useCallback((): void => {
+    const conversationId = runtimeState.selectedConversationId;
+    const list = messageList.current;
+    if (
+      conversationId === null ||
+      list === null ||
+      document.visibilityState !== "visible" ||
+      !document.hasFocus()
+    ) {
+      return;
+    }
+    const messageId = lastFullyVisibleMessageId(list);
+    if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
+  }, [runtime, runtimeState.selectedConversationId]);
+
+  const scheduleReadTracking = useCallback((): void => {
+    if (readTrackingFrame.current !== null) return;
+    readTrackingFrame.current = window.requestAnimationFrame(() => {
+      readTrackingFrame.current = null;
+      markVisibleMessagesRead();
+    });
+  }, [markVisibleMessagesRead]);
+
+  const handleTimelineScroll = useCallback((): void => {
+    const list = messageList.current;
+    if (list !== null) stickToTimelineBottom.current = isTimelineAtBottom(list);
+    scheduleReadTracking();
+  }, [scheduleReadTracking]);
+
+  useEffect(() => {
+    const handleFocus = (): void => scheduleReadTracking();
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleFocus);
+    };
+  }, [scheduleReadTracking]);
+
+  useEffect(
+    () => () => {
+      if (readTrackingFrame.current !== null) {
+        window.cancelAnimationFrame(readTrackingFrame.current);
+        readTrackingFrame.current = null;
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     const list = messageList.current;
-    if (list !== null) list.scrollTop = list.scrollHeight;
-  }, [messages.length, pending.length, runtimeState.selectedConversationId]);
+    const conversationId = runtimeState.selectedConversationId;
+    if (list === null || conversationId === null) return;
+    if (timelineConversationId.current !== conversationId) {
+      timelineConversationId.current = conversationId;
+      const divider = document.getElementById(`unread-${conversationId}`);
+      list.scrollTop =
+        divider === null
+          ? list.scrollHeight
+          : Math.max(0, divider.offsetTop - list.clientHeight / 2);
+    } else if (stickToTimelineBottom.current) {
+      list.scrollTop = list.scrollHeight;
+    }
+    stickToTimelineBottom.current = isTimelineAtBottom(list);
+    scheduleReadTracking();
+  }, [
+    messages.length,
+    pending.length,
+    runtimeState.selectedConversationId,
+    scheduleReadTracking,
+    unreadDividerMessageId,
+  ]);
 
   useEffect(() => {
     const focusedMessageId = runtimeState.focusedMessageId;
@@ -808,7 +887,12 @@ export function App({ client, theme }: AppProps) {
           />
         ) : (
           <>
-            <div className="message-list" ref={messageList} aria-live="polite">
+            <div
+              className="message-list"
+              ref={messageList}
+              aria-live="polite"
+              onScroll={handleTimelineScroll}
+            >
               {runtimeState.selectedConversationId !== null &&
                 runtime.hasOlder(runtimeState.selectedConversationId) && (
                   <button
@@ -834,6 +918,10 @@ export function App({ client, theme }: AppProps) {
                       message.createdAt,
                       messages[index - 1]?.createdAt ?? null,
                     ) && <MessageDateSeparator value={message.createdAt} />}
+                    {message.id === unreadDividerMessageId &&
+                      runtimeState.selectedConversationId !== null && (
+                        <UnreadDivider conversationId={runtimeState.selectedConversationId} />
+                      )}
                     <MessageRow
                       message={message}
                       members={bootstrap.members}
