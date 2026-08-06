@@ -64,6 +64,19 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
+  assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
+  assert.match(
+    releaseWorkflow,
+    /^ {2}prepare-github-release:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release create/mu,
+  );
+  assert.match(
+    releaseWorkflow,
+    /^ {2}package:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release upload/mu,
+  );
+  assert.match(
+    releaseWorkflow,
+    /^ {2}github-release:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release edit/mu,
+  );
   assert.match(
     packageSmokeWorkflow,
     /runner: '\["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"\]'/u,
@@ -85,7 +98,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(releaseWorkflow, /name: Wait for all GitHub Release assets[\s\S]*seq 1 60/u);
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
-  assert.match(releaseWorkflow, /gh release create[\s\S]*--generate-notes/u);
+  assert.match(
+    releaseWorkflow,
+    /RELEASE_NOTES_FALLBACK_TAG: v0\.1\.11[\s\S]*gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
+  );
   assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
 });
