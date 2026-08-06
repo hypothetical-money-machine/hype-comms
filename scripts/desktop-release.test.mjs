@@ -56,6 +56,15 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
   );
   assert.match(
+    releaseWorkflow,
+    /^  prepare-github-release:[\s\S]*?^    runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+  );
+  assert.match(
+    releaseWorkflow,
+    /^  github-release:[\s\S]*?^    runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+  );
+  assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
+  assert.match(
     packageSmokeWorkflow,
     /runner: '\["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"\]'/u,
   );
