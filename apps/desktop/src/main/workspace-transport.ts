@@ -1,6 +1,7 @@
 import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
@@ -18,6 +19,8 @@ import {
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
+  taskListResponseSchema,
+  taskMutationResponseSchema,
   workspaceBootstrapResponseSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
@@ -25,6 +28,7 @@ import {
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type ConversationMutationResponse,
+  type CreateTaskOperation,
   type CreateChannelOperation,
   type DirectConversationRequest,
   type ListConversationsQuery,
@@ -34,19 +38,28 @@ import {
   type MessageHistoryResponse,
   type MessageSearchQuery,
   type MessageSearchResponse,
+  type MoveTaskOperation,
   type RealtimeTicketResponse,
   type ReactionEmoji,
   type RemoveReactionResponse,
   type SendAttemptResult,
   type SendMessageOperation,
   type SyncAttemptResult,
+  type TaskListQuery,
+  type TaskListResponse,
+  type TaskMutationResponse,
+  type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
 import type { ChatSession } from "./chat-session";
 
-const CLIENT_CAPABILITIES = [REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY].join(",");
+const CLIENT_CAPABILITIES = [
+  REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
+  TASK_EVENTS_CAPABILITY,
+].join(",");
 
 function retryAfter(response: Response): number | null {
   const value = response.headers.get("retry-after");
@@ -293,6 +306,64 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(input.limit));
     const response = await this.session.fetch(url.href, { method: "GET" });
     return messageSearchResponseSchema.parse(await this.#payload(response));
+  }
+
+  async tasks(
+    conversationId: string,
+    input: Partial<TaskListQuery> = {},
+  ): Promise<TaskListResponse> {
+    const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/tasks`);
+    if (input.after !== undefined) url.searchParams.set("after", input.after);
+    url.searchParams.set("limit", String(input.limit ?? 100));
+    const response = await this.session.fetch(url.href, { method: "GET" });
+    return taskListResponseSchema.parse(await this.#payload(response));
+  }
+
+  async myTasks(input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
+    const url = this.#url("/v1/tasks/mine");
+    if (input.after !== undefined) url.searchParams.set("after", input.after);
+    url.searchParams.set("limit", String(input.limit ?? 100));
+    const response = await this.session.fetch(url.href, { method: "GET" });
+    return taskListResponseSchema.parse(await this.#payload(response));
+  }
+
+  async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
+    const { conversationId, idempotencyKey, ...request } = input;
+    const response = await this.#fetchIdempotentMutation(
+      this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/tasks`).href,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify(request),
+      },
+    );
+    return taskMutationResponseSchema.parse(await this.#payload(response));
+  }
+
+  async updateTask(input: UpdateTaskOperation): Promise<TaskMutationResponse> {
+    const { taskId, idempotencyKey, ...request } = input;
+    const response = await this.#fetchIdempotentMutation(
+      this.#url(`/v1/tasks/${encodeURIComponent(taskId)}`).href,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify(request),
+      },
+    );
+    return taskMutationResponseSchema.parse(await this.#payload(response));
+  }
+
+  async moveTask(input: MoveTaskOperation): Promise<TaskMutationResponse> {
+    const { taskId, idempotencyKey, ...request } = input;
+    const response = await this.#fetchIdempotentMutation(
+      this.#url(`/v1/tasks/${encodeURIComponent(taskId)}/move`).href,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify(request),
+      },
+    );
+    return taskMutationResponseSchema.parse(await this.#payload(response));
   }
 
   async send(input: SendMessageOperation): Promise<SendAttemptResult> {

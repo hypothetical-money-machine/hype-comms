@@ -25,6 +25,7 @@ import {
   realtimeTicketSchema,
   systemConnectedEventSchema,
 } from "./realtime.js";
+import { taskCreatedEventSchema, taskUpdatedEventSchema } from "./tasks.js";
 
 export const paginationCursorSchema = z
   .string()
@@ -34,6 +35,7 @@ export const paginationCursorSchema = z
 
 export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
 export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
+export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -441,6 +443,8 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   reactionAddedEventSchema,
   reactionRemovedEventSchema,
   readCursorUpdatedEventSchema,
+  taskCreatedEventSchema,
+  taskUpdatedEventSchema,
 ]);
 
 export const syncQuerySchema = z

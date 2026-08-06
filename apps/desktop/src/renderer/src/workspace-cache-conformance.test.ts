@@ -9,6 +9,7 @@ import {
   type CacheEncryptBatchRequest,
   type ConversationSummary,
   type Message,
+  type Task,
   type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
@@ -41,6 +42,7 @@ const MESSAGE_SEQUENCE_1_ID = "10000000-0000-4000-8000-000000000043";
 const CLIENT_MESSAGE_2_ID = "10000000-0000-4000-8000-000000000051";
 const CLIENT_MESSAGE_10_ID = "10000000-0000-4000-8000-000000000052";
 const CLIENT_MESSAGE_1_ID = "10000000-0000-4000-8000-000000000053";
+const TASK_ID = "10000000-0000-4000-8000-000000000071";
 
 const scope = { userId: MORGAN_ID, workspaceId: WORKSPACE_ID };
 
@@ -225,6 +227,42 @@ const reactionRemovedEvent: WorkspaceEvent = {
   type: "reaction.removed",
   workspaceSequence: "10",
 };
+
+const task: Task = {
+  id: TASK_ID,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  number: "1",
+  version: 1,
+  title: "Build the board",
+  description: null,
+  status: "todo",
+  priority: "high",
+  assigneeId: MORGAN_ID,
+  dueOn: "2026-08-15",
+  sourceMessageId: null,
+  rank: "1024",
+  createdBy: MORGAN_ID,
+  completedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+function taskEvent(value: Task, sequence: string): WorkspaceEvent {
+  return {
+    version: 1,
+    id: `10000000-0000-4000-8000-${sequence.padStart(12, "0")}`,
+    type: "task.updated",
+    occurredAt: value.updatedAt,
+    workspaceId: WORKSPACE_ID,
+    conversationId: ALPHA_ID,
+    workspaceSequence: sequence,
+    conversationSequence: null,
+    entityVersion: value.version,
+    delivery: "at_least_once",
+    payload: { task: value },
+  };
+}
 
 class FakeCrypto {
   async encryptCacheRecords(input: CacheEncryptBatchRequest) {
@@ -497,6 +535,44 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.removeReaction(reaction.id);
     expect((await cache.load()).reactions).toEqual([]);
   });
+
+  it("persists tasks by canonical version while independently advancing event cursors", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [], [], [task]);
+    const mutationProjection: Task = {
+      ...task,
+      version: 3,
+      title: "Build and verify the board",
+      updatedAt: "2026-07-24T12:03:00.000Z",
+    };
+    await cache.upsertTasks([mutationProjection]);
+
+    const olderEventTask: Task = {
+      ...task,
+      version: 2,
+      title: "Stale title",
+      updatedAt: "2026-07-24T12:02:00.000Z",
+    };
+    await expect(cache.applyEvent(taskEvent(olderEventTask, "11"))).resolves.toBe(true);
+    expect(await cache.load()).toMatchObject({
+      syncCursor: "11",
+      tasks: [mutationProjection],
+    });
+
+    const newerEventTask: Task = {
+      ...mutationProjection,
+      version: 4,
+      status: "in_progress",
+      rank: "2048",
+      updatedAt: "2026-07-24T12:04:00.000Z",
+    };
+    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(true);
+    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(false);
+    expect(await cache.load()).toMatchObject({
+      syncCursor: "12",
+      tasks: [newerEventTask],
+    });
+  });
 });
 
 describe("workspace cache implementation parity", () => {
@@ -511,6 +587,7 @@ describe("workspace cache implementation parity", () => {
       await cache.upsertHistory([messageSequence10, messageSequence1]);
       await cache.applyEvent(messageCreatedEvent);
       await cache.applyEvent(readCursorEvent);
+      await cache.upsertTasks([task]);
     }
 
     const memoryState = withoutTimestamps(await memory.load());

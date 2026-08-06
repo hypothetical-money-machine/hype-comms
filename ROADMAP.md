@@ -21,6 +21,9 @@ The implementation contract and security boundaries live in
 - Date separators in the main message timeline, including pending outbox messages.
 - Unicode emoji reactions with grouped counts, quick add/remove controls, encrypted local
   persistence, authorized batch hydration, and realtime convergence.
+- Channel task projects with Board and List views, canonical three-column Kanban ordering,
+  assignments/priorities/due dates, message-to-task links, realtime convergence, and a self-DM
+  My Tasks list that can include assigned work from other visible boards.
 - Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
   result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients

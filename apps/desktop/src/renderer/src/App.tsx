@@ -6,6 +6,7 @@ import type {
   Message,
   Reaction,
   ReactionEmoji,
+  Task,
   UpdateState,
   User,
 } from "@hmm-chat/contracts";
@@ -20,6 +21,7 @@ import { isMessageContinuation } from "./message-grouping";
 import { MessageReactions } from "./message-reactions";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
+import { TasksView } from "./tasks-view";
 import { WorkspaceSearch } from "./workspace-search";
 import {
   cacheFallbackNotice,
@@ -198,6 +200,7 @@ function MessageRow({
   reactionsDisabled,
   onAddReaction,
   onRemoveReaction,
+  onCreateTask,
   highlighted,
   continuation,
 }: {
@@ -208,6 +211,7 @@ function MessageRow({
   readonly reactionsDisabled: boolean;
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
+  readonly onCreateTask?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
 }) {
@@ -240,6 +244,11 @@ function MessageRow({
           onAdd={onAddReaction}
           onRemove={onRemoveReaction}
         />
+        {onCreateTask !== undefined && (
+          <button className="message-task-action" type="button" onClick={() => void onCreateTask()}>
+            + Task
+          </button>
+        )}
       </div>
     </article>
   );
@@ -254,6 +263,7 @@ export function App({ client, theme }: AppProps) {
   const [composerError, setComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [showChannelMembers, setShowChannelMembers] = useState(false);
+  const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
   const messageList = useRef<HTMLDivElement>(null);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
@@ -301,6 +311,12 @@ export function App({ client, theme }: AppProps) {
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
+  const selectedIsPersonal =
+    selectedSummary?.conversation.kind === "direct_message" &&
+    selectedSummary.participantIds.length === 1 &&
+    selectedSummary.participantIds[0] === bootstrap?.currentUser.user.id;
+  const tasksAvailable =
+    selectedSummary?.conversation.kind === "channel" || selectedIsPersonal === true;
   const messages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
   );
@@ -323,7 +339,19 @@ export function App({ client, theme }: AppProps) {
           (item) => item.operation.message.clientMessageId === editingClientMessageId,
         );
 
-  useEffect(() => setShowChannelMembers(false), [runtimeState.selectedConversationId]);
+  useEffect(() => {
+    setShowChannelMembers(false);
+    setPaneView("chat");
+  }, [runtimeState.selectedConversationId]);
+
+  useEffect(() => {
+    const conversationId = runtimeState.selectedConversationId;
+    if (paneView !== "tasks" || conversationId === null || !tasksAvailable) return;
+    const request = selectedIsPersonal
+      ? runtime.loadMyTasks()
+      : runtime.loadConversationTasks(conversationId);
+    void request.catch(() => undefined);
+  }, [paneView, runtime, runtimeState.selectedConversationId, selectedIsPersonal, tasksAvailable]);
 
   useEffect(() => {
     if (editingClientMessageId === null) return;
@@ -372,6 +400,28 @@ export function App({ client, theme }: AppProps) {
     } catch (error) {
       setComposerError(errorMessage(error, "Could not queue the message"));
     }
+  };
+
+  const createTaskFromMessage = async (message: Message): Promise<void> => {
+    const firstLine = message.body.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
+    const title = (firstLine === "" ? "Follow up on this message" : firstLine).slice(0, 240);
+    try {
+      await runtime.createTask({
+        conversationId: message.conversationId,
+        title,
+        sourceMessageId: message.id,
+        assigneeId: selectedIsPersonal ? (bootstrap?.currentUser.user.id ?? null) : null,
+      });
+      setPaneView("tasks");
+      setComposerError("");
+    } catch (error) {
+      setComposerError(errorMessage(error, "Could not create a task from this message"));
+    }
+  };
+
+  const openTaskSource = (task: Task): void => {
+    setPaneView("chat");
+    runtime.openTaskSource(task);
   };
 
   const createChannel = useCallback(
@@ -648,187 +698,259 @@ export function App({ client, theme }: AppProps) {
               </p>
             )}
           </div>
-          {selectedSummary?.conversation.kind === "channel" && (
-            <div className="conversation-header-actions">
-              <button
-                className="quiet-button"
-                type="button"
-                onClick={() => setShowChannelMembers(true)}
-              >
-                {selectedSummary.conversation.access === "members"
-                  ? `${String(selectedSummary.participantIds.length)} members`
-                  : "Everyone"}
-              </button>
-              {selectedSummary.conversation.slug !== "general" &&
-                !selectedSummary.conversation.isArchived &&
-                bootstrap.currentUser.role === "owner" && (
-                  <button
-                    className="quiet-button"
-                    type="button"
-                    onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
-                  >
-                    Archive
-                  </button>
+          {selectedSummary !== undefined &&
+            (tasksAvailable || selectedSummary.conversation.kind === "channel") && (
+              <div className="conversation-header-actions">
+                {tasksAvailable && (
+                  <div className="pane-toggle" aria-label="Conversation view">
+                    <button
+                      type="button"
+                      className={paneView === "chat" ? "active" : ""}
+                      onClick={() => setPaneView("chat")}
+                    >
+                      Chat
+                    </button>
+                    <button
+                      type="button"
+                      className={paneView === "tasks" ? "active" : ""}
+                      onClick={() => setPaneView("tasks")}
+                    >
+                      Tasks
+                    </button>
+                  </div>
                 )}
-            </div>
-          )}
+                {selectedSummary.conversation.kind === "channel" && (
+                  <>
+                    <button
+                      className="quiet-button"
+                      type="button"
+                      onClick={() => setShowChannelMembers(true)}
+                    >
+                      {selectedSummary.conversation.access === "members"
+                        ? `${String(selectedSummary.participantIds.length)} members`
+                        : "Everyone"}
+                    </button>
+                    {selectedSummary.conversation.slug !== "general" &&
+                      !selectedSummary.conversation.isArchived &&
+                      bootstrap.currentUser.role === "owner" && (
+                        <button
+                          className="quiet-button"
+                          type="button"
+                          onClick={() =>
+                            void runtime.archiveChannel(selectedSummary.conversation.id)
+                          }
+                        >
+                          Archive
+                        </button>
+                      )}
+                  </>
+                )}
+              </div>
+            )}
         </header>
 
-        <div className="message-list" ref={messageList} aria-live="polite">
-          {runtimeState.selectedConversationId !== null &&
-            runtime.hasOlder(runtimeState.selectedConversationId) && (
-              <button
-                className="load-older"
-                type="button"
-                onClick={() => {
-                  const conversationId = runtimeState.selectedConversationId;
-                  if (conversationId !== null) void runtime.loadOlder(conversationId);
-                }}
-              >
-                Load older messages
-              </button>
-            )}
-          {messages.length === 0 && pending.length === 0 ? (
-            <div className="empty-state">
-              <h3>No messages yet</h3>
-              <p>Start the conversation.</p>
-            </div>
-          ) : (
-            messages.map((message, index) => (
-              <Fragment key={message.id}>
-                {shouldShowDateSeparator(
-                  message.createdAt,
-                  messages[index - 1]?.createdAt ?? null,
-                ) && <MessageDateSeparator value={message.createdAt} />}
-                <MessageRow
-                  message={message}
-                  members={bootstrap.members}
-                  reactions={reactionsByMessage.get(message.id) ?? []}
-                  currentUserId={currentUserId}
-                  reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                  onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
-                  onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
-                  highlighted={message.id === runtimeState.focusedMessageId}
-                  continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
-                />
-              </Fragment>
-            ))
-          )}
-          {pending.map((item, index) => {
-            const previousTimestamp =
-              pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
-            const continuation = isMessageContinuation(
-              {
-                authorId: currentUserId,
-                createdAt: item.createdAt,
-                conversationSequence: null,
-              },
-              index > 0
-                ? {
-                    authorId: currentUserId,
-                    createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
-                    conversationSequence: null,
-                  }
-                : (messages.at(-1) ?? null),
-            );
-            const pendingStatus =
-              editingClientMessageId === item.operation.message.clientMessageId
-                ? "editing"
-                : item.status.replaceAll("_", " ");
-            return (
-              <Fragment key={item.operation.message.clientMessageId}>
-                {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
-                  <MessageDateSeparator value={item.createdAt} />
-                )}
-                <article
-                  className={`message pending-message${
-                    continuation ? " message-continuation" : ""
-                  }`}
-                >
-                  {continuation ? (
-                    <time
-                      className="message-continuation-time"
-                      dateTime={item.createdAt}
-                      aria-hidden="true"
-                    >
-                      {messageTime(item.createdAt)}
-                    </time>
-                  ) : (
-                    <Avatar user={bootstrap.currentUser.user} />
-                  )}
-                  <div>
-                    <header className={continuation ? "sr-only" : undefined}>
-                      <strong>{bootstrap.currentUser.user.displayName}</strong>
-                      <span>{pendingStatus}</span>
-                    </header>
-                    <p>
-                      {item.operation.message.body}
-                      {continuation && <span className="pending-status"> · {pendingStatus}</span>}
-                    </p>
-                    {item.status === "permanent_failure" && (
-                      <div className="message-actions">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDraft(item.operation.message.body);
-                            setEditingClientMessageId(item.operation.message.clientMessageId);
-                          }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void runtime.retryMessage(item.operation.message.clientMessageId)
-                          }
-                        >
-                          Retry
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void runtime.discardMessage(item.operation.message.clientMessageId)
-                          }
-                        >
-                          Discard
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </article>
-              </Fragment>
-            );
-          })}
-        </div>
-
-        <form className="composer" onSubmit={(event) => void send(event)}>
-          <label className="sr-only" htmlFor="message">
-            Message
-          </label>
-          <input
-            id="message"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={
-              selectedSummary === undefined
-                ? "Choose a conversation"
-                : `Message ${runtime.conversationName(selectedSummary)}`
+        {paneView === "tasks" && tasksAvailable && selectedSummary !== undefined ? (
+          <TasksView
+            conversationId={selectedSummary.conversation.id}
+            personal={selectedIsPersonal === true}
+            archived={selectedSummary.conversation.isArchived}
+            currentUserId={currentUserId}
+            members={bootstrap.members}
+            assignableMembers={(conversationId) => {
+              const summary = bootstrap.conversations.find(
+                (candidate) => candidate.conversation.id === conversationId,
+              );
+              if (summary === undefined) return [];
+              const participantIds = new Set(summary.participantIds);
+              return bootstrap.members.filter((member) => participantIds.has(member.id));
+            }}
+            tasks={runtimeState.tasks}
+            busy={runtimeState.tasksBusy}
+            error={runtimeState.taskError}
+            conversationName={(conversationId) => {
+              const summary = bootstrap.conversations.find(
+                (candidate) => candidate.conversation.id === conversationId,
+              );
+              return summary === undefined ? "Unavailable" : runtime.conversationName(summary);
+            }}
+            isConversationArchived={(conversationId) =>
+              bootstrap.conversations.find(
+                (candidate) => candidate.conversation.id === conversationId,
+              )?.conversation.isArchived ?? true
             }
-            disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
-            maxLength={4_000}
+            onCreate={(input) =>
+              runtime.createTask({ conversationId: selectedSummary.conversation.id, ...input })
+            }
+            onUpdate={(taskId, input) => runtime.updateTask(taskId, input)}
+            onMove={(taskId, status, beforeTaskId) =>
+              runtime.moveTask(taskId, status, beforeTaskId)
+            }
+            onOpenSource={openTaskSource}
           />
-          <button
-            type="submit"
-            disabled={
-              draft.trim() === "" ||
-              selectedSummary === undefined ||
-              selectedSummary.conversation.isArchived
-            }
-          >
-            Send
-          </button>
-          {composerError !== "" && <p className="composer-error">{composerError}</p>}
-        </form>
+        ) : (
+          <>
+            <div className="message-list" ref={messageList} aria-live="polite">
+              {runtimeState.selectedConversationId !== null &&
+                runtime.hasOlder(runtimeState.selectedConversationId) && (
+                  <button
+                    className="load-older"
+                    type="button"
+                    onClick={() => {
+                      const conversationId = runtimeState.selectedConversationId;
+                      if (conversationId !== null) void runtime.loadOlder(conversationId);
+                    }}
+                  >
+                    Load older messages
+                  </button>
+                )}
+              {messages.length === 0 && pending.length === 0 ? (
+                <div className="empty-state">
+                  <h3>No messages yet</h3>
+                  <p>Start the conversation.</p>
+                </div>
+              ) : (
+                messages.map((message, index) => (
+                  <Fragment key={message.id}>
+                    {shouldShowDateSeparator(
+                      message.createdAt,
+                      messages[index - 1]?.createdAt ?? null,
+                    ) && <MessageDateSeparator value={message.createdAt} />}
+                    <MessageRow
+                      message={message}
+                      members={bootstrap.members}
+                      reactions={reactionsByMessage.get(message.id) ?? []}
+                      currentUserId={currentUserId}
+                      reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                      onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
+                      onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
+                      onCreateTask={
+                        tasksAvailable ? () => createTaskFromMessage(message) : undefined
+                      }
+                      highlighted={message.id === runtimeState.focusedMessageId}
+                      continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
+                    />
+                  </Fragment>
+                ))
+              )}
+              {pending.map((item, index) => {
+                const previousTimestamp =
+                  pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
+                const continuation = isMessageContinuation(
+                  {
+                    authorId: currentUserId,
+                    createdAt: item.createdAt,
+                    conversationSequence: null,
+                  },
+                  index > 0
+                    ? {
+                        authorId: currentUserId,
+                        createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
+                        conversationSequence: null,
+                      }
+                    : (messages.at(-1) ?? null),
+                );
+                const pendingStatus =
+                  editingClientMessageId === item.operation.message.clientMessageId
+                    ? "editing"
+                    : item.status.replaceAll("_", " ");
+                return (
+                  <Fragment key={item.operation.message.clientMessageId}>
+                    {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
+                      <MessageDateSeparator value={item.createdAt} />
+                    )}
+                    <article
+                      className={`message pending-message${
+                        continuation ? " message-continuation" : ""
+                      }`}
+                    >
+                      {continuation ? (
+                        <time
+                          className="message-continuation-time"
+                          dateTime={item.createdAt}
+                          aria-hidden="true"
+                        >
+                          {messageTime(item.createdAt)}
+                        </time>
+                      ) : (
+                        <Avatar user={bootstrap.currentUser.user} />
+                      )}
+                      <div>
+                        <header className={continuation ? "sr-only" : undefined}>
+                          <strong>{bootstrap.currentUser.user.displayName}</strong>
+                          <span>{pendingStatus}</span>
+                        </header>
+                        <p>
+                          {item.operation.message.body}
+                          {continuation && (
+                            <span className="pending-status"> · {pendingStatus}</span>
+                          )}
+                        </p>
+                        {item.status === "permanent_failure" && (
+                          <div className="message-actions">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraft(item.operation.message.body);
+                                setEditingClientMessageId(item.operation.message.clientMessageId);
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void runtime.retryMessage(item.operation.message.clientMessageId)
+                              }
+                            >
+                              Retry
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void runtime.discardMessage(item.operation.message.clientMessageId)
+                              }
+                            >
+                              Discard
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  </Fragment>
+                );
+              })}
+            </div>
+
+            <form className="composer" onSubmit={(event) => void send(event)}>
+              <label className="sr-only" htmlFor="message">
+                Message
+              </label>
+              <input
+                id="message"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={
+                  selectedSummary === undefined
+                    ? "Choose a conversation"
+                    : `Message ${runtime.conversationName(selectedSummary)}`
+                }
+                disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
+                maxLength={4_000}
+              />
+              <button
+                type="submit"
+                disabled={
+                  draft.trim() === "" ||
+                  selectedSummary === undefined ||
+                  selectedSummary.conversation.isArchived
+                }
+              >
+                Send
+              </button>
+              {composerError !== "" && <p className="composer-error">{composerError}</p>}
+            </form>
+          </>
+        )}
       </section>
       {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (
         <ChannelMembersDialog

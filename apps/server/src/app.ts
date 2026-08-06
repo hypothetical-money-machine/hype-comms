@@ -107,6 +107,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             deviceSessionId: principal.deviceSessionId,
             reactionEvents: principal.reactionEvents,
             readStateEvents: principal.readStateEvents,
+            taskEvents: principal.taskEvents,
           };
         };
   await app.register(

@@ -12,6 +12,7 @@ const workspaceId = "10000000-0000-4000-8000-000000000002";
 const sessionId = "10000000-0000-4000-8000-000000000003";
 const messageId = "10000000-0000-4000-8000-000000000004";
 const reactionId = "10000000-0000-4000-8000-000000000005";
+const taskId = "10000000-0000-4000-8000-000000000006";
 const sessionToken = "a".repeat(43);
 
 const currentUser: CurrentUser = {
@@ -53,6 +54,15 @@ class FakeWorkspaceRepository {
     }),
   );
   readonly removeReaction = vi.fn(async () => ({ removed: true, syncCursor: "8" }));
+  readonly listConversationTasks = vi.fn(async () => ({
+    tasks: [],
+    nextCursor: null,
+    hasMore: false,
+  }));
+  readonly listMyTasks = vi.fn(async () => ({ tasks: [], nextCursor: null, hasMore: false }));
+  readonly createTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
+  readonly updateTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "10" }));
+  readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "11" }));
 
   asRepository(): WorkspaceRepository {
     return this as unknown as WorkspaceRepository;
@@ -95,7 +105,7 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hmm_session=${sessionToken}`,
-      "x-hmm-chat-capabilities": "reaction-events-v1, read-state-events-v1",
+      "x-hmm-chat-capabilities": "reaction-events-v1, read-state-events-v1, task-events-v1",
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -113,9 +123,11 @@ describe("event capability routes", () => {
       100,
       true,
       true,
+      true,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
+      true,
       true,
       true,
     );
@@ -142,6 +154,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
     );
@@ -227,6 +240,108 @@ describe("event capability routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(repository.listMessageReactions).not.toHaveBeenCalled();
+  });
+});
+
+describe("task routes", () => {
+  it("validates paging and requires idempotency for every task mutation", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = { cookie: `hmm_session=${sessionToken}` };
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${messageId}/tasks?after=cursor&limit=25`,
+      headers,
+    });
+    const mine = await app.inject({ method: "GET", url: "/v1/tasks/mine", headers });
+    const missingKey = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: { ...headers, "content-type": "application/json" },
+      payload: { title: "Build the board" },
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": taskId,
+      },
+      payload: { title: "  Build the board  ", priority: "high" },
+    });
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/v1/tasks/${taskId}`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": messageId,
+      },
+      payload: {
+        expectedVersion: 1,
+        title: "Build and verify the board",
+        description: null,
+        priority: "urgent",
+        assigneeId: null,
+        dueOn: null,
+      },
+    });
+    const moved = await app.inject({
+      method: "POST",
+      url: `/v1/tasks/${taskId}/move`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": reactionId,
+      },
+      payload: { expectedVersion: 2, status: "in_progress", beforeTaskId: null },
+    });
+
+    expect(listed.statusCode).toBe(200);
+    expect(mine.statusCode).toBe(200);
+    expect(missingKey.statusCode).toBe(400);
+    expect(created.statusCode).toBe(201);
+    expect(updated.statusCode).toBe(200);
+    expect(moved.statusCode).toBe(200);
+    expect(repository.listConversationTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+      "cursor",
+      25,
+    );
+    expect(repository.listMyTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      undefined,
+      100,
+    );
+    expect(repository.createTask).toHaveBeenCalledTimes(1);
+    expect(repository.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+      {
+        title: "Build the board",
+        description: null,
+        priority: "high",
+        assigneeId: null,
+        dueOn: null,
+        sourceMessageId: null,
+      },
+      taskId,
+    );
+    expect(repository.updateTask).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      taskId,
+      expect.objectContaining({ expectedVersion: 1, priority: "urgent" }),
+      messageId,
+    );
+    expect(repository.moveTask).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      taskId,
+      { expectedVersion: 2, status: "in_progress", beforeTaskId: null },
+      reactionId,
+    );
   });
 });
 

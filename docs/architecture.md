@@ -15,15 +15,18 @@ contract tests.
   add, remove, promote, or demote members. Direct conversations contain exactly two participant
   slots; a self-DM uses the same active member in both slots, and conversations are unique for
   that unordered pair. Group DMs are not yet supported.
+- Every channel may own a task project. A self-DM owns the member's personal project and its
+  My Tasks view may also include tasks assigned to that member from visible channel projects.
+  Ordinary two-person DMs remain chat-only.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
   Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
   hint, and a client must be able to rebuild from HTTP APIs without losing its local outbox.
-- The target feature set is channels, 1:1 DMs, one-level threads, emoji reactions, user
-  mentions, unread state, file attachments, message/filename search, and native
-  notifications.
+- The target feature set is channels, 1:1 DMs, channel and personal task boards, one-level
+  threads, emoji reactions, user mentions, unread state, file attachments, message/filename
+  search, and native notifications.
 - Transport and managed storage are encrypted, but Hype Comms is not end-to-end encrypted.
   The service necessarily processes plaintext for authorization, notifications, malware
   scanning, and search; operators with explicitly granted production access are inside the
@@ -114,6 +117,7 @@ at the current 25-member scale.
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
 | Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
+| Task                   | Belongs to one channel or self-DM and has a conversation-local number, optimistic version, title, optional description/assignee/due date/source message, priority, fixed `todo`/`in_progress`/`done` status, and canonical integer rank within a status column. Completing sets `completedAt`; reopening clears it. Assignees and linked messages must be able to access the same conversation. |
 | Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments.                                                                            |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
 
@@ -126,10 +130,10 @@ log.
 
 Important constraints are enforced in PostgreSQL as well as application code: one DM per
 sorted member pair; one reaction per member/message/emoji; one message per
-author/`clientMessageId`; monotonic read cursors; unique active email/username/channel slug;
-and attachment/message/thread references within the same authorized conversation. Every
-query for history, sync, search, files, or events applies conversation visibility on the
-server; knowledge of an ID never grants access.
+author/`clientMessageId`; one task number per conversation; monotonic read cursors; unique active
+email/username/channel slug; and task/message/attachment/thread references within the same
+authorized conversation. Every query for history, tasks, sync, search, files, or events applies
+conversation visibility on the server; knowledge of an ID never grants access.
 
 Membership mutations lock the channel row to serialize competing owner changes, then reject a
 removal or demotion that would leave a members-only channel without an owner.
@@ -172,6 +176,9 @@ returns the original result. Reuse with a different fingerprint returns `409 CON
 | `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
 | `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
 | `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
+| `GET/POST /v1/conversations/:id/tasks`                                        | Page a channel/self-DM project or idempotently add its next numbered task.                                                                |
+| `GET /v1/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels.                                       |
+| `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version.                                                          |
 | `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
 | `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
@@ -203,15 +210,16 @@ domain events are:
 - `member.updated`, `channel.created`, `channel.membership_changed`, and
   `direct_conversation.created`;
 - `message.created`, `reaction.added`, and `reaction.removed`;
+- `task.created` and `task.updated`;
 - `read_cursor.updated` (the owning member only); and
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
-Reaction events are capability-gated for rolling compatibility. A client advertises
-`reaction-events-v1` through `X-HMM-Chat-Capabilities` on both `GET /v1/sync` and
-`POST /v1/realtime/tickets`. Clients without that capability do not receive reaction events,
-but the server still advances their scanned cursor past those events so released clients neither
-fail strict parsing nor loop on an unsupported event.
+Reaction and task events are capability-gated for rolling compatibility. A client advertises
+`reaction-events-v1` and `task-events-v1` through `X-HMM-Chat-Capabilities` on both
+`GET /v1/sync` and `POST /v1/realtime/tickets`. Clients without a capability do not receive its
+events, but the server still advances their scanned cursor past those events so released clients
+neither fail strict parsing nor loop on an unsupported event.
 
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
 and optional conversation IDs, and a typed payload. Workspace-channel events target active
@@ -232,9 +240,9 @@ renderer does not get direct production-network access.
 
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message
-bodies, reaction emoji, member/workspace display data, attachment metadata, and queued mutation
-payloads are encrypted as AES-256-GCM values with a fresh nonce and store/key/schema version as
-authenticated additional data.
+bodies, reaction emoji, task titles/descriptions/dates, member/workspace display data, attachment
+metadata, and queued mutation payloads are encrypted as AES-256-GCM values with a fresh nonce and
+store/key/schema version as authenticated additional data.
 
 Electron main generates the cache data key, wraps it with `safeStorage`, and exposes only
 bounded, validated batch encrypt/decrypt IPC. The raw key never crosses preload. On macOS
@@ -285,6 +293,11 @@ later sends in that conversation until the user resolves it, preserving authored
 Server uniqueness on author plus `clientMessageId` is permanent, so a retry after local or
 server restart cannot create a duplicate. Editing a failed queued payload discards its old
 key and creates a new client message/key; changed content never reuses an accepted key.
+
+Task reads and realtime projections are available from the encrypted cache while offline. Task
+creates, edits, and Kanban moves currently require connectivity and are not placed in the message
+outbox; every online mutation is idempotent and uses an expected task version so concurrent edits
+surface as a conflict instead of silently overwriting another device.
 
 Unread state is server-authoritative. A focused conversation advances only through the
 newest message actually rendered, never blindly to the server head; the API applies
@@ -342,6 +355,10 @@ shared focus treatment before it can be added to the built-in registry.
 - Reactions are grouped by emoji beneath each main-timeline message. The quick picker toggles the
   current member's reaction, archived conversations expose reactions read-only, history pages
   batch-hydrate current state, and capability-gated sync/realtime events converge other devices.
+- Channels expose Chat and Tasks panes, with Board as the default task view and List as an option.
+  The Board has fixed To do, In progress, and Done columns with canonical drag/drop and keyboard
+  reordering. A message can create a source-linked task. The self-DM defaults to My Tasks in List
+  mode and can include work assigned from visible channel boards.
 - Upload URLs accept one exact content length/type/checksum into an S3 quarantine prefix.
   Completion enqueues an isolated scanner; only a clean verdict atomically changes status
   to ready and emits an event. EICAR/unknown executable content becomes failed, is deleted,
@@ -493,11 +510,11 @@ downgrade.
 
 | Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                                                |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                                            |
+| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, task ordering/version conflicts, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                     |
 | PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                                          |
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
-| Feature integration        | Three-user scenarios cover channel/DM isolation, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                                                                 |
+| Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                        |
 | Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 (x64 and ARM64), and Ubuntu 24.04 (x64 and ARM64) AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
 | Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |

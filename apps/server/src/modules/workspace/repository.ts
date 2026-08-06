@@ -7,6 +7,7 @@ import {
   MESSAGE_SEARCH_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
+  TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
@@ -27,6 +28,9 @@ import {
   removeReactionResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
+  taskListResponseSchema,
+  taskMutationResponseSchema,
+  taskSchema,
   userSchema,
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
@@ -39,6 +43,7 @@ import {
   type ConversationMutationResponse,
   type ConversationSummary,
   type CreateChannelRequest,
+  type CreateTaskRequest,
   type DirectConversationRequest,
   type ListConversationsResponse,
   type ListMessageReactionsResponse,
@@ -52,6 +57,12 @@ import {
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
+  type Task,
+  type TaskListResponse,
+  type TaskMutationResponse,
+  type TaskStatus,
+  type MoveTaskRequest,
+  type UpdateTaskRequest,
   type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
@@ -71,6 +82,7 @@ const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
+const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface WorkspaceRow extends QueryResultRow {
@@ -104,6 +116,7 @@ interface ConversationRow extends QueryResultRow {
   created_by: string | null;
   dm_user_low_id: string | null;
   dm_user_high_id: string | null;
+  last_task_number: string;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -154,6 +167,26 @@ interface ReactionRow extends QueryResultRow {
   created_at: Date | string;
 }
 
+interface TaskRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  number: string;
+  version: number;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  priority: Task["priority"];
+  assignee_id: string | null;
+  due_on: Date | string | null;
+  source_message_id: string | null;
+  rank: string;
+  created_by: string;
+  completed_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
 interface ReactionCountRow extends QueryResultRow {
   total: string;
   member_total: string;
@@ -187,6 +220,7 @@ interface TicketRow extends QueryResultRow {
   device_session_id: string;
   reaction_events: boolean;
   read_state_events: boolean;
+  task_events: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -221,6 +255,7 @@ export interface ConsumedRealtimeTicket {
   readonly deviceSessionId: string;
   readonly reactionEvents: boolean;
   readonly readStateEvents: boolean;
+  readonly taskEvents: boolean;
 }
 
 export interface WorkspacePrincipal {
@@ -228,6 +263,7 @@ export interface WorkspacePrincipal {
   readonly userId: string;
   readonly reactionEvents?: boolean;
   readonly readStateEvents?: boolean;
+  readonly taskEvents?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -333,6 +369,34 @@ function mapReaction(row: ReactionRow): Reaction {
     userId: row.user_id,
     emoji: row.emoji,
     createdAt: iso(row.created_at),
+  });
+}
+
+function taskDueOn(value: Date | string | null): string | null {
+  if (value === null) return null;
+  if (typeof value === "string") return value.slice(0, 10);
+  return value.toISOString().slice(0, 10);
+}
+
+function mapTask(row: TaskRow): Task {
+  return taskSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    conversationId: row.conversation_id,
+    number: row.number,
+    version: row.version,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    priority: row.priority,
+    assigneeId: row.assignee_id,
+    dueOn: taskDueOn(row.due_on),
+    sourceMessageId: row.source_message_id,
+    rank: row.rank,
+    createdBy: row.created_by,
+    completedAt: nullableIso(row.completed_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   });
 }
 
@@ -454,6 +518,40 @@ function decodeConversationCursor(cursor: string | undefined): string | null {
     return parsed.id;
   } catch {
     throw new ApiError(400, "BAD_REQUEST", "Invalid conversation cursor");
+  }
+}
+
+interface TaskCursor {
+  readonly createdAt: string;
+  readonly id: string;
+}
+
+function encodeTaskCursor(row: TaskRow): string {
+  return Buffer.from(
+    JSON.stringify({ createdAt: iso(row.created_at), id: row.id } satisfies TaskCursor),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeTaskCursor(cursor: string | undefined): TaskCursor | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("createdAt" in parsed) ||
+      typeof parsed.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(parsed.createdAt)) ||
+      !("id" in parsed) ||
+      typeof parsed.id !== "string" ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      throw new Error("Invalid cursor");
+    }
+    return { createdAt: new Date(parsed.createdAt).toISOString(), id: parsed.id };
+  } catch {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid task cursor");
   }
 }
 
@@ -754,6 +852,26 @@ export class WorkspaceRepository {
         [conversationId, memberId],
       );
       const audienceAfter = await this.#conversationAudience(client, conversation);
+      const unassigned = await client.query<TaskRow>(
+        `UPDATE tasks
+            SET assignee_id = NULL,
+                version = version + 1,
+                updated_at = clock_timestamp()
+          WHERE conversation_id = $1
+            AND assignee_id = $2
+          RETURNING *`,
+        [conversationId, memberId],
+      );
+      for (const row of unassigned.rows) {
+        const task = mapTask(row);
+        await this.#insertEvent(client, identity, {
+          type: "task.updated",
+          conversation,
+          entityVersion: task.version,
+          payload: { task },
+          audienceUserIds: audienceAfter,
+        });
+      }
       const event = await this.#insertEvent(client, identity, {
         type: "channel.membership_changed",
         conversation,
@@ -1130,6 +1248,364 @@ export class WorkspaceRepository {
     }
   }
 
+  async listConversationTasks(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    after: string | undefined,
+    limit: number,
+  ): Promise<TaskListResponse> {
+    const cursor = decodeTaskCursor(after);
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
+    const client = await this.pool.connect();
+    try {
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+      );
+      this.#requireTaskConversation(identity, conversation);
+      const result = await client.query<TaskRow>(
+        `SELECT task.*
+           FROM tasks AS task
+          WHERE task.conversation_id = $1
+            AND (
+              $2::timestamptz IS NULL
+              OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
+            )
+          ORDER BY task.created_at DESC, task.id DESC
+          LIMIT $4`,
+        [conversationId, cursor?.createdAt ?? null, cursor?.id ?? null, pageLimit + 1],
+      );
+      const rows = result.rows.slice(0, pageLimit);
+      const last = rows.at(-1);
+      const nextCursor =
+        result.rows.length > pageLimit && last !== undefined ? encodeTaskCursor(last) : null;
+      return taskListResponseSchema.parse({
+        tasks: rows.map(mapTask),
+        nextCursor,
+        hasMore: nextCursor !== null,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async listMyTasks(
+    identity: AuthenticatedIdentity,
+    after: string | undefined,
+    limit: number,
+  ): Promise<TaskListResponse> {
+    const cursor = decodeTaskCursor(after);
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<TaskRow>(
+        `SELECT task.*
+           FROM tasks AS task
+           JOIN conversations AS conversation
+             ON conversation.id = task.conversation_id
+            AND conversation.workspace_id = task.workspace_id
+          WHERE task.workspace_id = $1
+            AND conversation.is_archived = false
+            AND ${conversationVisibilitySql("conversation", "$2")}
+            AND (
+              task.assignee_id = $2
+              OR (
+                conversation.kind = 'direct_message'
+                AND conversation.dm_user_low_id = $2
+                AND conversation.dm_user_high_id = $2
+              )
+            )
+            AND (
+              $3::timestamptz IS NULL
+              OR (task.created_at, task.id) < ($3::timestamptz, $4::uuid)
+            )
+          ORDER BY task.created_at DESC, task.id DESC
+          LIMIT $5`,
+        [
+          identity.currentUser.workspaceId,
+          identity.currentUser.user.id,
+          cursor?.createdAt ?? null,
+          cursor?.id ?? null,
+          pageLimit + 1,
+        ],
+      );
+      const rows = result.rows.slice(0, pageLimit);
+      const last = rows.at(-1);
+      const nextCursor =
+        result.rows.length > pageLimit && last !== undefined ? encodeTaskCursor(last) : null;
+      return taskListResponseSchema.parse({
+        tasks: rows.map(mapTask),
+        nextCursor,
+        hasMore: nextCursor !== null,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async createTask(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    input: CreateTaskRequest,
+    idempotencyKey: string,
+  ): Promise<TaskMutationResponse> {
+    return this.#transaction(async (client) => {
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        true,
+        true,
+      );
+      this.#requireTaskConversation(identity, conversation);
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: `/v1/conversations/${conversationId}/tasks`,
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 201,
+          responseSchema: taskMutationResponseSchema,
+        },
+        async () => {
+          await this.#validateTaskReferences(client, identity, conversation, input);
+          const numberResult = await client.query<{ next: string } & QueryResultRow>(
+            `UPDATE conversations
+                SET last_task_number = last_task_number + 1,
+                    updated_at = clock_timestamp()
+              WHERE id = $1
+              RETURNING last_task_number::text AS next`,
+            [conversationId],
+          );
+          const number = numberResult.rows[0]?.next;
+          if (number === undefined) throw new Error("Could not allocate task number");
+          const rankResult = await client.query<{ next: string } & QueryResultRow>(
+            `SELECT (coalesce(max(rank), 0) + $2::bigint)::text AS next
+               FROM tasks
+              WHERE conversation_id = $1
+                AND status = 'todo'`,
+            [conversationId, TASK_RANK_STEP.toString()],
+          );
+          const rank = rankResult.rows[0]?.next;
+          if (rank === undefined) throw new Error("Could not allocate task rank");
+          const inserted = await client.query<TaskRow>(
+            `INSERT INTO tasks (
+               id, workspace_id, conversation_id, number, title, description, status,
+               priority, assignee_id, due_on, source_message_id, rank, created_by
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, 'todo', $7, $8, $9, $10, $11, $12)
+             RETURNING *`,
+            [
+              randomUUID(),
+              identity.currentUser.workspaceId,
+              conversationId,
+              number,
+              input.title,
+              input.description,
+              input.priority,
+              input.assigneeId,
+              input.dueOn,
+              input.sourceMessageId,
+              rank,
+              identity.currentUser.user.id,
+            ],
+          );
+          const row = inserted.rows[0];
+          if (row === undefined) throw new Error("Task insert returned no row");
+          const task = mapTask(row);
+          const event = await this.#insertEvent(client, identity, {
+            type: "task.created",
+            conversation,
+            entityVersion: task.version,
+            payload: { task },
+            audienceUserIds: await this.#conversationAudience(client, conversation),
+          });
+          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
+        },
+      );
+    });
+  }
+
+  async updateTask(
+    identity: AuthenticatedIdentity,
+    taskId: string,
+    input: UpdateTaskRequest,
+    idempotencyKey: string,
+  ): Promise<TaskMutationResponse> {
+    return this.#transaction(async (client) => {
+      const { conversation, task: current } = await this.#requireTaskTarget(
+        client,
+        identity,
+        taskId,
+      );
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: `/v1/tasks/${taskId}`,
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 200,
+          responseSchema: taskMutationResponseSchema,
+        },
+        async () => {
+          if (current.version !== input.expectedVersion) {
+            throw new ApiError(409, "CONFLICT", "The task changed on another device");
+          }
+          await this.#validateTaskReferences(client, identity, conversation, input);
+          const updated = await client.query<TaskRow>(
+            `UPDATE tasks
+                SET title = $2,
+                    description = $3,
+                    priority = $4,
+                    assignee_id = $5,
+                    due_on = $6,
+                    version = version + 1,
+                    updated_at = clock_timestamp()
+              WHERE id = $1
+              RETURNING *`,
+            [taskId, input.title, input.description, input.priority, input.assigneeId, input.dueOn],
+          );
+          const row = updated.rows[0];
+          if (row === undefined) throw new Error("Task update returned no row");
+          const task = mapTask(row);
+          const event = await this.#insertEvent(client, identity, {
+            type: "task.updated",
+            conversation,
+            entityVersion: task.version,
+            payload: { task },
+            audienceUserIds: await this.#conversationAudience(client, conversation),
+          });
+          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
+        },
+      );
+    });
+  }
+
+  async moveTask(
+    identity: AuthenticatedIdentity,
+    taskId: string,
+    input: MoveTaskRequest,
+    idempotencyKey: string,
+  ): Promise<TaskMutationResponse> {
+    return this.#transaction(async (client) => {
+      const { conversation, task: current } = await this.#requireTaskTarget(
+        client,
+        identity,
+        taskId,
+      );
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: `/v1/tasks/${taskId}/move`,
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 200,
+          responseSchema: taskMutationResponseSchema,
+        },
+        async () => {
+          if (current.version !== input.expectedVersion) {
+            throw new ApiError(409, "CONFLICT", "The task changed on another device");
+          }
+          const orderedResult = await client.query<TaskRow>(
+            `SELECT *
+               FROM tasks
+              WHERE conversation_id = $1
+                AND status = $2
+                AND id <> $3
+              ORDER BY rank, id
+              FOR UPDATE`,
+            [conversation.id, input.status, taskId],
+          );
+          const ordered = orderedResult.rows;
+          const insertionIndex =
+            input.beforeTaskId === null
+              ? ordered.length
+              : ordered.findIndex((task) => task.id === input.beforeTaskId);
+          if (insertionIndex < 0) {
+            throw new ApiError(400, "BAD_REQUEST", "The Kanban destination is invalid");
+          }
+          const previousRank =
+            insertionIndex === 0 ? 0n : BigInt(ordered[insertionIndex - 1]?.rank ?? "0");
+          const nextRank =
+            insertionIndex === ordered.length ? null : BigInt(ordered[insertionIndex]?.rank ?? "0");
+          const canAppend =
+            nextRank === null && previousRank <= POSTGRES_BIGINT_MAX - TASK_RANK_STEP;
+          const hasGap = nextRank !== null && nextRank - previousRank > 1n;
+          const changed: TaskRow[] = [];
+
+          if (canAppend || hasGap) {
+            const rank = canAppend
+              ? previousRank + TASK_RANK_STEP
+              : (previousRank + (nextRank ?? previousRank)) / 2n;
+            const moved = await client.query<TaskRow>(
+              `UPDATE tasks
+                  SET status = $2,
+                      rank = $3,
+                      completed_at = CASE
+                        WHEN $2 = 'done' THEN coalesce(completed_at, clock_timestamp())
+                        ELSE NULL
+                      END,
+                      version = version + 1,
+                      updated_at = clock_timestamp()
+                WHERE id = $1
+                RETURNING *`,
+              [taskId, input.status, rank.toString()],
+            );
+            const row = moved.rows[0];
+            if (row === undefined) throw new Error("Task move returned no row");
+            changed.push(row);
+          } else {
+            const ids = ordered.map((task) => task.id);
+            ids.splice(insertionIndex, 0, taskId);
+            for (const [index, id] of ids.entries()) {
+              const rank = BigInt(index + 1) * TASK_RANK_STEP;
+              const updated = await client.query<TaskRow>(
+                `UPDATE tasks
+                    SET status = CASE WHEN id = $1 THEN $2 ELSE status END,
+                        rank = $3,
+                        completed_at = CASE
+                          WHEN id = $1 AND $2 = 'done' THEN coalesce(completed_at, clock_timestamp())
+                          WHEN id = $1 THEN NULL
+                          ELSE completed_at
+                        END,
+                        version = version + 1,
+                        updated_at = clock_timestamp()
+                  WHERE id = $4
+                  RETURNING *`,
+                [taskId, input.status, rank.toString(), id],
+              );
+              const row = updated.rows[0];
+              if (row === undefined) throw new Error("Task rebalance returned no row");
+              changed.push(row);
+            }
+          }
+
+          const audienceUserIds = await this.#conversationAudience(client, conversation);
+          let syncCursor = "0";
+          for (const row of changed) {
+            const task = mapTask(row);
+            const event = await this.#insertEvent(client, identity, {
+              type: "task.updated",
+              conversation,
+              entityVersion: task.version,
+              payload: { task },
+              audienceUserIds,
+            });
+            syncCursor = event.workspaceSequence;
+          }
+          const moved = changed.find((row) => row.id === taskId);
+          if (moved === undefined) throw new Error("Moved task was not returned");
+          return taskMutationResponseSchema.parse({ task: mapTask(moved), syncCursor });
+        },
+      );
+    });
+  }
+
   async sendMessage(
     identity: AuthenticatedIdentity,
     conversationId: string,
@@ -1341,6 +1817,7 @@ export class WorkspaceRepository {
     limit: number,
     reactionEvents = false,
     readStateEvents = false,
+    taskEvents = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -1348,6 +1825,7 @@ export class WorkspaceRepository {
         userId: identity.currentUser.user.id,
         reactionEvents,
         readStateEvents,
+        taskEvents,
       },
       after,
       limit,
@@ -1407,6 +1885,10 @@ export class WorkspaceRepository {
                     $5::boolean
                     OR event.event_type NOT IN ('reaction.added', 'reaction.removed')
                   )
+                  AND (
+                    $6::boolean
+                    OR event.event_type NOT IN ('task.created', 'task.updated')
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -1419,6 +1901,7 @@ export class WorkspaceRepository {
           after,
           limit + 1,
           principal.reactionEvents ?? false,
+          principal.taskEvents ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -1440,6 +1923,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     reactionEvents = false,
     readStateEvents = false,
+    taskEvents = false,
   ) {
     const token = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(token).digest();
@@ -1447,8 +1931,8 @@ export class WorkspaceRepository {
     await this.pool.query(
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events,
-          read_state_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          read_state_events, task_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -1458,6 +1942,7 @@ export class WorkspaceRepository {
         expiresAt,
         reactionEvents,
         readStateEvents,
+        taskEvents,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -1476,10 +1961,10 @@ export class WorkspaceRepository {
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
          RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-                   ticket.reaction_events, ticket.read_state_events
+                   ticket.reaction_events, ticket.read_state_events, ticket.task_events
        )
        SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-              ticket.reaction_events, ticket.read_state_events
+              ticket.reaction_events, ticket.read_state_events, ticket.task_events
          FROM consumed_ticket AS ticket
          JOIN device_sessions AS session
            ON session.id = ticket.device_session_id
@@ -1501,6 +1986,7 @@ export class WorkspaceRepository {
           deviceSessionId: row.device_session_id,
           reactionEvents: row.reaction_events,
           readStateEvents: row.read_state_events,
+          taskEvents: row.task_events,
         };
   }
 
@@ -1698,6 +2184,85 @@ export class WorkspaceRepository {
       unreadCount: Number(unreadResult.rows[0]?.count ?? "0"),
       mentionCount: Number(mentionResult.rows[0]?.count ?? "0"),
     };
+  }
+
+  #requireTaskConversation(identity: AuthenticatedIdentity, conversation: ConversationRow): void {
+    if (conversation.kind === "channel") return;
+    if (
+      conversation.dm_user_low_id === identity.currentUser.user.id &&
+      conversation.dm_user_high_id === identity.currentUser.user.id
+    ) {
+      return;
+    }
+    throw new ApiError(404, "NOT_FOUND", "Tasks are available in channels and self messages");
+  }
+
+  async #requireTaskTarget(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    taskId: string,
+  ): Promise<{ readonly conversation: ConversationRow; readonly task: TaskRow }> {
+    const located = await client.query<{ conversation_id: string } & QueryResultRow>(
+      `SELECT task.conversation_id
+         FROM tasks AS task
+         JOIN conversations AS conversation
+           ON conversation.id = task.conversation_id
+          AND conversation.workspace_id = task.workspace_id
+        WHERE task.id = $1
+          AND task.workspace_id = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}`,
+      [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+    );
+    const conversationId = located.rows[0]?.conversation_id;
+    if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+    const conversation = await this.#requireVisibleConversation(
+      client,
+      identity,
+      conversationId,
+      true,
+      true,
+    );
+    this.#requireTaskConversation(identity, conversation);
+    const taskResult = await client.query<TaskRow>(
+      `SELECT * FROM tasks WHERE id = $1 AND conversation_id = $2 FOR UPDATE`,
+      [taskId, conversation.id],
+    );
+    const task = taskResult.rows[0];
+    if (task === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+    return { conversation, task };
+  }
+
+  async #validateTaskReferences(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
+    input: {
+      readonly assigneeId: string | null;
+      readonly sourceMessageId?: string | null;
+    },
+  ): Promise<void> {
+    if (input.assigneeId !== null) {
+      const audience = new Set(await this.#conversationAudience(client, conversation));
+      if (!audience.has(input.assigneeId)) {
+        throw new ApiError(400, "BAD_REQUEST", "The assignee cannot access this task");
+      }
+    }
+    if (input.sourceMessageId !== undefined && input.sourceMessageId !== null) {
+      const source = await client.query(
+        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2`,
+        [input.sourceMessageId, conversation.id],
+      );
+      if (source.rowCount !== 1) {
+        throw new ApiError(400, "BAD_REQUEST", "The source message is unavailable");
+      }
+    }
+    if (
+      conversation.kind === "direct_message" &&
+      input.assigneeId !== null &&
+      input.assigneeId !== identity.currentUser.user.id
+    ) {
+      throw new ApiError(400, "BAD_REQUEST", "Personal tasks can only be assigned to you");
+    }
   }
 
   async #requireVisibleConversation(
@@ -1954,6 +2519,7 @@ export class WorkspaceRepository {
       readonly type: WorkspaceEvent["type"];
       readonly conversation: ConversationRow;
       readonly conversationSequence?: string;
+      readonly entityVersion?: number;
       readonly payload: WorkspaceEvent["payload"];
       readonly audienceUserIds?: readonly string[];
     },
@@ -1970,6 +2536,7 @@ export class WorkspaceRepository {
       readonly type: WorkspaceEvent["type"];
       readonly conversation: ConversationRow;
       readonly conversationSequence?: string;
+      readonly entityVersion?: number;
       readonly payload: WorkspaceEvent["payload"];
       readonly audienceUserIds?: readonly string[];
     },
@@ -1984,7 +2551,7 @@ export class WorkspaceRepository {
       conversationId: input.conversation.id,
       workspaceSequence: sequence,
       conversationSequence: input.conversationSequence ?? null,
-      entityVersion: 1,
+      entityVersion: input.entityVersion ?? 1,
       delivery: "at_least_once",
       payload: input.payload,
     });
