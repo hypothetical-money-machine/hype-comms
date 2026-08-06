@@ -7,6 +7,8 @@ import {
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
   apiErrorEnvelopeSchema,
+  botAccessTokenSchema,
+  botScopesSchema,
   channelSlugFromName,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
@@ -14,6 +16,7 @@ import {
   conversationSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
+  currentUserSchema,
   displayNameSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
@@ -197,7 +200,19 @@ describe("entity contracts", () => {
         createdAt: NOW,
         updatedAt: NOW,
       }),
-    ).toMatchObject({ id: USER_ID });
+    ).toMatchObject({ id: USER_ID, kind: "human" });
+
+    expect(
+      userSchema.parse({
+        id: USER_ID,
+        kind: "bot",
+        username: "release-bot",
+        displayName: "Release Bot",
+        avatarUrl: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toMatchObject({ kind: "bot" });
 
     expect(
       conversationSchema.parse({
@@ -265,6 +280,25 @@ describe("entity contracts", () => {
         createdAt: NOW,
       }),
     ).toMatchObject({ emoji: "❤️" });
+  });
+
+  it("accepts only prefixed 256-bit bot tokens and unique task scopes", () => {
+    expect(botAccessTokenSchema.parse(`hmm_bot_${"a".repeat(43)}`)).toHaveLength(51);
+    expect(() => botAccessTokenSchema.parse("a".repeat(43))).toThrow();
+    expect(botScopesSchema.parse(["tasks:read", "tasks:write"])).toEqual([
+      "tasks:read",
+      "tasks:write",
+    ]);
+    expect(() => botScopesSchema.parse(["tasks:read", "tasks:read"])).toThrow();
+  });
+
+  it("keeps bot principals out of the human desktop-session contract", () => {
+    expect(() =>
+      currentUserSchema.parse({
+        ...BOOTSTRAP.currentUser,
+        user: { ...BOOTSTRAP.currentUser.user, kind: "bot" },
+      }),
+    ).toThrow();
   });
 
   it("validates strict task entities and optimistic mutation operations", () => {

@@ -50,6 +50,7 @@ describeWithPostgres("runMigrations", () => {
           "0008_hype_comms_rebrand.sql",
           "0009_self_direct_messages.sql",
           "0010_conversation_tasks.sql",
+          "0011_bot_task_principals.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -68,6 +69,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0008_hype_comms_rebrand.sql" },
         { filename: "0009_self_direct_messages.sql" },
         { filename: "0010_conversation_tasks.sql" },
+        { filename: "0011_bot_task_principals.sql" },
       ]);
 
       const userId = randomUUID();

@@ -28,6 +28,7 @@ import { withTransaction } from "../../db/pool.js";
 interface UserRow extends QueryResultRow {
   readonly id: unknown;
   readonly email: unknown;
+  readonly kind: unknown;
   readonly username: unknown;
   readonly display_name: unknown;
   readonly avatar_url: unknown;
@@ -105,7 +106,7 @@ const magicLinkRecordSchema = z
   .strict();
 const countRowSchema = z.object({ count: z.coerce.number().int().nonnegative() }).strict();
 
-export type IdentityUser = User & { readonly email: Email };
+export type IdentityUser = User & { readonly email: Email | null };
 export type MagicLinkRecord = z.infer<typeof magicLinkRecordSchema>;
 
 export interface InsertUserInput {
@@ -181,13 +182,14 @@ function nullableTimestamp(value: unknown): string | null {
 function mapUser(row: UserRow): IdentityUser {
   const user = userSchema.parse({
     id: row.id,
+    kind: row.kind,
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
     createdAt: timestamp(row.created_at),
     updatedAt: timestamp(row.updated_at),
   });
-  return { ...user, email: emailSchema.parse(row.email) };
+  return { ...user, email: emailSchema.nullable().parse(row.email) };
 }
 
 function mapWorkspace(row: WorkspaceRow): Workspace {
@@ -283,7 +285,7 @@ export class IdentityRepository {
 
   async findUserById(id: EntityId): Promise<IdentityUser | null> {
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE id = $1`,
       [id],
@@ -294,7 +296,7 @@ export class IdentityRepository {
   async findUserByEmail(email: Email): Promise<IdentityUser | null> {
     const normalizedEmail = emailSchema.parse(email);
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE email = $1`,
       [normalizedEmail],
@@ -304,7 +306,7 @@ export class IdentityRepository {
 
   async findUserByUsername(username: string): Promise<IdentityUser | null> {
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE username = $1`,
       [username],
@@ -316,7 +318,7 @@ export class IdentityRepository {
     const result = await this.#database.query<UserRow>(
       `INSERT INTO users (id, email, username, display_name, avatar_url)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, username, display_name, avatar_url, created_at, updated_at`,
+       RETURNING id, email, kind, username, display_name, avatar_url, created_at, updated_at`,
       [
         input.id,
         emailSchema.parse(input.email),

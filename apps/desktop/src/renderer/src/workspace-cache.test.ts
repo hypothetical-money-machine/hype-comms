@@ -32,6 +32,7 @@ const scope = { userId: USER_ID, workspaceId: WORKSPACE_ID };
 
 const user = {
   id: USER_ID,
+  kind: "human",
   username: "morgan",
   displayName: "Morgan",
   avatarUrl: null,

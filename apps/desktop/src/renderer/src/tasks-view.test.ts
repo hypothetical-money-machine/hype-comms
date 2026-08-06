@@ -18,6 +18,7 @@ const NOW = "2026-08-05T12:00:00.000Z";
 const members: readonly User[] = [
   {
     id: USER_ID,
+    kind: "human",
     username: "morgan",
     displayName: "Morgan",
     avatarUrl: null,
@@ -26,6 +27,7 @@ const members: readonly User[] = [
   },
   {
     id: PEER_ID,
+    kind: "human",
     username: "alex",
     displayName: "Alex",
     avatarUrl: null,

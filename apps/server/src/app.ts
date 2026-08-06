@@ -6,6 +6,7 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import type { MetricsRegistry } from "./metrics.js";
+import type { BotService } from "./modules/bots/service.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
@@ -27,6 +28,7 @@ export interface BuildAppOptions {
   };
   readonly identity?: {
     readonly service: IdentityService;
+    readonly botService?: BotService;
     /** False when links are issued by an administrator, which disables self-service requests. */
     readonly selfServiceMagicLink?: boolean;
   };
@@ -138,6 +140,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (options.identity !== undefined && options.workspace !== undefined) {
         await v1.register(workspaceRoutes, {
           identityService: options.identity.service,
+          ...(options.identity.botService === undefined
+            ? {}
+            : { botService: options.identity.botService }),
           repository: options.workspace.repository,
         });
       }

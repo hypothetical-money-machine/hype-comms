@@ -37,6 +37,7 @@ export type RefreshedSession = RedeemedSession;
 export interface AuthenticatedIdentity {
   readonly currentUser: CurrentUser;
   readonly sessionId: EntityId;
+  readonly principalKind: "human";
 }
 
 export interface SeedOwnerInput {
@@ -188,7 +189,9 @@ export class IdentityService {
     const session = await this.#repository.findDeviceSessionByTokenHash(hashToken(sessionToken));
     if (session === null || isExpired(session.expiresAt, now)) return null;
     const currentUser = await this.#currentUser(session.userId);
-    return currentUser === null ? null : { currentUser, sessionId: session.id };
+    return currentUser === null
+      ? null
+      : { currentUser, sessionId: session.id, principalKind: "human" };
   }
 
   async refreshSession(sessionToken: string): Promise<RefreshedSession> {
@@ -392,7 +395,9 @@ export class IdentityService {
       this.#repository.findUserById(userId),
       this.#repository.findActiveMembershipByUserId(userId),
     ]);
-    if (user === null || membership === null) return null;
+    if (user === null || user.kind !== "human" || user.email === null || membership === null) {
+      return null;
+    }
     const { email, ...publicUser } = user;
     return currentUserSchema.parse({
       user: publicUser,

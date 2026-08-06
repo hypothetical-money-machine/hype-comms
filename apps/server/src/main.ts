@@ -7,6 +7,7 @@ import { createPool } from "./db/pool.js";
 import { Lifecycle } from "./lifecycle.js";
 import { createLoggerOptions } from "./logging.js";
 import { MetricsRegistry } from "./metrics.js";
+import { BotService } from "./modules/bots/service.js";
 import {
   ConsoleEmailSender,
   ManualEmailSender,
@@ -26,7 +27,12 @@ async function main(): Promise<void> {
   let pool: Pool | undefined;
   let startedRealtimeHub: RealtimeEventHub | undefined;
   let identity:
-    { readonly service: IdentityService; readonly selfServiceMagicLink: boolean } | undefined;
+    | {
+        readonly service: IdentityService;
+        readonly botService: BotService;
+        readonly selfServiceMagicLink: boolean;
+      }
+    | undefined;
   let workspace:
     | { readonly repository: WorkspaceRepository; readonly realtimeHub: RealtimeEventHub }
     | undefined;
@@ -55,7 +61,11 @@ async function main(): Promise<void> {
         config.publicApiUrl,
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
-      identity = { service, selfServiceMagicLink: config.emailDelivery !== "manual" };
+      identity = {
+        service,
+        botService: new BotService(databasePool),
+        selfServiceMagicLink: config.emailDelivery !== "manual",
+      };
       const repository = new WorkspaceRepository(databasePool);
       const realtimeHub = new RealtimeEventHub(databasePool);
       await realtimeHub.start();

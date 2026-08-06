@@ -25,12 +25,15 @@ import {
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import { requireTaskIdentity } from "../bots/request-auth.js";
+import type { BotService } from "../bots/service.js";
 import { requireAuthenticatedIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "./repository.js";
 
 interface WorkspaceRoutesOptions {
   readonly identityService: IdentityService;
+  readonly botService?: BotService;
   readonly repository: WorkspaceRepository;
 }
 
@@ -89,10 +92,8 @@ function capabilities(value: string | string[] | undefined): readonly string[] {
   return parsed.data;
 }
 
-export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (
-  app,
-  { identityService, repository },
-) => {
+export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (app, options) => {
+  const { identityService, botService, repository } = options;
   app.get("/bootstrap", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     return repository.bootstrap(identity);
@@ -183,7 +184,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   });
 
   app.get("/conversations/:id/tasks", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
     const { id } = parameters(request.params);
     const query = taskListQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
@@ -191,14 +192,14 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   });
 
   app.get("/tasks/mine", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
     const query = taskListQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
     return repository.listMyTasks(identity, query.data.after, query.data.limit);
   });
 
   app.post("/conversations/:id/tasks", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
     const { id } = parameters(request.params);
     const body = createTaskRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task");
@@ -215,7 +216,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   });
 
   app.patch("/tasks/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
     const { id } = parameters(request.params);
     const body = updateTaskRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task update");
@@ -228,7 +229,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   });
 
   app.post("/tasks/:id/move", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
     const { id } = parameters(request.params);
     const body = moveTaskRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task move");

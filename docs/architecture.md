@@ -8,9 +8,12 @@ contract tests.
 ## Product and platform invariants
 
 - Today there is exactly one hosted workspace and no public registration. One bootstrapped
-  owner invites members by email; the service rejects a 26th active membership.
+  owner invites human members by email and provisions bot members through an operator CLI; the
+  service rejects a 26th active human-or-bot membership.
   Multi-workspace and open signup are deliberate future changes, not emergent ones.
-- Channels are either workspace-visible or restricted to an explicit member list. A
+- Channels are either workspace-visible or restricted to an explicit human member list. Human
+  members see workspace-visible channels automatically; bots require an explicit grant for every
+  channel, including workspace-visible channels. A
   members-only channel always retains at least one channel owner, and only its owners can
   add, remove, promote, or demote members. Direct conversations contain exactly two participant
   slots; a self-DM uses the same active member in both slots, and conversations are unique for
@@ -110,9 +113,11 @@ at the current 25-member scale.
 | Aggregate              | Current rules                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                                                                                                    |
-| User and membership    | Email is normalized for comparison and unique. A membership is `owner` or `member` and `invited`, `active`, or `revoked`. Capacity counts active memberships transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                                                                                                   |
+| User and membership    | A user is `human` or `bot`. Human email is normalized for comparison and unique; bots have no email and cannot create device sessions. A membership is `owner` or `member` and `invited`, `active`, or `revoked`; bots are always members. Capacity counts every active human and bot transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                                    |
 | Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                                                                                                          |
-| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active member, while `members` is readable only by active conversation memberships. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted pair and is readable only by that pair. Archived channels remain readable but reject writes. |
+| Bot credential         | Owner-issued service credential with one or both `tasks:read` and `tasks:write` scopes, a required expiry, last-used time, and optional revocation time. The 256-bit token is shown once and only its SHA-256 hash is stored. Rotation atomically revokes every prior credential for that bot.                                                                                                        |
+| Bot channel grant      | Explicit bot-to-channel authorization. A grant is required even when the channel access mode is `workspace`; it never grants a DM. Visibility is the intersection of an active bot membership, credential scope, and channel grant.                                                                                                                                                              |
+| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human member, while `members` is readable only by active human conversation memberships. Bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human pair. Archived channels remain readable but reject writes. |
 | Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
@@ -176,9 +181,9 @@ returns the original result. Reuse with a different fingerprint returns `409 CON
 | `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
 | `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
 | `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
-| `GET/POST /v1/conversations/:id/tasks`                                        | Page a channel/self-DM project or idempotently add its next numbered task.                                                                |
-| `GET /v1/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels.                                       |
-| `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version.                                                          |
+| `GET/POST /v1/conversations/:id/tasks`                                        | Page a channel/self-DM project or idempotently add its next numbered task. Human cookies or channel-granted bot bearer credentials with the matching task scope are accepted. |
+| `GET /v1/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels. For a bot, this means assigned tasks in explicitly granted channels. |
+| `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version. Bot callers require `tasks:write`.                       |
 | `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
 | `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
@@ -393,6 +398,14 @@ reuse revokes the device-session family. Tokens are random 256-bit values, store
 hashes server-side, and scoped to one user, workspace, and device session.
 Membership/session status is checked on every authorized request and ticket redemption, so
 invitation revocation, member removal, and session revocation take effect immediately.
+
+Bot credentials are a separate task-only authentication path and are never accepted by desktop,
+chat, search, bootstrap, sync, realtime, member-directory, DM, or session routes. Supplying an
+`Authorization` header to a task route opts into bot authentication and cannot fall back to a
+human cookie. Every bot request checks credential hash, expiry, revocation, active workspace
+membership, required task scope, and an explicit channel grant. Authorization headers are redacted
+from structured request logs. Bot tokens belong in the caller's secret store and never cross the
+renderer boundary.
 
 Magic-link and exchange responses do not reveal whether an email is invited. Limits are
 five link requests per normalized email and 20 per source IP per hour, plus 20 exchanges per

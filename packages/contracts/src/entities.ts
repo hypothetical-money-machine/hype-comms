@@ -15,9 +15,13 @@ const timestampsShape = {
   updatedAt: isoDateTimeSchema,
 };
 
+export const userKindSchema = z.enum(["human", "bot"]);
+
 export const userSchema = z
   .object({
     id: entityIdSchema,
+    // Defaults preserve encrypted cache records written before bot principals existed.
+    kind: userKindSchema.default("human"),
     username: z.string().trim().min(1).max(80),
     displayName: z.string().trim().min(1).max(120),
     avatarUrl: credentialFreeHttpsUrlSchema.nullable(),
@@ -194,6 +198,7 @@ export const attachmentSchema = z
   .strict();
 
 export type User = z.infer<typeof userSchema>;
+export type UserKind = z.infer<typeof userKindSchema>;
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 export type MembershipStatus = z.infer<typeof membershipStatusSchema>;

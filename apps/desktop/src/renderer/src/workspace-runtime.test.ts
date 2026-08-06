@@ -84,6 +84,7 @@ const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" 
 
 const user = {
   id: USER_ID,
+  kind: "human",
   username: "morgan",
   displayName: "Morgan",
   avatarUrl: null,
@@ -1679,6 +1680,7 @@ describe("WorkspaceRuntime", () => {
       payload: {
         member: {
           id: "20000000-0000-4000-8000-000000000011",
+          kind: "human",
           username: "alice",
           displayName: "Alice",
           avatarUrl: null,

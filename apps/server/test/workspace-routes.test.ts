@@ -1,7 +1,8 @@
-import { type CurrentUser } from "@hmm-chat/contracts";
+import { type BotScope, type CurrentUser } from "@hmm-chat/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import type { AuthenticatedBotIdentity, BotService } from "../src/modules/bots/service.js";
 import type { IdentityService } from "../src/modules/identity/service.js";
 import type { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import type { WorkspaceRepository } from "../src/modules/workspace/repository.js";
@@ -14,10 +15,12 @@ const messageId = "10000000-0000-4000-8000-000000000004";
 const reactionId = "10000000-0000-4000-8000-000000000005";
 const taskId = "10000000-0000-4000-8000-000000000006";
 const sessionToken = "a".repeat(43);
+const botToken = `hmm_bot_${"b".repeat(43)}`;
 
 const currentUser: CurrentUser = {
   user: {
     id: userId,
+    kind: "human",
     username: "owner",
     displayName: "Owner",
     avatarUrl: null,
@@ -30,10 +33,45 @@ const currentUser: CurrentUser = {
 };
 
 class FakeIdentityService {
-  readonly authenticateContext = vi.fn(async () => ({ currentUser, sessionId }));
+  readonly authenticateContext = vi.fn(async () => ({
+    currentUser,
+    sessionId,
+    principalKind: "human" as const,
+  }));
 
   asService(): IdentityService {
     return this as unknown as IdentityService;
+  }
+}
+
+class FakeBotService {
+  readonly authenticate;
+
+  constructor(scopes: readonly BotScope[]) {
+    const identity: AuthenticatedBotIdentity = {
+      principalKind: "bot",
+      currentUser: {
+        user: {
+          id: reactionId,
+          kind: "bot",
+          username: "task-bot",
+          displayName: "Task Bot",
+          avatarUrl: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        workspaceId,
+        role: "member",
+      },
+      sessionId: null,
+      credentialId: messageId,
+      scopes,
+    };
+    this.authenticate = vi.fn(async () => identity);
+  }
+
+  asService(): BotService {
+    return this as unknown as BotService;
   }
 }
 
@@ -87,9 +125,12 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map(async (app) => app.close()));
 });
 
-async function reactionApp(repository: FakeWorkspaceRepository) {
+async function reactionApp(repository: FakeWorkspaceRepository, botService?: BotService) {
   const app = await buildApp({
-    identity: { service: new FakeIdentityService().asService() },
+    identity: {
+      service: new FakeIdentityService().asService(),
+      ...(botService === undefined ? {} : { botService }),
+    },
     workspace: {
       repository: repository.asRepository(),
       realtimeHub: new FakeRealtimeEventHub().asHub(),
@@ -342,6 +383,98 @@ describe("task routes", () => {
       { expectedVersion: 2, status: "in_progress", beforeTaskId: null },
       reactionId,
     );
+  });
+
+  it("accepts scoped bot credentials only on task routes", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const botService = new FakeBotService(["tasks:read"]);
+    const app = await reactionApp(repository, botService.asService());
+    const authorization = { authorization: `Bearer ${botToken}` };
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: authorization,
+    });
+    const writeWithoutScope = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: {
+        ...authorization,
+        "content-type": "application/json",
+        "idempotency-key": taskId,
+      },
+      payload: { title: "Bot-created task" },
+    });
+    const nonTaskRoute = await app.inject({
+      method: "GET",
+      url: "/v1/members",
+      headers: authorization,
+    });
+
+    expect(listed.statusCode).toBe(200);
+    expect(writeWithoutScope.statusCode).toBe(403);
+    expect(nonTaskRoute.statusCode).toBe(401);
+    expect(botService.authenticate).toHaveBeenCalledWith(botToken);
+    expect(repository.listConversationTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot", credentialId: messageId }),
+      messageId,
+      undefined,
+      100,
+    );
+    expect(repository.createTask).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a human cookie when a bot credential is malformed", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const botService = new FakeBotService(["tasks:read"]);
+    const app = await reactionApp(repository, botService.asService());
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: {
+        cookie: `hmm_session=${sessionToken}`,
+        authorization: "Bearer malformed",
+      },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(botService.authenticate).not.toHaveBeenCalled();
+    expect(repository.listConversationTasks).not.toHaveBeenCalled();
+  });
+
+  it("lets a write-scoped bot mutate tasks without granting list access", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const botService = new FakeBotService(["tasks:write"]);
+    const app = await reactionApp(repository, botService.asService());
+    const headers = {
+      authorization: `Bearer ${botToken}`,
+      "content-type": "application/json",
+      "idempotency-key": taskId,
+    };
+
+    const created = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers,
+      payload: { title: "Bot-created task" },
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${messageId}/tasks`,
+      headers: { authorization: headers.authorization },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(listed.statusCode).toBe(403);
+    expect(repository.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot" }),
+      messageId,
+      expect.objectContaining({ title: "Bot-created task" }),
+      taskId,
+    );
+    expect(repository.listConversationTasks).not.toHaveBeenCalled();
   });
 });
 

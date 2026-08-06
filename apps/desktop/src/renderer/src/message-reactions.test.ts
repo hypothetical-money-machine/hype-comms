@@ -15,6 +15,7 @@ const NOW = "2026-07-27T12:00:00.000Z";
 const members: User[] = [
   {
     id: CURRENT_USER_ID,
+    kind: "human",
     username: "morgan",
     displayName: "Morgan",
     avatarUrl: null,
@@ -23,6 +24,7 @@ const members: User[] = [
   },
   {
     id: PEER_ID,
+    kind: "human",
     username: "dan",
     displayName: "Dan",
     avatarUrl: null,
