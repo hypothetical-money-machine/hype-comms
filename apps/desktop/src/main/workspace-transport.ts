@@ -19,6 +19,7 @@ import {
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
+  taskListQuerySchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
   workspaceBootstrapResponseSchema,
@@ -68,6 +69,19 @@ function retryAfter(response: Response): number | null {
   return Number.isFinite(seconds) && seconds >= 0
     ? Math.min(Math.round(seconds * 1_000), 86_400_000)
     : null;
+}
+
+function appendTaskListQuery(url: URL, input: Partial<TaskListQuery>): void {
+  const query = taskListQuerySchema.parse(input);
+  if (query.after !== undefined) url.searchParams.set("after", query.after);
+  url.searchParams.set("limit", String(query.limit));
+  if (query.status !== undefined) url.searchParams.set("status", query.status);
+  if (query.priority !== undefined) url.searchParams.set("priority", query.priority);
+  if (query.assignee !== undefined) url.searchParams.set("assignee", query.assignee);
+  if (query.dueAfter !== undefined) url.searchParams.set("dueAfter", query.dueAfter);
+  if (query.dueBefore !== undefined) url.searchParams.set("dueBefore", query.dueBefore);
+  if (query.updatedAfter !== undefined) url.searchParams.set("updatedAfter", query.updatedAfter);
+  if (query.updatedBy !== undefined) url.searchParams.set("updatedBy", query.updatedBy);
 }
 
 /**
@@ -313,16 +327,14 @@ export class WorkspaceTransport {
     input: Partial<TaskListQuery> = {},
   ): Promise<TaskListResponse> {
     const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/tasks`);
-    if (input.after !== undefined) url.searchParams.set("after", input.after);
-    url.searchParams.set("limit", String(input.limit ?? 100));
+    appendTaskListQuery(url, input);
     const response = await this.session.fetch(url.href, { method: "GET" });
     return taskListResponseSchema.parse(await this.#payload(response));
   }
 
   async myTasks(input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
     const url = this.#url("/v1/tasks/mine");
-    if (input.after !== undefined) url.searchParams.set("after", input.after);
-    url.searchParams.set("limit", String(input.limit ?? 100));
+    appendTaskListQuery(url, input);
     const response = await this.session.fetch(url.href, { method: "GET" });
     return taskListResponseSchema.parse(await this.#payload(response));
   }

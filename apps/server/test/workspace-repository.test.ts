@@ -900,6 +900,23 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     const boardFirstPage = await repository.listConversationTasks(owner, generalId, undefined, 2);
     const myFirstPage = await repository.listMyTasks(member, undefined, 2);
+    const filteredFirstPage = await repository.listConversationTasks(
+      owner,
+      generalId,
+      undefined,
+      1,
+      { status: "todo", assignee: memberId, updatedBy: ownerId },
+    );
+    expect(filteredFirstPage).toMatchObject({ hasMore: true, tasks: [expect.any(Object)] });
+    await expect(
+      repository.listConversationTasks(
+        owner,
+        generalId,
+        filteredFirstPage.nextCursor ?? undefined,
+        1,
+        { status: "done", assignee: memberId, updatedBy: ownerId },
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
     const firstPageIds = new Set(boardFirstPage.tasks.map((task) => task.id));
     expect(new Set(myFirstPage.tasks.map((task) => task.id))).toEqual(firstPageIds);
     const unseen = created.find(({ task }) => !firstPageIds.has(task.id));

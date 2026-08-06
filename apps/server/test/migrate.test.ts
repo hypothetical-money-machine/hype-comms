@@ -51,6 +51,7 @@ describeWithPostgres("runMigrations", () => {
           "0009_self_direct_messages.sql",
           "0010_conversation_tasks.sql",
           "0011_bot_task_principals.sql",
+          "0012_task_actor_attribution.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -70,6 +71,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0009_self_direct_messages.sql" },
         { filename: "0010_conversation_tasks.sql" },
         { filename: "0011_bot_task_principals.sql" },
+        { filename: "0012_task_actor_attribution.sql" },
       ]);
 
       const userId = randomUUID();
@@ -177,6 +179,49 @@ describeWithPostgres("runMigrations", () => {
           defaultWorkspaceId,
         ]),
       ).resolves.toMatchObject({ rows: [{ name: "Morgan and Dan" }] });
+    });
+  });
+
+  it("keeps previous-server task creates compatible while seeding their actor", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const userId = randomUUID();
+      const workspaceId = randomUUID();
+      const conversationId = randomUUID();
+      const taskId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'compatibility@example.test', 'compatibility', 'Compatibility')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Compatibility', 'compatibility', $2)`,
+        [workspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [workspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by)
+         VALUES ($1, $2, 'channel', 'Compatibility', 'compatibility', 'workspace', $3)`,
+        [conversationId, workspaceId, userId],
+      );
+
+      await pool.query(
+        `INSERT INTO tasks
+           (id, workspace_id, conversation_id, number, title, status, priority, rank, created_by)
+         VALUES ($1, $2, $3, 1, 'Old server create', 'todo', 'none', 1024, $4)`,
+        [taskId, workspaceId, conversationId, userId],
+      );
+      const actor = await pool.query<{ updated_by: string }>(
+        "SELECT updated_by FROM tasks WHERE id = $1",
+        [taskId],
+      );
+      expect(actor.rows).toEqual([{ updated_by: userId }]);
     });
   });
 

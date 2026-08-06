@@ -508,9 +508,19 @@ describe("WorkspaceTransport tasks", () => {
       return jsonResponse({ task: TASK, syncCursor: "43" });
     });
 
-    await expect(transport.tasks(CONVERSATION_ID, { after: "cursor", limit: 25 })).resolves.toEqual(
-      { tasks: [TASK], nextCursor: null, hasMore: false },
-    );
+    await expect(
+      transport.tasks(CONVERSATION_ID, {
+        after: "cursor",
+        limit: 25,
+        status: "in_progress",
+        priority: "urgent",
+        assignee: "me",
+        dueAfter: "2026-08-01",
+        dueBefore: "2026-08-31",
+        updatedAfter: NOW,
+        updatedBy: "me",
+      }),
+    ).resolves.toEqual({ tasks: [TASK], nextCursor: null, hasMore: false });
     await transport.myTasks({ limit: 10 });
     await transport.createTask({
       conversationId: CONVERSATION_ID,
@@ -543,7 +553,7 @@ describe("WorkspaceTransport tasks", () => {
     expect(requests.map((request) => [request.init.method, request.url])).toEqual([
       [
         "GET",
-        "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25",
+        "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25&status=in_progress&priority=urgent&assignee=me&dueAfter=2026-08-01&dueBefore=2026-08-31&updatedAfter=2026-07-24T12%3A00%3A00.000Z&updatedBy=me",
       ],
       ["GET", "https://chat.example/v1/tasks/mine?limit=10"],
       ["POST", "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks"],

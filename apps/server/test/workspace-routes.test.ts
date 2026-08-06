@@ -97,8 +97,16 @@ class FakeWorkspaceRepository {
     nextCursor: null,
     hasMore: false,
   }));
+  readonly listChannelTasks = vi.fn(async () => ({
+    tasks: [],
+    nextCursor: null,
+    hasMore: false,
+  }));
   readonly listMyTasks = vi.fn(async () => ({ tasks: [], nextCursor: null, hasMore: false }));
+  readonly getTask = vi.fn(async () => ({ task: { id: taskId } }));
+  readonly getChannelTaskByNumber = vi.fn(async () => ({ task: { id: taskId } }));
   readonly createTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
+  readonly createChannelTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
   readonly updateTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "10" }));
   readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "11" }));
 
@@ -351,11 +359,13 @@ describe("task routes", () => {
       messageId,
       "cursor",
       25,
+      {},
     );
     expect(repository.listMyTasks).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       undefined,
       100,
+      {},
     );
     expect(repository.createTask).toHaveBeenCalledTimes(1);
     expect(repository.createTask).toHaveBeenCalledWith(
@@ -421,6 +431,7 @@ describe("task routes", () => {
       messageId,
       undefined,
       100,
+      {},
     );
     expect(repository.createTask).not.toHaveBeenCalled();
   });
@@ -475,6 +486,92 @@ describe("task routes", () => {
       taskId,
     );
     expect(repository.listConversationTasks).not.toHaveBeenCalled();
+  });
+
+  it("supports filtered channel-slug lists and stable single-task references", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const botService = new FakeBotService(["tasks:read", "tasks:write"]);
+    const app = await reactionApp(repository, botService.asService());
+    const headers = { authorization: `Bearer ${botToken}` };
+    const filteredUrl = new URL("http://localhost/v1/channels/general/tasks");
+    filteredUrl.searchParams.set("status", "in_progress");
+    filteredUrl.searchParams.set("priority", "urgent");
+    filteredUrl.searchParams.set("assignee", "me");
+    filteredUrl.searchParams.set("dueAfter", "2026-08-01");
+    filteredUrl.searchParams.set("dueBefore", "2026-08-31");
+    filteredUrl.searchParams.set("updatedAfter", now);
+    filteredUrl.searchParams.set("updatedBy", "me");
+
+    const filtered = await app.inject({
+      method: "GET",
+      url: `${filteredUrl.pathname}${filteredUrl.search}`,
+      headers,
+    });
+    const byNumber = await app.inject({
+      method: "GET",
+      url: "/v1/channels/general/tasks/12",
+      headers,
+    });
+    const byId = await app.inject({ method: "GET", url: `/v1/tasks/${taskId}`, headers });
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/channels/general/tasks",
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": taskId,
+      },
+      payload: { title: "Create by human-readable channel" },
+    });
+    const invalidRange = await app.inject({
+      method: "GET",
+      url: "/v1/channels/general/tasks?dueAfter=2026-09-01&dueBefore=2026-08-01",
+      headers,
+    });
+    const invalidNumber = await app.inject({
+      method: "GET",
+      url: "/v1/channels/general/tasks/0",
+      headers,
+    });
+
+    expect(filtered.statusCode).toBe(200);
+    expect(byNumber.statusCode).toBe(200);
+    expect(byId.statusCode).toBe(200);
+    expect(created.statusCode).toBe(201);
+    expect(invalidRange.statusCode).toBe(400);
+    expect(invalidNumber.statusCode).toBe(400);
+    expect(repository.listChannelTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot" }),
+      "general",
+      undefined,
+      100,
+      {
+        status: "in_progress",
+        priority: "urgent",
+        assignee: "me",
+        dueAfter: "2026-08-01",
+        dueBefore: "2026-08-31",
+        updatedAfter: now,
+        updatedBy: "me",
+      },
+    );
+    expect(repository.getChannelTaskByNumber).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot" }),
+      "general",
+      "12",
+    );
+    expect(repository.getTask).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot" }),
+      taskId,
+    );
+    expect(repository.createChannelTask).toHaveBeenCalledWith(
+      expect.objectContaining({ principalKind: "bot" }),
+      "general",
+      expect.objectContaining({ title: "Create by human-readable channel" }),
+      taskId,
+    );
+    expect(repository.listChannelTasks).toHaveBeenCalledTimes(1);
+    expect(repository.getChannelTaskByNumber).toHaveBeenCalledTimes(1);
   });
 });
 

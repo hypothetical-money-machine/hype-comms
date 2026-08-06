@@ -36,6 +36,7 @@ import {
   syncQuerySchema,
   systemConnectedEventSchema,
   taskListQuerySchema,
+  taskRecordSchema,
   taskSchema,
   themePreferenceSchema,
   themeStateSchema,
@@ -303,6 +304,9 @@ describe("entity contracts", () => {
 
   it("validates strict task entities and optimistic mutation operations", () => {
     expect(taskSchema.parse(TASK)).toEqual(TASK);
+    expect(taskRecordSchema.parse({ ...TASK, updatedBy: USER_ID })).toMatchObject({
+      updatedBy: USER_ID,
+    });
     expect(() => taskSchema.parse({ ...TASK, rank: "0" })).toThrow();
     expect(() => taskSchema.parse({ ...TASK, dueOn: "08/15/2026" })).toThrow();
     expect(() => taskSchema.parse({ ...TASK, secret: true })).toThrow();
@@ -504,7 +508,31 @@ describe("transport contracts", () => {
       limit: 100,
     });
     expect(taskListQuerySchema.parse({ limit: "200" })).toEqual({ limit: 200 });
+    expect(
+      taskListQuerySchema.parse({
+        status: "in_progress",
+        priority: "urgent",
+        assignee: "me",
+        dueAfter: "2026-08-01",
+        dueBefore: "2026-08-31",
+        updatedAfter: NOW,
+        updatedBy: USER_ID,
+      }),
+    ).toEqual({
+      status: "in_progress",
+      priority: "urgent",
+      assignee: "me",
+      dueAfter: "2026-08-01",
+      dueBefore: "2026-08-31",
+      updatedAfter: NOW,
+      updatedBy: USER_ID,
+      limit: 100,
+    });
     expect(() => taskListQuerySchema.parse({ limit: "201" })).toThrow();
+    expect(() =>
+      taskListQuerySchema.parse({ dueAfter: "2026-09-01", dueBefore: "2026-08-01" }),
+    ).toThrow();
+    expect(() => taskListQuerySchema.parse({ assignee: "someone" })).toThrow();
     expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
   });
 

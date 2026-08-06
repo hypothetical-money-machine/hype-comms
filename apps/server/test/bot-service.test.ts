@@ -196,22 +196,44 @@ describeWithPostgres("BotService", () => {
     });
     const authenticated = await service.authenticate(first.token);
     if (authenticated === null) throw new Error("Expected bot authentication");
-    const created = await workspaceRepository.createTask(
+    const created = await workspaceRepository.createChannelTask(
       authenticated,
-      generalId,
+      "general",
       {
         title: "Verify the release",
         description: null,
         priority: "high",
         assigneeId: authenticated.currentUser.user.id,
-        dueOn: null,
+        dueOn: "2026-08-20",
         sourceMessageId: null,
       },
       randomUUID(),
     );
     expect(created.task).toMatchObject({
       createdBy: authenticated.currentUser.user.id,
+      updatedBy: authenticated.currentUser.user.id,
       assigneeId: authenticated.currentUser.user.id,
+    });
+    await expect(workspaceRepository.getTask(authenticated, created.task.id)).resolves.toEqual({
+      task: { ...created.task, updatedBy: authenticated.currentUser.user.id },
+    });
+    await expect(
+      workspaceRepository.getChannelTaskByNumber(authenticated, "general", created.task.number),
+    ).resolves.toEqual({
+      task: { ...created.task, updatedBy: authenticated.currentUser.user.id },
+    });
+    await expect(
+      workspaceRepository.listChannelTasks(authenticated, "general", undefined, 100, {
+        status: "todo",
+        priority: "high",
+        assignee: "me",
+        dueAfter: "2026-08-01",
+        dueBefore: "2026-08-31",
+        updatedAfter: "2000-01-01T00:00:00.000Z",
+        updatedBy: "me",
+      }),
+    ).resolves.toMatchObject({
+      tasks: [{ ...created.task, updatedBy: authenticated.currentUser.user.id }],
     });
     const event = await pool.query<{ actor_user_id: string }>(
       `SELECT actor_user_id
@@ -221,6 +243,28 @@ describeWithPostgres("BotService", () => {
       [created.task.id],
     );
     expect(event.rows[0]?.actor_user_id).toBe(authenticated.currentUser.user.id);
+
+    const updated = await workspaceRepository.updateTask(
+      owner,
+      created.task.id,
+      {
+        expectedVersion: created.task.version,
+        title: "Verify and report the release",
+        description: null,
+        priority: "urgent",
+        assigneeId: authenticated.currentUser.user.id,
+        dueOn: created.task.dueOn,
+      },
+      randomUUID(),
+    );
+    await expect(
+      workspaceRepository.getTask(authenticated, updated.task.id),
+    ).resolves.toMatchObject({ task: { id: updated.task.id, updatedBy: ownerId } });
+    await expect(
+      workspaceRepository.listChannelTasks(authenticated, "general", undefined, 100, {
+        updatedBy: "me",
+      }),
+    ).resolves.toMatchObject({ tasks: [] });
 
     const rotated = await service.rotateCredential(ownerId, {
       username: "task-bot",
