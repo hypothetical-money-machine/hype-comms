@@ -11,7 +11,12 @@ import {
 import { createPortal } from "react-dom";
 
 interface ChannelCreatePopoverProps {
-  readonly onCreate: (name: string, slug: string, access: ChannelAccess) => Promise<void>;
+  readonly onCreate: (
+    name: string,
+    slug: string,
+    topic: string | null,
+    access: ChannelAccess,
+  ) => Promise<void>;
 }
 
 interface PopoverPosition {
@@ -35,6 +40,7 @@ const ARROW_MARGIN = 18;
 export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [topic, setTopic] = useState("");
   const [access, setAccess] = useState<ChannelAccess>("workspace");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -50,6 +56,7 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
     if (creatingRef.current) return;
     setOpen(false);
     setName("");
+    setTopic("");
     setAccess("workspace");
     setError("");
     setPosition(null);
@@ -137,7 +144,7 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
     setCreating(true);
     setError("");
     try {
-      await onCreate(displayName, slug, access);
+      await onCreate(displayName, slug, topic.trim() === "" ? null : topic.trim(), access);
       creatingRef.current = false;
       setCreating(false);
       dismiss();
@@ -225,6 +232,20 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
                 Add a Unicode letter or number; symbols and emoji alone cannot form a channel.
               </p>
             )}
+
+            <label className="channel-topic-label" htmlFor="channel-topic">
+              Topic <span>Optional</span>
+            </label>
+            <textarea
+              id="channel-topic"
+              value={topic}
+              maxLength={250}
+              rows={3}
+              placeholder="What is this channel for?"
+              disabled={creating}
+              onChange={(event) => setTopic(event.target.value)}
+            />
+            <div className="channel-topic-details">{topic.length} / 250</div>
 
             <fieldset className="channel-access-options">
               <legend>Who has access?</legend>
