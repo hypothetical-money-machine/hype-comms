@@ -57,11 +57,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     releaseWorkflow,
-    /^  prepare-github-release:[\s\S]*?^    runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
   );
   assert.match(
     releaseWorkflow,
-    /^  github-release:[\s\S]*?^    runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.match(
