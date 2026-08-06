@@ -884,6 +884,61 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("keeps task pagination stable when an unseen task is updated", async () => {
+    const created = [];
+    for (const title of ["First task", "Second task", "Third task"]) {
+      created.push(
+        await repository.createTask(
+          owner,
+          generalId,
+          taskInput(title, { assigneeId: memberId }),
+          randomUUID(),
+        ),
+      );
+    }
+
+    const boardFirstPage = await repository.listConversationTasks(owner, generalId, undefined, 2);
+    const myFirstPage = await repository.listMyTasks(member, undefined, 2);
+    const firstPageIds = new Set(boardFirstPage.tasks.map((task) => task.id));
+    expect(new Set(myFirstPage.tasks.map((task) => task.id))).toEqual(firstPageIds);
+    const unseen = created.find(({ task }) => !firstPageIds.has(task.id));
+    expect(unseen).toBeDefined();
+    if (unseen === undefined) throw new Error("Expected an unseen task");
+
+    await repository.updateTask(
+      owner,
+      unseen.task.id,
+      {
+        expectedVersion: unseen.task.version,
+        title: `${unseen.task.title} updated`,
+        description: unseen.task.description,
+        priority: unseen.task.priority,
+        assigneeId: unseen.task.assigneeId,
+        dueOn: unseen.task.dueOn,
+      },
+      randomUUID(),
+    );
+
+    const boardSecondPage = await repository.listConversationTasks(
+      owner,
+      generalId,
+      boardFirstPage.nextCursor ?? undefined,
+      2,
+    );
+    const mySecondPage = await repository.listMyTasks(
+      member,
+      myFirstPage.nextCursor ?? undefined,
+      2,
+    );
+    const expectedIds = new Set(created.map(({ task }) => task.id));
+    expect(
+      new Set([...boardFirstPage.tasks, ...boardSecondPage.tasks].map((task) => task.id)),
+    ).toEqual(expectedIds);
+    expect(new Set([...myFirstPage.tasks, ...mySecondPage.tasks].map((task) => task.id))).toEqual(
+      expectedIds,
+    );
+  });
+
   it("unassigns tasks before removing a member from a private channel", async () => {
     const channel = await repository.createChannel(owner, {
       name: "Task Crew",

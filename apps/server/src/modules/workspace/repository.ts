@@ -522,13 +522,13 @@ function decodeConversationCursor(cursor: string | undefined): string | null {
 }
 
 interface TaskCursor {
-  readonly updatedAt: string;
+  readonly createdAt: string;
   readonly id: string;
 }
 
 function encodeTaskCursor(row: TaskRow): string {
   return Buffer.from(
-    JSON.stringify({ updatedAt: iso(row.updated_at), id: row.id } satisfies TaskCursor),
+    JSON.stringify({ createdAt: iso(row.created_at), id: row.id } satisfies TaskCursor),
     "utf8",
   ).toString("base64url");
 }
@@ -540,16 +540,16 @@ function decodeTaskCursor(cursor: string | undefined): TaskCursor | null {
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !("updatedAt" in parsed) ||
-      typeof parsed.updatedAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.updatedAt)) ||
+      !("createdAt" in parsed) ||
+      typeof parsed.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(parsed.createdAt)) ||
       !("id" in parsed) ||
       typeof parsed.id !== "string" ||
       !UUID_PATTERN.test(parsed.id)
     ) {
       throw new Error("Invalid cursor");
     }
-    return { updatedAt: new Date(parsed.updatedAt).toISOString(), id: parsed.id };
+    return { createdAt: new Date(parsed.createdAt).toISOString(), id: parsed.id };
   } catch {
     throw new ApiError(400, "BAD_REQUEST", "Invalid task cursor");
   }
@@ -1271,11 +1271,11 @@ export class WorkspaceRepository {
           WHERE task.conversation_id = $1
             AND (
               $2::timestamptz IS NULL
-              OR (task.updated_at, task.id) < ($2::timestamptz, $3::uuid)
+              OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
             )
-          ORDER BY task.updated_at DESC, task.id DESC
+          ORDER BY task.created_at DESC, task.id DESC
           LIMIT $4`,
-        [conversationId, cursor?.updatedAt ?? null, cursor?.id ?? null, pageLimit + 1],
+        [conversationId, cursor?.createdAt ?? null, cursor?.id ?? null, pageLimit + 1],
       );
       const rows = result.rows.slice(0, pageLimit);
       const last = rows.at(-1);
@@ -1319,14 +1319,14 @@ export class WorkspaceRepository {
             )
             AND (
               $3::timestamptz IS NULL
-              OR (task.updated_at, task.id) < ($3::timestamptz, $4::uuid)
+              OR (task.created_at, task.id) < ($3::timestamptz, $4::uuid)
             )
-          ORDER BY task.updated_at DESC, task.id DESC
+          ORDER BY task.created_at DESC, task.id DESC
           LIMIT $5`,
         [
           identity.currentUser.workspaceId,
           identity.currentUser.user.id,
-          cursor?.updatedAt ?? null,
+          cursor?.createdAt ?? null,
           cursor?.id ?? null,
           pageLimit + 1,
         ],

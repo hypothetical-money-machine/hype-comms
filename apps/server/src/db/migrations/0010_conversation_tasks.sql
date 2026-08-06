@@ -45,10 +45,10 @@ CREATE TABLE tasks (
 
 CREATE INDEX tasks_conversation_board
   ON tasks (conversation_id, status, rank, id);
-CREATE INDEX tasks_conversation_updated
-  ON tasks (conversation_id, updated_at DESC, id DESC);
-CREATE INDEX tasks_assignee_updated
-  ON tasks (workspace_id, assignee_id, updated_at DESC, id DESC)
+CREATE INDEX tasks_conversation_created
+  ON tasks (conversation_id, created_at DESC, id DESC);
+CREATE INDEX tasks_assignee_created
+  ON tasks (workspace_id, assignee_id, created_at DESC, id DESC)
   WHERE assignee_id IS NOT NULL;
 
 ALTER TABLE sync_events
