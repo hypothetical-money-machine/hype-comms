@@ -25,7 +25,8 @@ The implementation contract and security boundaries live in
   assignments/priorities/due dates, message-to-task links, realtime convergence, and a self-DM
   My Tasks list that can include assigned work from other visible boards.
 - First-class bot members with owner-issued, hashed, expiring task credentials, read/write scopes,
-  explicit per-channel grants, one-time token display, rotation/revocation, and actor attribution.
+  explicit per-channel grants, one-time token display, rotation/revocation, channel-slug/task-number
+  lookup, filtered polling, and latest-mutation actor attribution.
 - Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
   result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients

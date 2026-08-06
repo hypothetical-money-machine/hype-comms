@@ -4,6 +4,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   advanceReadCursorRequestSchema,
   archiveChannelRequestSchema,
+  channelSlugSchema,
   clientCapabilitiesHeaderSchema,
   createChannelRequestSchema,
   createTaskRequestSchema,
@@ -19,6 +20,7 @@ import {
   sendConversationMessageRequestSchema,
   syncQuerySchema,
   taskListQuerySchema,
+  taskNumberSchema,
   updateTaskRequestSchema,
   upsertChannelMemberRequestSchema,
 } from "@hmm-chat/contracts";
@@ -68,6 +70,26 @@ function memberParameters(value: unknown): { readonly id: string; readonly userI
     throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
   }
   return { id: id.data, userId: userId.data };
+}
+
+function channelParameters(value: unknown): { readonly slug: string } {
+  const result = channelSlugSchema.safeParse(
+    typeof value === "object" && value !== null && "slug" in value ? value.slug : undefined,
+  );
+  if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel slug");
+  return { slug: result.data };
+}
+
+function channelTaskParameters(value: unknown): { readonly slug: string; readonly number: string } {
+  if (typeof value !== "object" || value === null) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid channel task reference");
+  }
+  const slug = channelSlugSchema.safeParse("slug" in value ? value.slug : undefined);
+  const number = taskNumberSchema.safeParse("number" in value ? value.number : undefined);
+  if (!slug.success || !number.success) {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid channel task reference");
+  }
+  return { slug: slug.data, number: number.data };
 }
 
 function reactionParameters(value: unknown): { readonly id: string; readonly emoji: string } {
@@ -188,14 +210,37 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const query = taskListQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
-    return repository.listConversationTasks(identity, id, query.data.after, query.data.limit);
+    const { after, limit, ...filters } = query.data;
+    return repository.listConversationTasks(identity, id, after, limit, filters);
+  });
+
+  app.get("/channels/:slug/tasks", async (request) => {
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
+    const { slug } = channelParameters(request.params);
+    const query = taskListQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
+    const { after, limit, ...filters } = query.data;
+    return repository.listChannelTasks(identity, slug, after, limit, filters);
+  });
+
+  app.get("/channels/:slug/tasks/:number", async (request) => {
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
+    const { slug, number } = channelTaskParameters(request.params);
+    return repository.getChannelTaskByNumber(identity, slug, number);
   });
 
   app.get("/tasks/mine", async (request) => {
     const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
     const query = taskListQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
-    return repository.listMyTasks(identity, query.data.after, query.data.limit);
+    const { after, limit, ...filters } = query.data;
+    return repository.listMyTasks(identity, after, limit, filters);
+  });
+
+  app.get("/tasks/:id", async (request) => {
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
+    const { id } = parameters(request.params);
+    return repository.getTask(identity, id);
   });
 
   app.post("/conversations/:id/tasks", async (request, reply) => {
@@ -209,6 +254,23 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
         await repository.createTask(
           identity,
           id,
+          body.data,
+          requiredIdempotencyKey(request.headers["idempotency-key"]),
+        ),
+      );
+  });
+
+  app.post("/channels/:slug/tasks", async (request, reply) => {
+    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
+    const { slug } = channelParameters(request.params);
+    const body = createTaskRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task");
+    return reply
+      .code(201)
+      .send(
+        await repository.createChannelTask(
+          identity,
+          slug,
           body.data,
           requiredIdempotencyKey(request.headers["idempotency-key"]),
         ),

@@ -30,6 +30,10 @@ import {
   syncResponseSchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
+  taskRecordListResponseSchema,
+  taskRecordMutationResponseSchema,
+  taskRecordResponseSchema,
+  taskRecordSchema,
   taskSchema,
   userSchema,
   workspaceBootstrapResponseSchema,
@@ -58,8 +62,14 @@ import {
   type SendMessageResponse,
   type SyncResponse,
   type Task,
+  type TaskListFilters,
   type TaskListResponse,
   type TaskMutationResponse,
+  type TaskNumber,
+  type TaskRecord,
+  type TaskRecordListResponse,
+  type TaskRecordMutationResponse,
+  type TaskRecordResponse,
   type TaskStatus,
   type MoveTaskRequest,
   type UpdateTaskRequest,
@@ -186,6 +196,7 @@ interface TaskRow extends QueryResultRow {
   source_message_id: string | null;
   rank: string;
   created_by: string;
+  updated_by: string;
   completed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -426,6 +437,10 @@ function mapTask(row: TaskRow): Task {
   });
 }
 
+function mapTaskRecord(row: TaskRow): TaskRecord {
+  return taskRecordSchema.parse({ ...mapTask(row), updatedBy: row.updated_by });
+}
+
 function mapReadCursor(row: ReadCursorRow) {
   return readCursorSchema.parse({
     conversationId: row.conversation_id,
@@ -550,16 +565,38 @@ function decodeConversationCursor(cursor: string | undefined): string | null {
 interface TaskCursor {
   readonly createdAt: string;
   readonly id: string;
+  readonly filterHash: string;
 }
 
-function encodeTaskCursor(row: TaskRow): string {
+function taskFilterHash(filters: TaskListFilters): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        status: filters.status ?? null,
+        priority: filters.priority ?? null,
+        assignee: filters.assignee ?? null,
+        dueAfter: filters.dueAfter ?? null,
+        dueBefore: filters.dueBefore ?? null,
+        updatedAfter: filters.updatedAfter ?? null,
+        updatedBy: filters.updatedBy ?? null,
+      }),
+    )
+    .digest("base64url");
+}
+
+const EMPTY_TASK_FILTER_HASH = taskFilterHash({});
+
+function encodeTaskCursor(row: TaskRow, filterHash: string): string {
   return Buffer.from(
-    JSON.stringify({ createdAt: iso(row.created_at), id: row.id } satisfies TaskCursor),
+    JSON.stringify({ createdAt: iso(row.created_at), id: row.id, filterHash } satisfies TaskCursor),
     "utf8",
   ).toString("base64url");
 }
 
-function decodeTaskCursor(cursor: string | undefined): TaskCursor | null {
+function decodeTaskCursor(
+  cursor: string | undefined,
+  expectedFilterHash: string,
+): TaskCursor | null {
   if (cursor === undefined) return null;
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
@@ -571,14 +608,63 @@ function decodeTaskCursor(cursor: string | undefined): TaskCursor | null {
       !Number.isFinite(Date.parse(parsed.createdAt)) ||
       !("id" in parsed) ||
       typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id)
+      !UUID_PATTERN.test(parsed.id) ||
+      ("filterHash" in parsed &&
+        (typeof parsed.filterHash !== "string" || parsed.filterHash !== expectedFilterHash)) ||
+      (!("filterHash" in parsed) && expectedFilterHash !== EMPTY_TASK_FILTER_HASH)
     ) {
       throw new Error("Invalid cursor");
     }
-    return { createdAt: new Date(parsed.createdAt).toISOString(), id: parsed.id };
+    return {
+      createdAt: new Date(parsed.createdAt).toISOString(),
+      id: parsed.id,
+      filterHash: expectedFilterHash,
+    };
   } catch {
     throw new ApiError(400, "BAD_REQUEST", "Invalid task cursor");
   }
+}
+
+function taskListFilterParameters(
+  identity: AuthenticatedTaskIdentity,
+  filters: TaskListFilters,
+): readonly unknown[] {
+  const assigneeFilter = filters.assignee;
+  const assigneeId =
+    assigneeFilter === "me"
+      ? identity.currentUser.user.id
+      : assigneeFilter === "unassigned" || assigneeFilter === undefined
+        ? null
+        : assigneeFilter;
+  const updatedById =
+    filters.updatedBy === "me" ? identity.currentUser.user.id : (filters.updatedBy ?? null);
+  return [
+    filters.status ?? null,
+    filters.priority ?? null,
+    assigneeFilter !== undefined,
+    assigneeFilter === "unassigned",
+    assigneeId,
+    filters.dueAfter ?? null,
+    filters.dueBefore ?? null,
+    filters.updatedAfter ?? null,
+    updatedById,
+  ];
+}
+
+function taskListFilterSql(alias: "task", firstParameter: number): string {
+  const parameter = (offset: number) => `$${firstParameter + offset}`;
+  return `
+    AND (${parameter(0)}::text IS NULL OR ${alias}.status = ${parameter(0)})
+    AND (${parameter(1)}::text IS NULL OR ${alias}.priority = ${parameter(1)})
+    AND (
+      ${parameter(2)}::boolean = false
+      OR (${parameter(3)}::boolean = true AND ${alias}.assignee_id IS NULL)
+      OR (${parameter(3)}::boolean = false AND ${alias}.assignee_id = ${parameter(4)}::uuid)
+    )
+    AND (${parameter(5)}::date IS NULL OR ${alias}.due_on >= ${parameter(5)}::date)
+    AND (${parameter(6)}::date IS NULL OR ${alias}.due_on <= ${parameter(6)}::date)
+    AND (${parameter(7)}::timestamptz IS NULL OR ${alias}.updated_at > ${parameter(7)})
+    AND (${parameter(8)}::uuid IS NULL OR ${alias}.updated_by = ${parameter(8)}::uuid)`;
 }
 
 function fingerprintMessage(conversationId: string, input: SendConversationMessageRequest): Buffer {
@@ -884,11 +970,12 @@ export class WorkspaceRepository {
         `UPDATE tasks
             SET assignee_id = NULL,
                 version = version + 1,
+                updated_by = $3,
                 updated_at = clock_timestamp()
           WHERE conversation_id = $1
             AND assignee_id = $2
           RETURNING *`,
-        [conversationId, memberId],
+        [conversationId, memberId, identity.currentUser.user.id],
       );
       for (const row of unassigned.rows) {
         const task = mapTask(row);
@@ -1285,8 +1372,10 @@ export class WorkspaceRepository {
     conversationId: string,
     after: string | undefined,
     limit: number,
+    filters: TaskListFilters = {},
   ): Promise<TaskListResponse> {
-    const cursor = decodeTaskCursor(after);
+    const filterHash = taskFilterHash(filters);
+    const cursor = decodeTaskCursor(after, filterHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
     const client = await this.pool.connect();
     try {
@@ -1305,14 +1394,23 @@ export class WorkspaceRepository {
               $2::timestamptz IS NULL
               OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
             )
+            ${taskListFilterSql("task", 4)}
           ORDER BY task.created_at DESC, task.id DESC
-          LIMIT $4`,
-        [conversationId, cursor?.createdAt ?? null, cursor?.id ?? null, pageLimit + 1],
+          LIMIT $13`,
+        [
+          conversationId,
+          cursor?.createdAt ?? null,
+          cursor?.id ?? null,
+          ...taskListFilterParameters(identity, filters),
+          pageLimit + 1,
+        ],
       );
       const rows = result.rows.slice(0, pageLimit);
       const last = rows.at(-1);
       const nextCursor =
-        result.rows.length > pageLimit && last !== undefined ? encodeTaskCursor(last) : null;
+        result.rows.length > pageLimit && last !== undefined
+          ? encodeTaskCursor(last, filterHash)
+          : null;
       return taskListResponseSchema.parse({
         tasks: rows.map(mapTask),
         nextCursor,
@@ -1327,8 +1425,10 @@ export class WorkspaceRepository {
     identity: AuthenticatedTaskIdentity,
     after: string | undefined,
     limit: number,
+    filters: TaskListFilters = {},
   ): Promise<TaskListResponse> {
-    const cursor = decodeTaskCursor(after);
+    const filterHash = taskFilterHash(filters);
+    const cursor = decodeTaskCursor(after, filterHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
     const client = await this.pool.connect();
     try {
@@ -1353,25 +1453,140 @@ export class WorkspaceRepository {
               $3::timestamptz IS NULL
               OR (task.created_at, task.id) < ($3::timestamptz, $4::uuid)
             )
+            ${taskListFilterSql("task", 5)}
           ORDER BY task.created_at DESC, task.id DESC
-          LIMIT $5`,
+          LIMIT $14`,
         [
           identity.currentUser.workspaceId,
           identity.currentUser.user.id,
           cursor?.createdAt ?? null,
           cursor?.id ?? null,
+          ...taskListFilterParameters(identity, filters),
           pageLimit + 1,
         ],
       );
       const rows = result.rows.slice(0, pageLimit);
       const last = rows.at(-1);
       const nextCursor =
-        result.rows.length > pageLimit && last !== undefined ? encodeTaskCursor(last) : null;
+        result.rows.length > pageLimit && last !== undefined
+          ? encodeTaskCursor(last, filterHash)
+          : null;
       return taskListResponseSchema.parse({
         tasks: rows.map(mapTask),
         nextCursor,
         hasMore: nextCursor !== null,
       });
+    } finally {
+      client.release();
+    }
+  }
+
+  async listChannelTasks(
+    identity: AuthenticatedTaskIdentity,
+    channelSlug: string,
+    after: string | undefined,
+    limit: number,
+    filters: TaskListFilters = {},
+  ): Promise<TaskRecordListResponse> {
+    const filterHash = taskFilterHash(filters);
+    const cursor = decodeTaskCursor(after, filterHash);
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
+    const client = await this.pool.connect();
+    try {
+      const conversation = await this.#requireVisibleChannelBySlug(
+        client,
+        identity,
+        channelSlug,
+        false,
+      );
+      const result = await client.query<TaskRow>(
+        `SELECT task.*
+           FROM tasks AS task
+          WHERE task.conversation_id = $1
+            AND (
+              $2::timestamptz IS NULL
+              OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
+            )
+            ${taskListFilterSql("task", 4)}
+          ORDER BY task.created_at DESC, task.id DESC
+          LIMIT $13`,
+        [
+          conversation.id,
+          cursor?.createdAt ?? null,
+          cursor?.id ?? null,
+          ...taskListFilterParameters(identity, filters),
+          pageLimit + 1,
+        ],
+      );
+      const rows = result.rows.slice(0, pageLimit);
+      const last = rows.at(-1);
+      const nextCursor =
+        result.rows.length > pageLimit && last !== undefined
+          ? encodeTaskCursor(last, filterHash)
+          : null;
+      return taskRecordListResponseSchema.parse({
+        tasks: rows.map(mapTaskRecord),
+        nextCursor,
+        hasMore: nextCursor !== null,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async getTask(identity: AuthenticatedTaskIdentity, taskId: string): Promise<TaskRecordResponse> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<TaskRow>(
+        `SELECT task.*
+           FROM tasks AS task
+           JOIN conversations AS conversation
+             ON conversation.id = task.conversation_id
+            AND conversation.workspace_id = task.workspace_id
+          WHERE task.id = $1
+            AND task.workspace_id = $2
+            AND ${conversationVisibilitySql("conversation", "$3")}
+            AND (
+              conversation.kind = 'channel'
+              OR (
+                conversation.kind = 'direct_message'
+                AND conversation.dm_user_low_id = $3
+                AND conversation.dm_user_high_id = $3
+              )
+            )`,
+        [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+      return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
+    } finally {
+      client.release();
+    }
+  }
+
+  async getChannelTaskByNumber(
+    identity: AuthenticatedTaskIdentity,
+    channelSlug: string,
+    taskNumber: TaskNumber,
+  ): Promise<TaskRecordResponse> {
+    const client = await this.pool.connect();
+    try {
+      const conversation = await this.#requireVisibleChannelBySlug(
+        client,
+        identity,
+        channelSlug,
+        false,
+      );
+      const result = await client.query<TaskRow>(
+        `SELECT task.*
+           FROM tasks AS task
+          WHERE task.conversation_id = $1
+            AND task.number = $2`,
+        [conversation.id, taskNumber],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+      return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
     } finally {
       client.release();
     }
@@ -1426,9 +1641,9 @@ export class WorkspaceRepository {
           const inserted = await client.query<TaskRow>(
             `INSERT INTO tasks (
                id, workspace_id, conversation_id, number, title, description, status,
-               priority, assignee_id, due_on, source_message_id, rank, created_by
+               priority, assignee_id, due_on, source_message_id, rank, created_by, updated_by
              )
-             VALUES ($1, $2, $3, $4, $5, $6, 'todo', $7, $8, $9, $10, $11, $12)
+             VALUES ($1, $2, $3, $4, $5, $6, 'todo', $7, $8, $9, $10, $11, $12, $12)
              RETURNING *`,
             [
               randomUUID(),
@@ -1458,6 +1673,20 @@ export class WorkspaceRepository {
           return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
         },
       );
+    });
+  }
+
+  async createChannelTask(
+    identity: AuthenticatedTaskIdentity,
+    channelSlug: string,
+    input: CreateTaskRequest,
+    idempotencyKey: string,
+  ): Promise<TaskRecordMutationResponse> {
+    const conversationId = await this.#visibleChannelIdBySlug(identity, channelSlug, true);
+    const created = await this.createTask(identity, conversationId, input, idempotencyKey);
+    return taskRecordMutationResponseSchema.parse({
+      task: { ...created.task, updatedBy: created.task.createdBy },
+      syncCursor: created.syncCursor,
     });
   }
 
@@ -1495,11 +1724,20 @@ export class WorkspaceRepository {
                     priority = $4,
                     assignee_id = $5,
                     due_on = $6,
+                    updated_by = $7,
                     version = version + 1,
                     updated_at = clock_timestamp()
               WHERE id = $1
               RETURNING *`,
-            [taskId, input.title, input.description, input.priority, input.assigneeId, input.dueOn],
+            [
+              taskId,
+              input.title,
+              input.description,
+              input.priority,
+              input.assigneeId,
+              input.dueOn,
+              identity.currentUser.user.id,
+            ],
           );
           const row = updated.rows[0];
           if (row === undefined) throw new Error("Task update returned no row");
@@ -1583,10 +1821,11 @@ export class WorkspaceRepository {
                         ELSE NULL
                       END,
                       version = version + 1,
+                      updated_by = $4,
                       updated_at = clock_timestamp()
                 WHERE id = $1
                 RETURNING *`,
-              [taskId, input.status, rank.toString()],
+              [taskId, input.status, rank.toString(), identity.currentUser.user.id],
             );
             const row = moved.rows[0];
             if (row === undefined) throw new Error("Task move returned no row");
@@ -1606,10 +1845,11 @@ export class WorkspaceRepository {
                           ELSE completed_at
                         END,
                         version = version + 1,
+                        updated_by = $5,
                         updated_at = clock_timestamp()
                   WHERE id = $4
                   RETURNING *`,
-                [taskId, input.status, rank.toString(), id],
+                [taskId, input.status, rank.toString(), id, identity.currentUser.user.id],
               );
               const row = updated.rows[0];
               if (row === undefined) throw new Error("Task rebalance returned no row");
@@ -2325,6 +2565,47 @@ export class WorkspaceRepository {
     );
     const row = result.rows[0];
     if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+    return row;
+  }
+
+  async #visibleChannelIdBySlug(
+    identity: AuthenticatedTaskIdentity,
+    channelSlug: string,
+    requireWritable: boolean,
+  ): Promise<string> {
+    const client = await this.pool.connect();
+    try {
+      return (
+        await this.#requireVisibleChannelBySlug(client, identity, channelSlug, requireWritable)
+      ).id;
+    } finally {
+      client.release();
+    }
+  }
+
+  async #requireVisibleChannelBySlug(
+    client: PoolClient,
+    identity: AuthenticatedTaskIdentity,
+    channelSlug: string,
+    requireWritable: boolean,
+  ): Promise<ConversationRow> {
+    const result = await client.query<ConversationRow>(
+      `SELECT *
+         FROM conversations AS conversation
+        WHERE conversation.workspace_id = $1
+          AND conversation.kind = 'channel'
+          AND conversation.slug = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}
+          AND ($4::boolean = false OR conversation.is_archived = false)`,
+      [
+        identity.currentUser.workspaceId,
+        channelSlug,
+        identity.currentUser.user.id,
+        requireWritable,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
     return row;
   }
 

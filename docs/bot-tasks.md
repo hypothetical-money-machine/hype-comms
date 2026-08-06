@@ -65,7 +65,7 @@ origin were loaded from a secret store into the process environment.
 ```bash
 curl --fail-with-body \
   --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
-  "${HMM_API_ORIGIN}/v1/conversations/${CHANNEL_ID}/tasks?limit=100"
+  "${HMM_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks?limit=100"
 ```
 
 Create operations require a stable `Idempotency-Key`. A bot should derive this from the external
@@ -78,13 +78,47 @@ curl --fail-with-body \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: deploy:production:2026-08-05.1" \
   --data '{"title":"Verify production rollout","priority":"high"}' \
-  "${HMM_API_ORIGIN}/v1/conversations/${CHANNEL_ID}/tasks"
+  "${HMM_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks"
 ```
+
+Channel slugs and conversation-local task numbers form stable human-readable references. Fetch
+`#general-42` without scanning the board, or use the canonical task UUID returned by any response:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
+  "${HMM_API_ORIGIN}/v1/channels/general/tasks/42"
+
+curl --fail-with-body \
+  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
+  "${HMM_API_ORIGIN}/v1/tasks/${TASK_ID}"
+```
+
+Board and My Tasks lists accept optional `status`, `priority`, `assignee`, `dueAfter`, `dueBefore`,
+`updatedAfter`, and `updatedBy` filters. `assignee` accepts a user UUID, `me`, or `unassigned`;
+`updatedBy` accepts a user UUID or `me`. Due-date bounds are inclusive and `updatedAfter` is
+exclusive. For example, a bot can poll its recently changed urgent work without downloading every
+card:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
+  "${HMM_API_ORIGIN}/v1/channels/general/tasks?status=in_progress&priority=urgent&assignee=me&updatedAfter=2026-08-05T00%3A00%3A00.000Z"
+```
+
+Pagination cursors are bound to the exact filter set. Reusing a cursor after changing a filter is
+a `400 BAD_REQUEST`; restart that filtered query without `after` instead.
 
 The same credential may use `GET /v1/tasks/mine` for tasks assigned to its bot identity. Updates
 and Kanban moves use the existing optimistic `expectedVersion` contract and their own stable
 idempotency keys. A stale version returns `409 CONFLICT`; read the board again before deciding
 whether to retry the intended change.
+
+Every response from the bot-friendly channel-slug list/create routes and the two single-task lookup
+routes includes `createdBy` and `updatedBy`. A create attributes both fields to the bot; edits,
+assignments, Kanban moves, and automatic unassignment record the member or bot that performed the
+latest mutation. The original conversation-ID task routes keep their prior wire shape for desktop
+compatibility; use a lookup route when a bot needs fresh actor attribution after a patch or move.
 
 `tasks:read` permits the two task-list routes. `tasks:write` permits create, update, and move routes.
 Write responses include the canonical task that was changed, but the scope does not permit list
