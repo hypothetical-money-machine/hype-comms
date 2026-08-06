@@ -1,4 +1,4 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 const MIN_COMPOSER_HEIGHT = 44;
 const MAX_COMPOSER_HEIGHT = 132;
@@ -19,7 +19,10 @@ export function MessageComposer({
   readonly onSubmit: () => Promise<void>;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
-  const sendDisabled = disabled || draft.trim() === "";
+  const submitting = useRef(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const composerDisabled = disabled || isSubmitting;
+  const sendDisabled = composerDisabled || draft.trim() === "";
 
   useEffect(() => {
     const element = input.current;
@@ -35,7 +38,17 @@ export function MessageComposer({
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!sendDisabled) void onSubmit();
+    if (sendDisabled || submitting.current) return;
+    submitting.current = true;
+    setIsSubmitting(true);
+    void (async () => {
+      try {
+        await onSubmit();
+      } finally {
+        submitting.current = false;
+        setIsSubmitting(false);
+      }
+    })();
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -45,7 +58,7 @@ export function MessageComposer({
   };
 
   return (
-    <form className="composer" onSubmit={submit}>
+    <form className="composer" onSubmit={submit} aria-busy={isSubmitting}>
       <div className="composer-input">
         <label className="sr-only" htmlFor="message">
           Message
@@ -59,7 +72,7 @@ export function MessageComposer({
           placeholder={
             conversationName === null ? "Choose a conversation" : `Message ${conversationName}`
           }
-          disabled={disabled}
+          disabled={composerDisabled}
           maxLength={4_000}
           rows={1}
           enterKeyHint="send"

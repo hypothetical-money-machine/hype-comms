@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -39,6 +39,27 @@ describe("MessageComposer", () => {
     fireEvent.keyDown(textbox, { key: "Enter", shiftKey: true });
     expect(props.onSubmit).not.toHaveBeenCalled();
     expect(screen.getByText(/for a new line/)).toBeTruthy();
+  });
+
+  it("allows only one submission while the current send is pending", async () => {
+    let finishSubmission: (() => void) | undefined;
+    const pendingSubmission = new Promise<void>((resolve) => {
+      finishSubmission = resolve;
+    });
+    const onSubmit = vi.fn(() => pendingSubmission);
+    renderComposer({ onSubmit });
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(textbox.disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    expect(textbox.closest("form")?.getAttribute("aria-busy")).toBe("true");
+
+    finishSubmission?.();
+    await waitFor(() => expect(textbox.disabled).toBe(false));
   });
 
   it("tracks the selected conversation in its placeholder", () => {
