@@ -18,11 +18,11 @@ jobs:
     name: Check with PostgreSQL
     # GitHub-hosted jobs are unavailable on the repository's current billing plan. Keep untrusted
     # fork code off persistent infrastructure; private same-repository branches are collaborator-
-    # controlled, and this read-only job receives no release credentials.
+    # controlled and already use these runners for native package smoke tests.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
+    runs-on: [self-hosted, Linux, X64, docker, docker-mac-mini]
     timeout-minutes: 20
     steps:
       - name: Check out source
@@ -34,6 +34,46 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      - name: Install PostgreSQL 16
+        run: |
+          if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+            sudo mv /etc/apt/sources.list.d/pgdg.list "$RUNNER_TEMP/stale-pgdg.list"
+          fi
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends postgresql-16
+
+      - name: Start isolated PostgreSQL
+        id: postgres
+        run: |
+          postgres_bindir=/usr/lib/postgresql/16/bin
+          postgres_data="$RUNNER_TEMP/pgdata"
+          postgres_password_file="$RUNNER_TEMP/postgres-password"
+          printf '%s' 'hmm-test-password' > "$postgres_password_file"
+          "$postgres_bindir/initdb" \
+            --pgdata="$postgres_data" \
+            --username=hmm \
+            --pwfile="$postgres_password_file" \
+            --auth-host=scram-sha-256 \
+            --auth-local=trust \
+            --encoding=UTF8 \
+            --locale=C.UTF-8 \
+            --no-instructions
+          printf "%s\n" \
+            "listen_addresses = '127.0.0.1'" \
+            "port = 55432" \
+            "unix_socket_directories = '$RUNNER_TEMP'" >> "$postgres_data/postgresql.conf"
+          "$postgres_bindir/pg_ctl" \
+            --pgdata="$postgres_data" \
+            --log="$RUNNER_TEMP/postgres.log" \
+            --wait start
+          PGPASSWORD=hmm-test-password "$postgres_bindir/createdb" \
+            --host=127.0.0.1 \
+            --port=55432 \
+            --username=hmm \
+            --owner=hmm \
+            hmm_chat_test
+          echo "connection-uri=postgresql://hmm:hmm-test-password@127.0.0.1:55432/hmm_chat_test" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
         run: npm ci
 
@@ -41,4 +81,16 @@ jobs:
         run: npm run check
 
       - name: Run the complete PostgreSQL suite
-        run: npm run test:db
+        env:
+          HMM_TEST_DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
+        run: npm test --workspace @hmm-chat/server
+
+      - name: Stop isolated PostgreSQL
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/pgdata/postmaster.pid" ]; then
+            /usr/lib/postgresql/16/bin/pg_ctl \
+              --pgdata="$RUNNER_TEMP/pgdata" \
+              --wait \
+              --mode=fast stop
+          fi
