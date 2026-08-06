@@ -7,7 +7,9 @@ on:
       - "v*"
 
 concurrency:
-  group: desktop-release
+  # The previous key was orphaned by completed runs during the August 2026 Actions incident.
+  # Keep one stable replacement key so every future desktop publication remains serialized.
+  group: desktop-release-publish
   cancel-in-progress: false
 
 permissions:

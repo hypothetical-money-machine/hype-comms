@@ -54,6 +54,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.equal(desktopPackage.build.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
   assert.match(
     releaseWorkflow,
+    /^concurrency:\n[ ]{2}# [^\n]+\n[ ]{2}# [^\n]+\n[ ]{2}group: desktop-release-publish\n[ ]{2}cancel-in-progress: false$/mu,
+  );
+  assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
+  assert.match(
+    releaseWorkflow,
     /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
   );
   assert.match(
