@@ -271,6 +271,14 @@ function firstItemsByConversation(outbox: readonly OutboxItem[]): readonly Outbo
   });
 }
 
+interface ReadTarget {
+  readonly messageId: string;
+  readonly conversationSequence: string;
+  attempt: number;
+  inFlight: boolean;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+}
+
 export class WorkspaceRuntime {
   readonly #listeners = new Set<(state: WorkspaceRuntimeState) => void>();
   readonly #client: DesktopApi;
@@ -299,10 +307,7 @@ export class WorkspaceRuntime {
   #syncCursor: string | null = null;
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
-  readonly #pendingReadTargets = new Map<
-    string,
-    { readonly messageId: string; readonly conversationSequence: string }
-  >();
+  readonly #readTargets = new Map<string, ReadTarget>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -350,7 +355,7 @@ export class WorkspaceRuntime {
     this.#clearSyncRetryTimer();
     this.#resetResyncState();
     this.#syncAttempt = 0;
-    this.#pendingReadTargets.clear();
+    this.#clearReadTargets();
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
@@ -426,7 +431,7 @@ export class WorkspaceRuntime {
     await this.#client.stopWorkspaceRealtime();
     this.#cache = null;
     this.#syncCursor = null;
-    this.#pendingReadTargets.clear();
+    this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
   }
@@ -452,19 +457,46 @@ export class WorkspaceRuntime {
     if (message === undefined || summary === undefined) return;
     const targetSequence = message.conversationSequence;
     const currentSequence = summary.readCursor?.lastReadConversationSequence;
-    if (currentSequence !== undefined && BigInt(currentSequence) >= BigInt(targetSequence)) return;
-    const pending = this.#pendingReadTargets.get(conversationId);
-    if (pending !== undefined && BigInt(pending.conversationSequence) >= BigInt(targetSequence)) {
+    const tracked = this.#readTargets.get(conversationId);
+    if (currentSequence !== undefined && BigInt(currentSequence) >= BigInt(targetSequence)) {
+      if (
+        tracked !== undefined &&
+        BigInt(currentSequence) >= BigInt(tracked.conversationSequence)
+      ) {
+        if (tracked.retryTimer !== null) clearTimeout(tracked.retryTimer);
+        this.#readTargets.delete(conversationId);
+      }
+      return;
+    }
+    if (tracked !== undefined && BigInt(tracked.conversationSequence) >= BigInt(targetSequence)) {
       return;
     }
 
-    this.#pendingReadTargets.set(conversationId, {
+    if (tracked !== undefined && tracked.retryTimer !== null) {
+      clearTimeout(tracked.retryTimer);
+    }
+    const target: ReadTarget = {
       messageId,
       conversationSequence: targetSequence,
-    });
-    const generation = this.#generation;
+      attempt: 0,
+      inFlight: false,
+      retryTimer: null,
+    };
+    this.#readTargets.set(conversationId, target);
+    this.#sendReadTarget(conversationId, target, this.#generation);
+  }
+
+  #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
+    if (
+      generation !== this.#generation ||
+      this.#readTargets.get(conversationId) !== target ||
+      target.inFlight
+    ) {
+      return;
+    }
+    target.inFlight = true;
     void this.#client
-      .advanceReadCursor(conversationId, messageId)
+      .advanceReadCursor(conversationId, target.messageId)
       .then((result) => {
         if (generation !== this.#generation || this.#state.bootstrap === null) return;
         this.#setState({
@@ -481,15 +513,20 @@ export class WorkspaceRuntime {
             return { ...current, readCursor: result.readCursor };
           }),
         });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (
-          generation === this.#generation &&
-          this.#pendingReadTargets.get(conversationId)?.messageId === messageId
-        ) {
-          this.#pendingReadTargets.delete(conversationId);
+        if (this.#readTargets.get(conversationId) === target) {
+          this.#readTargets.delete(conversationId);
         }
+      })
+      .catch(() => {
+        if (generation !== this.#generation || this.#readTargets.get(conversationId) !== target) {
+          return;
+        }
+        target.inFlight = false;
+        target.attempt += 1;
+        target.retryTimer = setTimeout(() => {
+          target.retryTimer = null;
+          this.#sendReadTarget(conversationId, target, generation);
+        }, retryDelay(target.attempt));
       });
   }
 
@@ -1008,6 +1045,7 @@ export class WorkspaceRuntime {
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#resetResyncState();
+    this.#clearReadTargets();
     const scope = this.#scope;
     await this.#client.stopWorkspaceRealtime();
     await this.#cache?.clearAll().catch(() => undefined);
@@ -1522,6 +1560,13 @@ export class WorkspaceRuntime {
       clearTimeout(this.#syncRetryTimer);
       this.#syncRetryTimer = null;
     }
+  }
+
+  #clearReadTargets(): void {
+    for (const target of this.#readTargets.values()) {
+      if (target.retryTimer !== null) clearTimeout(target.retryTimer);
+    }
+    this.#readTargets.clear();
   }
 
   #clearResyncTimer(): void {

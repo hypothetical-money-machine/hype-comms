@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { isTimelineAtBottom, lastFullyVisibleMessageId } from "./message-read-tracking";
+import { isTimelineAtBottom, lastReadEligibleMessageId } from "./message-read-tracking";
 
 function rectangle(top: number, bottom: number): DOMRect {
   return {
@@ -18,22 +18,62 @@ function rectangle(top: number, bottom: number): DOMRect {
   };
 }
 
+function visibilityMemory() {
+  return { observedStarts: new Set<string>(), observedEnds: new Set<string>() };
+}
+
 describe("message read tracking", () => {
-  it("returns the last message whose bottom edge is visible", () => {
+  it("returns the last message whose start and end have been observed", () => {
     const container = document.createElement("div");
     vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rectangle(100, 500));
-    for (const [id, top, bottom] of [
-      ["first", 50, 150],
-      ["second", 150, 300],
-      ["third", 300, 520],
+    for (const [id, sequence, top, bottom] of [
+      ["first", "1", 50, 150],
+      ["second", "2", 150, 300],
+      ["third", "3", 300, 520],
     ] as const) {
       const element = document.createElement("article");
       element.dataset.messageId = id;
+      element.dataset.messageSequence = sequence;
       vi.spyOn(element, "getBoundingClientRect").mockReturnValue(rectangle(top, bottom));
       container.append(element);
     }
 
-    expect(lastFullyVisibleMessageId(container)).toBe("second");
+    const memory = visibilityMemory();
+    expect(lastReadEligibleMessageId(container, memory, "1")).toBe("second");
+    expect(memory.observedStarts.has("first")).toBe(false);
+  });
+
+  it("does not leapfrog a top-clipped unread message", () => {
+    const container = document.createElement("div");
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rectangle(100, 500));
+    for (const [id, sequence, top, bottom] of [
+      ["clipped", "1", 50, 300],
+      ["later", "2", 300, 450],
+    ] as const) {
+      const message = document.createElement("article");
+      message.dataset.messageId = id;
+      message.dataset.messageSequence = sequence;
+      vi.spyOn(message, "getBoundingClientRect").mockReturnValue(rectangle(top, bottom));
+      container.append(message);
+    }
+
+    expect(lastReadEligibleMessageId(container, visibilityMemory(), null)).toBeNull();
+  });
+
+  it("reads a tall message after both edges have been observed", () => {
+    const container = document.createElement("div");
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rectangle(100, 500));
+    const message = document.createElement("article");
+    message.dataset.messageId = "tall";
+    message.dataset.messageSequence = "1";
+    let messageBounds = rectangle(150, 650);
+    vi.spyOn(message, "getBoundingClientRect").mockImplementation(() => messageBounds);
+    container.append(message);
+    const memory = visibilityMemory();
+
+    expect(lastReadEligibleMessageId(container, memory, null)).toBeNull();
+    messageBounds = rectangle(50, 450);
+    expect(lastReadEligibleMessageId(container, memory, null)).toBe("tall");
   });
 
   it("detects the bottom with a small layout tolerance", () => {

@@ -20,7 +20,7 @@ import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-se
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
 import { isMessageContinuation } from "./message-grouping";
-import { isTimelineAtBottom, lastFullyVisibleMessageId } from "./message-read-tracking";
+import { isTimelineAtBottom, lastReadEligibleMessageId } from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -228,6 +228,7 @@ function MessageRow({
       }`}
       id={`message-${message.id}`}
       data-message-id={message.id}
+      data-message-sequence={message.conversationSequence}
     >
       {continuation ? (
         <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
@@ -276,6 +277,11 @@ export function App({ client, theme }: AppProps) {
   const timelineConversationId = useRef<string | null>(null);
   const stickToTimelineBottom = useRef(true);
   const readTrackingFrame = useRef<number | null>(null);
+  const readTrackingConversationId = useRef<string | null>(null);
+  const messageVisibilityMemory = useRef({
+    observedStarts: new Set<string>(),
+    observedEnds: new Set<string>(),
+  });
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -394,9 +400,18 @@ export function App({ client, theme }: AppProps) {
     ) {
       return;
     }
-    const messageId = lastFullyVisibleMessageId(list);
+    if (readTrackingConversationId.current !== conversationId) {
+      readTrackingConversationId.current = conversationId;
+      messageVisibilityMemory.current.observedStarts.clear();
+      messageVisibilityMemory.current.observedEnds.clear();
+    }
+    const messageId = lastReadEligibleMessageId(
+      list,
+      messageVisibilityMemory.current,
+      selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
+    );
     if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
-  }, [runtime, runtimeState.selectedConversationId]);
+  }, [runtime, runtimeState.selectedConversationId, selectedSummary?.readCursor]);
 
   const scheduleReadTracking = useCallback((): void => {
     if (readTrackingFrame.current !== null) return;
