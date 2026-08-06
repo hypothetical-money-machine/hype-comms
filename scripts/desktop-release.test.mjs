@@ -51,6 +51,12 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
   assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
   assert.equal(desktopPackage.build.nsis.buildUniversalInstaller, false);
+  assert.equal(desktopPackage.build.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
+  assert.match(
+    releaseWorkflow,
+    /^concurrency:\n[ ]{2}# [^\n]+\n[ ]{2}# [^\n]+\n[ ]{2}group: desktop-release-publish\n[ ]{2}cancel-in-progress: false$/mu,
+  );
+  assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
   assert.match(
     releaseWorkflow,
     /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
@@ -103,6 +109,15 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /RELEASE_NOTES_FALLBACK_TAG: v0\.1\.11[\s\S]*gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
   );
   assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
+  assert.match(
+    releaseWorkflow,
+    /apps\/desktop\/release\/hype-comms-\$\{\{ needs\.validate\.outputs\.desktop-version \}\}-\$\{\{ matrix\.artifact_os \}\}-\*/u,
+  );
+  assert.equal(
+    releaseWorkflow.match(/"hype-comms-\$\{DESKTOP_VERSION\}-(?:mac|win|linux)-"/gu)?.length,
+    6,
+  );
+  assert.doesNotMatch(releaseWorkflow, /hmm-chat-\$\{(?:DESKTOP_VERSION|\{)/u);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
 });
 
