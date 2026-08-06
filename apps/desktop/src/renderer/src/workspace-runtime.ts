@@ -271,6 +271,14 @@ function firstItemsByConversation(outbox: readonly OutboxItem[]): readonly Outbo
   });
 }
 
+interface ReadTarget {
+  readonly messageId: string;
+  readonly conversationSequence: string;
+  attempt: number;
+  inFlight: boolean;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+}
+
 export class WorkspaceRuntime {
   readonly #listeners = new Set<(state: WorkspaceRuntimeState) => void>();
   readonly #client: DesktopApi;
@@ -299,6 +307,7 @@ export class WorkspaceRuntime {
   #syncCursor: string | null = null;
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
+  readonly #readTargets = new Map<string, ReadTarget>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -346,6 +355,7 @@ export class WorkspaceRuntime {
     this.#clearSyncRetryTimer();
     this.#resetResyncState();
     this.#syncAttempt = 0;
+    this.#clearReadTargets();
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
@@ -421,19 +431,13 @@ export class WorkspaceRuntime {
     await this.#client.stopWorkspaceRealtime();
     this.#cache = null;
     this.#syncCursor = null;
+    this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
   }
 
   selectConversation(conversationId: string): void {
     this.#setState({ selectedConversationId: conversationId, focusedMessageId: null });
-    const messages = this.#state.messages.filter(
-      (message) => message.conversationId === conversationId,
-    );
-    const latest = messages.at(-1);
-    if (latest !== undefined) {
-      void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
-    }
   }
 
   openTaskSource(task: Task): void {
@@ -441,12 +445,89 @@ export class WorkspaceRuntime {
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
     });
-    const latest = this.#state.messages
-      .filter((message) => message.conversationId === task.conversationId)
-      .at(-1);
-    if (latest !== undefined) {
-      void this.#client.advanceReadCursor(task.conversationId, latest.id).catch(() => undefined);
+  }
+
+  markConversationReadThrough(conversationId: string, messageId: string): void {
+    const message = this.#state.messages.find(
+      (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
+    );
+    const summary = this.#state.bootstrap?.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (message === undefined || summary === undefined) return;
+    const targetSequence = message.conversationSequence;
+    const currentSequence = summary.readCursor?.lastReadConversationSequence;
+    const tracked = this.#readTargets.get(conversationId);
+    if (currentSequence !== undefined && BigInt(currentSequence) >= BigInt(targetSequence)) {
+      if (
+        tracked !== undefined &&
+        BigInt(currentSequence) >= BigInt(tracked.conversationSequence)
+      ) {
+        if (tracked.retryTimer !== null) clearTimeout(tracked.retryTimer);
+        this.#readTargets.delete(conversationId);
+      }
+      return;
     }
+    if (tracked !== undefined && BigInt(tracked.conversationSequence) >= BigInt(targetSequence)) {
+      return;
+    }
+
+    if (tracked !== undefined && tracked.retryTimer !== null) {
+      clearTimeout(tracked.retryTimer);
+    }
+    const target: ReadTarget = {
+      messageId,
+      conversationSequence: targetSequence,
+      attempt: 0,
+      inFlight: false,
+      retryTimer: null,
+    };
+    this.#readTargets.set(conversationId, target);
+    this.#sendReadTarget(conversationId, target, this.#generation);
+  }
+
+  #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
+    if (
+      generation !== this.#generation ||
+      this.#readTargets.get(conversationId) !== target ||
+      target.inFlight
+    ) {
+      return;
+    }
+    target.inFlight = true;
+    void this.#client
+      .advanceReadCursor(conversationId, target.messageId)
+      .then((result) => {
+        if (generation !== this.#generation || this.#state.bootstrap === null) return;
+        this.#setState({
+          bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
+            if (current === undefined) return null;
+            const projectedSequence = result.readCursor.lastReadConversationSequence;
+            const existingSequence = current.readCursor?.lastReadConversationSequence;
+            if (
+              existingSequence !== undefined &&
+              BigInt(existingSequence) >= BigInt(projectedSequence)
+            ) {
+              return current;
+            }
+            return { ...current, readCursor: result.readCursor };
+          }),
+        });
+        if (this.#readTargets.get(conversationId) === target) {
+          this.#readTargets.delete(conversationId);
+        }
+      })
+      .catch(() => {
+        if (generation !== this.#generation || this.#readTargets.get(conversationId) !== target) {
+          return;
+        }
+        target.inFlight = false;
+        target.attempt += 1;
+        target.retryTimer = setTimeout(() => {
+          target.retryTimer = null;
+          this.#sendReadTarget(conversationId, target, generation);
+        }, retryDelay(target.attempt));
+      });
   }
 
   async sendMessage(
@@ -964,6 +1045,7 @@ export class WorkspaceRuntime {
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#resetResyncState();
+    this.#clearReadTargets();
     const scope = this.#scope;
     await this.#client.stopWorkspaceRealtime();
     await this.#cache?.clearAll().catch(() => undefined);
@@ -1478,6 +1560,13 @@ export class WorkspaceRuntime {
       clearTimeout(this.#syncRetryTimer);
       this.#syncRetryTimer = null;
     }
+  }
+
+  #clearReadTargets(): void {
+    for (const target of this.#readTargets.values()) {
+      if (target.retryTimer !== null) clearTimeout(target.retryTimer);
+    }
+    this.#readTargets.clear();
   }
 
   #clearResyncTimer(): void {

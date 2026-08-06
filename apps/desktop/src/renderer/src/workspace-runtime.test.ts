@@ -487,6 +487,11 @@ class FakeDesktopApi implements DesktopApi {
   readonly conversationTaskRequests: string[] = [];
   readonly taskMutationResults: TaskMutationResponse[] = [];
   readonly taskMutations: (CreateTaskOperation | UpdateTaskOperation | MoveTaskOperation)[] = [];
+  readCursorFailures = 0;
+  readonly readCursorRequests: {
+    readonly conversationId: string;
+    readonly lastReadMessageId: string;
+  }[] = [];
   readonly #eventListeners = new Set<(event: ProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
@@ -726,12 +731,17 @@ class FakeDesktopApi implements DesktopApi {
     conversationId: string,
     lastReadMessageId: string,
   ): Promise<AdvanceReadCursorResponse> {
+    this.readCursorRequests.push({ conversationId, lastReadMessageId });
+    if (this.readCursorFailures > 0) {
+      this.readCursorFailures -= 1;
+      throw new Error("The read cursor is temporarily unavailable");
+    }
     return {
       readCursor: {
         conversationId,
         userId: USER_ID,
         lastReadMessageId,
-        lastReadConversationSequence: "1",
+        lastReadConversationSequence: lastReadMessageId === OWN_MESSAGE_ID ? "2" : "1",
         lastReadAt: NOW,
         updatedAt: NOW,
       },
@@ -848,6 +858,71 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("advances read state only when the renderer exposes a visible message", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [peerMessage, ownMessage],
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    runtime.selectConversation(CONVERSATION_ID);
+    expect(api.readCursorRequests).toEqual([]);
+
+    runtime.markConversationReadThrough(CONVERSATION_ID, PEER_MESSAGE_ID);
+    await settle(() => api.readCursorRequests.length === 1, "read cursor request");
+    expect(api.readCursorRequests).toEqual([
+      { conversationId: CONVERSATION_ID, lastReadMessageId: PEER_MESSAGE_ID },
+    ]);
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations[0]?.readCursor?.lastReadMessageId ===
+        PEER_MESSAGE_ID,
+      "read cursor response projection",
+    );
+
+    runtime.markConversationReadThrough(CONVERSATION_ID, PEER_MESSAGE_ID);
+    runtime.markConversationReadThrough(CONVERSATION_ID, "10000000-0000-4000-8000-000000000099");
+    expect(api.readCursorRequests).toHaveLength(1);
+
+    runtime.markConversationReadThrough(CONVERSATION_ID, OWN_MESSAGE_ID);
+    await settle(() => api.readCursorRequests.length === 2, "newer read cursor request");
+    expect(api.readCursorRequests[1]).toEqual({
+      conversationId: CONVERSATION_ID,
+      lastReadMessageId: OWN_MESSAGE_ID,
+    });
+  });
+
+  it("retries a visible read target after a transient cursor failure", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.histories.set(CONVERSATION_ID, { messages: [peerMessage], nextCursor: null });
+      api.readCursorFailures = 1;
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      runtime.markConversationReadThrough(CONVERSATION_ID, PEER_MESSAGE_ID);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.readCursorRequests).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.readCursorRequests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.readCursorRequests).toHaveLength(2);
+      expect(runtime.state.bootstrap?.conversations[0]?.readCursor?.lastReadMessageId).toBe(
+        PEER_MESSAGE_ID,
+      );
+
+      await runtime.stop();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("hydrates reactions with initial history and restores them from the cache", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
