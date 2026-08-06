@@ -342,7 +342,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
-            apps/desktop/release/hmm-chat-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-* \
+            apps/desktop/release/hype-comms-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-* \
             apps/desktop/release/latest*.yml
 
       # All package lanes must stage before any lane can publish its platform feed. Otherwise a
@@ -363,9 +363,9 @@ jobs:
                 fi
               done
               for artifact_prefix in \
-                "hmm-chat-${DESKTOP_VERSION}-mac-" \
-                "hmm-chat-${DESKTOP_VERSION}-win-" \
-                "hmm-chat-${DESKTOP_VERSION}-linux-"; do
+                "hype-comms-${DESKTOP_VERSION}-mac-" \
+                "hype-comms-${DESKTOP_VERSION}-win-" \
+                "hype-comms-${DESKTOP_VERSION}-linux-"; do
                 if ! printf '%s\n' "$assets" | grep -Fq -- "$artifact_prefix"; then
                   missing=1
                 fi
@@ -542,9 +542,9 @@ jobs:
             fi
           done
           for artifact_prefix in \
-            "hmm-chat-${DESKTOP_VERSION}-mac-" \
-            "hmm-chat-${DESKTOP_VERSION}-win-" \
-            "hmm-chat-${DESKTOP_VERSION}-linux-"; do
+            "hype-comms-${DESKTOP_VERSION}-mac-" \
+            "hype-comms-${DESKTOP_VERSION}-win-" \
+            "hype-comms-${DESKTOP_VERSION}-linux-"; do
             if ! printf '%s\n' "$assets" | grep -Fq -- "$artifact_prefix"; then
               echo "GitHub Release is missing an asset with prefix ${artifact_prefix}." >&2
               exit 1
