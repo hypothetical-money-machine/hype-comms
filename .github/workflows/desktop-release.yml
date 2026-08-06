@@ -59,27 +59,54 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    # GitHub-hosted jobs are unavailable while organization billing is blocked. This release
-    # runner already has bash and gh for validation and asset uploads, so keep metadata work there.
+    # GitHub-hosted jobs are unavailable while organization billing is blocked. Keep metadata work
+    # on the release runner and install the pinned GitHub CLI instead of relying on its host image.
     runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install verified GitHub CLI
+        shell: bash
+        run: node scripts/install-github-cli.mjs
+
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+          RELEASE_NOTES_FALLBACK_TAG: v0.1.11
         shell: bash
         run: |
           set -euo pipefail
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            notes_start_tag="$(
+              gh release list \
+                --repo "$GITHUB_REPOSITORY" \
+                --exclude-drafts \
+                --exclude-pre-releases \
+                --limit 1 \
+                --json tagName \
+                --jq '.[0].tagName // empty'
+            )"
+            if [[ -z "$notes_start_tag" ]]; then
+              notes_start_tag="$RELEASE_NOTES_FALLBACK_TAG"
+            fi
             gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
               --title "HMM Chat ${DESKTOP_VERSION}" \
-              --generate-notes
+              --generate-notes \
+              --notes-start-tag "$notes_start_tag"
           fi
 
   package:
@@ -138,9 +165,20 @@ jobs:
           if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
           if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
           if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
+          where tar.exe >NUL 2>&1 || (echo tar.exe is required to install the pinned GitHub CLI. & exit /b 1)
           where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
           aws --version
           echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
+
+      - name: Install verified GitHub CLI
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: node scripts/install-github-cli.mjs
+
+      - name: Install verified GitHub CLI on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: node scripts/install-github-cli.mjs
 
       - name: Install dependencies
         if: matrix.platform != 'Windows'
@@ -476,6 +514,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install verified GitHub CLI
+        shell: bash
+        run: node scripts/install-github-cli.mjs
+
       - name: Verify and publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
