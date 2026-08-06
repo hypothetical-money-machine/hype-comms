@@ -13,7 +13,15 @@ const MEMBER_ID = "10000000-0000-4000-8000-000000000003";
 const NOW = "2026-07-26T12:00:00.000Z";
 
 function user(id: string, username: string, displayName: string): User {
-  return { id, username, displayName, avatarUrl: null, createdAt: NOW, updatedAt: NOW };
+  return {
+    id,
+    kind: "human",
+    username,
+    displayName,
+    avatarUrl: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
 }
 
 const owner = user(OWNER_ID, "owner", "Owner");

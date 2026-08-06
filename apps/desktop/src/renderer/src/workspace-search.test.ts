@@ -14,6 +14,7 @@ const MESSAGE_ID = "10000000-0000-4000-8000-000000000003";
 
 const member: User = {
   id: USER_ID,
+  kind: "human",
   username: "claire",
   displayName: "Claire",
   avatarUrl: null,

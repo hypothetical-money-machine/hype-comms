@@ -46,23 +46,25 @@ const TASK_ID = "10000000-0000-4000-8000-000000000071";
 
 const scope = { userId: MORGAN_ID, workspaceId: WORKSPACE_ID };
 
-const morgan: User = {
+const morgan = {
   id: MORGAN_ID,
+  kind: "human",
   username: "morgan",
   displayName: "Morgan",
   avatarUrl: null,
   createdAt: NOW,
   updatedAt: NOW,
-};
+} as const satisfies User;
 
-const alice: User = {
+const alice = {
   id: ALICE_ID,
+  kind: "human",
   username: "alice",
   displayName: "alice",
   avatarUrl: null,
   createdAt: NOW,
   updatedAt: NOW,
-};
+} as const satisfies User;
 
 function channelSummary(id: string, name: string, slug: string): ConversationSummary {
   return {
