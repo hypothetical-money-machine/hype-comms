@@ -3,6 +3,8 @@ import { z } from "zod";
 import { entityIdSchema, isoDateTimeSchema } from "./common.js";
 import { userSchema, workspaceRoleSchema } from "./entities.js";
 
+const humanUserSchema = userSchema.extend({ kind: z.literal("human").default("human") });
+
 /**
  * Email addresses are stored and compared in a single normalized form so that an invitation and a
  * later sign-in for the same person always match. Normalization is lowercasing only: the local
@@ -53,7 +55,7 @@ export const deviceSessionSchema = z
  */
 export const currentUserSchema = z
   .object({
-    user: userSchema,
+    user: humanUserSchema,
     email: emailSchema,
     workspaceId: entityIdSchema,
     role: workspaceRoleSchema,

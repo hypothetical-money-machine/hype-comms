@@ -24,6 +24,8 @@ The implementation contract and security boundaries live in
 - Channel task projects with Board and List views, canonical three-column Kanban ordering,
   assignments/priorities/due dates, message-to-task links, realtime convergence, and a self-DM
   My Tasks list that can include assigned work from other visible boards.
+- First-class bot members with owner-issued, hashed, expiring task credentials, read/write scopes,
+  explicit per-channel grants, one-time token display, rotation/revocation, and actor attribution.
 - Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
   result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients
@@ -77,9 +79,9 @@ Direction, not commitment — revisit once we are happily living in it:
   for anyone who is not us.
 - Browser and mobile clients; the renderer already sits behind a transport interface for
   exactly this reason.
-- An agent-native workspace: agents as first-class members with their own identity,
-  channel membership as the permission boundary, scoped capabilities, and an audit trail.
-  This is the differentiator we care most about long-term.
+- Extend the agent-native foundation beyond tasks: event delivery, richer audit history, safe bot
+  messaging, and in-app owner management. Agents already have first-class identities, explicit
+  channel grants, scoped task capabilities, and task actor attribution.
 - Pricing, packaging, Slack import, and the enterprise/compliance backlog — only if and
   when this becomes a product with users beyond us.
 

@@ -174,10 +174,20 @@ function currentUser(
   workspaceId: EntityId,
   role: "owner" | "member",
 ): CurrentUser {
-  const { email, ...publicUser } = user;
+  if (user.kind !== "human" || user.email === null) {
+    throw new Error("A demo desktop identity must be human");
+  }
   return {
-    user: publicUser,
-    email,
+    user: {
+      id: user.id,
+      kind: "human",
+      username: user.username,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    },
+    email: user.email,
     workspaceId,
     role,
   };
@@ -189,7 +199,11 @@ function identity(
   role: "owner" | "member",
   sessionId: EntityId,
 ): AuthenticatedIdentity {
-  return { currentUser: currentUser(user, workspaceId, role), sessionId };
+  return {
+    currentUser: currentUser(user, workspaceId, role),
+    sessionId,
+    principalKind: "human",
+  };
 }
 
 async function ensureDemoMember(

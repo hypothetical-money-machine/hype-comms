@@ -1,4 +1,5 @@
 export * from "./common.js";
+export * from "./bots.js";
 export * from "./cache.js";
 export * from "./channel-slug.js";
 export * from "./chat.js";

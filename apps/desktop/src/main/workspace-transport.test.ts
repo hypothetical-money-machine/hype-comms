@@ -26,6 +26,7 @@ const CLIENT_CAPABILITIES = [
 const CURRENT_USER = {
   user: {
     id: "10000000-0000-4000-8000-000000000001",
+    kind: "human",
     username: "morgan",
     displayName: "Morgan",
     avatarUrl: null,

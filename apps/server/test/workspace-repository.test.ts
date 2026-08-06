@@ -70,6 +70,7 @@ function currentUser(
   return {
     user: {
       id,
+      kind: "human",
       username,
       displayName,
       avatarUrl: null,
@@ -83,7 +84,7 @@ function currentUser(
 }
 
 function identity(user: CurrentUser, sessionId = randomUUID()): AuthenticatedIdentity {
-  return { currentUser: user, sessionId };
+  return { currentUser: user, sessionId, principalKind: "human" };
 }
 
 const owner = identity(currentUser(ownerId, "owner", "Owner", "owner"), ownerSessionId);

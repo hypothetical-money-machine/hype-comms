@@ -70,6 +70,7 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
+import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import {
@@ -85,6 +86,8 @@ const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+type AuthenticatedTaskIdentity = AuthenticatedIdentity | AuthenticatedBotIdentity;
+
 interface WorkspaceRow extends QueryResultRow {
   id: string;
   name: string;
@@ -97,6 +100,7 @@ interface WorkspaceRow extends QueryResultRow {
 
 interface UserRow extends QueryResultRow {
   id: string;
+  kind: "human" | "bot";
   username: string;
   display_name: string;
   avatar_url: string | null;
@@ -288,6 +292,7 @@ function mapWorkspace(row: WorkspaceRow) {
 function mapUser(row: UserRow) {
   return userSchema.parse({
     id: row.id,
+    kind: row.kind,
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
@@ -318,22 +323,43 @@ function conversationVisibilitySql(
 ): string {
   return `(
     (
-      ${alias}.kind = 'channel'
-      AND ${alias}.channel_access = 'workspace'
+      EXISTS (
+        SELECT 1 FROM users AS visible_actor
+         WHERE visible_actor.id = ${userParameter}
+           AND visible_actor.kind = 'human'
+      )
+      AND (
+        (
+          ${alias}.kind = 'channel'
+          AND ${alias}.channel_access = 'workspace'
+        )
+        OR (
+          ${alias}.kind = 'channel'
+          AND ${alias}.channel_access = 'members'
+          AND EXISTS (
+            SELECT 1
+              FROM conversation_memberships AS visible_membership
+             WHERE visible_membership.conversation_id = ${alias}.id
+               AND visible_membership.user_id = ${userParameter}
+               AND visible_membership.left_at IS NULL
+          )
+        )
+        OR ${alias}.dm_user_low_id = ${userParameter}
+        OR ${alias}.dm_user_high_id = ${userParameter}
+      )
     )
     OR (
       ${alias}.kind = 'channel'
-      AND ${alias}.channel_access = 'members'
       AND EXISTS (
         SELECT 1
-          FROM conversation_memberships AS visible_membership
-         WHERE visible_membership.conversation_id = ${alias}.id
-           AND visible_membership.user_id = ${userParameter}
-           AND visible_membership.left_at IS NULL
+          FROM bot_channel_grants AS visible_bot_grant
+          JOIN users AS visible_bot
+            ON visible_bot.id = visible_bot_grant.bot_user_id
+           AND visible_bot.kind = 'bot'
+         WHERE visible_bot_grant.conversation_id = ${alias}.id
+           AND visible_bot_grant.bot_user_id = ${userParameter}
       )
     )
-    OR ${alias}.dm_user_low_id = ${userParameter}
-    OR ${alias}.dm_user_high_id = ${userParameter}
   )`;
 }
 
@@ -757,10 +783,12 @@ export class WorkspaceRepository {
       const conversation = await this.#requireManagedChannel(client, identity, conversationId);
       const target = await client.query(
         `SELECT 1
-           FROM workspace_memberships
-          WHERE workspace_id = $1
-            AND user_id = $2
-            AND status = 'active'`,
+           FROM workspace_memberships AS membership
+           JOIN users AS user_account ON user_account.id = membership.user_id
+          WHERE membership.workspace_id = $1
+            AND membership.user_id = $2
+            AND membership.status = 'active'
+            AND user_account.kind = 'human'`,
         [identity.currentUser.workspaceId, memberId],
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
@@ -953,8 +981,12 @@ export class WorkspaceRepository {
     return this.#transaction(async (client) => {
       const target = await client.query(
         `SELECT 1
-           FROM workspace_memberships
-          WHERE workspace_id = $1 AND user_id = $2 AND status = 'active'`,
+           FROM workspace_memberships AS membership
+           JOIN users AS user_account ON user_account.id = membership.user_id
+          WHERE membership.workspace_id = $1
+            AND membership.user_id = $2
+            AND membership.status = 'active'
+            AND user_account.kind = 'human'`,
         [identity.currentUser.workspaceId, input.memberId],
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
@@ -1249,7 +1281,7 @@ export class WorkspaceRepository {
   }
 
   async listConversationTasks(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversationId: string,
     after: string | undefined,
     limit: number,
@@ -1292,7 +1324,7 @@ export class WorkspaceRepository {
   }
 
   async listMyTasks(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     after: string | undefined,
     limit: number,
   ): Promise<TaskListResponse> {
@@ -1346,7 +1378,7 @@ export class WorkspaceRepository {
   }
 
   async createTask(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversationId: string,
     input: CreateTaskRequest,
     idempotencyKey: string,
@@ -1430,7 +1462,7 @@ export class WorkspaceRepository {
   }
 
   async updateTask(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     taskId: string,
     input: UpdateTaskRequest,
     idempotencyKey: string,
@@ -1486,7 +1518,7 @@ export class WorkspaceRepository {
   }
 
   async moveTask(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     taskId: string,
     input: MoveTaskRequest,
     idempotencyKey: string,
@@ -2034,7 +2066,7 @@ export class WorkspaceRepository {
 
   async #members(client: PoolClient, workspaceId: string) {
     const result = await client.query<UserRow>(
-      `SELECT user_account.id, user_account.username, user_account.display_name,
+      `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
               user_account.avatar_url, user_account.created_at, user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
@@ -2186,9 +2218,13 @@ export class WorkspaceRepository {
     };
   }
 
-  #requireTaskConversation(identity: AuthenticatedIdentity, conversation: ConversationRow): void {
+  #requireTaskConversation(
+    identity: AuthenticatedTaskIdentity,
+    conversation: ConversationRow,
+  ): void {
     if (conversation.kind === "channel") return;
     if (
+      identity.principalKind === "human" &&
       conversation.dm_user_low_id === identity.currentUser.user.id &&
       conversation.dm_user_high_id === identity.currentUser.user.id
     ) {
@@ -2199,7 +2235,7 @@ export class WorkspaceRepository {
 
   async #requireTaskTarget(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     taskId: string,
   ): Promise<{ readonly conversation: ConversationRow; readonly task: TaskRow }> {
     const located = await client.query<{ conversation_id: string } & QueryResultRow>(
@@ -2234,7 +2270,7 @@ export class WorkspaceRepository {
 
   async #validateTaskReferences(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversation: ConversationRow,
     input: {
       readonly assigneeId: string | null;
@@ -2267,7 +2303,7 @@ export class WorkspaceRepository {
 
   async #requireVisibleConversation(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversationId: string,
     requireWritable: boolean,
     lock = false,
@@ -2346,7 +2382,8 @@ export class WorkspaceRepository {
     const result =
       conversation.channel_access === "workspace"
         ? await client.query<ChannelMemberRow>(
-            `SELECT user_account.id, user_account.username, user_account.display_name,
+            `SELECT user_account.id, user_account.kind, user_account.username,
+                    user_account.display_name,
                     user_account.avatar_url, user_account.created_at, user_account.updated_at,
                     CASE WHEN user_account.id = $2 THEN 'owner' ELSE 'member' END AS role,
                     workspace_membership.created_at AS joined_at
@@ -2355,22 +2392,49 @@ export class WorkspaceRepository {
                  ON workspace_membership.user_id = user_account.id
               WHERE workspace_membership.workspace_id = $1
                 AND workspace_membership.status = 'active'
+                AND (
+                  user_account.kind = 'human'
+                  OR EXISTS (
+                    SELECT 1
+                      FROM bot_channel_grants AS grant_record
+                     WHERE grant_record.conversation_id = $3
+                       AND grant_record.bot_user_id = user_account.id
+                  )
+                )
               ORDER BY lower(user_account.display_name), user_account.id`,
-            [conversation.workspace_id, conversation.created_by],
+            [conversation.workspace_id, conversation.created_by, conversation.id],
           )
         : await client.query<ChannelMemberRow>(
-            `SELECT user_account.id, user_account.username, user_account.display_name,
-                    user_account.avatar_url, user_account.created_at, user_account.updated_at,
-                    membership.role, membership.joined_at
-               FROM conversation_memberships AS membership
-               JOIN workspace_memberships AS workspace_membership
-                 ON workspace_membership.workspace_id = membership.workspace_id
-                AND workspace_membership.user_id = membership.user_id
-               JOIN users AS user_account ON user_account.id = membership.user_id
-              WHERE membership.conversation_id = $1
-                AND membership.left_at IS NULL
-                AND workspace_membership.status = 'active'
-              ORDER BY lower(user_account.display_name), user_account.id`,
+            `SELECT audience.*
+               FROM (
+                 SELECT user_account.id, user_account.kind, user_account.username,
+                        user_account.display_name, user_account.avatar_url,
+                        user_account.created_at, user_account.updated_at,
+                        membership.role, membership.joined_at
+                   FROM conversation_memberships AS membership
+                   JOIN workspace_memberships AS workspace_membership
+                     ON workspace_membership.workspace_id = membership.workspace_id
+                    AND workspace_membership.user_id = membership.user_id
+                   JOIN users AS user_account ON user_account.id = membership.user_id
+                  WHERE membership.conversation_id = $1
+                    AND membership.left_at IS NULL
+                    AND workspace_membership.status = 'active'
+                    AND user_account.kind = 'human'
+                 UNION ALL
+                 SELECT user_account.id, user_account.kind, user_account.username,
+                        user_account.display_name, user_account.avatar_url,
+                        user_account.created_at, user_account.updated_at,
+                        'member'::text AS role, grant_record.created_at AS joined_at
+                   FROM bot_channel_grants AS grant_record
+                   JOIN workspace_memberships AS workspace_membership
+                     ON workspace_membership.workspace_id = grant_record.workspace_id
+                    AND workspace_membership.user_id = grant_record.bot_user_id
+                   JOIN users AS user_account ON user_account.id = grant_record.bot_user_id
+                  WHERE grant_record.conversation_id = $1
+                    AND workspace_membership.status = 'active'
+                    AND user_account.kind = 'bot'
+               ) AS audience
+              ORDER BY lower(audience.display_name), audience.id`,
             [conversation.id],
           );
     const role = await this.#membershipRole(client, identity, conversation);
@@ -2393,25 +2457,50 @@ export class WorkspaceRepository {
     if (conversation.kind === "direct_message") return participants(conversation);
     if (conversation.channel_access === "workspace") {
       const result = await client.query<{ user_id: string } & QueryResultRow>(
-        `SELECT user_id
-           FROM workspace_memberships
-          WHERE workspace_id = $1
-            AND status = 'active'
-          ORDER BY user_id`,
-        [conversation.workspace_id],
+        `SELECT membership.user_id
+           FROM workspace_memberships AS membership
+           JOIN users AS user_account ON user_account.id = membership.user_id
+          WHERE membership.workspace_id = $1
+            AND membership.status = 'active'
+            AND (
+              user_account.kind = 'human'
+              OR EXISTS (
+                SELECT 1
+                  FROM bot_channel_grants AS grant_record
+                 WHERE grant_record.conversation_id = $2
+                   AND grant_record.bot_user_id = membership.user_id
+              )
+            )
+          ORDER BY membership.user_id`,
+        [conversation.workspace_id, conversation.id],
       );
       return result.rows.map((row) => row.user_id);
     }
     const result = await client.query<{ user_id: string } & QueryResultRow>(
-      `SELECT membership.user_id
-         FROM conversation_memberships AS membership
-         JOIN workspace_memberships AS workspace_membership
-           ON workspace_membership.workspace_id = membership.workspace_id
-          AND workspace_membership.user_id = membership.user_id
-        WHERE membership.conversation_id = $1
-          AND membership.left_at IS NULL
-          AND workspace_membership.status = 'active'
-        ORDER BY membership.user_id`,
+      `SELECT audience.user_id
+         FROM (
+           SELECT membership.user_id
+             FROM conversation_memberships AS membership
+             JOIN workspace_memberships AS workspace_membership
+               ON workspace_membership.workspace_id = membership.workspace_id
+              AND workspace_membership.user_id = membership.user_id
+             JOIN users AS user_account ON user_account.id = membership.user_id
+            WHERE membership.conversation_id = $1
+              AND membership.left_at IS NULL
+              AND workspace_membership.status = 'active'
+              AND user_account.kind = 'human'
+           UNION
+           SELECT grant_record.bot_user_id AS user_id
+             FROM bot_channel_grants AS grant_record
+             JOIN workspace_memberships AS workspace_membership
+               ON workspace_membership.workspace_id = grant_record.workspace_id
+              AND workspace_membership.user_id = grant_record.bot_user_id
+             JOIN users AS user_account ON user_account.id = grant_record.bot_user_id
+            WHERE grant_record.conversation_id = $1
+              AND workspace_membership.status = 'active'
+              AND user_account.kind = 'bot'
+         ) AS audience
+        ORDER BY audience.user_id`,
       [conversation.id],
     );
     return result.rows.map((row) => row.user_id);
@@ -2492,7 +2581,7 @@ export class WorkspaceRepository {
       throw new ApiError(400, "BAD_REQUEST", "A mentioned member cannot access this conversation");
     }
     const result = await client.query<UserRow>(
-      `SELECT user_account.id, user_account.username, user_account.display_name,
+      `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
               user_account.avatar_url, user_account.created_at, user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
@@ -2514,7 +2603,7 @@ export class WorkspaceRepository {
 
   async #insertEvent(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     input: {
       readonly type: WorkspaceEvent["type"];
       readonly conversation: ConversationRow;
@@ -2530,7 +2619,7 @@ export class WorkspaceRepository {
 
   async #insertEventWithSequence(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     sequence: string,
     input: {
       readonly type: WorkspaceEvent["type"];
@@ -2579,8 +2668,10 @@ export class WorkspaceRepository {
         `INSERT INTO sync_event_audiences (event_id, workspace_id, user_id)
          SELECT $1, $2, membership.user_id
            FROM workspace_memberships AS membership
+           JOIN users AS user_account ON user_account.id = membership.user_id
           WHERE membership.workspace_id = $2
-            AND membership.status = 'active'`,
+            AND membership.status = 'active'
+            AND user_account.kind = 'human'`,
         [event.id, event.workspaceId],
       );
     } else {

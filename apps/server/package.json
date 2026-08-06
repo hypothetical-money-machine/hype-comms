@@ -11,6 +11,8 @@
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
     "invite:dist": "node dist/modules/identity/invite-cli.js",
+    "bot": "tsx src/modules/bots/cli.ts",
+    "bot:dist": "node dist/modules/bots/cli.js",
     "migrate": "tsx src/db/migrate.ts",
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",

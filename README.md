@@ -70,6 +70,18 @@ server log. An owner can also issue a manual invitation:
 npm run invite --workspace @hmm-chat/server -- --email member@example.com
 ```
 
+Owners can provision task-only bot members with scoped, expiring credentials and explicit channel
+grants. Tokens are printed once and never enter the desktop renderer:
+
+```bash
+npm run bot --workspace @hmm-chat/server -- create \
+  --username release-bot \
+  --display-name "Release Bot" \
+  --channel general
+```
+
+See [docs/bot-tasks.md](docs/bot-tasks.md) for scopes, rotation/revocation, and API examples.
+
 An additional desktop identity needs isolated Electron storage:
 
 ```bash
