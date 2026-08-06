@@ -59,7 +59,9 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    runs-on: ubuntu-latest
+    # GitHub-hosted jobs are unavailable while organization billing is blocked. This release
+    # runner already has bash and gh for validation and asset uploads, so keep metadata work there.
+    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
     timeout-minutes: 5
     permissions:
       contents: write
@@ -469,7 +471,7 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
     timeout-minutes: 10
     permissions:
       contents: write
