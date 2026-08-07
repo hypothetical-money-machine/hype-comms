@@ -266,7 +266,13 @@ test("waits for every GitHub Release asset without shell utilities", async () =>
     environment,
     fetchImplementation: async (url, options) => {
       requests.push({ options, url: url.href });
-      return Response.json({ assets: responses.shift().map((name) => ({ name })) });
+      return Response.json([
+        { assets: [], tag_name: "v1.2.2" },
+        {
+          assets: responses.shift().map((name) => ({ name })),
+          tag_name: "v1.2.3",
+        },
+      ]);
     },
     sleep(milliseconds) {
       delays.push(milliseconds);
@@ -276,7 +282,7 @@ test("waits for every GitHub Release asset without shell utilities", async () =>
   assert.equal(requests.length, 2);
   assert.equal(
     requests[0].url,
-    "https://api.github.example/repos/example/hmm-chat/releases/tags/v1.2.3",
+    "https://api.github.example/repos/example/hmm-chat/releases?per_page=100",
   );
   assert.equal(requests[0].options.headers.authorization, "Bearer test-token");
   assert.deepEqual(delays, [25]);
@@ -290,7 +296,7 @@ test("bounds GitHub Release asset polling and validates the response", async () 
       attempts: 2,
       delayMilliseconds: 5,
       environment,
-      fetchImplementation: async () => Response.json({ assets: [] }),
+      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.3" }]),
       sleep(milliseconds) {
         delays.push(milliseconds);
       },
@@ -303,9 +309,18 @@ test("bounds GitHub Release asset polling and validates the response", async () 
     waitForGithubReleaseAssets({
       attempts: 1,
       environment,
-      fetchImplementation: async () => Response.json({ assets: [{ name: 42 }] }),
+      fetchImplementation: async () =>
+        Response.json([{ assets: [{ name: 42 }], tag_name: "v1.2.3" }]),
     }),
     /assets must have non-empty string names/,
+  );
+  await assert.rejects(
+    waitForGithubReleaseAssets({
+      attempts: 1,
+      environment,
+      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.2" }]),
+    }),
+    /does not contain draft tag v1\.2\.3/,
   );
 });
 

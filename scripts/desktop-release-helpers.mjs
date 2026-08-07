@@ -41,14 +41,34 @@ export function missingGithubReleaseAssets(assetNames, desktopVersion) {
   return missing;
 }
 
-function parseGithubReleaseAssetNames(payload) {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    throw new Error("GitHub release response must be an object");
+function parseGithubReleaseAssetNames(payload, tagName) {
+  if (!Array.isArray(payload)) {
+    throw new Error("GitHub releases response must be an array");
   }
-  if (!Array.isArray(payload.assets)) {
+  let selectedRelease;
+  for (const release of payload) {
+    if (
+      typeof release !== "object" ||
+      release === null ||
+      Array.isArray(release) ||
+      typeof release.tag_name !== "string"
+    ) {
+      throw new Error("GitHub releases must have string tag names");
+    }
+    if (release.tag_name === tagName) {
+      if (selectedRelease !== undefined) {
+        throw new Error(`GitHub releases response contains duplicate tag ${tagName}`);
+      }
+      selectedRelease = release;
+    }
+  }
+  if (selectedRelease === undefined) {
+    throw new Error(`GitHub releases response does not contain draft tag ${tagName}`);
+  }
+  if (!Array.isArray(selectedRelease.assets)) {
     throw new Error("GitHub release response must contain an assets array");
   }
-  return payload.assets.map((asset) => {
+  return selectedRelease.assets.map((asset) => {
     if (
       typeof asset !== "object" ||
       asset === null ||
@@ -86,15 +106,15 @@ export async function waitForGithubReleaseAssets({
   const token = requireEnvironment("GH_TOKEN", environment);
   const apiRoot = (environment.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/u, "");
   const repositoryPath = repositoryParts.map(encodeURIComponent).join("/");
-  const releaseUrl = new URL(
-    `${apiRoot}/repos/${repositoryPath}/releases/tags/${encodeURIComponent(tagName)}`,
-  );
+  // GitHub's release-by-tag endpoint returns 404 for drafts. The authenticated list endpoint
+  // includes drafts, and the current serialized release is always among its 100 newest entries.
+  const releasesUrl = new URL(`${apiRoot}/repos/${repositoryPath}/releases?per_page=100`);
   let lastError;
   let missing = missingGithubReleaseAssets([], desktopVersion);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetchImplementation(releaseUrl, {
+      const response = await fetchImplementation(releasesUrl, {
         headers: {
           accept: "application/vnd.github+json",
           authorization: `Bearer ${token}`,
@@ -108,7 +128,7 @@ export async function waitForGithubReleaseAssets({
       if (!response.ok) {
         throw new Error(`GitHub release lookup returned HTTP ${response.status}`);
       }
-      const assetNames = parseGithubReleaseAssetNames(await response.json());
+      const assetNames = parseGithubReleaseAssetNames(await response.json(), tagName);
       missing = missingGithubReleaseAssets(assetNames, desktopVersion);
       if (missing.length === 0) return;
       lastError = undefined;
