@@ -28,6 +28,7 @@ import { TasksView } from "./tasks-view";
 import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
 import { useConversationDrafts } from "./use-conversation-drafts";
 import { WorkspaceSearch } from "./workspace-search";
+import type { OutboxItem } from "./workspace-cache";
 import {
   cacheFallbackNotice,
   WorkspaceRuntime,
@@ -55,6 +56,33 @@ function messageTime(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function mentionedMemberIds(
+  body: string,
+  members: readonly User[],
+  participantIds: readonly string[],
+): readonly string[] {
+  const visibleMemberIds = new Set(participantIds);
+  return members
+    .filter((member) => {
+      if (!visibleMemberIds.has(member.id)) return false;
+      const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
+    })
+    .map((member) => member.id);
+}
+
+export function visibleTimelineMessages(
+  messages: readonly Message[],
+  conversationId: string | null,
+  threadsSupported: boolean,
+): readonly Message[] {
+  return messages.filter(
+    (message) =>
+      message.conversationId === conversationId &&
+      (!threadsSupported || message.threadRootId === null),
+  );
 }
 
 export function UpdateControl({ client }: { readonly client: UpdateClient }) {
@@ -197,7 +225,7 @@ function Avatar({ user }: { user: User | undefined }) {
   );
 }
 
-function MessageRow({
+export function MessageRow({
   message,
   members,
   reactions,
@@ -208,6 +236,9 @@ function MessageRow({
   onCreateTask,
   highlighted,
   continuation,
+  onOpenThread,
+  replyCount = 0,
+  domIdPrefix = "message",
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -219,6 +250,9 @@ function MessageRow({
   readonly onCreateTask?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
+  readonly onOpenThread?: () => void;
+  readonly replyCount?: number;
+  readonly domIdPrefix?: string;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   return (
@@ -226,7 +260,7 @@ function MessageRow({
       className={`message${continuation ? " message-continuation" : ""}${
         highlighted ? " search-target" : ""
       }`}
-      id={`message-${message.id}`}
+      id={`${domIdPrefix}-${message.id}`}
       data-message-id={message.id}
       data-message-sequence={message.conversationSequence}
     >
@@ -256,6 +290,71 @@ function MessageRow({
             + Task
           </button>
         )}
+        {onOpenThread !== undefined && (
+          <button className="thread-action" type="button" onClick={onOpenThread}>
+            {replyCount === 0
+              ? "Reply"
+              : `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function PendingMessageRow({
+  item,
+  currentUser,
+  continuation,
+  editing,
+  onEdit,
+  onRetry,
+  onDiscard,
+  mutationsDisabled = false,
+}: {
+  readonly item: OutboxItem;
+  readonly currentUser: User;
+  readonly continuation: boolean;
+  readonly editing: boolean;
+  readonly onEdit: () => void;
+  readonly onRetry: () => void;
+  readonly onDiscard: () => void;
+  readonly mutationsDisabled?: boolean;
+}) {
+  const pendingStatus = editing ? "editing" : item.status.replaceAll("_", " ");
+  return (
+    <article className={`message pending-message${continuation ? " message-continuation" : ""}`}>
+      {continuation ? (
+        <time className="message-continuation-time" dateTime={item.createdAt} aria-hidden="true">
+          {messageTime(item.createdAt)}
+        </time>
+      ) : (
+        <Avatar user={currentUser} />
+      )}
+      <div>
+        <header className={continuation ? "sr-only" : undefined}>
+          <strong>{currentUser.displayName}</strong>
+          <span>{pendingStatus}</span>
+        </header>
+        <MessageBody
+          body={item.operation.message.body}
+          suffix={
+            continuation ? <span className="pending-status"> · {pendingStatus}</span> : undefined
+          }
+        />
+        {item.status === "permanent_failure" && (
+          <div className="message-actions">
+            <button type="button" disabled={mutationsDisabled} onClick={onEdit}>
+              Edit
+            </button>
+            <button type="button" disabled={mutationsDisabled} onClick={onRetry}>
+              Retry
+            </button>
+            <button type="button" onClick={onDiscard}>
+              Discard
+            </button>
+          </div>
+        )}
       </div>
     </article>
   );
@@ -268,8 +367,13 @@ export function App({ client, theme }: AppProps) {
   const { draft, setDraft, clearDraft, resetDrafts } = useConversationDrafts(
     runtimeState.selectedConversationId,
   );
+  const [threadDrafts, setThreadDrafts] = useState<Readonly<Record<string, string>>>({});
   const [editingClientMessageId, setEditingClientMessageId] = useState<string | null>(null);
+  const [threadEditingClientMessageId, setThreadEditingClientMessageId] = useState<string | null>(
+    null,
+  );
   const [composerError, setComposerError] = useState("");
+  const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [showChannelMembers, setShowChannelMembers] = useState(false);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
@@ -282,6 +386,21 @@ export function App({ client, theme }: AppProps) {
     observedStarts: new Set<string>(),
     observedEnds: new Set<string>(),
   });
+  const threadList = useRef<HTMLDivElement>(null);
+  const threadComposer = useRef<HTMLInputElement>(null);
+  const threadSubmissionPending = useRef(false);
+  const stickToThreadBottom = useRef(true);
+  const threadReadTrackingFrame = useRef<number | null>(null);
+  const threadReadTrackingRootId = useRef<string | null>(null);
+  const threadMessageVisibilityMemory = useRef({
+    observedStarts: new Set<string>(),
+    observedEnds: new Set<string>(),
+  });
+  const threadScrollState = useRef<{
+    readonly rootId: string | null;
+    readonly newestReplyId: string | null;
+    readonly pendingCount: number;
+  }>({ rootId: null, newestReplyId: null, pendingCount: 0 });
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -292,8 +411,11 @@ export function App({ client, theme }: AppProps) {
         void runtime.start(next);
       } else if (next.status === "signed-out") {
         resetDrafts();
+        setThreadDrafts({});
         setEditingClientMessageId(null);
+        setThreadEditingClientMessageId(null);
         setComposerError("");
+        setThreadComposerError("");
         void runtime.stop();
       }
     },
@@ -337,8 +459,13 @@ export function App({ client, theme }: AppProps) {
     selectedSummary.participantIds[0] === bootstrap?.currentUser.user.id;
   const tasksAvailable =
     selectedSummary?.conversation.kind === "channel" || selectedIsPersonal === true;
-  const messages = runtimeState.messages.filter(
+  const conversationMessages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
+  );
+  const messages = visibleTimelineMessages(
+    runtimeState.messages,
+    runtimeState.selectedConversationId,
+    runtimeState.threadsSupported,
   );
   const unreadDividerMessageId = useUnreadDividerMessageId(
     runtimeState.selectedConversationId,
@@ -355,13 +482,76 @@ export function App({ client, theme }: AppProps) {
     return grouped;
   }, [runtimeState.reactions]);
   const pending = runtimeState.outbox.filter(
-    (item) => item.operation.conversationId === runtimeState.selectedConversationId,
+    (item) =>
+      item.operation.conversationId === runtimeState.selectedConversationId &&
+      (!runtimeState.threadsSupported || item.operation.message.threadRootId === null),
   );
+  const selectedThreadRootId = runtimeState.threadsSupported
+    ? runtimeState.selectedThreadRootId
+    : null;
+  const threadRoot =
+    selectedThreadRootId === null
+      ? undefined
+      : conversationMessages.find(
+          (message) => message.id === selectedThreadRootId && message.threadRootId === null,
+        );
+  const threadReplies =
+    selectedThreadRootId === null
+      ? []
+      : conversationMessages.filter((message) => message.threadRootId === selectedThreadRootId);
+  const threadPending =
+    selectedThreadRootId === null
+      ? []
+      : runtimeState.outbox.filter(
+          (item) =>
+            item.operation.conversationId === runtimeState.selectedConversationId &&
+            item.operation.message.threadRootId === selectedThreadRootId,
+        );
+  const threadSummaryByRoot = useMemo(
+    () =>
+      new Map(
+        runtimeState.threadSummaries.map((summary) => [summary.threadRootId, summary] as const),
+      ),
+    [runtimeState.threadSummaries],
+  );
+  const loadedReplyCountByRoot = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const message of conversationMessages) {
+      if (message.threadRootId !== null) {
+        counts.set(message.threadRootId, (counts.get(message.threadRootId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [conversationMessages]);
+  const pendingThreadRootIds = useMemo(
+    () =>
+      new Set(
+        runtimeState.outbox.flatMap((item) => {
+          const threadRootId = item.operation.message.threadRootId;
+          return item.operation.conversationId === runtimeState.selectedConversationId &&
+            threadRootId !== null
+            ? [threadRootId]
+            : [];
+        }),
+      ),
+    [runtimeState.outbox, runtimeState.selectedConversationId],
+  );
+  const threadDraft =
+    selectedThreadRootId === null ? "" : (threadDrafts[selectedThreadRootId] ?? "");
+  const selectedThreadSummary =
+    selectedThreadRootId === null ? undefined : threadSummaryByRoot.get(selectedThreadRootId);
+  const threadReplyCount = Math.max(selectedThreadSummary?.replyCount ?? 0, threadReplies.length);
   const editingItem =
     editingClientMessageId === null
       ? undefined
       : runtimeState.outbox.find(
           (item) => item.operation.message.clientMessageId === editingClientMessageId,
+        );
+  const threadEditingItem =
+    threadEditingClientMessageId === null
+      ? undefined
+      : runtimeState.outbox.find(
+          (item) => item.operation.message.clientMessageId === threadEditingClientMessageId,
         );
 
   useEffect(() => {
@@ -383,7 +573,8 @@ export function App({ client, theme }: AppProps) {
     if (
       editingItem === undefined ||
       editingItem.status !== "permanent_failure" ||
-      editingItem.operation.conversationId !== runtimeState.selectedConversationId
+      editingItem.operation.conversationId !== runtimeState.selectedConversationId ||
+      editingItem.operation.message.threadRootId !== null
     ) {
       setEditingClientMessageId(null);
     }
@@ -427,15 +618,64 @@ export function App({ client, theme }: AppProps) {
     scheduleReadTracking();
   }, [scheduleReadTracking]);
 
+  const markVisibleThreadMessagesRead = useCallback((): void => {
+    const conversationId = runtimeState.selectedConversationId;
+    const threadRootId = runtimeState.selectedThreadRootId;
+    const list = threadList.current;
+    if (
+      conversationId === null ||
+      threadRootId === null ||
+      list === null ||
+      document.visibilityState !== "visible" ||
+      !document.hasFocus()
+    ) {
+      return;
+    }
+    const trackingKey = `${conversationId}:${threadRootId}`;
+    if (threadReadTrackingRootId.current !== trackingKey) {
+      threadReadTrackingRootId.current = trackingKey;
+      threadMessageVisibilityMemory.current.observedStarts.clear();
+      threadMessageVisibilityMemory.current.observedEnds.clear();
+    }
+    const messageId = lastReadEligibleMessageId(
+      list,
+      threadMessageVisibilityMemory.current,
+      selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
+    );
+    if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
+  }, [
+    runtime,
+    runtimeState.selectedConversationId,
+    runtimeState.selectedThreadRootId,
+    selectedSummary?.readCursor,
+  ]);
+
+  const scheduleThreadReadTracking = useCallback((): void => {
+    if (threadReadTrackingFrame.current !== null) return;
+    threadReadTrackingFrame.current = window.requestAnimationFrame(() => {
+      threadReadTrackingFrame.current = null;
+      markVisibleThreadMessagesRead();
+    });
+  }, [markVisibleThreadMessagesRead]);
+
+  const handleThreadScroll = useCallback((): void => {
+    const list = threadList.current;
+    if (list !== null) stickToThreadBottom.current = isTimelineAtBottom(list);
+    scheduleThreadReadTracking();
+  }, [scheduleThreadReadTracking]);
+
   useEffect(() => {
-    const handleFocus = (): void => scheduleReadTracking();
+    const handleFocus = (): void => {
+      scheduleReadTracking();
+      scheduleThreadReadTracking();
+    };
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleFocus);
     return () => {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleFocus);
     };
-  }, [scheduleReadTracking]);
+  }, [scheduleReadTracking, scheduleThreadReadTracking]);
 
   useEffect(
     () => () => {
@@ -443,9 +683,33 @@ export function App({ client, theme }: AppProps) {
         window.cancelAnimationFrame(readTrackingFrame.current);
         readTrackingFrame.current = null;
       }
+      if (threadReadTrackingFrame.current !== null) {
+        window.cancelAnimationFrame(threadReadTrackingFrame.current);
+        threadReadTrackingFrame.current = null;
+      }
     },
     [],
   );
+
+  useEffect(() => {
+    if (threadEditingClientMessageId === null) return;
+    if (
+      threadEditingItem === undefined ||
+      threadEditingItem.status !== "permanent_failure" ||
+      threadEditingItem.operation.message.threadRootId !== selectedThreadRootId
+    ) {
+      setThreadEditingClientMessageId(null);
+    }
+  }, [selectedThreadRootId, threadEditingClientMessageId, threadEditingItem]);
+
+  useEffect(() => setThreadComposerError(""), [selectedThreadRootId]);
+
+  useEffect(() => {
+    if (selectedThreadRootId !== null) return;
+    threadReadTrackingRootId.current = null;
+    threadMessageVisibilityMemory.current.observedStarts.clear();
+    threadMessageVisibilityMemory.current.observedEnds.clear();
+  }, [selectedThreadRootId]);
 
   useEffect(() => {
     const list = messageList.current;
@@ -472,24 +736,62 @@ export function App({ client, theme }: AppProps) {
   ]);
 
   useEffect(() => {
+    const previous = threadScrollState.current;
+    const next = {
+      rootId: selectedThreadRootId,
+      newestReplyId: threadReplies.at(-1)?.id ?? null,
+      pendingCount: threadPending.length,
+    };
+    threadScrollState.current = next;
+    const rootChanged = previous.rootId !== next.rootId;
+    const replyChanged = previous.newestReplyId !== next.newestReplyId;
+    const pendingGrew = previous.pendingCount < next.pendingCount;
+    const shouldScrollToLatest =
+      rootChanged || pendingGrew || (replyChanged && stickToThreadBottom.current);
+    const list = threadList.current;
+    if (list !== null && shouldScrollToLatest) {
+      list.scrollTop = list.scrollHeight;
+      stickToThreadBottom.current = isTimelineAtBottom(list);
+    }
+    scheduleThreadReadTracking();
+  }, [scheduleThreadReadTracking, selectedThreadRootId, threadPending.length, threadReplies]);
+
+  useEffect(() => {
     const focusedMessageId = runtimeState.focusedMessageId;
     if (focusedMessageId === null) return;
     document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({ block: "center" });
   }, [messages.length, runtimeState.focusedMessageId, runtimeState.selectedConversationId]);
+
+  useEffect(() => {
+    const focusedMessageId = runtimeState.focusedThreadMessageId;
+    if (focusedMessageId === null) return;
+    document.getElementById(`thread-message-${focusedMessageId}`)?.scrollIntoView({
+      block: "center",
+    });
+    scheduleThreadReadTracking();
+  }, [
+    runtimeState.focusedThreadMessageId,
+    scheduleThreadReadTracking,
+    selectedThreadRootId,
+    threadReplies.length,
+  ]);
+
+  useEffect(() => {
+    if (selectedThreadRootId !== null && runtimeState.focusedThreadMessageId === null) {
+      threadComposer.current?.focus();
+    }
+  }, [runtimeState.focusedThreadMessageId, selectedThreadRootId]);
 
   const send = async (): Promise<void> => {
     const submittedDraft = draft;
     const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
     if (body === "" || conversationId === null || bootstrap === null) return;
-    const visibleMemberIds = new Set(selectedSummary?.participantIds ?? []);
-    const mentionedUserIds = bootstrap.members
-      .filter((member) => {
-        if (!visibleMemberIds.has(member.id)) return false;
-        const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
-      })
-      .map((member) => member.id);
+    const mentionedUserIds = mentionedMemberIds(
+      body,
+      bootstrap.members,
+      selectedSummary?.participantIds ?? [],
+    );
     try {
       if (editingClientMessageId === null) {
         await runtime.sendMessage(conversationId, body, mentionedUserIds);
@@ -524,6 +826,48 @@ export function App({ client, theme }: AppProps) {
   const openTaskSource = (task: Task): void => {
     setPaneView("chat");
     runtime.openTaskSource(task);
+  };
+
+  const sendThreadReply = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const submittedDraft = threadDraft;
+    const body = submittedDraft.trim();
+    const conversationId = runtimeState.selectedConversationId;
+    const threadRootId = runtimeState.selectedThreadRootId;
+    if (
+      body === "" ||
+      conversationId === null ||
+      threadRootId === null ||
+      bootstrap === null ||
+      threadSubmissionPending.current
+    ) {
+      return;
+    }
+    threadSubmissionPending.current = true;
+    const mentionedUserIds = mentionedMemberIds(
+      body,
+      bootstrap.members,
+      selectedSummary?.participantIds ?? [],
+    );
+    try {
+      if (threadEditingClientMessageId === null) {
+        await runtime.sendMessage(conversationId, body, mentionedUserIds, threadRootId);
+      } else {
+        await runtime.replaceFailedMessage(threadEditingClientMessageId, body, mentionedUserIds);
+        setThreadEditingClientMessageId(null);
+      }
+      setThreadDrafts((current) => {
+        if (current[threadRootId] !== submittedDraft) return current;
+        const next = { ...current };
+        delete next[threadRootId];
+        return next;
+      });
+      setThreadComposerError("");
+    } catch (error) {
+      setThreadComposerError(errorMessage(error, "Could not queue the reply"));
+    } finally {
+      threadSubmissionPending.current = false;
+    }
   };
 
   const createChannel = useCallback(
@@ -657,7 +1001,7 @@ export function App({ client, theme }: AppProps) {
   const currentUserId = bootstrap.currentUser.user.id;
 
   return (
-    <main className="shell">
+    <main className={selectedThreadRootId === null ? "shell" : "shell thread-open"}>
       <aside className="workspace-rail" aria-label="Workspace">
         <div className="workspace-mark">H</div>
       </aside>
@@ -950,6 +1294,20 @@ export function App({ client, theme }: AppProps) {
                       }
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
+                      replyCount={Math.max(
+                        threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
+                        loadedReplyCountByRoot.get(message.id) ?? 0,
+                      )}
+                      onOpenThread={
+                        runtimeState.threadsSupported &&
+                        message.threadRootId === null &&
+                        (!(selectedSummary?.conversation.isArchived ?? true) ||
+                          threadSummaryByRoot.has(message.id) ||
+                          loadedReplyCountByRoot.has(message.id) ||
+                          pendingThreadRootIds.has(message.id))
+                          ? () => void runtime.openThread(message.id)
+                          : undefined
+                      }
                     />
                   </Fragment>
                 ))
@@ -1058,6 +1416,196 @@ export function App({ client, theme }: AppProps) {
           </>
         )}
       </section>
+      {selectedThreadRootId !== null && (
+        <aside className="thread-pane" aria-label="Thread">
+          <header className="thread-header">
+            <div>
+              <h2>Thread</h2>
+              <p>
+                {threadReplyCount === 0
+                  ? "No replies yet"
+                  : `${String(threadReplyCount)} ${threadReplyCount === 1 ? "reply" : "replies"}`}
+              </p>
+            </div>
+            <button
+              className="thread-close"
+              type="button"
+              aria-label="Close thread"
+              onClick={() => runtime.closeThread()}
+            >
+              ×
+            </button>
+          </header>
+
+          <div
+            className="thread-message-list"
+            ref={threadList}
+            aria-live="polite"
+            onScroll={handleThreadScroll}
+          >
+            {runtimeState.threadError !== null && (
+              <p className="thread-error" role="alert">
+                {runtimeState.threadError}{" "}
+                <button type="button" onClick={() => void runtime.openThread(selectedThreadRootId)}>
+                  Retry
+                </button>
+              </p>
+            )}
+            {threadRoot === undefined ? (
+              <div className="thread-loading" aria-busy={runtimeState.threadLoading}>
+                {runtimeState.threadLoading ? "Loading thread…" : "Thread unavailable"}
+              </div>
+            ) : (
+              <>
+                <MessageRow
+                  message={threadRoot}
+                  members={bootstrap.members}
+                  reactions={reactionsByMessage.get(threadRoot.id) ?? []}
+                  currentUserId={currentUserId}
+                  reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                  onAddReaction={(emoji) => runtime.addReaction(threadRoot.id, emoji)}
+                  onRemoveReaction={(emoji) => runtime.removeReaction(threadRoot.id, emoji)}
+                  highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
+                  continuation={false}
+                  domIdPrefix="thread-message"
+                />
+                <div className="thread-replies-heading" role="separator">
+                  <span>
+                    {threadReplyCount === 0
+                      ? "Replies"
+                      : `${String(threadReplyCount)} ${threadReplyCount === 1 ? "reply" : "replies"}`}
+                  </span>
+                </div>
+                {runtime.hasOlderThread(selectedThreadRootId) && (
+                  <button
+                    className="load-older"
+                    type="button"
+                    disabled={runtimeState.threadLoading}
+                    onClick={() => void runtime.loadOlderThread(selectedThreadRootId)}
+                  >
+                    Load older replies
+                  </button>
+                )}
+                {threadReplies.map((message, index) => (
+                  <Fragment key={message.id}>
+                    {shouldShowDateSeparator(
+                      message.createdAt,
+                      threadReplies[index - 1]?.createdAt ?? null,
+                    ) && <MessageDateSeparator value={message.createdAt} />}
+                    <MessageRow
+                      message={message}
+                      members={bootstrap.members}
+                      reactions={reactionsByMessage.get(message.id) ?? []}
+                      currentUserId={currentUserId}
+                      reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                      onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
+                      onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
+                      highlighted={message.id === runtimeState.focusedThreadMessageId}
+                      continuation={isMessageContinuation(
+                        message,
+                        threadReplies[index - 1] ?? null,
+                      )}
+                      domIdPrefix="thread-message"
+                    />
+                  </Fragment>
+                ))}
+                {threadReplies.length === 0 && threadPending.length === 0 && (
+                  <p className="thread-empty">Start the thread with a reply.</p>
+                )}
+                {threadPending.map((item, index) => {
+                  const previousTimestamp =
+                    threadPending[index - 1]?.createdAt ??
+                    threadReplies.at(-1)?.createdAt ??
+                    threadRoot.createdAt;
+                  const continuation = isMessageContinuation(
+                    {
+                      authorId: currentUserId,
+                      createdAt: item.createdAt,
+                      conversationSequence: null,
+                    },
+                    index > 0
+                      ? {
+                          authorId: currentUserId,
+                          createdAt: threadPending[index - 1]?.createdAt ?? item.createdAt,
+                          conversationSequence: null,
+                        }
+                      : (threadReplies.at(-1) ?? null),
+                  );
+                  return (
+                    <Fragment key={item.operation.message.clientMessageId}>
+                      {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
+                        <MessageDateSeparator value={item.createdAt} />
+                      )}
+                      <PendingMessageRow
+                        item={item}
+                        currentUser={bootstrap.currentUser.user}
+                        continuation={continuation}
+                        editing={
+                          threadEditingClientMessageId === item.operation.message.clientMessageId
+                        }
+                        mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                        onEdit={() => {
+                          setThreadDrafts((current) => ({
+                            ...current,
+                            [selectedThreadRootId]: item.operation.message.body,
+                          }));
+                          setThreadEditingClientMessageId(item.operation.message.clientMessageId);
+                          threadComposer.current?.focus();
+                        }}
+                        onRetry={() =>
+                          void runtime.retryMessage(item.operation.message.clientMessageId)
+                        }
+                        onDiscard={() =>
+                          void runtime.discardMessage(item.operation.message.clientMessageId)
+                        }
+                      />
+                    </Fragment>
+                  );
+                })}
+                {runtimeState.threadLoading && <p className="thread-loading">Loading replies…</p>}
+              </>
+            )}
+          </div>
+
+          <form
+            className="composer thread-composer"
+            onSubmit={(event) => void sendThreadReply(event)}
+          >
+            <label className="sr-only" htmlFor="thread-message-composer">
+              Reply
+            </label>
+            <input
+              id="thread-message-composer"
+              ref={threadComposer}
+              value={threadDraft}
+              onChange={(event) =>
+                setThreadDrafts((current) => ({
+                  ...current,
+                  [selectedThreadRootId]: event.target.value,
+                }))
+              }
+              placeholder="Reply in thread"
+              disabled={threadRoot === undefined || selectedSummary?.conversation.isArchived}
+              maxLength={4_000}
+            />
+            <button
+              type="submit"
+              disabled={
+                threadDraft.trim() === "" ||
+                threadRoot === undefined ||
+                selectedSummary?.conversation.isArchived
+              }
+            >
+              Reply
+            </button>
+            {threadComposerError !== "" && (
+              <p className="composer-error" role="alert">
+                {threadComposerError}
+              </p>
+            )}
+          </form>
+        </aside>
+      )}
       {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (
         <ChannelMembersDialog
           channelName={

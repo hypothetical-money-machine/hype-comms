@@ -48,6 +48,7 @@ describeWithPostgres("runMigrations", () => {
           "0006_message_reactions.sql",
           "0007_read_state_event_capability.sql",
           "0008_hype_comms_rebrand.sql",
+          "0009_message_threads.sql",
           "0009_self_direct_messages.sql",
           "0010_conversation_tasks.sql",
           "0011_bot_task_principals.sql",
@@ -68,6 +69,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0006_message_reactions.sql" },
         { filename: "0007_read_state_event_capability.sql" },
         { filename: "0008_hype_comms_rebrand.sql" },
+        { filename: "0009_message_threads.sql" },
         { filename: "0009_self_direct_messages.sql" },
         { filename: "0010_conversation_tasks.sql" },
         { filename: "0011_bot_task_principals.sql" },
@@ -76,6 +78,8 @@ describeWithPostgres("runMigrations", () => {
 
       const userId = randomUUID();
       const workspaceId = randomUUID();
+      const conversationId = randomUUID();
+      const otherConversationId = randomUUID();
       await pool.query(
         `INSERT INTO users (id, email, username, display_name)
          VALUES ($1, 'migration@example.test', 'migration', 'Migration')`,
@@ -97,7 +101,7 @@ describeWithPostgres("runMigrations", () => {
          VALUES
            ($1, $2, 'channel', 'Existing ASCII', 'existing-ascii', 'workspace', $3),
            ($4, $2, 'channel', 'Équipe Produit', 'équipe-produit', 'workspace', $3)`,
-        [randomUUID(), workspaceId, userId, randomUUID()],
+        [conversationId, workspaceId, userId, otherConversationId],
       );
       await expect(
         pool.query(
@@ -131,6 +135,97 @@ describeWithPostgres("runMigrations", () => {
           [randomUUID(), workspaceId, userId],
         ),
       ).resolves.toMatchObject({ rowCount: 1 });
+
+      const threadRootId = randomUUID();
+      await pool.query(
+        `INSERT INTO messages (
+           id, workspace_id, conversation_id, conversation_sequence,
+           committed_workspace_sequence, client_message_id, request_fingerprint,
+           author_id, thread_root_id, body, body_format
+         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Root', 'hmm_markdown_v1')`,
+        [threadRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
+      );
+      const replyId = randomUUID();
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, $7, 'Reply', 'hmm_markdown_v1')`,
+          [
+            replyId,
+            workspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+            threadRootId,
+          ],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      const alternateRootId = randomUUID();
+      await pool.query(
+        `INSERT INTO messages (
+           id, workspace_id, conversation_id, conversation_sequence,
+           committed_workspace_sequence, client_message_id, request_fingerprint,
+           author_id, thread_root_id, body, body_format
+         ) VALUES ($1, $2, $3, 10, 3, $4, $5, $6, NULL, 'Other root', 'hmm_markdown_v1')`,
+        [alternateRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
+      );
+      await expect(
+        pool.query(`UPDATE messages SET thread_root_id = $1 WHERE id = $2`, [
+          alternateRootId,
+          threadRootId,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 1, 3, $4, $5, $6, $7, 'Cross thread', 'hmm_markdown_v1')`,
+          [
+            randomUUID(),
+            workspaceId,
+            otherConversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+            threadRootId,
+          ],
+        ),
+      ).rejects.toMatchObject({ code: "23503" });
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 3, 4, $4, $5, $6, $7, 'Nested reply', 'hmm_markdown_v1')`,
+          [
+            randomUUID(),
+            workspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+            replyId,
+          ],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      const selfReplyId = randomUUID();
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hmm_markdown_v1')`,
+          [selfReplyId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
     });
   });
 

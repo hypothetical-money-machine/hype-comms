@@ -23,6 +23,7 @@ import type {
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
+  MessageThreadResponse,
   ProductRealtimeEvent,
   Reaction,
   ReactionEmoji,
@@ -68,6 +69,8 @@ const REACTION_ID = "20000000-0000-4000-8000-000000000011";
 const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
 const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
 const TASK_ID = "20000000-0000-4000-8000-000000000014";
+const THREAD_REPLY_ID = "20000000-0000-4000-8000-000000000020";
+const THREAD_REPLY_CLIENT_ID = "20000000-0000-4000-8000-000000000021";
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -165,6 +168,14 @@ function message(
 
 const peerMessage = message(PEER_MESSAGE_ID, PEER_ID, "1", PEER_CLIENT_MESSAGE_ID);
 const ownMessage = message(OWN_MESSAGE_ID, USER_ID, "2", OWN_CLIENT_MESSAGE_ID);
+const threadReply: Message = {
+  ...peerMessage,
+  id: THREAD_REPLY_ID,
+  clientMessageId: THREAD_REPLY_CLIENT_ID,
+  conversationSequence: "3",
+  threadRootId: OWN_MESSAGE_ID,
+  body: "A reply",
+};
 const ownReaction: Reaction = {
   id: REACTION_ID,
   messageId: OWN_MESSAGE_ID,
@@ -460,6 +471,12 @@ class FakeDesktopApi implements DesktopApi {
   connectedOnStart = false;
   readonly conversationPages = new Map<string, ListConversationsResponse>();
   readonly histories = new Map<string, MessageHistoryResponse>();
+  readonly threadResults: MessageThreadResponse[] = [];
+  readonly threadRequests: {
+    readonly messageId: string;
+    readonly before?: string;
+    readonly limit?: number;
+  }[] = [];
   readonly reactions: Reaction[] = [];
   readonly reactionResults: (
     ListMessageReactionsResponse | Promise<ListMessageReactionsResponse>
@@ -620,7 +637,24 @@ class FakeDesktopApi implements DesktopApi {
     readonly conversationId: string;
   }): Promise<MessageHistoryResponse> {
     this.historyRequests.push(input.conversationId);
-    return this.histories.get(input.conversationId) ?? { messages: [], nextCursor: null };
+    return {
+      threadSummaries: [],
+      threadsSupported: true,
+      messages: [],
+      nextCursor: null,
+      ...this.histories.get(input.conversationId),
+    };
+  }
+
+  async getMessageThread(input: {
+    readonly messageId: string;
+    readonly before?: string;
+    readonly limit?: number;
+  }): Promise<MessageThreadResponse> {
+    this.threadRequests.push(input);
+    const response = this.threadResults.shift();
+    if (response === undefined) throw new Error("The test queued no thread result");
+    return response;
   }
 
   async listMessageReactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
@@ -742,7 +776,12 @@ class FakeDesktopApi implements DesktopApi {
         conversationId,
         userId: USER_ID,
         lastReadMessageId,
-        lastReadConversationSequence: lastReadMessageId === OWN_MESSAGE_ID ? "2" : "1",
+        lastReadConversationSequence:
+          lastReadMessageId === THREAD_REPLY_ID
+            ? "3"
+            : lastReadMessageId === OWN_MESSAGE_ID
+              ? "2"
+              : "1",
         lastReadAt: NOW,
         updatedAt: NOW,
       },
@@ -863,6 +902,8 @@ describe("WorkspaceRuntime", () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [peerMessage, ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
       nextCursor: null,
     });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
@@ -900,7 +941,12 @@ describe("WorkspaceRuntime", () => {
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
       const api = new FakeDesktopApi(bootstrapAt("10"));
-      api.histories.set(CONVERSATION_ID, { messages: [peerMessage], nextCursor: null });
+      api.histories.set(CONVERSATION_ID, {
+        messages: [peerMessage],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
       api.readCursorFailures = 1;
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
@@ -927,7 +973,12 @@ describe("WorkspaceRuntime", () => {
   it("hydrates reactions with initial history and restores them from the cache", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
     api.reactions.push(ownReaction);
     const runtime = runtimeWith(api, cache);
 
@@ -938,10 +989,230 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).reactions).toEqual([ownReaction]);
   });
 
+  it("durably queues and sends a reply with its thread root", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Thread reply", [], OWN_MESSAGE_ID);
+    await settle(
+      () => runtime.state.outbox[0]?.status === "permanent_failure",
+      "reply send attempt",
+    );
+
+    expect(api.sent[0]?.message.threadRootId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.outbox[0]?.operation.message.threadRootId).toBe(OWN_MESSAGE_ID);
+    expect((await cache.load()).outbox[0]?.operation.message.threadRootId).toBe(OWN_MESSAGE_ID);
+  });
+
+  it("hydrates a thread without reading it until the renderer reports visibility", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
+    api.reactions.push(ownReaction);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    expect(runtime.state.selectedThreadRootId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.threadSummaries[0]?.replyCount).toBe(1);
+    expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect((await cache.load()).messages).toEqual([ownMessage, threadReply]);
+    expect(api.threadRequests).toEqual([{ messageId: OWN_MESSAGE_ID, limit: 50 }]);
+    expect(api.readCursorRequests).toEqual([]);
+
+    runtime.markConversationReadThrough(CONVERSATION_ID, THREAD_REPLY_ID);
+    await settle(() => api.readCursorRequests.length === 1, "visible thread read cursor");
+
+    expect(api.readCursorRequests.at(-1)).toEqual({
+      conversationId: CONVERSATION_ID,
+      lastReadMessageId: THREAD_REPLY_ID,
+    });
+  });
+
+  it("preserves an open thread and its reactions across a membership refresh", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push(
+      { root: ownMessage, replies: [threadReply], nextCursor: null },
+      { root: ownMessage, replies: [threadReply], nextCursor: null },
+    );
+    api.reactions.push(ownReaction);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    api.bootstrap = bootstrapAt("11");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000016",
+      type: "channel.membership_changed",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { memberId: USER_ID, action: "updated" },
+    });
+
+    await settle(
+      () =>
+        api.threadRequests.length === 2 &&
+        runtime.state.bootstrap?.syncCursor === "11" &&
+        runtime.state.messages.some((message) => message.id === THREAD_REPLY_ID),
+      "open thread refresh",
+    );
+    expect(runtime.state.selectedThreadRootId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.messages).toContainEqual(threadReply);
+    expect(runtime.state.reactions).toContainEqual(ownReaction);
+    expect((await cache.load()).messages).toContainEqual(threadReply);
+    expect((await cache.load()).reactions).toContainEqual(ownReaction);
+  });
+
+  it("opens and focuses a reply search hit inside its thread", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.openSearchResult({ message: threadReply });
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.selectedThreadRootId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.focusedThreadMessageId).toBe(THREAD_REPLY_ID);
+    expect(runtime.state.messages).toContainEqual(ownMessage);
+    expect(runtime.state.messages).toContainEqual(threadReply);
+    expect(api.readCursorRequests).toEqual([]);
+  });
+
+  it("keeps legacy replies inline and focuses them without a thread endpoint", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, threadReply],
+      threadSummaries: [],
+      threadsSupported: false,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.openSearchResult({ message: threadReply });
+
+    expect(runtime.state.threadsSupported).toBe(false);
+    expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
+    expect(runtime.state.selectedThreadRootId).toBeNull();
+    expect(runtime.state.focusedMessageId).toBe(THREAD_REPLY_ID);
+    expect(api.threadRequests).toEqual([]);
+  });
+
+  it("downgrades a live client to inline replies when the server rolls back", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, threadReply],
+      threadSummaries: [],
+      threadsSupported: false,
+      nextCursor: null,
+    });
+
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    expect(runtime.state.threadsSupported).toBe(false);
+    expect(runtime.state.selectedThreadRootId).toBeNull();
+    expect(runtime.state.focusedMessageId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
+    expect(runtime.state.threadError).toBeNull();
+    expect(api.threadRequests).toEqual([{ messageId: OWN_MESSAGE_ID, limit: 50 }]);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, CONVERSATION_ID]);
+    expect(api.readCursorRequests).toEqual([]);
+  });
+
+  it("keeps cached replies inline when history negotiation fails during startup", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage, threadReply]);
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.bootstrapFailures = 1;
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.error).toBe("The workspace is temporarily unavailable");
+    expect(runtime.state.threadsSupported).toBe(false);
+    expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
+  });
+
+  it("preserves an older root referenced by a queued reply across snapshot replacement", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+    const queuedReply = {
+      ...queuedOperation(THREAD_REPLY_CLIENT_ID, "Queued reply"),
+      message: {
+        ...queuedOperation(THREAD_REPLY_CLIENT_ID, "Queued reply").message,
+        threadRootId: OWN_MESSAGE_ID,
+      },
+    };
+    await cache.enqueue(queuedReply);
+    await cache.updateOutbox(THREAD_REPLY_CLIENT_ID, {
+      status: "permanent_failure",
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: "validation",
+    });
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [peerMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.threadsSupported).toBe(true);
+    expect(runtime.state.messages).toContainEqual(ownMessage);
+    expect(runtime.state.outbox[0]?.operation.message.threadRootId).toBe(OWN_MESSAGE_ID);
+    expect((await cache.load()).messages).toContainEqual(ownMessage);
+  });
+
   it("projects idempotent reaction mutations and their realtime echoes", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
     api.addReactionResults.push({ reaction: ownReaction, syncCursor: "11" });
     api.removeReactionResults.push({ removed: true, syncCursor: "12" });
     const runtime = runtimeWith(api, cache);
@@ -968,7 +1239,12 @@ describe("WorkspaceRuntime", () => {
   it("loads and mutates tasks while keeping newer optimistic versions over stale events", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    api.histories.set(CONVERSATION_ID, { messages: [ownMessage], nextCursor: null });
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
     api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -1628,6 +1904,8 @@ describe("WorkspaceRuntime", () => {
     };
     api.histories.set(SECOND_CONVERSATION_ID, {
       messages: [privateMessage],
+      threadSummaries: [],
+      threadsSupported: true,
       nextCursor: null,
     });
     const cache = new FakeWorkspaceCache();

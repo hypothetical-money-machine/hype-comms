@@ -406,6 +406,129 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
   });
 
+  it("projects roots in history and paginates replies inside one thread", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "thread root"),
+      mentionedUserIds: [],
+    });
+    const replies = [];
+    for (const body of ["first reply", "second reply", "latest reply"]) {
+      replies.push(
+        await repository.sendMessage(owner, generalId, {
+          ...message(randomUUID(), body),
+          threadRootId: root.message.id,
+          mentionedUserIds: [],
+        }),
+      );
+    }
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.map((entry) => entry.id)).toEqual([root.message.id]);
+    expect(history.threadsSupported).toBe(true);
+    expect(history.threadSummaries).toEqual([
+      {
+        threadRootId: root.message.id,
+        replyCount: 3,
+        latestReply: replies[2]?.message,
+      },
+    ]);
+
+    const legacyHistory = await repository.history(member, generalId, undefined, 50, true);
+    expect(legacyHistory.messages.map((entry) => entry.id)).toEqual([
+      root.message.id,
+      ...replies.map((entry) => entry.message.id),
+    ]);
+    expect(legacyHistory.threadSummaries).toEqual([]);
+    expect(legacyHistory.threadsSupported).toBe(false);
+
+    const latestPage = await repository.thread(member, root.message.id, undefined, 2);
+    expect(latestPage.root).toEqual(root.message);
+    expect(latestPage.replies.map((entry) => entry.id)).toEqual([
+      replies[1]?.message.id,
+      replies[2]?.message.id,
+    ]);
+    expect(latestPage.nextCursor).not.toBeNull();
+    const oldestPage = await repository.thread(
+      member,
+      root.message.id,
+      latestPage.nextCursor ?? undefined,
+      2,
+    );
+    expect(oldestPage.replies.map((entry) => entry.id)).toEqual([replies[0]?.message.id]);
+    expect(oldestPage.nextCursor).toBeNull();
+
+    const summary = await repository.listConversations(
+      member,
+      undefined,
+      CONVERSATION_PAGE_DEFAULT_LIMIT,
+    );
+    expect(summary.conversations[0]).toMatchObject({ unreadCount: 4 });
+    const sync = await repository.sync(member, "0", 100);
+    expect(sync.events).toContainEqual(
+      expect.objectContaining({
+        type: "message.created",
+        payload: expect.objectContaining({
+          message: expect.objectContaining({
+            id: replies[2]?.message.id,
+            threadRootId: root.message.id,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("rejects missing, cross-conversation, nested, and unauthorized thread roots", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "general root"),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "general reply"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+    await expect(
+      repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "nested reply"),
+        threadRootId: reply.message.id,
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "missing root"),
+        threadRootId: randomUUID(),
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Private Threads",
+      slug: "private-threads",
+      topic: null,
+      access: "members",
+    });
+    const privateConversationId = privateChannel.conversation.conversation.id;
+    const privateRoot = await repository.sendMessage(owner, privateConversationId, {
+      ...message(randomUUID(), "private root"),
+      mentionedUserIds: [],
+    });
+    await expect(
+      repository.sendMessage(owner, privateConversationId, {
+        ...message(randomUUID(), "wrong conversation root"),
+        threadRootId: root.message.id,
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      repository.thread(member, privateRoot.message.id, undefined, 50),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(repository.thread(owner, reply.message.id, undefined, 50)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+  });
+
   it("replays channel mutations without duplicating rows or sync events", async () => {
     const idempotencyKey = randomUUID();
     const input = {

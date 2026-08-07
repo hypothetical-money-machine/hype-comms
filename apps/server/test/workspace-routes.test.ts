@@ -1,4 +1,4 @@
-import { type BotScope, type CurrentUser } from "@hmm-chat/contracts";
+import { THREADS_CAPABILITY, type BotScope, type CurrentUser } from "@hmm-chat/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
@@ -14,6 +14,8 @@ const sessionId = "10000000-0000-4000-8000-000000000003";
 const messageId = "10000000-0000-4000-8000-000000000004";
 const reactionId = "10000000-0000-4000-8000-000000000005";
 const taskId = "10000000-0000-4000-8000-000000000006";
+const conversationId = "10000000-0000-4000-8000-000000000007";
+const replyId = "10000000-0000-4000-8000-000000000008";
 const sessionToken = "a".repeat(43);
 const botToken = `hmm_bot_${"b".repeat(43)}`;
 
@@ -77,6 +79,85 @@ class FakeBotService {
 
 class FakeWorkspaceRepository {
   readonly createChannel = vi.fn(async () => ({}));
+  readonly history = vi.fn(async () => ({
+    messages: [
+      {
+        id: messageId,
+        conversationId,
+        conversationSequence: "1",
+        version: 1,
+        clientMessageId: messageId,
+        authorId: userId,
+        threadRootId: null,
+        body: "Root",
+        bodyFormat: "hmm_markdown_v1",
+        editedAt: null,
+        deletedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    threadSummaries: [
+      {
+        threadRootId: messageId,
+        replyCount: 1,
+        latestReply: {
+          id: replyId,
+          conversationId,
+          conversationSequence: "2",
+          version: 1,
+          clientMessageId: replyId,
+          authorId: userId,
+          threadRootId: messageId,
+          body: "Reply",
+          bodyFormat: "hmm_markdown_v1",
+          editedAt: null,
+          deletedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    ],
+    threadsSupported: true,
+    nextCursor: null,
+  }));
+  readonly thread = vi.fn(async () => ({
+    root: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 1,
+      clientMessageId: messageId,
+      authorId: userId,
+      threadRootId: null,
+      body: "Root",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    replies: [],
+    nextCursor: null,
+  }));
+  readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
+    message: {
+      id: replyId,
+      conversationId: targetConversationId,
+      conversationSequence: "2",
+      version: 1,
+      clientMessageId: replyId,
+      authorId: userId,
+      threadRootId: messageId,
+      body: "Reply",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    syncCursor: "2",
+  }));
   readonly sync = vi.fn(async () => ({
     events: [],
     nextCursor: "0",
@@ -572,6 +653,113 @@ describe("task routes", () => {
     );
     expect(repository.listChannelTasks).toHaveBeenCalledTimes(1);
     expect(repository.getChannelTaskByNumber).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("message thread routes", () => {
+  it("gates thread summaries while accepting legacy and capable history clients", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = { cookie: `hmm_session=${sessionToken}` };
+
+    const legacy = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers,
+    });
+    const capable = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers: { ...headers, "x-hmm-chat-capabilities": THREADS_CAPABILITY },
+    });
+
+    expect(legacy.statusCode).toBe(200);
+    expect(legacy.json()).toEqual({
+      messages: expect.any(Array),
+      nextCursor: null,
+    });
+    expect(legacy.json()).not.toHaveProperty("threadSummaries");
+    expect(legacy.json()).not.toHaveProperty("threadsSupported");
+    expect(capable.statusCode).toBe(200);
+    expect(capable.json()).toMatchObject({
+      messages: expect.any(Array),
+      threadSummaries: [{ threadRootId: messageId, replyCount: 1 }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    expect(repository.history).toHaveBeenCalledTimes(2);
+    expect(repository.history).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ currentUser }),
+      conversationId,
+      undefined,
+      50,
+      true,
+    );
+    expect(repository.history).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ currentUser }),
+      conversationId,
+      undefined,
+      50,
+      false,
+    );
+  });
+
+  it("loads a bounded thread page and forwards a reply root on send", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = {
+      cookie: `hmm_session=${sessionToken}`,
+      "content-type": "application/json",
+      "idempotency-key": replyId,
+    };
+
+    const thread = await app.inject({
+      method: "GET",
+      url: `/v1/messages/${messageId}/thread?before=cursor&limit=25`,
+      headers,
+    });
+    const reply = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers,
+      payload: {
+        threadRootId: messageId,
+        body: "Reply",
+        bodyFormat: "hmm_markdown_v1",
+        clientMessageId: replyId,
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    });
+
+    expect(thread.statusCode).toBe(200);
+    expect(repository.thread).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+      "cursor",
+      25,
+    );
+    expect(reply.statusCode).toBe(201);
+    expect(repository.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      conversationId,
+      expect.objectContaining({ clientMessageId: replyId, threadRootId: messageId }),
+    );
+  });
+
+  it("rejects malformed thread pagination before calling the repository", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/messages/${messageId}/thread?limit=101`,
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.thread).not.toHaveBeenCalled();
   });
 });
 

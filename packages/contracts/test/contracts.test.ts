@@ -6,6 +6,7 @@ import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
   apiErrorEnvelopeSchema,
   botAccessTokenSchema,
   botScopesSchema,
@@ -26,6 +27,8 @@ import {
   messageHistoryResponseSchema,
   messageSchema,
   messageHistoryQuerySchema,
+  messageThreadResponseSchema,
+  messageThreadRequestSchema,
   messageSearchQuerySchema,
   moveTaskOperationSchema,
   reactionEmojiSchema,
@@ -55,6 +58,7 @@ const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
 const REACTION_ID = "10000000-0000-4000-8000-000000000005";
 const TASK_ID = "10000000-0000-4000-8000-000000000006";
+const REPLY_ID = "10000000-0000-4000-8000-000000000007";
 const NOW = "2026-07-21T12:00:00.000Z";
 
 const CONVERSATION_SUMMARY = {
@@ -494,6 +498,11 @@ describe("transport contracts", () => {
 
   it("coerces bounded HTTP query parameters from URL strings", () => {
     expect(messageHistoryQuerySchema.parse({ limit: "25" })).toEqual({ limit: 25 });
+    expect(messageThreadRequestSchema.parse({ messageId: MESSAGE_ID, limit: "25" })).toEqual({
+      messageId: MESSAGE_ID,
+      limit: 25,
+    });
+    expect(() => messageThreadRequestSchema.parse({ messageId: "not-a-uuid" })).toThrow();
     expect(messageSearchQuerySchema.parse({ query: "  quarterly avalanche  " })).toEqual({
       query: "quarterly avalanche",
       limit: 25,
@@ -536,19 +545,34 @@ describe("transport contracts", () => {
     expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
   });
 
-  it("batches reaction hydration without changing the strict history response", () => {
+  it("keeps reactions separate from thread-aware history", () => {
     expect(listMessageReactionsRequestSchema.parse({ messageIds: [MESSAGE_ID] })).toEqual({
       messageIds: [MESSAGE_ID],
     });
     expect(() =>
       listMessageReactionsRequestSchema.parse({ messageIds: [MESSAGE_ID, MESSAGE_ID] }),
     ).toThrow();
+    expect(
+      messageHistoryResponseSchema.parse({
+        messages: [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      }),
+    ).toEqual({ messages: [], threadSummaries: [], threadsSupported: true, nextCursor: null });
     expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
       messages: [],
+      threadSummaries: [],
+      threadsSupported: false,
       nextCursor: null,
     });
     expect(() =>
-      messageHistoryResponseSchema.parse({ messages: [], reactions: [], nextCursor: null }),
+      messageHistoryResponseSchema.parse({
+        messages: [],
+        threadSummaries: [],
+        reactions: [],
+        nextCursor: null,
+      }),
     ).toThrow();
     expect(messageReactionTargetSchema.parse({ messageId: MESSAGE_ID, emoji: "👩🏽‍💻" })).toEqual({
       messageId: MESSAGE_ID,
@@ -556,6 +580,68 @@ describe("transport contracts", () => {
     });
     expect(() =>
       messageReactionTargetSchema.parse({ messageId: MESSAGE_ID, emoji: "shipit" }),
+    ).toThrow();
+  });
+
+  it("validates one-level thread projections", () => {
+    const root = {
+      id: MESSAGE_ID,
+      conversationId: CONVERSATION_ID,
+      conversationSequence: "1",
+      version: 1,
+      clientMessageId: MESSAGE_ID,
+      authorId: USER_ID,
+      threadRootId: null,
+      body: "Root",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    } as const;
+    const reply = {
+      ...root,
+      id: REPLY_ID,
+      clientMessageId: REPLY_ID,
+      conversationSequence: "2",
+      threadRootId: MESSAGE_ID,
+      body: "Reply",
+    } as const;
+
+    expect(
+      messageHistoryResponseSchema.parse({ messages: [root, reply], nextCursor: null }),
+    ).toEqual({
+      messages: [root, reply],
+      threadSummaries: [],
+      threadsSupported: false,
+      nextCursor: null,
+    });
+    expect(
+      messageHistoryResponseSchema.parse({
+        messages: [root],
+        threadSummaries: [{ threadRootId: MESSAGE_ID, replyCount: 1, latestReply: reply }],
+        nextCursor: null,
+      }),
+    ).toMatchObject({
+      threadSummaries: [{ threadRootId: MESSAGE_ID, replyCount: 1 }],
+      threadsSupported: false,
+    });
+    expect(
+      messageThreadResponseSchema.parse({ root, replies: [reply], nextCursor: null }),
+    ).toMatchObject({ root: { id: MESSAGE_ID }, replies: [{ id: REPLY_ID }] });
+    expect(() =>
+      messageThreadResponseSchema.parse({
+        root: reply,
+        replies: [],
+        nextCursor: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      messageThreadResponseSchema.parse({
+        root,
+        replies: [{ ...reply, threadRootId: REPLY_ID }],
+        nextCursor: null,
+      }),
     ).toThrow();
   });
 
@@ -674,9 +760,14 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}`,
       ),
-    ).toEqual([REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY, TASK_EVENTS_CAPABILITY]);
+    ).toEqual([
+      REACTION_EVENTS_CAPABILITY,
+      READ_STATE_EVENTS_CAPABILITY,
+      TASK_EVENTS_CAPABILITY,
+      THREADS_CAPABILITY,
+    ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
     }

@@ -10,6 +10,7 @@ import {
   type Message,
   type MessageSearchResponse,
   type MessageSearchResult,
+  type MessageThreadSummary,
   type ProductRealtimeEvent,
   type Reaction,
   type ReactionEmoji,
@@ -40,11 +41,17 @@ export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_onl
 export interface WorkspaceRuntimeState {
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
+  readonly threadSummaries: readonly MessageThreadSummary[];
+  readonly threadsSupported: boolean;
   readonly reactions: readonly Reaction[];
   readonly tasks: readonly Task[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
+  readonly selectedThreadRootId: string | null;
+  readonly focusedThreadMessageId: string | null;
+  readonly threadLoading: boolean;
+  readonly threadError: string | null;
   readonly connection: RealtimeConnectionState;
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly cacheFallbackReason: CacheFallbackReason | null;
@@ -90,11 +97,18 @@ const RESYNC_CHAIN_RESET_MS = 60_000;
 const INITIAL_STATE: WorkspaceRuntimeState = {
   bootstrap: null,
   messages: [],
+  threadSummaries: [],
+  // Conservative until history negotiation succeeds: previous servers keep replies inline.
+  threadsSupported: false,
   reactions: [],
   tasks: [],
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
+  selectedThreadRootId: null,
+  focusedThreadMessageId: null,
+  threadLoading: false,
+  threadError: null,
   connection: "offline",
   cacheMode: null,
   cacheFallbackReason: null,
@@ -145,6 +159,53 @@ function mergeMessages(
   for (const message of incoming) byId.set(message.id, message);
   return [...byId.values()].sort((left, right) =>
     compareSequence(left.conversationSequence, right.conversationSequence),
+  );
+}
+
+function mergeThreadSummaries(
+  summaries: readonly MessageThreadSummary[],
+  incoming: readonly MessageThreadSummary[],
+): readonly MessageThreadSummary[] {
+  if (incoming.length === 0) return summaries;
+  const byRootId = new Map(summaries.map((summary) => [summary.threadRootId, summary]));
+  for (const summary of incoming) {
+    const existing = byRootId.get(summary.threadRootId);
+    if (
+      existing === undefined ||
+      compareSequence(
+        summary.latestReply.conversationSequence,
+        existing.latestReply.conversationSequence,
+      ) >= 0
+    ) {
+      byRootId.set(summary.threadRootId, summary);
+    }
+  }
+  return [...byRootId.values()];
+}
+
+function projectReplySummary(
+  summaries: readonly MessageThreadSummary[],
+  message: Message,
+): readonly MessageThreadSummary[] {
+  const threadRootId = message.threadRootId;
+  if (threadRootId === null) return summaries;
+  const existing = summaries.find((summary) => summary.threadRootId === threadRootId);
+  if (existing === undefined) {
+    return [...summaries, { threadRootId, replyCount: 1, latestReply: message }];
+  }
+  if (
+    compareSequence(message.conversationSequence, existing.latestReply.conversationSequence) <= 0
+  ) {
+    return summaries;
+  }
+  return summaries.map((summary) =>
+    summary.threadRootId === threadRootId
+      ? {
+          ...summary,
+          replyCount: summary.replyCount + 1,
+          latestReply: message,
+        }
+      : summary,
   );
 }
 
@@ -308,6 +369,7 @@ export class WorkspaceRuntime {
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
   readonly #readTargets = new Map<string, ReadTarget>();
+  readonly #threadCursors = new Map<string, string | null>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -437,13 +499,24 @@ export class WorkspaceRuntime {
   }
 
   selectConversation(conversationId: string): void {
-    this.#setState({ selectedConversationId: conversationId, focusedMessageId: null });
+    this.#setState({
+      selectedConversationId: conversationId,
+      focusedMessageId: null,
+      selectedThreadRootId: null,
+      focusedThreadMessageId: null,
+      threadLoading: false,
+      threadError: null,
+    });
   }
 
   openTaskSource(task: Task): void {
     this.#setState({
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
+      selectedThreadRootId: null,
+      focusedThreadMessageId: null,
+      threadLoading: false,
+      threadError: null,
     });
   }
 
@@ -534,6 +607,7 @@ export class WorkspaceRuntime {
     conversationId: string,
     body: string,
     mentionedUserIds: readonly string[],
+    threadRootId: string | null = null,
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -542,7 +616,7 @@ export class WorkspaceRuntime {
       conversationId,
       idempotencyKey: clientMessageId,
       message: {
-        threadRootId: null,
+        threadRootId,
         body,
         bodyFormat: "hmm_markdown_v1",
         clientMessageId,
@@ -814,6 +888,7 @@ export class WorkspaceRuntime {
     if (!snapshot.conversations.some((summary) => summary.conversation.id === conversationId)) {
       throw new Error("This conversation is no longer available");
     }
+    const threadRootId = this.#state.threadsSupported ? result.message.threadRootId : null;
     await this.#serialize(async () => {
       if (generation !== this.#generation || cache !== this.#cache) return;
       const currentSnapshot = this.#state.bootstrap;
@@ -837,13 +912,137 @@ export class WorkspaceRuntime {
           hydrated.reactions,
         ),
         selectedConversationId: conversationId,
-        focusedMessageId: result.message.id,
+        focusedMessageId: threadRootId === null ? result.message.id : null,
+        selectedThreadRootId: threadRootId,
+        focusedThreadMessageId: threadRootId === null ? null : result.message.id,
+        threadLoading: threadRootId !== null,
+        threadError: null,
       });
-      const latest = messages.filter((message) => message.conversationId === conversationId).at(-1);
-      if (latest !== undefined) {
-        void this.#client.advanceReadCursor(conversationId, latest.id).catch(() => undefined);
-      }
     });
+    if (threadRootId !== null) await this.openThread(threadRootId, result.message.id);
+  }
+
+  async openThread(threadRootId: string, focusedMessageId: string | null = null): Promise<void> {
+    if (!this.#state.threadsSupported) {
+      throw new Error("Threads are unavailable on this server");
+    }
+    this.#threadCursors.delete(threadRootId);
+    this.#setState({
+      selectedThreadRootId: threadRootId,
+      focusedThreadMessageId: focusedMessageId,
+      threadLoading: true,
+      threadError: null,
+      focusedMessageId: null,
+    });
+    await this.#fetchThreadPage(threadRootId, undefined);
+  }
+
+  closeThread(): void {
+    this.#setState({
+      selectedThreadRootId: null,
+      focusedThreadMessageId: null,
+      threadLoading: false,
+      threadError: null,
+    });
+  }
+
+  async loadOlderThread(threadRootId: string): Promise<void> {
+    const before = this.#threadCursors.get(threadRootId);
+    if (before === null) return;
+    this.#setState({ threadLoading: true, threadError: null });
+    await this.#fetchThreadPage(threadRootId, before);
+  }
+
+  hasOlderThread(threadRootId: string): boolean {
+    const cursor = this.#threadCursors.get(threadRootId);
+    return cursor !== undefined && cursor !== null;
+  }
+
+  async #fetchThreadPage(threadRootId: string, before: string | undefined): Promise<void> {
+    const cache = this.#cache;
+    const generation = this.#generation;
+    if (cache === null) {
+      this.#setState({ threadLoading: false, threadError: "Workspace cache is unavailable" });
+      return;
+    }
+    try {
+      await this.#serialize(async () => {
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        const thread = await this.#client.getMessageThread({
+          messageId: threadRootId,
+          ...(before === undefined ? {} : { before }),
+          limit: 50,
+        });
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        const messages = [thread.root, ...thread.replies];
+        const messageIds = messages.map((message) => message.id);
+        const hydrated = await this.#client.listMessageReactions(messageIds);
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.upsertHistory(messages, hydrated.reactions);
+        this.#threadCursors.set(threadRootId, thread.nextCursor);
+        this.#setState({
+          messages: mergeMessages(this.#state.messages, messages),
+          reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+          ...(this.#state.selectedThreadRootId === threadRootId
+            ? { threadLoading: false, threadError: null }
+            : {}),
+        });
+      });
+    } catch (error) {
+      try {
+        if (await this.#downgradeAfterThreadFailure(threadRootId, generation, cache)) return;
+      } catch {
+        // Preserve the original thread failure when capability renegotiation is also unavailable.
+      }
+      if (generation === this.#generation && this.#state.selectedThreadRootId === threadRootId) {
+        this.#setState({
+          threadLoading: false,
+          threadError: errorMessage(error, "Could not load the thread"),
+        });
+      }
+    }
+  }
+
+  async #downgradeAfterThreadFailure(
+    threadRootId: string,
+    generation: number,
+    cache: WorkspaceCache,
+  ): Promise<boolean> {
+    if (!this.#state.threadsSupported) return true;
+    const root = this.#state.messages.find(
+      (message) => message.id === threadRootId && message.threadRootId === null,
+    );
+    if (root === undefined) return false;
+    const history = await this.#client.getConversationMessages({
+      conversationId: root.conversationId,
+      limit: 50,
+    });
+    if (history.threadsSupported) return false;
+    const messageIds = history.messages.map((message) => message.id);
+    const hydrated =
+      messageIds.length === 0
+        ? { reactions: [] }
+        : await this.#client.listMessageReactions(messageIds);
+    await this.#serialize(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#historyCursors.set(root.conversationId, history.nextCursor);
+      await cache.upsertHistory(history.messages, hydrated.reactions);
+      const selectedThreadRootId = this.#state.selectedThreadRootId;
+      this.#setState({
+        messages: mergeMessages(this.#state.messages, history.messages),
+        threadSummaries: [],
+        threadsSupported: false,
+        reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+        ...(this.#state.selectedConversationId === root.conversationId
+          ? { focusedMessageId: selectedThreadRootId ?? threadRootId }
+          : {}),
+      });
+    });
+    return generation === this.#generation && cache === this.#cache;
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
@@ -968,6 +1167,10 @@ export class WorkspaceRuntime {
         bootstrap: projected,
         selectedConversationId: conversationId,
         focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
         ...(repairError === null ? {} : { stale: true, error: repairError }),
       });
     });
@@ -1031,6 +1234,18 @@ export class WorkspaceRuntime {
       await cache.upsertHistory(history.messages, hydrated.reactions);
       this.#setState({
         messages: mergeMessages(this.#state.messages, history.messages),
+        threadSummaries: history.threadsSupported
+          ? mergeThreadSummaries(this.#state.threadSummaries, history.threadSummaries)
+          : [],
+        threadsSupported: history.threadsSupported,
+        ...(history.threadsSupported
+          ? {}
+          : {
+              selectedThreadRootId: null,
+              focusedThreadMessageId: null,
+              threadLoading: false,
+              threadError: null,
+            }),
         reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
       });
     });
@@ -1057,6 +1272,7 @@ export class WorkspaceRuntime {
     this.#cache = null;
     this.#syncCursor = null;
     this.#historyCursors.clear();
+    this.#threadCursors.clear();
     this.#setState({ ...INITIAL_STATE, error: "Local cache reset. Rebuilding the workspace…" });
   }
 
@@ -1104,10 +1320,15 @@ export class WorkspaceRuntime {
   async #refreshSnapshot(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null) return;
+    const openThreadRootId = this.#state.selectedThreadRootId;
+    const openThreadConversationId = this.#state.selectedConversationId;
     const snapshot = await this.#fetchSnapshot();
     const messages: Message[] = [];
+    const threadSummaries: MessageThreadSummary[] = [];
     const reactions: Reaction[] = [];
+    let threadsSupported = true;
     this.#historyCursors.clear();
+    this.#threadCursors.clear();
     for (const summary of snapshot.conversations) {
       const history = await this.#client.getConversationMessages({
         conversationId: summary.conversation.id,
@@ -1115,6 +1336,8 @@ export class WorkspaceRuntime {
       });
       this.#historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
+      threadSummaries.push(...history.threadSummaries);
+      threadsSupported &&= history.threadsSupported;
       if (history.messages.length > 0) {
         const hydrated = await this.#client.listMessageReactions(
           history.messages.map((message) => message.id),
@@ -1122,14 +1345,57 @@ export class WorkspaceRuntime {
         reactions.push(...hydrated.reactions);
       }
     }
-    if (generation !== this.#generation) return;
     const visibleConversationIds = new Set(
       snapshot.conversations.map((summary) => summary.conversation.id),
     );
+    const queuedThreadRootIds = new Set(
+      this.#state.outbox.flatMap((item) => {
+        const threadRootId = item.operation.message.threadRootId;
+        return threadRootId !== null && visibleConversationIds.has(item.operation.conversationId)
+          ? [threadRootId]
+          : [];
+      }),
+    );
+    const preservedQueuedRoots = this.#state.messages.filter(
+      (message) =>
+        queuedThreadRootIds.has(message.id) &&
+        message.threadRootId === null &&
+        visibleConversationIds.has(message.conversationId),
+    );
+    const refreshedMessageIds = new Set(messages.map((message) => message.id));
+    let refreshedMessages: readonly Message[] = mergeMessages(messages, preservedQueuedRoots);
+    let refreshedReactions: readonly Reaction[] = mergeReactions(
+      reactions,
+      this.#state.reactions.filter(
+        (reaction) =>
+          queuedThreadRootIds.has(reaction.messageId) &&
+          !refreshedMessageIds.has(reaction.messageId),
+      ),
+    );
+    const selectedConversationStillVisible =
+      openThreadConversationId !== null && visibleConversationIds.has(openThreadConversationId);
+    if (threadsSupported && openThreadRootId !== null && selectedConversationStillVisible) {
+      const thread = await this.#client.getMessageThread({
+        messageId: openThreadRootId,
+        limit: 50,
+      });
+      const threadMessages = [thread.root, ...thread.replies];
+      const hydrated = await this.#client.listMessageReactions(
+        threadMessages.map((message) => message.id),
+      );
+      this.#threadCursors.set(openThreadRootId, thread.nextCursor);
+      refreshedMessages = mergeMessages(refreshedMessages, threadMessages);
+      refreshedReactions = replaceMessageReactions(
+        refreshedReactions,
+        threadMessages.map((message) => message.id),
+        hydrated.reactions,
+      );
+    }
+    if (generation !== this.#generation) return;
     const retainedTasks = this.#state.tasks.filter((task) =>
       visibleConversationIds.has(task.conversationId),
     );
-    await cache.replaceSnapshot(snapshot, messages, reactions, retainedTasks);
+    await cache.replaceSnapshot(snapshot, refreshedMessages, refreshedReactions, retainedTasks);
     const loaded = await cache.load();
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
@@ -1145,14 +1411,25 @@ export class WorkspaceRuntime {
           : firstConversation(loadedSnapshot);
     const focusedMessageId =
       selectedConversationId === currentSelection ? this.#state.focusedMessageId : null;
+    const selectedThreadRootId =
+      threadsSupported && selectedConversationId === currentSelection
+        ? this.#state.selectedThreadRootId
+        : null;
+    const focusedThreadMessageId =
+      selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId;
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
+      threadSummaries,
+      threadsSupported,
       reactions: loaded.reactions,
       tasks: loaded.tasks,
       outbox: loaded.outbox,
       selectedConversationId,
       focusedMessageId,
+      selectedThreadRootId,
+      focusedThreadMessageId,
+      ...(selectedThreadRootId === null ? { threadLoading: false, threadError: null } : {}),
       stale: false,
       error: null,
     });
@@ -1340,6 +1617,7 @@ export class WorkspaceRuntime {
       const message = event.payload.message;
       this.#setState({
         messages: mergeMessages(this.#state.messages, [message]),
+        threadSummaries: projectReplySummary(this.#state.threadSummaries, message),
         outbox: this.#withoutOutbox([message.clientMessageId]),
         bootstrap: snapshot === null ? null : countMessage(snapshot, event),
       });
@@ -1478,6 +1756,7 @@ export class WorkspaceRuntime {
           });
     this.#setState({
       messages: mergeMessages(this.#state.messages, [message]),
+      threadSummaries: projectReplySummary(this.#state.threadSummaries, message),
       // Both ids are dropped so a server that does not echo the client id cannot leave the
       // delivered item queued and spin the flush loop.
       outbox: this.#withoutOutbox([clientMessageId, message.clientMessageId]),
@@ -1504,10 +1783,17 @@ export class WorkspaceRuntime {
     const cache = this.#cache;
     if (cache === null) return;
     const loaded = await cache.load();
+    let threadSummaries = this.#state.threadSummaries;
+    for (const message of loaded.messages) {
+      if (message.threadRootId !== null) {
+        threadSummaries = projectReplySummary(threadSummaries, message);
+      }
+    }
     this.#syncCursor = loaded.syncCursor;
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
+      threadSummaries,
       reactions: loaded.reactions,
       tasks: loaded.tasks,
       outbox: loaded.outbox,

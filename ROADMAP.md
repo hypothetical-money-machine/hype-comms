@@ -27,6 +27,8 @@ The implementation contract and security boundaries live in
 - First-class bot members with owner-issued, hashed, expiring task credentials, read/write scopes,
   explicit per-channel grants, one-time token display, rotation/revocation, channel-slug/task-number
   lookup, filtered polling, and latest-mutation actor attribution.
+- One-level message threads with root-only conversation history, accurate reply summaries,
+  paginated reply panes, reply-aware search and read state, and restart-safe queued replies.
 - Authorized, ranked PostgreSQL message-body search across visible channels and DMs; selecting a
   result opens and highlights it in the main timeline.
 - Every mutation commits together with its ordered sync event in one transaction; clients
@@ -55,11 +57,6 @@ accident.
 
 Roughly in order:
 
-- Decide the conversation model before building threads. `docs/architecture.md` currently
-  specifies one-level Slack-style threads; our competitive read says that model is the most
-  copied and least good part of Slack, and a topic-first model with a single unified unread
-  state is the stronger position. Decide, then update the contract — this is much cheaper
-  to change now than after threads ship.
 - Structured mention completion on the existing verified mention model.
 - File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
   authorized filename search.

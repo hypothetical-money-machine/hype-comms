@@ -19,6 +19,7 @@ import type {
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
+  MessageThreadResponse,
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
@@ -94,6 +95,11 @@ export interface DesktopApi extends SessionTransport, ThemeTransport {
     readonly before?: string;
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
+  readonly getMessageThread: (input: {
+    readonly messageId: string;
+    readonly before?: string;
+    readonly limit?: number;
+  }) => Promise<MessageThreadResponse>;
   readonly listMessageReactions: (
     messageIds: readonly string[],
   ) => Promise<ListMessageReactionsResponse>;
