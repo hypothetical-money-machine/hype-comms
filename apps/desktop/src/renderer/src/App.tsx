@@ -225,6 +225,17 @@ function Avatar({ user }: { user: User | undefined }) {
   );
 }
 
+const PARTICIPANT_COLOR_COUNT = 8;
+
+export function participantColorIndex(userId: string): number {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < userId.length; index += 1) {
+    hash ^= userId.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0) % PARTICIPANT_COLOR_COUNT;
+}
+
 export function MessageRow({
   message,
   members,
@@ -255,9 +266,10 @@ export function MessageRow({
   readonly domIdPrefix?: string;
 }) {
   const author = members.find((member) => member.id === message.authorId);
+  const participantId = message.authorId ?? "former-member";
   return (
     <article
-      className={`message${continuation ? " message-continuation" : ""}${
+      className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
         highlighted ? " search-target" : ""
       }`}
       id={`${domIdPrefix}-${message.id}`}
@@ -284,17 +296,37 @@ export function MessageRow({
           disabled={reactionsDisabled}
           onAdd={onAddReaction}
           onRemove={onRemoveReaction}
+          leadingActions={
+            onOpenThread === undefined ? undefined : (
+              <button
+                className="message-reply-action"
+                type="button"
+                aria-label="Reply in thread"
+                title="Reply in thread"
+                onClick={onOpenThread}
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M4 4.5h12v8H9l-4 3v-3H4z" />
+                  <path d="M7 8.5h6" />
+                </svg>
+              </button>
+            )
+          }
+          trailingActions={
+            onCreateTask === undefined ? undefined : (
+              <button
+                className="message-task-action"
+                type="button"
+                onClick={() => void onCreateTask()}
+              >
+                + Task
+              </button>
+            )
+          }
         />
-        {onCreateTask !== undefined && (
-          <button className="message-task-action" type="button" onClick={() => void onCreateTask()}>
-            + Task
-          </button>
-        )}
-        {onOpenThread !== undefined && (
-          <button className="thread-action" type="button" onClick={onOpenThread}>
-            {replyCount === 0
-              ? "Reply"
-              : `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`}
+        {onOpenThread !== undefined && replyCount > 0 && (
+          <button className="thread-summary" type="button" onClick={onOpenThread}>
+            {`${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`}
           </button>
         )}
       </div>
@@ -302,7 +334,7 @@ export function MessageRow({
   );
 }
 
-function PendingMessageRow({
+export function PendingMessageRow({
   item,
   currentUser,
   continuation,
@@ -323,7 +355,9 @@ function PendingMessageRow({
 }) {
   const pendingStatus = editing ? "editing" : item.status.replaceAll("_", " ");
   return (
-    <article className={`message pending-message${continuation ? " message-continuation" : ""}`}>
+    <article
+      className={`message participant-color-${String(participantColorIndex(currentUser.id))} pending-message${continuation ? " message-continuation" : ""}`}
+    >
       {continuation ? (
         <time className="message-continuation-time" dateTime={item.createdAt} aria-hidden="true">
           {messageTime(item.createdAt)}
@@ -1329,75 +1363,28 @@ export function App({ client, theme }: AppProps) {
                       }
                     : (messages.at(-1) ?? null),
                 );
-                const pendingStatus =
-                  editingClientMessageId === item.operation.message.clientMessageId
-                    ? "editing"
-                    : item.status.replaceAll("_", " ");
                 return (
                   <Fragment key={item.operation.message.clientMessageId}>
                     {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
                       <MessageDateSeparator value={item.createdAt} />
                     )}
-                    <article
-                      className={`message pending-message${
-                        continuation ? " message-continuation" : ""
-                      }`}
-                    >
-                      {continuation ? (
-                        <time
-                          className="message-continuation-time"
-                          dateTime={item.createdAt}
-                          aria-hidden="true"
-                        >
-                          {messageTime(item.createdAt)}
-                        </time>
-                      ) : (
-                        <Avatar user={bootstrap.currentUser.user} />
-                      )}
-                      <div>
-                        <header className={continuation ? "sr-only" : undefined}>
-                          <strong>{bootstrap.currentUser.user.displayName}</strong>
-                          <span>{pendingStatus}</span>
-                        </header>
-                        <MessageBody
-                          body={item.operation.message.body}
-                          suffix={
-                            continuation ? (
-                              <span className="pending-status"> · {pendingStatus}</span>
-                            ) : undefined
-                          }
-                        />
-                        {item.status === "permanent_failure" && (
-                          <div className="message-actions">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setDraft(item.operation.message.body);
-                                setEditingClientMessageId(item.operation.message.clientMessageId);
-                              }}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                void runtime.retryMessage(item.operation.message.clientMessageId)
-                              }
-                            >
-                              Retry
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                void runtime.discardMessage(item.operation.message.clientMessageId)
-                              }
-                            >
-                              Discard
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </article>
+                    <PendingMessageRow
+                      item={item}
+                      currentUser={bootstrap.currentUser.user}
+                      continuation={continuation}
+                      editing={editingClientMessageId === item.operation.message.clientMessageId}
+                      mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
+                      onEdit={() => {
+                        setDraft(item.operation.message.body);
+                        setEditingClientMessageId(item.operation.message.clientMessageId);
+                      }}
+                      onRetry={() =>
+                        void runtime.retryMessage(item.operation.message.clientMessageId)
+                      }
+                      onDiscard={() =>
+                        void runtime.discardMessage(item.operation.message.clientMessageId)
+                      }
+                    />
                   </Fragment>
                 );
               })}

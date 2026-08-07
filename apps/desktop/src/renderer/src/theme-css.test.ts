@@ -142,11 +142,12 @@ describe("renderer theme CSS", () => {
     expect(violations).toEqual([]);
   });
 
-  it("preserves pending-state and reaction-reveal cues across themes", () => {
+  it("preserves pending-state and message-action reveal cues across themes", () => {
     const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
     const reactionAddRule = /^\.reaction-add\s*\{(?<body>[^}]*)\}/mu.exec(styles);
-    const reactionRevealRule =
-      /\.message:hover \.reaction-add,\s*\.reaction-add:focus-visible,\s*\.reaction-add\[aria-expanded="true"\]\s*\{(?<body>[^}]*)\}/u.exec(
+    const actionRailRule = /\.message-action-rail\s*\{(?<body>[^}]*)\}/u.exec(styles);
+    const actionRevealRule =
+      /\.message:hover \.message-action-rail,\s*\.message:focus-within \.message-action-rail\s*\{(?<body>[^}]*)\}/u.exec(
         styles,
       );
     const pendingMessageRule = /\.pending-message\s*\{(?<body>[^}]*)\}/u.exec(styles);
@@ -156,9 +157,10 @@ describe("renderer theme CSS", () => {
 
     expect(pendingMessageRule?.groups?.body).toContain("opacity: 0.72");
     expect(reactionAddRule?.groups?.body).toBeDefined();
-    expect(reactionAddRule?.groups?.body).toContain("opacity: 0.62");
+    expect(reactionAddRule?.groups?.body).toContain("opacity: 1");
     expect(reactionAddRule?.groups?.body).toContain("color: var(--theme-text-muted)");
-    expect(reactionRevealRule?.groups?.body).toContain("opacity: 1");
+    expect(actionRailRule?.groups?.body).toContain("opacity: 0");
+    expect(actionRevealRule?.groups?.body).toContain("opacity: 1");
     expect(memberRoleRule?.groups?.body).toContain("color: var(--theme-text-secondary)");
   });
 

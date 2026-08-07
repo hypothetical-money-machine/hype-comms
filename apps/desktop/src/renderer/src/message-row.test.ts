@@ -5,7 +5,13 @@ import type { Message, User } from "@hmm-chat/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MessageRow, visibleTimelineMessages } from "./App";
+import type { OutboxItem } from "./workspace-cache";
+import {
+  MessageRow,
+  participantColorIndex,
+  PendingMessageRow,
+  visibleTimelineMessages,
+} from "./App";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000002";
@@ -35,6 +41,26 @@ const message: Message = {
   deletedAt: null,
   createdAt: NOW,
   updatedAt: NOW,
+};
+
+const pendingMessage: OutboxItem = {
+  operation: {
+    conversationId: message.conversationId,
+    idempotencyKey: message.clientMessageId,
+    message: {
+      threadRootId: null,
+      body: "Pending message",
+      bodyFormat: "hmm_markdown_v1",
+      clientMessageId: message.clientMessageId,
+      mentionedUserIds: [],
+      attachmentIds: [],
+    },
+  },
+  createdAt: NOW,
+  status: "pending",
+  attemptCount: 0,
+  nextAttemptAt: null,
+  failureReason: null,
 };
 
 afterEach(cleanup);
@@ -68,6 +94,21 @@ describe("MessageRow thread action", () => {
     fireEvent.click(screen.getByRole("button", { name: "3 replies" }));
 
     expect(onOpenThread).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Reply in thread" }));
+    expect(onOpenThread).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an empty thread in the hover action rail instead of showing a summary", () => {
+    const onOpenThread = vi.fn();
+    const { container } = renderMessage({ onOpenThread, replyCount: 0 });
+
+    expect(screen.queryByRole("button", { name: /0 replies/i })).toBeNull();
+    const reply = screen.getByRole("button", { name: "Reply in thread" });
+    expect(reply.closest(".message-action-rail")).not.toBeNull();
+    expect(container.querySelector(".thread-summary")).toBeNull();
+
+    fireEvent.click(reply);
+    expect(onOpenThread).toHaveBeenCalledOnce();
   });
 
   it("does not expose a nested reply action when the caller omits it", () => {
@@ -83,6 +124,43 @@ describe("MessageRow thread action", () => {
     expect(row?.id).toBe(`thread-message-${MESSAGE_ID}`);
     expect(row?.dataset.messageId).toBe(MESSAGE_ID);
     expect(row?.dataset.messageSequence).toBe("1");
+  });
+});
+
+describe("MessageRow participant color", () => {
+  it("derives a stable palette slot from the author identifier", () => {
+    const first = participantColorIndex(USER_ID);
+
+    expect(participantColorIndex(USER_ID)).toBe(first);
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(8);
+    expect(participantColorIndex("10000000-0000-4000-8000-000000000002")).not.toBe(first);
+  });
+
+  it("marks each message with its author's palette class", () => {
+    const { container } = renderMessage({});
+
+    expect(container.querySelector("article")?.classList).toContain(
+      `participant-color-${String(participantColorIndex(USER_ID))}`,
+    );
+  });
+
+  it("keeps the current user's color on optimistic messages", () => {
+    const { container } = render(
+      createElement(PendingMessageRow, {
+        item: pendingMessage,
+        currentUser: user,
+        continuation: false,
+        editing: false,
+        onEdit: vi.fn(),
+        onRetry: vi.fn(),
+        onDiscard: vi.fn(),
+      }),
+    );
+
+    expect(container.querySelector("article")?.classList).toContain(
+      `participant-color-${String(participantColorIndex(USER_ID))}`,
+    );
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { Reaction, ReactionEmoji, User } from "@hmm-chat/contracts";
@@ -44,6 +44,8 @@ export function MessageReactions({
   disabled,
   onAdd,
   onRemove,
+  leadingActions,
+  trailingActions,
 }: {
   readonly reactions: readonly Reaction[];
   readonly members: readonly User[];
@@ -51,6 +53,8 @@ export function MessageReactions({
   readonly disabled: boolean;
   readonly onAdd: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemove: (emoji: ReactionEmoji) => Promise<void>;
+  readonly leadingActions?: ReactNode;
+  readonly trailingActions?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [pendingEmoji, setPendingEmoji] = useState<ReactionEmoji | null>(null);
@@ -131,33 +135,42 @@ export function MessageReactions({
   };
 
   return (
-    <div
-      className={
-        groups.length === 0 && error === "" ? "message-reactions empty" : "message-reactions"
-      }
-      ref={root}
-    >
-      <div className="reaction-chips">
-        {groups.map((group) => {
-          const hasCurrentUser = group.currentUserReaction !== null;
-          const names = group.reactions
-            .map((reaction) => memberNames.get(reaction.userId) ?? "Former member")
-            .join(", ");
-          return (
-            <button
-              className={hasCurrentUser ? "reaction-chip selected" : "reaction-chip"}
-              type="button"
-              key={group.emoji}
-              disabled={disabled || pendingEmoji !== null}
-              aria-label={`${group.emoji} ${String(group.reactions.length)} ${group.reactions.length === 1 ? "reaction" : "reactions"}; ${hasCurrentUser ? "remove your reaction" : "add your reaction"}`}
-              title={names}
-              onClick={() => void toggle(group.emoji, hasCurrentUser)}
-            >
-              <span aria-hidden="true">{group.emoji}</span>
-              <span>{group.reactions.length}</span>
-            </button>
-          );
-        })}
+    <div className="message-reaction-controls" ref={root}>
+      <div
+        className={
+          groups.length === 0 && error === "" ? "message-reactions empty" : "message-reactions"
+        }
+      >
+        <div className="reaction-chips">
+          {groups.map((group) => {
+            const hasCurrentUser = group.currentUserReaction !== null;
+            const names = group.reactions
+              .map((reaction) => memberNames.get(reaction.userId) ?? "Former member")
+              .join(", ");
+            return (
+              <button
+                className={hasCurrentUser ? "reaction-chip selected" : "reaction-chip"}
+                type="button"
+                key={group.emoji}
+                disabled={disabled || pendingEmoji !== null}
+                aria-label={`${group.emoji} ${String(group.reactions.length)} ${group.reactions.length === 1 ? "reaction" : "reactions"}; ${hasCurrentUser ? "remove your reaction" : "add your reaction"}`}
+                title={names}
+                onClick={() => void toggle(group.emoji, hasCurrentUser)}
+              >
+                <span aria-hidden="true">{group.emoji}</span>
+                <span>{group.reactions.length}</span>
+              </button>
+            );
+          })}
+        </div>
+        {error !== "" && (
+          <p className="reaction-error" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+      <div className="message-action-rail">
+        {leadingActions}
         <button
           className="reaction-add"
           type="button"
@@ -166,6 +179,7 @@ export function MessageReactions({
           aria-haspopup="menu"
           aria-expanded={open}
           aria-label={disabled ? "Reactions are unavailable in archived channels" : "Add reaction"}
+          title={disabled ? undefined : "Add reaction"}
           onClick={() => setOpen((value) => !value)}
         >
           <svg aria-hidden="true" viewBox="0 0 20 20">
@@ -173,6 +187,7 @@ export function MessageReactions({
             <path d="M6 9h.01M10 9h.01M6.25 11.5c.8.8 2.7.8 3.5 0M15 3.5v5M12.5 6h5" />
           </svg>
         </button>
+        {trailingActions}
       </div>
       {open &&
         createPortal(
@@ -232,11 +247,6 @@ export function MessageReactions({
           </div>,
           document.body,
         )}
-      {error !== "" && (
-        <p className="reaction-error" role="alert">
-          {error}
-        </p>
-      )}
     </div>
   );
 }
