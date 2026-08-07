@@ -1572,6 +1572,90 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
   });
 
+  it("counts out-of-order replies once across HTTP and realtime delivery", async () => {
+    const earlierReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-000000000022",
+      clientMessageId: "20000000-0000-4000-8000-000000000023",
+      conversationSequence: "4",
+      body: "Earlier reply A",
+    };
+    const laterReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-000000000024",
+      clientMessageId: "20000000-0000-4000-8000-000000000025",
+      conversationSequence: "5",
+      body: "Later reply B",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.sendResults.push({
+      status: "accepted",
+      response: { message: laterReply, syncCursor: "12" },
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, laterReply.body, [], OWN_MESSAGE_ID);
+    await settle(
+      () => runtime.state.threadSummaries[0]?.latestReply.id === laterReply.id,
+      "later HTTP reply projection",
+    );
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000026",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: earlierReply.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: earlierReply, mentionedUserIds: [] },
+    });
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === earlierReply.id),
+      "earlier realtime reply projection",
+    );
+
+    expect(runtime.state.threadSummaries[0]).toMatchObject({
+      replyCount: 3,
+      latestReply: { id: laterReply.id },
+    });
+
+    const sentClientMessageId = api.sent[0]?.message.clientMessageId;
+    if (sentClientMessageId === undefined) throw new Error("Expected the reply send operation");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000027",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: laterReply.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        message: { ...laterReply, clientMessageId: sentClientMessageId },
+        mentionedUserIds: [],
+      },
+    });
+    await settle(() => api.acknowledged.includes("12"), "later realtime reply echo");
+
+    expect(runtime.state.threadSummaries[0]).toMatchObject({
+      replyCount: 3,
+      latestReply: { id: laterReply.id },
+    });
+  });
+
   it("projects canonical unread counts from read-cursor events", async () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", {

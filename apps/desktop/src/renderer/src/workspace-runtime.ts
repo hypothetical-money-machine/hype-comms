@@ -186,6 +186,7 @@ function mergeThreadSummaries(
 function projectReplySummary(
   summaries: readonly MessageThreadSummary[],
   message: Message,
+  newlyObserved: boolean,
 ): readonly MessageThreadSummary[] {
   const threadRootId = message.threadRootId;
   if (threadRootId === null) return summaries;
@@ -193,17 +194,18 @@ function projectReplySummary(
   if (existing === undefined) {
     return [...summaries, { threadRootId, replyCount: 1, latestReply: message }];
   }
-  if (
-    compareSequence(message.conversationSequence, existing.latestReply.conversationSequence) <= 0
-  ) {
-    return summaries;
-  }
+  // HTTP responses, realtime, and sync can expose distinct replies out of conversation order.
+  // Identity decides whether the total grows; sequence decides only which reply is latest.
+  const replacesLatest =
+    compareSequence(message.conversationSequence, existing.latestReply.conversationSequence) > 0;
+  const incrementsCount = newlyObserved && message.id !== existing.latestReply.id;
+  if (!replacesLatest && !incrementsCount) return summaries;
   return summaries.map((summary) =>
     summary.threadRootId === threadRootId
       ? {
           ...summary,
-          replyCount: summary.replyCount + 1,
-          latestReply: message,
+          replyCount: summary.replyCount + (incrementsCount ? 1 : 0),
+          latestReply: replacesLatest ? message : summary.latestReply,
         }
       : summary,
   );
@@ -1615,9 +1617,10 @@ export class WorkspaceRuntime {
     const snapshot = this.#state.bootstrap;
     if (event.type === "message.created") {
       const message = event.payload.message;
+      const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
       this.#setState({
         messages: mergeMessages(this.#state.messages, [message]),
-        threadSummaries: projectReplySummary(this.#state.threadSummaries, message),
+        threadSummaries: projectReplySummary(this.#state.threadSummaries, message, newlyObserved),
         outbox: this.#withoutOutbox([message.clientMessageId]),
         bootstrap: snapshot === null ? null : countMessage(snapshot, event),
       });
@@ -1747,6 +1750,7 @@ export class WorkspaceRuntime {
 
   #acceptMessage(message: Message, clientMessageId: string): void {
     const snapshot = this.#state.bootstrap;
+    const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
     const bootstrap =
       snapshot === null
         ? null
@@ -1756,7 +1760,7 @@ export class WorkspaceRuntime {
           });
     this.#setState({
       messages: mergeMessages(this.#state.messages, [message]),
-      threadSummaries: projectReplySummary(this.#state.threadSummaries, message),
+      threadSummaries: projectReplySummary(this.#state.threadSummaries, message, newlyObserved),
       // Both ids are dropped so a server that does not echo the client id cannot leave the
       // delivered item queued and spin the flush loop.
       outbox: this.#withoutOutbox([clientMessageId, message.clientMessageId]),
@@ -1784,10 +1788,16 @@ export class WorkspaceRuntime {
     if (cache === null) return;
     const loaded = await cache.load();
     let threadSummaries = this.#state.threadSummaries;
+    const knownMessageIds = new Set(this.#state.messages.map((message) => message.id));
     for (const message of loaded.messages) {
       if (message.threadRootId !== null) {
-        threadSummaries = projectReplySummary(threadSummaries, message);
+        threadSummaries = projectReplySummary(
+          threadSummaries,
+          message,
+          !knownMessageIds.has(message.id),
+        );
       }
+      knownMessageIds.add(message.id);
     }
     this.#syncCursor = loaded.syncCursor;
     this.#setState({
