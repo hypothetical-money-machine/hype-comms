@@ -102,7 +102,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     stagingIndex >= 0 && stagingIndex < publicationGuardIndex,
     "GitHub Release assets must be staged before the public feed publication guard",
   );
-  assert.match(releaseWorkflow, /name: Wait for all GitHub Release assets[\s\S]*seq 1 60/u);
+  assert.match(
+    releaseWorkflow,
+    /name: Wait for all GitHub Release assets[\s\S]*attempt=0[\s\S]*while \[ "\$attempt" -lt 60 \]; do[\s\S]*attempt=\$\(\(attempt \+ 1\)\)/u,
+  );
+  assert.doesNotMatch(releaseWorkflow, /\$\(\s*seq\b/u);
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
   assert.match(
     releaseWorkflow,

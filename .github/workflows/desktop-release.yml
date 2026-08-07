@@ -356,7 +356,11 @@ jobs:
         shell: sh
         run: |
           set -eu
-          for attempt in $(seq 1 60); do
+          # MinGit's POSIX shell on the Windows runner does not include the external `seq`
+          # utility. Keep the barrier portable across every release host with shell arithmetic.
+          attempt=0
+          while [ "$attempt" -lt 60 ]; do
+            attempt=$((attempt + 1))
             missing=0
             if assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null)"; then
               for manifest in latest-mac.yml latest.yml latest-linux.yml latest-linux-arm64.yml; do
