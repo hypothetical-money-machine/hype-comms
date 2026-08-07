@@ -19,6 +19,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceBootstrap: "workspace:bootstrap",
   workspaceConversationsList: "workspace:conversations-list",
   workspaceMessagesList: "workspace:messages-list",
+  workspaceMessageThread: "workspace:message-thread",
   workspaceReactionsList: "workspace:reactions-list",
   workspaceReactionAdd: "workspace:reaction-add",
   workspaceReactionRemove: "workspace:reaction-remove",

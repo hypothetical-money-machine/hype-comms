@@ -2,6 +2,7 @@ import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
   apiErrorEnvelopeSchema,
@@ -13,6 +14,8 @@ import {
   listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
+  messageThreadRequestSchema,
+  messageThreadResponseSchema,
   messageSearchResponseSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
@@ -37,6 +40,8 @@ import {
   type ListMembersResponse,
   type ListMessageReactionsResponse,
   type MessageHistoryResponse,
+  type MessageThreadRequest,
+  type MessageThreadResponse,
   type MessageSearchQuery,
   type MessageSearchResponse,
   type MoveTaskOperation,
@@ -60,6 +65,7 @@ const CLIENT_CAPABILITIES = [
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -275,8 +281,20 @@ export class WorkspaceTransport {
     const url = this.#url(`/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`);
     if (input.before !== undefined) url.searchParams.set("before", input.before);
     url.searchParams.set("limit", String(input.limit ?? 50));
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.session.fetch(url.href, {
+      method: "GET",
+      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+    });
     return messageHistoryResponseSchema.parse(await this.#payload(response));
+  }
+
+  async thread(input: MessageThreadRequest): Promise<MessageThreadResponse> {
+    const request = messageThreadRequestSchema.parse(input);
+    const url = this.#url(`/v1/messages/${encodeURIComponent(request.messageId)}/thread`);
+    if (request.before !== undefined) url.searchParams.set("before", request.before);
+    url.searchParams.set("limit", String(request.limit));
+    const response = await this.session.fetch(url.href, { method: "GET" });
+    return messageThreadResponseSchema.parse(await this.#payload(response));
   }
 
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {

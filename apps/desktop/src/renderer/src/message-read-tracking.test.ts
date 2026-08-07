@@ -76,6 +76,22 @@ describe("message read tracking", () => {
     expect(lastReadEligibleMessageId(container, memory, null)).toBe("tall");
   });
 
+  it("does not read remembered messages from a hidden pane", () => {
+    const container = document.createElement("div");
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rectangle(0, 0));
+    const message = document.createElement("article");
+    message.dataset.messageId = "hidden";
+    message.dataset.messageSequence = "1";
+    vi.spyOn(message, "getBoundingClientRect").mockReturnValue(rectangle(0, 0));
+    container.append(message);
+
+    const memory = visibilityMemory();
+    memory.observedStarts.add("hidden");
+    memory.observedEnds.add("hidden");
+
+    expect(lastReadEligibleMessageId(container, memory, null)).toBeNull();
+  });
+
   it("detects the bottom with a small layout tolerance", () => {
     const container = document.createElement("div");
     Object.defineProperties(container, {

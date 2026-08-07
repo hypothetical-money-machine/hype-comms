@@ -16,6 +16,7 @@ export function lastReadEligibleMessageId(
   lastReadConversationSequence: string | null,
 ): string | null {
   const viewport = container.getBoundingClientRect();
+  if (viewport.width <= 0 || viewport.height <= 0) return null;
   const lastReadSequence = BigInt(lastReadConversationSequence ?? "0");
   let lastVisible: string | null = null;
   for (const message of container.querySelectorAll<HTMLElement>("[data-message-id]")) {

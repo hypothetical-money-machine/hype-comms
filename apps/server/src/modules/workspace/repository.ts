@@ -21,6 +21,7 @@ import {
   messageHistoryResponseSchema,
   messageSearchResponseSchema,
   messageSchema,
+  messageThreadResponseSchema,
   reactionEmojiSchema,
   reactionSchema,
   readCursorSchema,
@@ -55,6 +56,8 @@ import {
   type Message,
   type MessageHistoryResponse,
   type MessageSearchResponse,
+  type MessageThreadResponse,
+  type MessageThreadSummary,
   type Reaction,
   type ReactionEmoji,
   type RemoveReactionResponse,
@@ -170,6 +173,11 @@ interface MessageRow extends QueryResultRow {
 
 interface SearchMessageRow extends MessageRow {
   search_rank: string;
+}
+
+interface ThreadSummaryRow extends MessageRow {
+  summarized_thread_root_id: string;
+  reply_count: string;
 }
 
 interface ReactionRow extends QueryResultRow {
@@ -1128,15 +1136,18 @@ export class WorkspaceRepository {
     conversationId: string,
     before: string | undefined,
     limit: number,
+    includeThreadReplies = false,
   ): Promise<MessageHistoryResponse> {
     const client = await this.pool.connect();
     try {
       await this.#requireVisibleConversation(client, identity, conversationId, false);
       const beforeSequence = decodeHistoryCursor(before);
+      const threadScope = includeThreadReplies ? "" : "AND thread_root_id IS NULL";
       const result = await client.query<MessageRow>(
         `SELECT *
            FROM messages
           WHERE conversation_id = $1
+            ${threadScope}
             AND ($2::bigint IS NULL OR conversation_sequence < $2::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $3`,
@@ -1145,8 +1156,65 @@ export class WorkspaceRepository {
       const hasMore = result.rows.length > limit;
       const selected = result.rows.slice(0, limit);
       const oldest = selected.at(-1);
+      const messages = selected.reverse().map(mapMessage);
       return messageHistoryResponseSchema.parse({
-        messages: selected.reverse().map(mapMessage),
+        messages,
+        threadSummaries: includeThreadReplies
+          ? []
+          : await this.#threadSummaries(
+              client,
+              messages.map((message) => message.id),
+            ),
+        threadsSupported: !includeThreadReplies,
+        nextCursor:
+          hasMore && oldest !== undefined
+            ? encodeHistoryCursor(oldest.conversation_sequence)
+            : null,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async thread(
+    identity: AuthenticatedIdentity,
+    threadRootId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<MessageThreadResponse> {
+    const client = await this.pool.connect();
+    try {
+      const rootResult = await client.query<MessageRow>(
+        `SELECT message.*
+           FROM messages AS message
+           JOIN conversations AS conversation ON conversation.id = message.conversation_id
+          WHERE message.id = $1
+            AND message.workspace_id = $2
+            AND message.thread_root_id IS NULL
+            AND conversation.workspace_id = $2
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      const root = rootResult.rows[0];
+      if (root === undefined) throw new ApiError(404, "NOT_FOUND", "Thread not found");
+
+      const beforeSequence = decodeHistoryCursor(before);
+      const result = await client.query<MessageRow>(
+        `SELECT *
+           FROM messages
+          WHERE thread_root_id = $1
+            AND conversation_id = $2
+            AND ($3::bigint IS NULL OR conversation_sequence < $3::bigint)
+          ORDER BY conversation_sequence DESC, id DESC
+          LIMIT $4`,
+        [threadRootId, root.conversation_id, beforeSequence, limit + 1],
+      );
+      const hasMore = result.rows.length > limit;
+      const selected = result.rows.slice(0, limit);
+      const oldest = selected.at(-1);
+      return messageThreadResponseSchema.parse({
+        root: mapMessage(root),
+        replies: selected.reverse().map(mapMessage),
         nextCursor:
           hasMore && oldest !== undefined
             ? encodeHistoryCursor(oldest.conversation_sequence)
@@ -1883,8 +1951,8 @@ export class WorkspaceRepository {
     conversationId: string,
     input: SendConversationMessageRequest,
   ): Promise<SendMessageResponse> {
-    if (input.threadRootId !== null || input.attachmentIds.length > 0) {
-      throw new ApiError(400, "BAD_REQUEST", "Threads and attachments are not available yet");
+    if (input.attachmentIds.length > 0) {
+      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     return this.#transaction(async (client) => {
@@ -1923,6 +1991,19 @@ export class WorkspaceRepository {
       if (conversation.is_archived) {
         throw new ApiError(404, "NOT_FOUND", "Conversation not found");
       }
+      if (input.threadRootId !== null) {
+        const root = await client.query<{ id: string } & QueryResultRow>(
+          `SELECT id
+             FROM messages
+            WHERE id = $1
+              AND conversation_id = $2
+              AND thread_root_id IS NULL`,
+          [input.threadRootId, conversationId],
+        );
+        if (root.rows[0] === undefined) {
+          throw new ApiError(404, "NOT_FOUND", "Thread root not found");
+        }
+      }
       await this.#validateMentions(client, identity, conversation, input);
 
       const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
@@ -1948,7 +2029,7 @@ export class WorkspaceRepository {
            committed_workspace_sequence, client_message_id, request_fingerprint,
            author_id, thread_root_id, body, body_format
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *`,
         [
           messageId,
@@ -1959,6 +2040,7 @@ export class WorkspaceRepository {
           input.clientMessageId,
           fingerprint,
           identity.currentUser.user.id,
+          input.threadRootId,
           input.body,
           input.bodyFormat,
         ],
@@ -2419,6 +2501,36 @@ export class WorkspaceRepository {
       ...counts,
       readCursor: cursorResult.rows[0] === undefined ? null : mapReadCursor(cursorResult.rows[0]),
     });
+  }
+
+  async #threadSummaries(
+    client: PoolClient,
+    threadRootIds: readonly string[],
+  ): Promise<MessageThreadSummary[]> {
+    if (threadRootIds.length === 0) return [];
+    const result = await client.query<ThreadSummaryRow>(
+      `SELECT latest.*, root.id AS summarized_thread_root_id, totals.reply_count
+         FROM unnest($1::uuid[]) WITH ORDINALITY AS root(id, position)
+        CROSS JOIN LATERAL (
+          SELECT count(*)::text AS reply_count
+            FROM messages AS reply
+           WHERE reply.thread_root_id = root.id
+        ) AS totals
+        CROSS JOIN LATERAL (
+          SELECT reply.*
+            FROM messages AS reply
+           WHERE reply.thread_root_id = root.id
+           ORDER BY reply.conversation_sequence DESC, reply.id DESC
+           LIMIT 1
+        ) AS latest
+        ORDER BY root.position`,
+      [threadRootIds],
+    );
+    return result.rows.map((row) => ({
+      threadRootId: row.summarized_thread_root_id,
+      replyCount: Number(row.reply_count),
+      latestReply: mapMessage(row),
+    }));
   }
 
   async #unreadCounts(

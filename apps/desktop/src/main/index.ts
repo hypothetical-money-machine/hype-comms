@@ -13,6 +13,7 @@ import {
   entityIdSchema,
   listConversationsQuerySchema,
   listMessageReactionsRequestSchema,
+  messageThreadRequestSchema,
   messageReactionTargetSchema,
   messageSearchQuerySchema,
   moveTaskOperationSchema,
@@ -564,6 +565,13 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted task move sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.moveTask(moveTaskOperationSchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageThread);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageThread, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace thread sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.thread(messageThreadRequestSchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionsList);

@@ -23,6 +23,8 @@ import {
   listMessageReactionsResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
+  messageThreadRequestSchema,
+  messageThreadResponseSchema,
   messageReactionTargetSchema,
   messageSearchQuerySchema,
   messageSearchResponseSchema,
@@ -198,6 +200,16 @@ const desktopApi: DesktopApi = Object.freeze({
     messageHistoryResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessagesList, input),
     ),
+  getMessageThread: async (input: {
+    readonly messageId: string;
+    readonly before?: string;
+    readonly limit?: number;
+  }) => {
+    const request = messageThreadRequestSchema.parse(input);
+    return messageThreadResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessageThread, request),
+    );
+  },
   listMessageReactions: async (messageIds: readonly string[]) => {
     const request = listMessageReactionsRequestSchema.parse({ messageIds });
     return listMessageReactionsResponseSchema.parse(

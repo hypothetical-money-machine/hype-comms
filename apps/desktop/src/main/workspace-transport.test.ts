@@ -4,6 +4,7 @@ import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
   type SendMessageOperation,
   type Task,
 } from "@hmm-chat/contracts";
@@ -17,10 +18,13 @@ const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
 const REACTION_ID = "10000000-0000-4000-8000-000000000012";
+const THREAD_REPLY_ID = "10000000-0000-4000-8000-000000000013";
+const THREAD_REPLY_CLIENT_ID = "10000000-0000-4000-8000-000000000014";
 const CLIENT_CAPABILITIES = [
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -128,6 +132,16 @@ const SEARCH_RESPONSE = {
   nextCursor: "next-page",
 } as const;
 
+const THREAD_ROOT = SEARCH_RESPONSE.results[0].message;
+const THREAD_REPLY = {
+  ...THREAD_ROOT,
+  id: THREAD_REPLY_ID,
+  conversationSequence: "8",
+  clientMessageId: THREAD_REPLY_CLIENT_ID,
+  threadRootId: THREAD_ROOT.id,
+  body: "Thread reply",
+} as const;
+
 const REACTION = {
   id: REACTION_ID,
   messageId: CLIENT_MESSAGE_ID,
@@ -208,6 +222,82 @@ describe("WorkspaceTransport bootstrap compatibility", () => {
     const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
 
     await expect(transport.bootstrap()).resolves.toEqual(BOOTSTRAP_RESPONSE);
+  });
+});
+
+describe("WorkspaceTransport threads", () => {
+  it("advertises thread support when requesting conversation history", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({
+        messages: [THREAD_ROOT],
+        threadSummaries: [
+          { threadRootId: THREAD_ROOT.id, replyCount: 1, latestReply: THREAD_REPLY },
+        ],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+    });
+
+    await transport.history({ conversationId: CONVERSATION_ID, before: "cursor-2", limit: 25 });
+
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
+        init: expect.objectContaining({
+          method: "GET",
+          headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+        }),
+      },
+    ]);
+  });
+
+  it("detects the immediately previous server from an absent thread-support signal", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ messages: [THREAD_ROOT, THREAD_REPLY], nextCursor: null }),
+    );
+
+    await expect(
+      transport.history({ conversationId: CONVERSATION_ID, limit: 25 }),
+    ).resolves.toMatchObject({
+      messages: [THREAD_ROOT, THREAD_REPLY],
+      threadSummaries: [],
+      threadsSupported: false,
+    });
+  });
+
+  it("fetches and strictly parses a paginated thread", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const response = { root: THREAD_ROOT, replies: [THREAD_REPLY], nextCursor: "cursor-1" };
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse(response);
+    });
+
+    await expect(
+      transport.thread({ messageId: THREAD_ROOT.id, before: "cursor-2", limit: 25 }),
+    ).resolves.toEqual(response);
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/messages/${THREAD_ROOT.id}/thread?before=cursor-2&limit=25`,
+        init: expect.objectContaining({ method: "GET" }),
+      },
+    ]);
+  });
+
+  it("rejects a thread response whose reply points at another root", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({
+        root: THREAD_ROOT,
+        replies: [{ ...THREAD_REPLY, threadRootId: CONVERSATION_ID }],
+        nextCursor: null,
+      }),
+    );
+
+    await expect(transport.thread({ messageId: THREAD_ROOT.id, limit: 50 })).rejects.toThrow(
+      "Reply must belong to the requested thread",
+    );
   });
 });
 
@@ -382,6 +472,39 @@ describe("WorkspaceTransport sync classification", () => {
 });
 
 describe("WorkspaceTransport send classification", () => {
+  it("forwards a non-null thread root in the idempotent send body", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ message: THREAD_REPLY, syncCursor: "43" });
+    });
+    const operation: SendMessageOperation = {
+      ...SEND_OPERATION,
+      idempotencyKey: THREAD_REPLY_CLIENT_ID,
+      message: {
+        ...SEND_OPERATION.message,
+        clientMessageId: THREAD_REPLY_CLIENT_ID,
+        threadRootId: THREAD_ROOT.id,
+        body: THREAD_REPLY.body,
+      },
+    };
+
+    await expect(transport.send(operation)).resolves.toMatchObject({ status: "accepted" });
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages`,
+        init: expect.objectContaining({
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": THREAD_REPLY_CLIENT_ID,
+          },
+          body: JSON.stringify(operation.message),
+        }),
+      },
+    ]);
+  });
+
   it("treats 408 Request Timeout as retryable instead of permanently blocking the outbox", async () => {
     const transport = transportAnswering(() => statusResponse(408));
 

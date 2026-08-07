@@ -232,6 +232,15 @@ Reaction and task events are capability-gated for rolling compatibility. A clien
 events, but the server still advances their scanned cursor past those events so released clients
 neither fail strict parsing nor loop on an unsupported event.
 
+Thread summaries are capability-gated separately because conversation-history responses are
+strict. A current client advertises `threads-v1` on
+`GET /v1/conversations/:id/messages`; the server then adds bounded reply-count and latest-reply
+metadata for the roots in that page and sets `threadsSupported: true`. Without the capability the
+server returns the previous exact history shape, stripping both the summaries and support flag,
+and continues paginating replies inline. Current clients default an absent summary collection and
+an absent `threadsSupported` flag to empty and `false`, respectively, so a rolled-back or
+immediately previous server remains readable and can be distinguished during a rolling upgrade.
+
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
 and optional conversation IDs, and a typed payload. Workspace-channel events target active
 workspace members; members-only channel events target active channel members. Membership

@@ -36,6 +36,7 @@ export const paginationCursorSchema = z
 export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
 export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
 export const TASK_EVENTS_CAPABILITY = "task-events-v1";
+export const THREADS_CAPABILITY = "threads-v1";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -214,12 +215,102 @@ export const messageHistoryQuerySchema = z
   })
   .strict();
 
+export const messageThreadRequestSchema = messageHistoryQuerySchema
+  .extend({ messageId: entityIdSchema })
+  .strict();
+
+export const messageThreadSummarySchema = z
+  .object({
+    threadRootId: entityIdSchema,
+    replyCount: z.number().int().positive(),
+    latestReply: messageSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.latestReply.threadRootId !== value.threadRootId) {
+      context.addIssue({
+        code: "custom",
+        path: ["latestReply", "threadRootId"],
+        message: "Latest reply must belong to the summarized thread",
+      });
+    }
+  });
+
 export const messageHistoryResponseSchema = z
   .object({
     messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
+    threadSummaries: z.array(messageThreadSummarySchema).max(MESSAGE_HISTORY_MAX_LIMIT).default([]),
+    threadsSupported: z.boolean().default(false),
     nextCursor: paginationCursorSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const roots = new Map(value.messages.map((message) => [message.id, message]));
+    const summarizedRoots = new Set<string>();
+    for (const [index, summary] of value.threadSummaries.entries()) {
+      const root = roots.get(summary.threadRootId);
+      if (root === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadSummaries", index, "threadRootId"],
+          message: "Thread summary must belong to a message in this history page",
+        });
+      } else if (root.threadRootId !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadSummaries", index, "threadRootId"],
+          message: "Thread summary must belong to a top-level message",
+        });
+      } else if (summary.latestReply.conversationId !== root.conversationId) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadSummaries", index, "latestReply", "conversationId"],
+          message: "Latest reply must belong to the root conversation",
+        });
+      }
+      if (summarizedRoots.has(summary.threadRootId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadSummaries", index, "threadRootId"],
+          message: "Thread roots must be summarized at most once",
+        });
+      }
+      summarizedRoots.add(summary.threadRootId);
+    }
+  });
+
+export const messageThreadResponseSchema = z
+  .object({
+    root: messageSchema,
+    replies: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
+    nextCursor: paginationCursorSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.root.threadRootId !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["root", "threadRootId"],
+        message: "Thread root must be a top-level message",
+      });
+    }
+    for (const [index, reply] of value.replies.entries()) {
+      if (reply.threadRootId !== value.root.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["replies", index, "threadRootId"],
+          message: "Reply must belong to the requested thread",
+        });
+      }
+      if (reply.conversationId !== value.root.conversationId) {
+        context.addIssue({
+          code: "custom",
+          path: ["replies", index, "conversationId"],
+          message: "Reply must belong to the root conversation",
+        });
+      }
+    }
+  });
 
 export const listMessageReactionsRequestSchema = z
   .object({
@@ -508,7 +599,10 @@ export type ArchiveChannelRequest = z.infer<typeof archiveChannelRequestSchema>;
 export type DirectConversationRequest = z.infer<typeof directConversationRequestSchema>;
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
+export type MessageThreadRequest = z.infer<typeof messageThreadRequestSchema>;
+export type MessageThreadSummary = z.infer<typeof messageThreadSummarySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;
+export type MessageThreadResponse = z.infer<typeof messageThreadResponseSchema>;
 export type ListMessageReactionsRequest = z.infer<typeof listMessageReactionsRequestSchema>;
 export type ListMessageReactionsResponse = z.infer<typeof listMessageReactionsResponseSchema>;
 export type MessageReactionTarget = z.infer<typeof messageReactionTargetSchema>;

@@ -2,6 +2,7 @@ import {
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
+  THREADS_CAPABILITY,
   advanceReadCursorRequestSchema,
   archiveChannelRequestSchema,
   channelSlugSchema,
@@ -190,7 +191,25 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
-    return repository.history(identity, id, query.data.before, query.data.limit);
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supportsThreads = supported.includes(THREADS_CAPABILITY);
+    const history = await repository.history(
+      identity,
+      id,
+      query.data.before,
+      query.data.limit,
+      !supportsThreads,
+    );
+    if (supportsThreads) return history;
+    return { messages: history.messages, nextCursor: history.nextCursor };
+  });
+
+  app.get("/messages/:id/thread", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    const { id } = parameters(request.params);
+    const query = messageHistoryQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid thread query");
+    return repository.thread(identity, id, query.data.before, query.data.limit);
   });
 
   app.get("/search", async (request) => {
