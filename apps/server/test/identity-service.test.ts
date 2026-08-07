@@ -263,12 +263,14 @@ describeWithPostgres("IdentityService and identity routes", () => {
       status: "pending",
     });
     expect(redemption.statusCode).toBe(200);
+    expect(redemption.json().user).not.toHaveProperty("kind");
     expect(cookie).toMatchObject({
       httpOnly: true,
       sameSite: "Strict",
       path: "/",
     });
     expect(cookie?.secure).toBeUndefined();
+    expect(me.json().user).not.toHaveProperty("kind");
     expect(currentUserSchema.parse(me.json())).toMatchObject({
       email: "invitee@example.com",
       role: "member",

@@ -82,6 +82,19 @@ async function requireCurrentUser(
   return { token, currentUser };
 }
 
+/**
+ * Desktop releases through v0.1.11 validate the public user object strictly and predate the
+ * additive `kind` discriminator. Omit the human-only constant on identity responses; newer
+ * contracts default the missing value back to `"human"`, so both generations accept this wire
+ * shape while internal identity objects remain discriminated.
+ */
+function desktopCurrentUserResponse(currentUser: CurrentUser) {
+  const parsed = currentUserSchema.parse(currentUser);
+  const { kind, ...user } = parsed.user;
+  void kind;
+  return { ...parsed, user };
+}
+
 function setSessionCookie(reply: FastifyReply, session: RedeemedSession, secure: boolean): void {
   void reply.header(
     "set-cookie",
@@ -188,12 +201,12 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
       throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
     }
     setSessionCookie(reply, session, cookieSecure);
-    return reply.code(200).send(currentUserSchema.parse(currentUser));
+    return reply.code(200).send(desktopCurrentUserResponse(currentUser));
   });
 
   app.get("/auth/me", async (request) => {
     const { currentUser } = await requireCurrentUser(request, service);
-    return currentUserSchema.parse(currentUser);
+    return desktopCurrentUserResponse(currentUser);
   });
 
   app.post("/auth/session/refresh", async (request, reply) => {
