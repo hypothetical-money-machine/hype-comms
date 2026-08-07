@@ -65,6 +65,14 @@ import {
   resolveDevelopmentProfile,
   resolveDevelopmentUserDataPath,
 } from "./development-profile";
+import {
+  HEADLESS_DESKTOP_CDP_ADDRESS,
+  assertHeadlessDesktopCommandLine,
+  resolveHeadlessDesktopConfiguration,
+  shouldAdvanceReadCursor,
+  shouldFocusDesktopWindow,
+  shouldShowDesktopWindow,
+} from "./headless-mode";
 import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
@@ -108,6 +116,19 @@ const pendingAuthCallbackUrls: string[] = [];
 let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
+const headlessDesktopConfiguration = resolveHeadlessDesktopConfiguration(
+  process.env,
+  app.isPackaged,
+  developmentProfile,
+);
+if (headlessDesktopConfiguration !== null) {
+  assertHeadlessDesktopCommandLine(process.argv);
+  app.commandLine.appendSwitch("remote-debugging-address", HEADLESS_DESKTOP_CDP_ADDRESS);
+  app.commandLine.appendSwitch(
+    "force-device-scale-factor",
+    String(headlessDesktopConfiguration.deviceScaleFactor),
+  );
+}
 const developmentAuthCallbackFile = resolveDevelopmentAuthCallbackFile(
   process.env,
   app.isPackaged,
@@ -322,6 +343,14 @@ function registerIpcHandlers(): void {
       isTrustedRendererUrl(senderFrame.url, trustedDevelopmentRendererUrl)
     );
   };
+
+  // This one synchronous, read-only capability is queried by preload before the renderer can
+  // schedule read tracking. Unlike a renderer command-line marker, it stays authoritative when a
+  // packaged client is launched with arbitrary application arguments.
+  ipcMain.removeAllListeners(DESKTOP_CHANNELS.automationHeadless);
+  ipcMain.on(DESKTOP_CHANNELS.automationHeadless, (event) => {
+    event.returnValue = headlessDesktopConfiguration !== null;
+  });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.appVersion);
   ipcMain.handle(DESKTOP_CHANNELS.appVersion, (event) => {
@@ -663,6 +692,9 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReadAdvance);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceReadAdvance, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted read-cursor sender");
+    if (!shouldAdvanceReadCursor(headlessDesktopConfiguration)) {
+      throw new Error("Read cursors are disabled for headless automation clients");
+    }
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     if (
       typeof input !== "object" ||
@@ -731,10 +763,15 @@ async function createMainWindow(): Promise<BrowserWindow> {
     throw new Error("Appearance must be initialized before creating a window");
   }
   const window = new BrowserWindow({
-    width: 1_280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 640,
+    width: headlessDesktopConfiguration?.contentWidth ?? 1_280,
+    height: headlessDesktopConfiguration?.contentHeight ?? 800,
+    ...(headlessDesktopConfiguration === null
+      ? { minWidth: 960, minHeight: 640 }
+      : {
+          focusable: headlessDesktopConfiguration.focusable,
+          useContentSize: true,
+          resizable: false,
+        }),
     show: false,
     backgroundColor: getThemeDefinition(themeController.state.resolvedThemeId).windowBackground,
     title: "Hype Comms",
@@ -749,6 +786,13 @@ async function createMainWindow(): Promise<BrowserWindow> {
       safeDialogs: true,
       devTools: !app.isPackaged,
       navigateOnDragDrop: false,
+      ...(headlessDesktopConfiguration === null
+        ? {}
+        : {
+            backgroundThrottling: !headlessDesktopConfiguration.disableBackgroundThrottling,
+            focusOnNavigation: headlessDesktopConfiguration.focusOnNavigation,
+            zoomFactor: headlessDesktopConfiguration.deviceScaleFactor,
+          }),
     },
   });
 
@@ -756,9 +800,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
   rendererReady = false;
   blockNavigation(window.webContents);
 
-  window.once("ready-to-show", () => {
-    window.show();
-  });
+  if (shouldShowDesktopWindow(headlessDesktopConfiguration)) {
+    window.once("ready-to-show", () => {
+      window.show();
+    });
+  }
   window.webContents.once("did-finish-load", () => {
     rendererReady = true;
     flushPendingRendererEvents();
@@ -773,7 +819,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
 }
 
 function focusMainWindow(): void {
-  if (mainWindow === null) {
+  if (!shouldFocusDesktopWindow(headlessDesktopConfiguration) || mainWindow === null) {
     return;
   }
 

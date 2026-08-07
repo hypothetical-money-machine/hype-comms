@@ -1,24 +1,58 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 
 import {
+  createHeadlessDemoManifest,
+  createHeadlessDemoReadyRecord,
+  createHeadlessDemoRunId,
+  DEMO_API_PORT,
+  DEMO_RENDERER_PORT,
   demoComposeArguments,
   deriveDemoEnvironment,
+  deriveHeadlessDesktopEnvironment,
   ensurePrivateDemoDirectories,
+  ensurePrivateHeadlessArtifactDirectory,
+  ensurePrivateHeadlessProfileDirectories,
+  headlessCdpClients,
+  headlessElectronArguments,
+  headlessElectronViteArguments,
+  parseDemoArguments,
+  removeHeadlessDevToolsActivePortFiles,
+  removeHeadlessDemoManifest,
   removeOwnedRunMarker,
   waitForChildClose,
+  writeHeadlessDemoManifest,
   writeRunMarker,
 } from "./demo-environment.mjs";
+import { signalProcessTree } from "./process-tree.mjs";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const rendererUrl = `http://127.0.0.1:${String(DEMO_RENDERER_PORT)}`;
 const managedChildren = new Set();
 let shuttingDown = false;
+let stopChildrenPromise = null;
+let shutdownSignal = null;
 let activeRunMarker = null;
+let activeHeadlessDemoPaths = null;
+let resolveInterruption;
+const interrupted = new Promise((resolve) => {
+  resolveInterruption = resolve;
+});
+
+function shutdownError() {
+  return new Error(`Demo interrupted by ${shutdownSignal ?? "a shutdown signal"}`);
+}
+
+function throwIfShutdownRequested() {
+  if (shutdownSignal !== null) throw shutdownError();
+}
 
 function spawnManaged(command, arguments_, options = {}) {
+  throwIfShutdownRequested();
   const child = spawn(command, arguments_, {
     cwd: projectRoot,
     detached: process.platform !== "win32",
@@ -43,6 +77,15 @@ async function assertPortAvailable(port, label) {
     });
     probe.listen({ host: "127.0.0.1", port }, () => probe.close(resolve));
   });
+}
+
+async function assertHeadlessCdpPortsAvailable(cdpBasePort) {
+  await Promise.all(
+    headlessCdpClients(cdpBasePort).map(async ({ profile, cdpUrl }) => {
+      const port = Number(new URL(cdpUrl).port);
+      await assertPortAvailable(port, `${profile} CDP`);
+    }),
+  );
 }
 
 async function runChecked(command, arguments_, options = {}) {
@@ -77,6 +120,30 @@ async function waitForHttp(url, label, child, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+function resolveElectronExecutable() {
+  const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
+  const electronPath = require("electron");
+  if (typeof electronPath !== "string") {
+    throw new TypeError("Electron executable path is unavailable");
+  }
+  return electronPath;
+}
+
+async function waitForHeadlessWorkspace(manifest) {
+  const { waitForHeadlessClients } = await import("./agent-capture.mjs");
+  const readinessController = new AbortController();
+  void interrupted.then(() => readinessController.abort(shutdownError()));
+  try {
+    await waitForHeadlessClients(manifest, {
+      signal: readinessController.signal,
+      timeoutMs: 30_000,
+    });
+  } finally {
+    readinessController.abort();
+  }
+  throwIfShutdownRequested();
+}
+
 function demoClient(seed, profile) {
   const client = seed.clients?.find((candidate) => candidate.profile === profile);
   if (
@@ -89,26 +156,33 @@ function demoClient(seed, profile) {
   return client;
 }
 
-function signalChild(child, signal) {
-  if (child.exitCode !== null || child.pid === undefined) return;
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-  }
-}
-
-async function stopChildren(signal = "SIGTERM") {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  const children = [...managedChildren];
-  for (const child of children) signalChild(child, signal);
-  await Promise.race([
-    Promise.allSettled(children.map((child) => once(child, "close"))),
+function waitForChildrenToClose(children) {
+  const activeChildren = children.filter((child) => child.exitCode === null);
+  if (activeChildren.length === 0) return Promise.resolve();
+  return Promise.race([
+    Promise.allSettled(activeChildren.map((child) => once(child, "close"))),
     new Promise((resolve) => setTimeout(resolve, 5_000)),
   ]);
-  for (const child of children) signalChild(child, "SIGKILL");
+}
+
+function stopChildren(signal = "SIGTERM") {
+  if (stopChildrenPromise !== null) return stopChildrenPromise;
+  stopChildrenPromise = (async () => {
+    shuttingDown = true;
+    const children = [...managedChildren];
+    await Promise.all(children.map((child) => signalProcessTree(child, signal)));
+    await waitForChildrenToClose(children);
+    await Promise.all(children.map((child) => signalProcessTree(child, "SIGKILL")));
+    await waitForChildrenToClose(children);
+  })();
+  return stopChildrenPromise;
+}
+
+function requestShutdown(signal) {
+  if (shutdownSignal !== null) return;
+  shutdownSignal = signal;
+  resolveInterruption("signal");
+  void stopChildren();
 }
 
 async function seed(demo) {
@@ -128,10 +202,19 @@ async function seed(demo) {
 }
 
 async function main() {
+  const options = parseDemoArguments(process.argv.slice(2));
   const demo = deriveDemoEnvironment(process.env, projectRoot);
   await ensurePrivateDemoDirectories(demo.paths);
   await writeRunMarker(demo.paths.runMarker);
   activeRunMarker = demo.paths.runMarker;
+  if (options.headless) {
+    activeHeadlessDemoPaths = demo.paths;
+    await ensurePrivateHeadlessProfileDirectories(demo.paths);
+    await Promise.all([
+      removeHeadlessDemoManifest(demo.paths),
+      removeHeadlessDevToolsActivePortFiles(demo.paths),
+    ]);
+  }
   process.stdout.write("Starting the isolated demo PostgreSQL container…\n");
   await runChecked("docker", demoComposeArguments("up", "-d", "--wait", "postgres"), {
     env: demo.env,
@@ -143,34 +226,81 @@ async function main() {
   process.stdout.write(
     `Seeded ${String(seeded.messageCount)} messages across ${String(seeded.channels?.length)} channels.\n`,
   );
-  if (process.argv.includes("--seed-only")) {
+  if (options.seedOnly) {
     process.stdout.write(`Callback files: ${claire.callbackFile}, ${woots.callbackFile}\n`);
     return;
   }
 
-  await assertPortAvailable(3000, "chat API");
-  await assertPortAvailable(5173, "renderer");
+  await assertPortAvailable(DEMO_API_PORT, "chat API");
+  await assertPortAvailable(DEMO_RENDERER_PORT, "renderer");
+  if (options.headless) await assertHeadlessCdpPortsAvailable(options.cdpBasePort);
   const server = spawnManaged(npmCommand, ["run", "dev:server"], { env: demo.env });
-  await waitForHttp("http://127.0.0.1:3000/readyz", "chat API", server);
+  await waitForHttp(`http://127.0.0.1:${String(DEMO_API_PORT)}/readyz`, "chat API", server);
 
   const desktopEnvironment = {
     ...demo.env,
     HMM_DEVELOPMENT_USER_DATA_ROOT: demo.paths.desktopUserDataRoot,
+    ...(options.headless ? { ELECTRON_RENDERER_URL: rendererUrl } : {}),
   };
-  const claireDesktop = spawnManaged(npmCommand, ["run", "dev:desktop"], {
-    env: {
-      ...desktopEnvironment,
-      HMM_DESKTOP_PROFILE: "claire",
-      HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: claire.callbackFile,
+  let headlessManifest = null;
+  if (options.headless) {
+    const startedAt = new Date().toISOString();
+    headlessManifest = createHeadlessDemoManifest(demo.paths, {
+      cdpBasePort: options.cdpBasePort,
+      startedAt,
+      artifactsDirectory: await ensurePrivateHeadlessArtifactDirectory(
+        demo.paths,
+        createHeadlessDemoRunId(startedAt, process.pid),
+      ),
+    });
+  }
+  const claireDesktop = spawnManaged(
+    npmCommand,
+    headlessManifest === null
+      ? ["run", "dev:desktop"]
+      : [
+          "run",
+          "dev",
+          "--workspace",
+          "@hmm-chat/desktop",
+          "--",
+          ...headlessElectronViteArguments(options.cdpBasePort),
+        ],
+    {
+      env:
+        headlessManifest === null
+          ? {
+              ...desktopEnvironment,
+              HMM_DESKTOP_PROFILE: "claire",
+              HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: claire.callbackFile,
+            }
+          : deriveHeadlessDesktopEnvironment(desktopEnvironment, {
+              profile: "claire",
+              callbackFile: claire.callbackFile,
+              cdpPort: options.cdpBasePort,
+            }),
     },
-  });
-  await waitForHttp("http://127.0.0.1:5173/", "desktop renderer", claireDesktop);
-  const wootsDesktop = spawnManaged(process.execPath, ["scripts/dev-join.mjs", "--profile=woots"], {
-    env: {
-      ...desktopEnvironment,
-      HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: woots.callbackFile,
-    },
-  });
+  );
+  await waitForHttp(`${rendererUrl}/`, "desktop renderer", claireDesktop);
+  const wootsDesktop =
+    headlessManifest === null
+      ? spawnManaged(process.execPath, ["scripts/dev-join.mjs", "--profile=woots"], {
+          env: {
+            ...desktopEnvironment,
+            HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: woots.callbackFile,
+          },
+        })
+      : spawnManaged(
+          resolveElectronExecutable(),
+          ["apps/desktop", ...headlessElectronArguments(options.cdpBasePort + 1)],
+          {
+            env: deriveHeadlessDesktopEnvironment(desktopEnvironment, {
+              profile: "woots",
+              callbackFile: woots.callbackFile,
+              cdpPort: options.cdpBasePort + 1,
+            }),
+          },
+        );
 
   const clientClosed = (child, label) =>
     once(child, "close").then(() => {
@@ -181,14 +311,22 @@ async function main() {
     clientClosed(wootsDesktop, "Woots"),
   ]).then(() => "clients");
   const serverClosed = once(server, "close").then(() => "server");
-  const interrupted = Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]).then(
-    () => "signal",
-  );
 
-  process.stdout.write("Demo ready: Claire and Woots are signed in on isolated clients.\n");
+  if (headlessManifest === null) {
+    process.stdout.write("Demo ready: Claire and Woots are signed in on isolated clients.\n");
+  } else {
+    await waitForHeadlessWorkspace(headlessManifest);
+    await writeHeadlessDemoManifest(demo.paths, headlessManifest);
+    process.stdout.write(
+      `${JSON.stringify(createHeadlessDemoReadyRecord(demo.paths, headlessManifest))}\n`,
+    );
+  }
   const stop = await Promise.race([bothClientsClosed, serverClosed, interrupted]);
   if (stop === "server") throw new Error("The demo API stopped while a client was still open");
 }
+
+process.once("SIGINT", () => requestShutdown("SIGINT"));
+process.once("SIGTERM", () => requestShutdown("SIGTERM"));
 
 void main()
   .catch((error) => {
@@ -199,5 +337,11 @@ void main()
   })
   .finally(async () => {
     await stopChildren();
+    if (activeHeadlessDemoPaths !== null) {
+      await Promise.all([
+        removeHeadlessDemoManifest(activeHeadlessDemoPaths),
+        removeHeadlessDevToolsActivePortFiles(activeHeadlessDemoPaths),
+      ]);
+    }
     if (activeRunMarker !== null) await removeOwnedRunMarker(activeRunMarker);
   });

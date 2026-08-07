@@ -22,9 +22,21 @@ function channelsMatching(source: string, pattern: RegExp): ReadonlySet<string> 
 }
 
 const invoked = channelsMatching(preloadSource, /ipcRenderer\.invoke\(\s*DESKTOP_CHANNELS\.(\w+)/g);
+const synchronouslyRequested = channelsMatching(
+  preloadSource,
+  /ipcRenderer\.sendSync\(\s*DESKTOP_CHANNELS\.(\w+)/g,
+);
 const subscribed = channelsMatching(preloadSource, /subscribe\(\s*DESKTOP_CHANNELS\.(\w+)/g);
 const handled = channelsMatching(mainSource, /ipcMain\.handle\(\s*DESKTOP_CHANNELS\.(\w+)/g);
 const removed = channelsMatching(mainSource, /ipcMain\.removeHandler\(\s*DESKTOP_CHANNELS\.(\w+)/g);
+const synchronouslyHandled = channelsMatching(
+  mainSource,
+  /ipcMain\.on\(\s*DESKTOP_CHANNELS\.(\w+)/g,
+);
+const synchronouslyRemoved = channelsMatching(
+  mainSource,
+  /ipcMain\.removeAllListeners\(\s*DESKTOP_CHANNELS\.(\w+)/g,
+);
 
 function missingFrom(
   source: ReadonlySet<string>,
@@ -38,6 +50,7 @@ describe("desktop IPC contract", () => {
   it("reads channels from both sides of the bridge", () => {
     expect(invoked.size).toBeGreaterThan(10);
     expect(handled.size).toBeGreaterThan(10);
+    expect(synchronouslyRequested.size).toBeGreaterThan(0);
     expect(subscribed.size).toBeGreaterThan(0);
   });
 
@@ -78,6 +91,12 @@ describe("desktop IPC contract", () => {
       .filter((channel): channel is string => channel !== null)
       .sort();
     expect(unguarded).toEqual([]);
+  });
+
+  it("answers every synchronous preload capability query", () => {
+    expect(missingFrom(synchronouslyRequested, synchronouslyHandled)).toEqual([]);
+    expect(missingFrom(synchronouslyHandled, synchronouslyRequested)).toEqual([]);
+    expect(missingFrom(synchronouslyHandled, synchronouslyRemoved)).toEqual([]);
   });
 
   it("never registers a request handler for a push-only channel", () => {

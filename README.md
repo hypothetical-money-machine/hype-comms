@@ -120,6 +120,66 @@ npm run demo:reset
 The reset refuses to run while its launcher marker names a live process. It never removes the
 normal Compose volume or standard Electron profiles.
 
+### Headless agent captures
+
+For local agent-driven UI checks, the real Electron renderer can run without showing native
+windows. It still needs a local desktop session; this is not a display-server-free browser mode.
+
+For the complete, opt-in local round trip—start the demo, send Claire → Woots, capture a Woots
+PNG and Claire WebM, then stop the demo—run:
+
+```bash
+npm run test:demo:headless
+```
+
+To keep the demo open for iterative agent work, use the launcher and attach-only smoke command in
+separate terminals instead:
+
+```bash
+# Terminal 1: starts the isolated Claire/Woots demo and leaves it running.
+npm run demo:headless -- --cdp-base-port=9222
+
+# Terminal 2: sends one Claire → Woots direct message, verifies the realtime receipt,
+# and writes a Woots PNG plus a Claire WebM recording.
+npm run demo:headless:smoke
+```
+
+The launcher prints one versioned readiness JSON record only after both clients have rendered
+`[data-testid="workspace-ready"]`. Its private, secret-free session manifest is
+`.dev-data/demo/headless-session.json`; it contains loopback CDP URLs and a new private,
+run-specific artifact directory. The smoke command reads that manifest by default (or use
+`HMM_HEADLESS_DEMO_MANIFEST=/absolute/path/session.json`) and preserves its artifacts rather than
+deleting prior runs.
+
+Automation can reuse [`scripts/agent-capture.mjs`](scripts/agent-capture.mjs) from another local
+ESM script. It dynamically imports Playwright, so normal development does not load it:
+
+```js
+import {
+  capturePng,
+  connectToCdp,
+  startWebmScreencast,
+  stopWebmScreencast,
+  waitForWorkspaceReady,
+} from "./scripts/agent-capture.mjs";
+
+const client = await connectToCdp("http://127.0.0.1:9222");
+try {
+  await waitForWorkspaceReady(client.page);
+  const recording = await startWebmScreencast(client.page, "/tmp/agent-flow.webm");
+  // Drive the normal renderer with Playwright locators here.
+  await capturePng(client.page, "/tmp/agent-flow.png");
+  await stopWebmScreencast(recording);
+} finally {
+  await client.disconnect();
+}
+```
+
+CDP is development-only and loopback-only. Treat the endpoint and manifest like local automation
+capabilities: do not expose either outside the machine. The capture helper uses fixed CSS-scale
+PNG settings and Playwright 1.59's explicit `page.screencast` WebM API; headless renderers are
+excluded from read tracking even while an agent drives their controls.
+
 The API applies forward-only migrations on startup. Migration filenames and checksums are
 recorded under an advisory lock; add a new numbered file and never edit an applied migration.
 

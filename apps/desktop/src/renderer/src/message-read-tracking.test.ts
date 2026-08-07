@@ -2,7 +2,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { isTimelineAtBottom, lastReadEligibleMessageId } from "./message-read-tracking";
+import {
+  isReadTrackingEligible,
+  isTimelineAtBottom,
+  lastReadEligibleMessageId,
+} from "./message-read-tracking";
 
 function rectangle(top: number, bottom: number): DOMRect {
   return {
@@ -23,6 +27,13 @@ function visibilityMemory() {
 }
 
 describe("message read tracking", () => {
+  it("never advances read state from an automation renderer", () => {
+    expect(isReadTrackingEligible(true, "visible", true)).toBe(false);
+    expect(isReadTrackingEligible(false, "hidden", true)).toBe(false);
+    expect(isReadTrackingEligible(false, "visible", false)).toBe(false);
+    expect(isReadTrackingEligible(false, "visible", true)).toBe(true);
+  });
+
   it("returns the last message whose start and end have been observed", () => {
     const container = document.createElement("div");
     vi.spyOn(container, "getBoundingClientRect").mockReturnValue(rectangle(100, 500));

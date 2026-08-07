@@ -6,6 +6,18 @@ export interface MessageVisibilityMemory {
   readonly observedEnds: Set<string>;
 }
 
+/**
+ * Read state records a person seeing a message, never merely an automation renderer visiting its
+ * DOM. The normal visibility and focus guard remains in force for interactive use.
+ */
+export function isReadTrackingEligible(
+  isHeadless: boolean,
+  visibilityState: DocumentVisibilityState,
+  hasFocus: boolean,
+): boolean {
+  return !isHeadless && visibilityState === "visible" && hasFocus;
+}
+
 export function isTimelineAtBottom(container: HTMLElement): boolean {
   return container.scrollHeight - container.scrollTop - container.clientHeight <= BOTTOM_THRESHOLD;
 }

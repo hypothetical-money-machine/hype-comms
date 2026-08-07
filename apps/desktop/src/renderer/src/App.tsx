@@ -20,7 +20,11 @@ import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-se
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
 import { isMessageContinuation } from "./message-grouping";
-import { isTimelineAtBottom, lastReadEligibleMessageId } from "./message-read-tracking";
+import {
+  isReadTrackingEligible,
+  isTimelineAtBottom,
+  lastReadEligibleMessageId,
+} from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -396,6 +400,7 @@ export function PendingMessageRow({
 
 export function App({ client, theme }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
+  const isHeadless = client.isHeadless === true;
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
   const { draft, setDraft, clearDraft, resetDrafts } = useConversationDrafts(
@@ -620,8 +625,7 @@ export function App({ client, theme }: AppProps) {
     if (
       conversationId === null ||
       list === null ||
-      document.visibilityState !== "visible" ||
-      !document.hasFocus()
+      !isReadTrackingEligible(isHeadless, document.visibilityState, document.hasFocus())
     ) {
       return;
     }
@@ -636,7 +640,7 @@ export function App({ client, theme }: AppProps) {
       selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
     );
     if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
-  }, [runtime, runtimeState.selectedConversationId, selectedSummary?.readCursor]);
+  }, [isHeadless, runtime, runtimeState.selectedConversationId, selectedSummary?.readCursor]);
 
   const scheduleReadTracking = useCallback((): void => {
     if (readTrackingFrame.current !== null) return;
@@ -660,8 +664,7 @@ export function App({ client, theme }: AppProps) {
       conversationId === null ||
       threadRootId === null ||
       list === null ||
-      document.visibilityState !== "visible" ||
-      !document.hasFocus()
+      !isReadTrackingEligible(isHeadless, document.visibilityState, document.hasFocus())
     ) {
       return;
     }
@@ -678,6 +681,7 @@ export function App({ client, theme }: AppProps) {
     );
     if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
   }, [
+    isHeadless,
     runtime,
     runtimeState.selectedConversationId,
     runtimeState.selectedThreadRootId,
@@ -1035,7 +1039,10 @@ export function App({ client, theme }: AppProps) {
   const currentUserId = bootstrap.currentUser.user.id;
 
   return (
-    <main className={selectedThreadRootId === null ? "shell" : "shell thread-open"}>
+    <main
+      className={selectedThreadRootId === null ? "shell" : "shell thread-open"}
+      data-testid="workspace-ready"
+    >
       <aside className="workspace-rail" aria-label="Workspace">
         <div className="workspace-mark">H</div>
       </aside>

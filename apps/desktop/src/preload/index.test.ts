@@ -9,6 +9,10 @@ import type { DesktopApi } from "../shared/desktop-api";
  * put a shape the wire contract forbids into the renderer's cache.
  */
 const invoke = vi.fn();
+const sendSync = vi.fn((...args: readonly unknown[]) => {
+  void args;
+  return false;
+});
 const exposed: Record<string, unknown> = {};
 
 vi.mock("electron", () => ({
@@ -19,6 +23,7 @@ vi.mock("electron", () => ({
   },
   ipcRenderer: {
     invoke: (...args: readonly unknown[]) => invoke(...args) as unknown,
+    sendSync: (...args: readonly unknown[]) => sendSync(...args) as unknown,
     on: vi.fn(),
     removeListener: vi.fn(),
   },

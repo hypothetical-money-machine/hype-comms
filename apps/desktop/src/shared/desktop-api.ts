@@ -69,6 +69,8 @@ export interface ThemeTransport {
 
 export interface DesktopApi extends SessionTransport, ThemeTransport {
   readonly platform: DesktopPlatform;
+  /** True only for the unpackaged, hidden-window automation client. */
+  readonly isHeadless?: boolean;
   readonly getAppVersion: () => Promise<string>;
   readonly getUpdateState: () => Promise<UpdateState>;
   readonly checkForUpdates: () => Promise<void>;

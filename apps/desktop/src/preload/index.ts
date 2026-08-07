@@ -112,9 +112,11 @@ if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
   throw new Error(`Unsupported desktop platform: ${platform}`);
 }
 const initialThemeState = resolveInitialThemeStateArgument(process.argv);
+const isHeadless = ipcRenderer.sendSync(DESKTOP_CHANNELS.automationHeadless) === true;
 
 const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
+  isHeadless,
   initialThemeState,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getUpdateState: async () =>
@@ -323,13 +325,17 @@ const desktopApi: DesktopApi = Object.freeze({
         directConversationRequestSchema.parse(input),
       ),
     ),
-  advanceReadCursor: async (conversationId: string, lastReadMessageId: string) =>
-    advanceReadCursorResponseSchema.parse(
+  advanceReadCursor: async (conversationId: string, lastReadMessageId: string) => {
+    if (isHeadless) {
+      throw new Error("Read cursors are disabled for headless automation clients");
+    }
+    return advanceReadCursorResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReadAdvance, {
         conversationId,
         lastReadMessageId,
       }),
-    ),
+    );
+  },
   syncWorkspace: async (after: string) =>
     syncAttemptResultSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceSync, sequenceSchema.parse(after)),
