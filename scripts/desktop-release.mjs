@@ -5,6 +5,7 @@ import {
   publishDownloadPage,
   uploadPlatformArtifacts,
   uploadPlatformManifest,
+  waitForGithubReleaseAssets,
 } from "./desktop-release-helpers.mjs";
 
 const command = process.argv[2];
@@ -28,6 +29,9 @@ try {
       break;
     case "upload-manifest":
       await uploadPlatformManifest();
+      break;
+    case "wait-github-assets":
+      await waitForGithubReleaseAssets();
       break;
     default:
       throw new Error(`Unknown desktop release command: ${command ?? "(missing)"}`);

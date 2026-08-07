@@ -8,15 +8,21 @@ import {
   addArtifactCacheKeys,
   assertVersionCanPublish,
   cacheKeyPlatformManifest,
+  missingGithubReleaseAssets,
   parseManifestVersion,
   runAws,
   runAwsWithRetry,
   selectArtifactNames,
   uploadPlatformManifest,
+  waitForGithubReleaseAssets,
 } from "./desktop-release-helpers.mjs";
 
 const environment = {
   DESKTOP_VERSION: "1.2.3",
+  GH_TOKEN: "test-token",
+  GITHUB_API_URL: "https://api.github.example",
+  GITHUB_REF_NAME: "v1.2.3",
+  GITHUB_REPOSITORY: "example/hmm-chat",
   HMM_UPDATE_PUBLIC_ROOT: "https://updates.example/desktop",
   HMM_UPDATE_S3_BUCKET: "updates",
   HMM_UPDATE_S3_ENDPOINT: "https://s3.example",
@@ -104,7 +110,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     releaseWorkflow,
-    /name: Wait for all GitHub Release assets[\s\S]*attempt=0[\s\S]*while \[ "\$attempt" -lt 60 \]; do[\s\S]*attempt=\$\(\(attempt \+ 1\)\)/u,
+    /name: Wait for all GitHub Release assets[\s\S]*run: node scripts\/desktop-release\.mjs wait-github-assets/u,
   );
   assert.doesNotMatch(releaseWorkflow, /\$\(\s*seq\b/u);
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
@@ -119,7 +125,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.equal(
     releaseWorkflow.match(/"hype-comms-\$\{DESKTOP_VERSION\}-(?:mac|win|linux)-"/gu)?.length,
-    6,
+    3,
   );
   assert.doesNotMatch(releaseWorkflow, /hmm-chat-\$\{(?:DESKTOP_VERSION|\{)/u);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
@@ -237,6 +243,69 @@ test("selects only exact version and platform artifacts", () => {
       "hype-comms-1.2.3-linux-x64.AppImage",
       "hype-comms-1.2.3-linux-x64.deb",
     ],
+  );
+});
+
+test("waits for every GitHub Release asset without shell utilities", async () => {
+  const completeAssets = [
+    "latest-mac.yml",
+    "latest.yml",
+    "latest-linux.yml",
+    "latest-linux-arm64.yml",
+    "hype-comms-1.2.3-mac-arm64.zip",
+    "hype-comms-1.2.3-win-x64.exe",
+    "hype-comms-1.2.3-linux-arm64.AppImage",
+  ];
+  const responses = [completeAssets.slice(0, -1), completeAssets];
+  const requests = [];
+  const delays = [];
+
+  await waitForGithubReleaseAssets({
+    attempts: 2,
+    delayMilliseconds: 25,
+    environment,
+    fetchImplementation: async (url, options) => {
+      requests.push({ options, url: url.href });
+      return Response.json({ assets: responses.shift().map((name) => ({ name })) });
+    },
+    sleep(milliseconds) {
+      delays.push(milliseconds);
+    },
+  });
+
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests[0].url,
+    "https://api.github.example/repos/example/hmm-chat/releases/tags/v1.2.3",
+  );
+  assert.equal(requests[0].options.headers.authorization, "Bearer test-token");
+  assert.deepEqual(delays, [25]);
+  assert.deepEqual(missingGithubReleaseAssets(completeAssets, "1.2.3"), []);
+});
+
+test("bounds GitHub Release asset polling and validates the response", async () => {
+  const delays = [];
+  await assert.rejects(
+    waitForGithubReleaseAssets({
+      attempts: 2,
+      delayMilliseconds: 5,
+      environment,
+      fetchImplementation: async () => Response.json({ assets: [] }),
+      sleep(milliseconds) {
+        delays.push(milliseconds);
+      },
+    }),
+    /Missing: latest-mac\.yml, latest\.yml, latest-linux\.yml, latest-linux-arm64\.yml/,
+  );
+  assert.deepEqual(delays, [5]);
+
+  await assert.rejects(
+    waitForGithubReleaseAssets({
+      attempts: 1,
+      environment,
+      fetchImplementation: async () => Response.json({ assets: [{ name: 42 }] }),
+    }),
+    /assets must have non-empty string names/,
   );
 });
 

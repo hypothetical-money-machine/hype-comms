@@ -354,38 +354,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         shell: sh
-        run: |
-          set -eu
-          # MinGit's POSIX shell on the Windows runner does not include the external `seq`
-          # utility. Keep the barrier portable across every release host with shell arithmetic.
-          attempt=0
-          while [ "$attempt" -lt 60 ]; do
-            attempt=$((attempt + 1))
-            missing=0
-            if assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null)"; then
-              for manifest in latest-mac.yml latest.yml latest-linux.yml latest-linux-arm64.yml; do
-                if ! printf '%s\n' "$assets" | grep -Fqx "$manifest"; then
-                  missing=1
-                fi
-              done
-              for artifact_prefix in \
-                "hype-comms-${DESKTOP_VERSION}-mac-" \
-                "hype-comms-${DESKTOP_VERSION}-win-" \
-                "hype-comms-${DESKTOP_VERSION}-linux-"; do
-                if ! printf '%s\n' "$assets" | grep -Fq -- "$artifact_prefix"; then
-                  missing=1
-                fi
-              done
-            else
-              missing=1
-            fi
-            if [ "$missing" -eq 0 ]; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Timed out waiting for all platform assets in the draft GitHub Release." >&2
-          exit 1
+        # Node is already pinned on every release host. Polling there avoids depending on optional
+        # MinGit shell utilities such as seq and sleep on Windows.
+        run: node scripts/desktop-release.mjs wait-github-assets
 
       - name: Address the update bucket by path
         shell: sh

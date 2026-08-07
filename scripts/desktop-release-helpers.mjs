@@ -5,6 +5,13 @@ import path from "node:path";
 import semver from "semver";
 
 const defaultReleaseDirectory = path.join("apps", "desktop", "release");
+const githubReleaseManifests = [
+  "latest-mac.yml",
+  "latest.yml",
+  "latest-linux.yml",
+  "latest-linux-arm64.yml",
+];
+const githubReleaseArtifactPlatforms = ["mac", "win", "linux"];
 
 export function requireEnvironment(name, environment = process.env) {
   const value = environment[name];
@@ -20,6 +27,105 @@ export function parseManifestVersion(manifest) {
     throw new Error("Manifest has no valid version");
   }
   return match[1];
+}
+
+export function missingGithubReleaseAssets(assetNames, desktopVersion) {
+  const names = new Set(assetNames);
+  const missing = githubReleaseManifests.filter((manifest) => !names.has(manifest));
+  for (const platform of githubReleaseArtifactPlatforms) {
+    const prefix = `hype-comms-${desktopVersion}-${platform}-`;
+    if (!assetNames.some((name) => name.startsWith(prefix))) {
+      missing.push(`${prefix}*`);
+    }
+  }
+  return missing;
+}
+
+function parseGithubReleaseAssetNames(payload) {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new Error("GitHub release response must be an object");
+  }
+  if (!Array.isArray(payload.assets)) {
+    throw new Error("GitHub release response must contain an assets array");
+  }
+  return payload.assets.map((asset) => {
+    if (
+      typeof asset !== "object" ||
+      asset === null ||
+      Array.isArray(asset) ||
+      typeof asset.name !== "string" ||
+      asset.name === ""
+    ) {
+      throw new Error("GitHub release assets must have non-empty string names");
+    }
+    return asset.name;
+  });
+}
+
+export async function waitForGithubReleaseAssets({
+  attempts = 60,
+  delayMilliseconds = 10_000,
+  environment = process.env,
+  fetchImplementation = fetch,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error("attempts must be a positive integer");
+  }
+  if (!Number.isInteger(delayMilliseconds) || delayMilliseconds < 0) {
+    throw new Error("delayMilliseconds must be a non-negative integer");
+  }
+
+  const desktopVersion = requireEnvironment("DESKTOP_VERSION", environment);
+  const repository = requireEnvironment("GITHUB_REPOSITORY", environment);
+  const repositoryParts = repository.split("/");
+  if (repositoryParts.length !== 2 || repositoryParts.some((part) => part === "")) {
+    throw new Error("GITHUB_REPOSITORY must use owner/name format");
+  }
+  const tagName = requireEnvironment("GITHUB_REF_NAME", environment);
+  const token = requireEnvironment("GH_TOKEN", environment);
+  const apiRoot = (environment.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/u, "");
+  const repositoryPath = repositoryParts.map(encodeURIComponent).join("/");
+  const releaseUrl = new URL(
+    `${apiRoot}/repos/${repositoryPath}/releases/tags/${encodeURIComponent(tagName)}`,
+  );
+  let lastError;
+  let missing = missingGithubReleaseAssets([], desktopVersion);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchImplementation(releaseUrl, {
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${token}`,
+          "cache-control": "no-cache",
+          "user-agent": "hmm-chat-desktop-release",
+          "x-github-api-version": "2022-11-28",
+        },
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        throw new Error(`GitHub release lookup returned HTTP ${response.status}`);
+      }
+      const assetNames = parseGithubReleaseAssetNames(await response.json());
+      missing = missingGithubReleaseAssets(assetNames, desktopVersion);
+      if (missing.length === 0) return;
+      lastError = undefined;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    if (attempt < attempts) {
+      await sleep(delayMilliseconds);
+    }
+  }
+
+  const detail =
+    lastError === undefined ? ` Missing: ${missing.join(", ")}.` : ` Last error: ${lastError}.`;
+  throw new Error(
+    `Timed out waiting for all platform assets in the draft GitHub Release.${detail}`,
+  );
 }
 
 export function addArtifactCacheKeys(manifest) {
