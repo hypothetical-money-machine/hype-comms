@@ -168,7 +168,10 @@ export function MessageReactions({
           aria-label={disabled ? "Reactions are unavailable in archived channels" : "Add reaction"}
           onClick={() => setOpen((value) => !value)}
         >
-          <span aria-hidden="true">＋</span>
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <circle cx="8" cy="10" r="5.5" />
+            <path d="M6 9h.01M10 9h.01M6.25 11.5c.8.8 2.7.8 3.5 0M15 3.5v5M12.5 6h5" />
+          </svg>
         </button>
       </div>
       {open &&

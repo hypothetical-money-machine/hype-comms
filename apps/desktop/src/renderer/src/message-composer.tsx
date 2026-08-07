@@ -21,8 +21,7 @@ export function MessageComposer({
   const input = useRef<HTMLTextAreaElement>(null);
   const submitting = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const composerDisabled = disabled || isSubmitting;
-  const sendDisabled = composerDisabled || draft.trim() === "";
+  const sendDisabled = disabled || isSubmitting || draft.trim() === "";
 
   useEffect(() => {
     const element = input.current;
@@ -72,7 +71,7 @@ export function MessageComposer({
           placeholder={
             conversationName === null ? "Choose a conversation" : `Message ${conversationName}`
           }
-          disabled={composerDisabled}
+          disabled={disabled}
           maxLength={4_000}
           rows={1}
           enterKeyHint="send"

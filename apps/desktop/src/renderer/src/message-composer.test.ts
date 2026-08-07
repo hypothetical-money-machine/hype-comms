@@ -50,16 +50,21 @@ describe("MessageComposer", () => {
     renderComposer({ onSubmit });
     const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
 
+    textbox.focus();
     fireEvent.keyDown(textbox, { key: "Enter" });
     fireEvent.keyDown(textbox, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledOnce();
-    expect(textbox.disabled).toBe(true);
+    expect(textbox.disabled).toBe(false);
+    expect(document.activeElement).toBe(textbox);
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
     expect(textbox.closest("form")?.getAttribute("aria-busy")).toBe("true");
 
     finishSubmission?.();
-    await waitFor(() => expect(textbox.disabled).toBe(false));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
+    );
+    expect(document.activeElement).toBe(textbox);
   });
 
   it("tracks the selected conversation in its placeholder", () => {
