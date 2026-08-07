@@ -19,7 +19,7 @@ import {
   userSchema,
   workspaceSchema,
 } from "./entities.js";
-import { currentUserSchema } from "./identity.js";
+import { currentPrincipalSchema, currentUserSchema } from "./identity.js";
 import {
   realtimeEventEnvelopeSchema,
   realtimeTicketSchema,
@@ -71,7 +71,7 @@ export const conversationSummarySchema = z
 
 export const workspaceBootstrapResponseSchema = z
   .object({
-    currentUser: currentUserSchema,
+    currentUser: currentPrincipalSchema,
     workspace: workspaceSchema,
     members: z.array(userSchema).max(25),
     conversations: z.array(conversationSummarySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
@@ -89,9 +89,19 @@ export const workspaceBootstrapResponseSchema = z
   .strict();
 
 /**
+ * `/v1/bootstrap` for a human session. Clients that can only ever be signed-in people -- the
+ * desktop app -- validate against this instead of the principal union, so an agent-shaped or
+ * email-less principal is rejected at their boundary rather than parsed and carried inward.
+ */
+export const humanWorkspaceBootstrapResponseSchema = workspaceBootstrapResponseSchema.extend({
+  currentUser: currentUserSchema,
+});
+
+/**
  * The desktop cache's aggregate view: bootstrap plus every conversation page the client has
  * already fetched. It is deliberately not a wire response, so its conversation bound is the
- * local cache limit rather than one server page.
+ * local cache limit rather than one server page. The desktop is always a human session, so the
+ * principal here is deliberately narrower than the shared bootstrap response.
  */
 export const workspaceSnapshotSchema = z
   .object({
@@ -438,6 +448,25 @@ const workspaceEventBaseSchema = realtimeEventEnvelopeSchema.extend({
   workspaceId: entityIdSchema,
 });
 
+/**
+ * Announces THAT the workspace member directory changed -- not what it now is.
+ *
+ * This event is an invalidation signal, not a state delta. Consumers MUST re-read the
+ * authoritative directory (`GET /v1/members`, or a fresh bootstrap) and REPLACE their member
+ * list. They MUST NOT upsert `payload.member` into a cached list.
+ *
+ * The reason is structural, not stylistic: `userSchema` is `.strict()` and carries no status or
+ * active flag, so the payload physically cannot express a removal. Treating it as an upsert makes
+ * a disable re-assert the disabled member instead of dropping it. Widening `userSchema` (or this
+ * payload) is not an option either -- it is `.strict()` at four separate boundaries that
+ * already-installed clients parse: the bootstrap response, {@link workspaceSnapshotSchema},
+ * this sync/realtime event payload, and the desktop client's encrypted cache record. Adding a
+ * field breaks all four for every client already in the field.
+ *
+ * `payload.member` is therefore advisory only -- useful for logging and for the common
+ * create/profile-edit case, never load-bearing. The server's member list (already filtered to
+ * `status = 'active'` memberships) is the single source of truth.
+ */
 export const memberUpdatedEventSchema = workspaceEventBaseSchema.extend({
   type: z.literal("member.updated"),
   conversationId: z.null(),
@@ -581,6 +610,7 @@ export const productRealtimeEventSchema = z.union([
 export type PaginationCursor = z.infer<typeof paginationCursorSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type WorkspaceBootstrapResponse = z.infer<typeof workspaceBootstrapResponseSchema>;
+export type HumanWorkspaceBootstrapResponse = z.infer<typeof humanWorkspaceBootstrapResponseSchema>;
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
 export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;

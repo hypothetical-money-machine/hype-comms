@@ -22,10 +22,10 @@ import {
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
+  humanWorkspaceBootstrapResponseSchema,
   taskListQuerySchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
-  workspaceBootstrapResponseSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
   type ArchiveChannelRequest,
@@ -56,7 +56,7 @@ import {
   type TaskMutationResponse,
   type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
-  type WorkspaceBootstrapResponse,
+  type HumanWorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
 import type { ChatSession } from "./chat-session";
@@ -176,9 +176,9 @@ export class WorkspaceTransport {
     return response;
   }
 
-  async bootstrap(): Promise<WorkspaceBootstrapResponse> {
+  async bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
     const response = await this.session.fetch(this.#url("/v1/bootstrap").href, { method: "GET" });
-    return workspaceBootstrapResponseSchema.parse(
+    return humanWorkspaceBootstrapResponseSchema.parse(
       withLegacyBootstrapPagination(await this.#payload(response)),
     );
   }

@@ -8,12 +8,12 @@ contract tests.
 ## Product and platform invariants
 
 - Today there is exactly one hosted workspace and no public registration. One bootstrapped
-  owner invites human members by email and provisions bot members through an operator CLI; the
-  service rejects a 26th active human-or-bot membership.
+  owner invites human members by email and provisions bot or agent members through an operator
+  CLI; the service rejects a 26th active membership across all three principal kinds.
   Multi-workspace and open signup are deliberate future changes, not emergent ones.
-- Channels are either workspace-visible or restricted to an explicit human member list. Human
-  members see workspace-visible channels automatically; bots require an explicit grant for every
-  channel, including workspace-visible channels. A
+- Channels are either workspace-visible or restricted to an explicit human-or-agent member list.
+  Human and agent members see workspace-visible channels automatically; bots require an explicit
+  grant for every channel, including workspace-visible channels. A
   members-only channel always retains at least one channel owner, and only its owners can
   add, remove, promote, or demote members. Direct conversations contain exactly two participant
   slots; a self-DM uses the same active member in both slots, and conversations are unique for
@@ -113,11 +113,12 @@ at the current 25-member scale.
 | Aggregate              | Current rules                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                                                                                                    |
-| User and membership    | A user is `human` or `bot`. Human email is normalized for comparison and unique; bots have no email and cannot create device sessions. A membership is `owner` or `member` and `invited`, `active`, or `revoked`; bots are always members. Capacity counts every active human and bot transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                                    |
+| User and membership    | A user is `human`, `bot`, or `agent`. Human email is normalized for comparison and unique; bots and agents have no email and cannot create device sessions. A membership is `owner` or `member` and `invited`, `active`, or `revoked`; bots and agents are always members. Capacity counts every active principal transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                          |
 | Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                                                                                                          |
 | Bot credential         | Owner-issued service credential with one or both `tasks:read` and `tasks:write` scopes, a required expiry, last-used time, and optional revocation time. The 256-bit token is shown once and only its SHA-256 hash is stored. Rotation atomically revokes every prior credential for that bot.                                                                                                        |
 | Bot channel grant      | Explicit bot-to-channel authorization. A grant is required even when the channel access mode is `workspace`; it never grants a DM. Visibility is the intersection of an active bot membership, credential scope, and channel grant.                                                                                                                                                              |
-| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human member, while `members` is readable only by active human conversation memberships. Bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human pair. Archived channels remain readable but reject writes. |
+| Agent credential       | Owner-issued, non-expiring bearer credential with immutable `workspace:read`, `messages:write`, `conversations:write`, and/or `read-cursors:write` scopes. The prefixed 256-bit token is shown once and only its SHA-256 hash is stored. Disabling an agent revokes its active membership and every token.                                                                                           |
+| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human or agent member, while `members` is readable only by active human or agent conversation memberships. Bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human-or-agent pair. Archived channels remain readable but reject writes. |
 | Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
@@ -176,12 +177,14 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v1/bootstrap`                                                           | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
 | `GET /v1/members`                                                             | Active member directory for DMs and mention completion.                                                                                   |
 | `GET /v1/invitations`, `POST /v1/invitations`, `DELETE /v1/invitations/:id`   | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
+| `GET/POST /v1/agents`, `DELETE /v1/agents/:id`                                | Owner-only list/create/disable for non-email agent members; active agents share workspace capacity with people and bots.                  |
+| `GET/POST /v1/agents/:id/tokens`, `DELETE .../:tokenId`                       | Owner-only list/create/revoke for one-time agent tokens; metadata never returns plaintext or token hashes.                                |
 | `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
 | `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
 | `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it.                                                                            |
 | `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
 | `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
-| `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation.                                                                  |
+| `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
 | `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
 | `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
 | `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
@@ -194,7 +197,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
 | `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
 | `GET /v1/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
-| `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the current member/session for a WSS connection; never return the access credential.         |
+| `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the human device session or agent token for a WSS connection; never return the access credential. |
 | `GET /v1/desktop/releases/latest`                                             | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
 
 The app requests a magic link only after generating a verifier and challenge. The emailed
@@ -226,8 +229,9 @@ domain events are:
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
-Reaction and task events are capability-gated for rolling compatibility. A client advertises
-`reaction-events-v1` and `task-events-v1` through `X-HMM-Chat-Capabilities` on both
+Reaction, task, and read-state events are capability-gated for rolling compatibility. A client
+advertises `reaction-events-v1`, `task-events-v1`, and `read-state-events-v1` through
+`X-HMM-Chat-Capabilities` on both
 `GET /v1/sync` and `POST /v1/realtime/tickets`. Clients without a capability do not receive its
 events, but the server still advances their scanned cursor past those events so released clients
 neither fail strict parsing nor loop on an unsupported event.
@@ -413,6 +417,20 @@ reuse revokes the device-session family. Tokens are random 256-bit values, store
 hashes server-side, and scoped to one user, workspace, and device session.
 Membership/session status is checked on every authorized request and ticket redemption, so
 invitation revocation, member removal, and session revocation take effect immediately.
+
+Agent bearer credentials are accepted only by agent-capable identity and workspace routes. Every
+request checks the token hash, token revocation, active agent membership, and the route's immutable
+scope. An agent may read the same workspace-visible and explicitly joined conversations as a human
+member, create DMs or channels with `conversations:write`, send with `messages:write`, and advance
+its cursor with `read-cursors:write`; it can never administer owners, invitations, agents, or
+tokens. Supplying both a human cookie and agent bearer credential to an identity route is rejected
+as ambiguous. Agent tokens never cross the renderer boundary or appear in argv, URLs, logs, or
+realtime tickets.
+
+For a rolling desktop upgrade, public member-directory and `member.updated` projections encode an
+agent as the previous release's `human` discriminator. Those shapes are mention/DM targets and do
+not authorize a principal. Agent administration responses and the authenticated agent's own
+principal retain the distinct `agent` kind and scoped contract.
 
 Bot credentials are a separate task-only authentication path and are never accepted by desktop,
 chat, search, bootstrap, sync, realtime, member-directory, DM, or session routes. Supplying an

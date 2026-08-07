@@ -15,7 +15,7 @@ const timestampsShape = {
   updatedAt: isoDateTimeSchema,
 };
 
-export const userKindSchema = z.enum(["human", "bot"]);
+export const userKindSchema = z.enum(["human", "bot", "agent"]);
 
 export const userSchema = z
   .object({

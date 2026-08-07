@@ -1,9 +1,17 @@
 import {
+  createAgentRequestSchema,
+  createAgentResponseSchema,
+  createAgentTokenRequestSchema,
+  createAgentTokenResponseSchema,
   createInvitationSchema,
+  currentPrincipalSchema,
   currentUserSchema,
   deviceSessionSchema,
   entityIdSchema,
   invitationSchema,
+  listAgentsResponseSchema,
+  listAgentTokensResponseSchema,
+  listInvitationsResponseSchema,
   magicLinkTokenSchema,
   magicLinkRequestedSchema,
   requestMagicLinkSchema,
@@ -15,6 +23,11 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import {
+  rejectAmbiguousCredentials,
+  requireAuthenticatedIdentity,
+  requireHumanIdentity,
+} from "./request-auth.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
 const COOKIE_NAME = "hmm_session";
@@ -67,6 +80,7 @@ function cookieValue(request: FastifyRequest): string | undefined {
 }
 
 function requiredSessionToken(request: FastifyRequest): SessionToken {
+  rejectAmbiguousCredentials(request);
   const result = sessionTokenSchema.safeParse(cookieValue(request));
   if (!result.success) throw new ApiError(401, "UNAUTHORIZED", "Sign in to continue");
   return result.data;
@@ -205,8 +219,10 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   });
 
   app.get("/auth/me", async (request) => {
-    const { currentUser } = await requireCurrentUser(request, service);
-    return desktopCurrentUserResponse(currentUser);
+    const identity = await requireAuthenticatedIdentity(request, service);
+    return identity.credentialType === "session"
+      ? desktopCurrentUserResponse(identity.currentUser)
+      : currentPrincipalSchema.parse(identity.currentUser);
   });
 
   app.post("/auth/session/refresh", async (request, reply) => {
@@ -217,6 +233,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   });
 
   app.delete("/auth/session", async (request, reply) => {
+    rejectAmbiguousCredentials(request);
     const result = sessionTokenSchema.safeParse(cookieValue(request));
     if (result.success) await service.signOut(result.data);
     void reply.header("set-cookie", sessionCookie("", cookieSecure, { clear: true }));
@@ -242,15 +259,124 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     return reply.code(204).send();
   });
 
-  app.post("/auth/invitations", async (request, reply) => {
-    const { currentUser } = await requireCurrentUser(request, service);
+  /** Shared by the legacy `/auth/invitations` path and the current `/invitations` one. */
+  const createInvitation = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<FastifyReply> => {
+    const identity = await requireHumanIdentity(request, service);
     const result = createInvitationSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid invitation");
     const invitation = await service.createInvitation(
-      currentUser.user.id,
+      identity.currentUser.user.id,
       result.data.email,
       result.data.role,
     );
     return reply.code(201).send(invitationSchema.parse(invitation));
+  };
+
+  app.post("/auth/invitations", createInvitation);
+
+  app.get("/invitations", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    return listInvitationsResponseSchema.parse({
+      invitations: await service.listInvitations(identity.currentUser.user.id),
+    });
+  });
+
+  app.post("/invitations", createInvitation);
+
+  app.delete("/invitations/:id", async (request, reply) => {
+    const identity = await requireHumanIdentity(request, service);
+    const invitationId = entityIdSchema.safeParse(
+      typeof request.params === "object" && request.params !== null && "id" in request.params
+        ? request.params.id
+        : undefined,
+    );
+    if (!invitationId.success) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid invitation id");
+    }
+    if (!(await service.revokeInvitation(identity.currentUser.user.id, invitationId.data))) {
+      throw new ApiError(404, "NOT_FOUND", "Pending invitation not found");
+    }
+    return reply.code(204).send();
+  });
+
+  app.get("/agents", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    return listAgentsResponseSchema.parse({
+      agents: await service.listAgents(identity.currentUser.user.id),
+    });
+  });
+
+  app.post("/agents", async (request, reply) => {
+    const identity = await requireHumanIdentity(request, service);
+    const input = createAgentRequestSchema.safeParse(request.body);
+    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent");
+    const agent = await service.createAgent(identity.currentUser.user.id, input.data);
+    return reply.code(201).send(createAgentResponseSchema.parse({ agent }));
+  });
+
+  app.delete("/agents/:id", async (request, reply) => {
+    const identity = await requireHumanIdentity(request, service);
+    const agentId = entityIdSchema.safeParse(
+      typeof request.params === "object" && request.params !== null && "id" in request.params
+        ? request.params.id
+        : undefined,
+    );
+    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
+    if (!(await service.disableAgent(identity.currentUser.user.id, agentId.data))) {
+      throw new ApiError(404, "NOT_FOUND", "Agent not found");
+    }
+    return reply.code(204).send();
+  });
+
+  app.get("/agents/:id/tokens", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    const agentId = entityIdSchema.safeParse(
+      typeof request.params === "object" && request.params !== null && "id" in request.params
+        ? request.params.id
+        : undefined,
+    );
+    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
+    return listAgentTokensResponseSchema.parse({
+      tokens: await service.listAgentTokens(identity.currentUser.user.id, agentId.data),
+    });
+  });
+
+  app.post("/agents/:id/tokens", async (request, reply) => {
+    const identity = await requireHumanIdentity(request, service);
+    const agentId = entityIdSchema.safeParse(
+      typeof request.params === "object" && request.params !== null && "id" in request.params
+        ? request.params.id
+        : undefined,
+    );
+    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
+    const input = createAgentTokenRequestSchema.safeParse(request.body);
+    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent token");
+    return reply
+      .code(201)
+      .send(
+        createAgentTokenResponseSchema.parse(
+          await service.createAgentToken(identity.currentUser.user.id, agentId.data, input.data),
+        ),
+      );
+  });
+
+  app.delete("/agents/:agentId/tokens/:tokenId", async (request, reply) => {
+    const identity = await requireHumanIdentity(request, service);
+    const params =
+      typeof request.params === "object" && request.params !== null ? request.params : {};
+    const agentId = entityIdSchema.safeParse("agentId" in params ? params.agentId : undefined);
+    const tokenId = entityIdSchema.safeParse("tokenId" in params ? params.tokenId : undefined);
+    if (!agentId.success || !tokenId.success) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid agent token id");
+    }
+    if (
+      !(await service.revokeAgentToken(identity.currentUser.user.id, agentId.data, tokenId.data))
+    ) {
+      throw new ApiError(404, "NOT_FOUND", "Agent token not found");
+    }
+    return reply.code(204).send();
   });
 };

@@ -32,7 +32,7 @@ interface RealtimeRoutesOptions {
   consumeTicket: ConsumeRealtimeTicket;
   loadEvents?: (principal: RealtimePrincipal, after: string) => Promise<SyncResponse>;
   subscribe?: (workspaceId: string, listener: () => void) => () => void;
-  /** Re-checks the device session and membership of an already-connected socket. */
+  /** Re-checks the bound session/token and membership of an already-connected socket. */
   revalidate?: RevalidateRealtimePrincipal;
   metrics?: MetricsRegistry;
 }
@@ -50,7 +50,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       websocket: true,
       preValidation: async (request) => {
         const origin = request.headers.origin;
-        if (origin === undefined || !allowedOrigins.has(origin)) {
+        if (origin !== undefined && !allowedOrigins.has(origin)) {
           throw new ApiError(403, "FORBIDDEN", "Origin is not allowed");
         }
 
@@ -65,11 +65,19 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           throw new ApiError(400, "BAD_REQUEST", "A valid realtime cursor is required");
         }
 
-        request.realtimePrincipal = await consumeTicket({
+        // An absent Origin is accepted for human and agent tickets alike. Requiring it here would
+        // break every non-browser client that holds a human session -- `hmm-chat-cli watch` opens
+        // its socket through `ws`, which sends no Origin -- and it buys little: a hostile page
+        // cannot obtain a human ticket to replay, because `POST /v1/realtime/tickets` sits behind
+        // the CORS policy in app.ts, which rejects an unrecognized origin outright rather than
+        // merely withholding response headers. Tickets are additionally single-use and expire in
+        // 30s. Browsers cannot forge Origin, so the allowlist check above still constrains them.
+        const principal = await consumeTicket({
           ticket: result.data,
           origin,
           request,
         });
+        request.realtimePrincipal = principal;
         request.realtimeCursor = cursor.data;
       },
     },

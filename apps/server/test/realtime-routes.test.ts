@@ -18,23 +18,23 @@ const workspaceId = "10000000-0000-4000-8000-000000000002";
 const deviceSessionId = "10000000-0000-4000-8000-000000000003";
 const ticket = "a".repeat(32);
 
-interface ConsumedTicket {
-  readonly workspaceId: string;
-  readonly userId: string;
-  readonly deviceSessionId: string;
-  readonly reactionEvents: boolean;
-}
-
 class FakeWorkspaceRepository {
   readonly consumedTickets: string[] = [];
   readonly syncedCursors: string[] = [];
   readonly revalidations: RealtimePrincipal[] = [];
+  consumedPrincipal: RealtimePrincipal = {
+    workspaceId,
+    userId,
+    deviceSessionId,
+    agentTokenId: null,
+    reactionEvents: true,
+  };
   revalidation: RealtimePrincipalRevalidation = { status: "valid" };
   revalidationError: Error | null = null;
 
-  async consumeRealtimeTicket(token: string): Promise<ConsumedTicket | null> {
+  async consumeRealtimeTicket(token: string): Promise<RealtimePrincipal | null> {
     this.consumedTickets.push(token);
-    return { workspaceId, userId, deviceSessionId, reactionEvents: true };
+    return this.consumedPrincipal;
   }
 
   async syncPrincipal(principal: RealtimePrincipal, after: string): Promise<SyncResponse> {
@@ -132,7 +132,7 @@ describe("realtime session revalidation", () => {
     expect(messages).toEqual([]);
     expect(repository.syncedCursors).toEqual([]);
     expect(repository.revalidations).toEqual([
-      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, agentTokenId: null, reactionEvents: true },
     ]);
   });
 
@@ -143,7 +143,7 @@ describe("realtime session revalidation", () => {
     const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
 
     expect(repository.revalidations).toEqual([
-      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, agentTokenId: null, reactionEvents: true },
     ]);
     expect(repository.syncedCursors).toEqual(["9"]);
     expect(socket.readyState).toBe(WebSocket.OPEN);
@@ -162,8 +162,8 @@ describe("realtime session revalidation", () => {
     expect(reason.toString()).toBe("Session revoked");
     // The principal must carry the device session the ticket was bound to, or nothing is checkable.
     expect(repository.revalidations).toEqual([
-      { userId, workspaceId, deviceSessionId, reactionEvents: true },
-      { userId, workspaceId, deviceSessionId, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, agentTokenId: null, reactionEvents: true },
+      { userId, workspaceId, deviceSessionId, agentTokenId: null, reactionEvents: true },
     ]);
   });
 
@@ -177,6 +177,29 @@ describe("realtime session revalidation", () => {
     const [code] = await closed;
 
     expect(code).toBe(4401);
+  });
+
+  it("revalidates the bound agent token and closes the socket once it is revoked", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const agentTokenId = "10000000-0000-4000-8000-000000000004";
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId,
+    };
+    const { socket } = await connectedApp(repository, new FakeRealtimeEventHub());
+
+    repository.revalidation = { status: "invalid", reason: "agent_token_revoked" };
+    const closed = once(socket, "close");
+    await vi.advanceTimersByTimeAsync(30_000);
+    const [code] = await closed;
+
+    expect(code).toBe(4401);
+    expect(repository.revalidations).toEqual([
+      { workspaceId, userId, deviceSessionId: null, agentTokenId },
+      { workspaceId, userId, deviceSessionId: null, agentTokenId },
+    ]);
   });
 
   it("keeps a socket whose session is still valid open on the heartbeat", async () => {

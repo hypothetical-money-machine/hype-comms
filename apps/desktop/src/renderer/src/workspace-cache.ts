@@ -22,7 +22,7 @@ import {
   type SendMessageOperation,
   type Task,
   type User,
-  type WorkspaceBootstrapResponse,
+  type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
 } from "@hmm-chat/contracts";
@@ -31,6 +31,12 @@ const CACHE_SCHEMA_VERSION = 1 as const;
 const CACHE_DATABASE_PREFIX = "hmm-chat-cache-v2-";
 const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
 const MAX_MESSAGE_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
+/**
+ * Mirrors `workspaceSnapshotSchema.members`, which is `z.array(userSchema).max(25)`. `load()`
+ * parses through that schema, so a cached list above this bound is not a stale read — it is a
+ * client that can never start again.
+ */
+const MAX_CACHED_MEMBERS = 25;
 
 export type OutboxStatus =
   "pending" | "sending" | "retry_wait" | "paused_auth" | "permanent_failure";
@@ -67,11 +73,19 @@ export interface WorkspaceCache {
    * hand the aggregate straight in.
    */
   replaceSnapshot(
-    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
+    snapshot: HumanWorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     tasks?: readonly Task[],
   ): Promise<void>;
+  /**
+   * Replaces the whole member directory with the server's answer to `GET /v1/members`.
+   *
+   * This is the only writer of the cached member list outside `replaceSnapshot`. `member.updated`
+   * deliberately does not write here: its payload is a bare `User` with no status field, so it
+   * cannot express a removal, and upserting it would re-assert a member the server just disabled.
+   */
+  replaceMembers(members: readonly User[]): Promise<void>;
   /** Persists a mutation projection without claiming that its workspace cursor was applied. */
   upsertConversation(summary: ConversationSummary): Promise<void>;
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
@@ -113,9 +127,9 @@ interface MetadataRow {
 }
 
 interface WorkspacePayload {
-  readonly currentUser: WorkspaceBootstrapResponse["currentUser"];
-  readonly workspace: WorkspaceBootstrapResponse["workspace"];
-  readonly featureFlags: WorkspaceBootstrapResponse["featureFlags"];
+  readonly currentUser: HumanWorkspaceBootstrapResponse["currentUser"];
+  readonly workspace: HumanWorkspaceBootstrapResponse["workspace"];
+  readonly featureFlags: HumanWorkspaceBootstrapResponse["featureFlags"];
 }
 
 interface WorkspaceRow {
@@ -285,6 +299,27 @@ export function compareConversations(
 }
 
 /**
+ * Clamps an over-capacity cached member list down to `workspaceSnapshotSchema.members`'s
+ * `.max(25)` bound so the hard `.parse` inside `load()` cannot brick the client. `compareMembers`
+ * sorts by displayName then id -- there is no recency signal in that order -- so the truncation
+ * this performs is arbitrary, not "the newest complete list": it just drops whatever sorts last.
+ * The one row it must never drop is the signed-in user, since losing it breaks author-name
+ * rendering everywhere the client attributes its own messages. When the sorted truncation would
+ * drop that row, this swaps it back in for the row that would otherwise sort last.
+ */
+function capCachedMembers(members: readonly User[], currentUserId: string | null): User[] {
+  const sorted = [...members].sort(compareMembers);
+  if (sorted.length <= MAX_CACHED_MEMBERS) return sorted;
+  const capped = sorted.slice(0, MAX_CACHED_MEMBERS);
+  if (currentUserId === null || capped.some((member) => member.id === currentUserId)) {
+    return capped;
+  }
+  const currentUser = sorted.find((member) => member.id === currentUserId);
+  if (currentUser === undefined) return capped;
+  return [...capped.slice(0, -1), currentUser].sort(compareMembers);
+}
+
+/**
  * Both cache implementations store rows keyed by ID, which loses the order the server sent. This
  * restores the server's deliberate ordering so the renderer never has to sort, and so the two
  * implementations return identical state for identical input.
@@ -302,7 +337,7 @@ function canonicalSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
  * fields explicitly keeps the strict schema happy for both inputs.
  */
 function parseSnapshotInput(
-  input: WorkspaceBootstrapResponse | WorkspaceSnapshot,
+  input: HumanWorkspaceBootstrapResponse | WorkspaceSnapshot,
 ): WorkspaceSnapshot {
   return workspaceSnapshotSchema.parse({
     currentUser: input.currentUser,
@@ -553,6 +588,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         ),
       ]);
     const workspace = workspacePayloads[0];
+    // A client upgraded from the build that upserted `member.updated` can hold 26 member rows
+    // after a disable followed by a create, and `workspaceSnapshotSchema.members` is `.max(25)`.
+    // That hard `.parse` runs inside `WorkspaceRuntime.start()`'s try block, so an over-capacity
+    // cached list would brick the client with "Could not initialize the workspace" and no repair
+    // path. Drop an arbitrary row (see `capCachedMembers`) rather than the newest one -- there is
+    // no recency signal to prefer by -- but never the signed-in user; the next `replaceMembers` or
+    // `replaceSnapshot` restores whatever else this truncated from the server.
+    const cappedMembers = capCachedMembers(members, workspace?.currentUser.user.id ?? null);
     // Dexie reads return primary-key (UUID) order, so both collections are re-sorted into the
     // order the server sent them; the renderer does not sort.
     const bootstrap =
@@ -561,7 +604,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         : canonicalSnapshot(
             parseSnapshotInput({
               ...workspace,
-              members,
+              members: cappedMembers,
               conversations,
               syncCursor: metadata?.syncCursor ?? "0",
             }),
@@ -585,7 +628,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(
-    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
+    snapshot: HumanWorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
@@ -623,7 +666,6 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       async () => {
         await Promise.all([
           this.#database.workspaces.clear(),
-          this.#database.members.clear(),
           this.#database.conversations.clear(),
           this.#database.messages.clear(),
           this.#database.reactions.clear(),
@@ -634,13 +676,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           id: parsed.workspace.id,
           value: encryptedValue(encrypted, "workspace", parsed.workspace.id),
         });
-        await this.#database.members.bulkPut(
-          parsed.members.map((member) => ({
-            id: member.id,
-            updatedAt: member.updatedAt,
-            value: encryptedValue(encrypted, "member", member.id),
-          })),
-        );
+        await this.#writeMembers(parsed.members, encrypted);
         await this.#database.conversations.bulkPut(
           parsed.conversations.map((summary) => ({
             id: summary.conversation.id,
@@ -665,6 +701,22 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       },
     );
     await this.#evictMessages();
+  }
+
+  async replaceMembers(members: readonly User[]): Promise<void> {
+    const parsed = members.map((member) => userSchema.parse(member)).sort(compareMembers);
+    const encrypted = await encryptRecords(
+      this.#crypto,
+      parsed.map((member) => protectedRecord("member", member.id, member)),
+    );
+    await this.#database.transaction(
+      "rw",
+      this.#database.metadata,
+      this.#database.members,
+      async () => {
+        await this.#writeMembers(parsed, encrypted);
+      },
+    );
   }
 
   async upsertConversation(summary: ConversationSummary): Promise<void> {
@@ -741,20 +793,15 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
     } else if (parsed.type === "member.updated") {
-      const encrypted = await encryptRecords(this.#crypto, [
-        protectedRecord("member", parsed.payload.member.id, parsed.payload.member),
-      ]);
+      // An invalidation signal, not a delta: `payload.member` is a bare `User` with no status
+      // field, so upserting it would re-assert a member the server just disabled instead of
+      // dropping it. Record the cursor here; WorkspaceRuntime replaces the server-derived member
+      // list immediately after applying this event.
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
-        this.#database.members,
         this.#database.events,
         async () => {
-          await this.#database.members.put({
-            id: parsed.payload.member.id,
-            updatedAt: parsed.payload.member.updatedAt,
-            value: encryptedValue(encrypted, "member", parsed.payload.member.id),
-          });
           await this.#recordEvent(parsed);
         },
       );
@@ -1086,6 +1133,26 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     return payload?.user.id ?? null;
   }
 
+  /**
+   * The single member-table writer, shared by `replaceSnapshot` and `replaceMembers` so the two
+   * cannot drift into different notions of what "the member directory" means. Always a clear plus
+   * a rewrite: a member the server no longer lists has to disappear, which a bulkPut cannot do.
+   * Runs inside the caller's transaction.
+   */
+  async #writeMembers(
+    members: readonly User[],
+    encrypted: ReadonlyMap<string, CacheCiphertext>,
+  ): Promise<void> {
+    await this.#database.members.clear();
+    await this.#database.members.bulkPut(
+      members.map((member) => ({
+        id: member.id,
+        updatedAt: member.updatedAt,
+        value: encryptedValue(encrypted, "member", member.id),
+      })),
+    );
+  }
+
   async #recordEvent(event: WorkspaceEvent): Promise<void> {
     await this.#database.events.put({
       id: event.id,
@@ -1123,6 +1190,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
 export class MemoryWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   #snapshot: WorkspaceSnapshot | null = null;
+  // Mirrors PersistentWorkspaceCache's separate `members` Dexie table: that table is written by
+  // both replaceSnapshot and replaceMembers regardless of whether a workspace row exists yet, so
+  // a replaceMembers call that lands before the first replaceSnapshot is never lost. Keeping
+  // members here instead of only inside `#snapshot` gives this cache the same durability instead
+  // of silently discarding the write when `#snapshot` is still null.
+  #members: readonly User[] = [];
   readonly #messages = new Map<string, Message>();
   readonly #reactions = new Map<string, Reaction>();
   readonly #tasks = new Map<string, Task>();
@@ -1136,7 +1209,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     // The reported snapshot cursor tracks applied events, matching how PersistentWorkspaceCache
     // rebuilds it from the metadata row.
     const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? "0";
-    const bootstrap = snapshot === null ? null : canonicalSnapshot({ ...snapshot, syncCursor });
+    const bootstrap =
+      snapshot === null
+        ? null
+        : canonicalSnapshot({ ...snapshot, members: [...this.#members], syncCursor });
     return {
       bootstrap,
       // Map insertion order is arrival order, not conversation order; sort so "load older
@@ -1154,13 +1230,14 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(
-    snapshot: WorkspaceBootstrapResponse | WorkspaceSnapshot,
+    snapshot: HumanWorkspaceBootstrapResponse | WorkspaceSnapshot,
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
     this.#snapshot = parsed;
+    this.#members = parsed.members;
     this.#messages.clear();
     for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
     this.#reactions.clear();
@@ -1175,6 +1252,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     }
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
+  }
+
+  async replaceMembers(members: readonly User[]): Promise<void> {
+    const parsed = members.map((member) => userSchema.parse(member)).sort(compareMembers);
+    // Persists regardless of `#snapshot`, matching PersistentWorkspaceCache's independent members
+    // table -- a replaceMembers call that arrives before the first replaceSnapshot must not be
+    // silently discarded, even though `load()` still reports no bootstrap until a snapshot exists.
+    this.#members = parsed;
+    if (this.#snapshot !== null) this.#snapshot = { ...this.#snapshot, members: parsed };
   }
 
   async upsertConversation(summary: ConversationSummary): Promise<void> {
@@ -1247,10 +1333,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       if (current === undefined || parsed.payload.task.version >= current.version) {
         this.#tasks.set(parsed.payload.task.id, parsed.payload.task);
       }
-    } else if (this.#snapshot !== null && parsed.type === "member.updated") {
-      const members = new Map(this.#snapshot.members.map((member) => [member.id, member]));
-      members.set(parsed.payload.member.id, parsed.payload.member);
-      this.#snapshot = { ...this.#snapshot, members: [...members.values()] };
+    } else if (parsed.type === "member.updated") {
+      // WorkspaceRuntime replaces the server-derived member list because `payload.member` cannot
+      // express a removal. Advancing the cursor above keeps this event idempotent until then.
     } else if (this.#snapshot !== null && parsed.conversationId !== null) {
       const conversations = new Map(
         this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),

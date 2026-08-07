@@ -53,6 +53,33 @@ describe("desktop IPC contract", () => {
     expect(missingFrom(handled, removed)).toEqual([]);
   });
 
+  it("guards every handler with the trusted-sender check", () => {
+    // A handler that forgets the guard is reachable from any frame the window ever loads, and the
+    // wire schemas cannot catch that: they validate the payload, never the caller. A raw count of
+    // `isTrustedIpcSender(event)` occurrences compared against the handler count cannot catch a new
+    // handler that omits the guard as long as some other handler happens to reference it twice --
+    // the count is not tied to any particular handler. So this instead slices the source between
+    // one `ipcMain.handle(DESKTOP_CHANNELS...` call and the next (handler registrations here are
+    // sequential and never nested, so that slice is exactly one handler's body) and checks the
+    // guard appears inside each slice individually.
+    const registrationPattern = /ipcMain\.handle\(\s*DESKTOP_CHANNELS\.(\w+)\s*,/g;
+    const registrations = [...mainSource.matchAll(registrationPattern)];
+    expect(registrations.length).toBe(handled.size);
+
+    const unguarded = registrations
+      .map((registration, index) => {
+        const channel = registration[1];
+        const start = registration.index;
+        if (channel === undefined || start === undefined) return null;
+        const end = registrations[index + 1]?.index ?? mainSource.length;
+        const body = mainSource.slice(start, end);
+        return /isTrustedIpcSender\(event\)/.test(body) ? null : channel;
+      })
+      .filter((channel): channel is string => channel !== null)
+      .sort();
+    expect(unguarded).toEqual([]);
+  });
+
   it("never registers a request handler for a push-only channel", () => {
     expect([...subscribed].filter((channel) => handled.has(channel)).sort()).toEqual([]);
   });

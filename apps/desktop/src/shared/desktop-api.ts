@@ -16,6 +16,7 @@ import type {
   DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListMembersResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
@@ -36,8 +37,8 @@ import type {
   ThemePreference,
   ThemeState,
   UpdateState,
+  HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
-  WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
@@ -82,7 +83,13 @@ export interface DesktopApi extends SessionTransport, ThemeTransport {
     input: CacheDecryptBatchRequest,
   ) => Promise<CacheDecryptBatchResponse>;
   readonly resetCacheCrypto: () => Promise<void>;
-  readonly getWorkspaceBootstrap: () => Promise<WorkspaceBootstrapResponse>;
+  readonly getWorkspaceBootstrap: () => Promise<HumanWorkspaceBootstrapResponse>;
+  /**
+   * Re-reads the authoritative workspace member directory. The server returns only active
+   * memberships, so this is the one call that can tell a client a member has gone away:
+   * `member.updated` announces that the directory changed but its payload cannot express removal.
+   */
+  readonly listWorkspaceMembers: () => Promise<ListMembersResponse>;
   /**
    * Fetches one page of conversation summaries. Bootstrap returns the first page; callers page
    * with `after` until `hasMore` is false so a large workspace cannot exceed the wire contract.

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,6 +35,27 @@ async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void>
   }
 }
 
+async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-agent-migrations-"));
+  const source = new URL("../src/db/migrations/", import.meta.url);
+  try {
+    const filenames = await readdir(source);
+    await Promise.all(
+      filenames
+        .filter((filename) => filename.endsWith(".sql") && filename !== "0013_agents.sql")
+        .map(async (filename) => {
+          await writeFile(
+            path.join(directory, filename),
+            await readFile(new URL(filename, source)),
+          );
+        }),
+    );
+    await fn(pathToFileURL(`${directory}${path.sep}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 describeWithPostgres("runMigrations", () => {
   it("applies migrations cleanly and is idempotent", async () => {
     await withFreshSchema(async (pool) => {
@@ -53,6 +74,7 @@ describeWithPostgres("runMigrations", () => {
           "0010_conversation_tasks.sql",
           "0011_bot_task_principals.sql",
           "0012_task_actor_attribution.sql",
+          "0013_agents.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -74,6 +96,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0010_conversation_tasks.sql" },
         { filename: "0011_bot_task_principals.sql" },
         { filename: "0012_task_actor_attribution.sql" },
+        { filename: "0013_agents.sql" },
       ]);
 
       const userId = randomUUID();
@@ -317,6 +340,113 @@ describeWithPostgres("runMigrations", () => {
         [taskId],
       );
       expect(actor.rows).toEqual([{ updated_by: userId }]);
+    });
+  });
+
+  it("upgrades existing human, bot, and device-ticket rows for agent identities", async () => {
+    await withFreshSchema(async (pool) => {
+      await withoutAgentMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+
+        const ownerId = randomUUID();
+        const botId = randomUUID();
+        const workspaceId = randomUUID();
+        const sessionId = randomUUID();
+        const existingTicketId = randomUUID();
+        await pool.query(
+          `INSERT INTO users (id, email, username, display_name)
+           VALUES ($1, 'owner@example.test', 'owner', 'Owner')`,
+          [ownerId],
+        );
+        await pool.query(
+          `INSERT INTO workspaces (id, name, slug, created_by)
+           VALUES ($1, 'Agent upgrade', 'agent-upgrade', $2)`,
+          [workspaceId, ownerId],
+        );
+        await pool.query(
+          `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+           VALUES ($1, $2, 'owner', 'active')`,
+          [workspaceId, ownerId],
+        );
+        await pool.query(
+          `INSERT INTO users (id, email, kind, username, display_name)
+           VALUES ($1, NULL, 'bot', 'task-bot', 'Task bot')`,
+          [botId],
+        );
+        await pool.query(
+          `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+           VALUES ($1, $2, 'member', 'active')`,
+          [workspaceId, botId],
+        );
+        await pool.query(
+          `INSERT INTO device_sessions
+             (id, user_id, token_hash, created_at, last_seen_at, expires_at)
+           VALUES ($1, $2, $3, clock_timestamp(), clock_timestamp(),
+                   clock_timestamp() + interval '1 day')`,
+          [sessionId, ownerId, Buffer.alloc(32, 1)],
+        );
+        await pool.query(
+          `INSERT INTO realtime_tickets
+             (id, workspace_id, user_id, device_session_id, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, clock_timestamp() + interval '1 minute')`,
+          [existingTicketId, workspaceId, ownerId, sessionId, Buffer.alloc(32, 2)],
+        );
+
+        await pool.query(
+          await readFile(new URL("../src/db/migrations/0013_agents.sql", import.meta.url), "utf8"),
+        );
+
+        const oldServerUserId = randomUUID();
+        await expect(
+          pool.query(
+            `INSERT INTO users (id, email, username, display_name)
+             VALUES ($1, 'old-server@example.test', 'old-server', 'Old server')`,
+            [oldServerUserId],
+          ),
+        ).resolves.toMatchObject({ rowCount: 1 });
+
+        const agentId = randomUUID();
+        await pool.query(
+          `INSERT INTO users (id, email, kind, username, display_name)
+           VALUES ($1, NULL, 'agent', 'hermes_agent', 'Hermes')`,
+          [agentId],
+        );
+        await pool.query(
+          `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+           VALUES ($1, $2, 'member', 'active')`,
+          [workspaceId, agentId],
+        );
+        await expect(
+          pool.query(
+            `INSERT INTO agents (user_id, workspace_id, created_by)
+             VALUES ($1, $2, $3)`,
+            [agentId, workspaceId, ownerId],
+          ),
+        ).resolves.toMatchObject({ rowCount: 1 });
+
+        await expect(
+          pool.query<{ id: string; kind: string; email: string | null }>(
+            `SELECT id, kind, email::text
+               FROM users
+              WHERE id = ANY($1::uuid[])
+              ORDER BY id`,
+            [[ownerId, botId, oldServerUserId, agentId]],
+          ),
+        ).resolves.toMatchObject({
+          rows: expect.arrayContaining([
+            { id: ownerId, kind: "human", email: "owner@example.test" },
+            { id: botId, kind: "bot", email: null },
+            { id: oldServerUserId, kind: "human", email: "old-server@example.test" },
+            { id: agentId, kind: "agent", email: null },
+          ]),
+        });
+        await expect(
+          pool.query<{ agent_token_id: string | null }>(
+            "SELECT agent_token_id FROM realtime_tickets WHERE id = $1",
+            [existingTicketId],
+          ),
+        ).resolves.toMatchObject({ rows: [{ agent_token_id: null }] });
+      });
     });
   });
 

@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  agentTokenSecretSchema,
   currentUserSchema,
   invitationSchema,
   magicLinkRequestedSchema,
   sessionTokenSchema,
+  type Agent,
+  type AgentCurrentPrincipal,
+  type AgentScope,
+  type AgentToken,
   type CurrentUser,
+  type CurrentPrincipal,
   type DeviceSession,
   type Email,
   type EntityId,
@@ -18,7 +24,7 @@ import { ApiError } from "../../errors.js";
 import type { SignInThrottle } from "../../throttle.js";
 import type { EmailSender } from "./email.js";
 import type { IdentityRepository, IdentityUser } from "./repository.js";
-import { hashToken, issueToken } from "./tokens.js";
+import { hashToken, issueAgentToken, issueToken } from "./tokens.js";
 
 /** displayNameSchema's upper bound, which is narrower than userSchema.displayName's. */
 const DISPLAY_NAME_MAX_LENGTH = 80;
@@ -35,8 +41,23 @@ export interface RedeemedSession {
 export type RefreshedSession = RedeemedSession;
 
 export interface AuthenticatedIdentity {
+  readonly currentUser: CurrentPrincipal;
+  readonly principalKind: "human" | "agent";
+  readonly sessionId?: EntityId;
+  readonly agentTokenId?: EntityId;
+}
+
+export interface AuthenticatedAgentIdentity extends AuthenticatedIdentity {
+  readonly currentUser: AgentCurrentPrincipal;
+  readonly principalKind: "agent";
+  readonly agentTokenId: EntityId;
+  readonly sessionId?: never;
+}
+
+export interface AuthenticatedHumanIdentity extends AuthenticatedIdentity {
   readonly currentUser: CurrentUser;
   readonly sessionId: EntityId;
+  readonly agentTokenId?: never;
   readonly principalKind: "human";
 }
 
@@ -66,6 +87,17 @@ function isExpired(expiresAt: string, now: Date): boolean {
 function unauthenticated(): ApiError {
   return new ApiError(401, "UNAUTHORIZED", "Sign in link or session is invalid");
 }
+
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "23505";
+}
+
+const AGENT_SCOPE_ORDER: readonly AgentScope[] = [
+  "workspace:read",
+  "messages:write",
+  "conversations:write",
+  "read-cursors:write",
+];
 
 function usernameBase(email: Email): string {
   const localPart = email.slice(0, email.lastIndexOf("@"));
@@ -184,7 +216,7 @@ export class IdentityService {
     return (await this.authenticateContext(sessionToken))?.currentUser ?? null;
   }
 
-  async authenticateContext(sessionToken: string): Promise<AuthenticatedIdentity | null> {
+  async authenticateContext(sessionToken: string): Promise<AuthenticatedHumanIdentity | null> {
     const now = this.#clock();
     const session = await this.#repository.findDeviceSessionByTokenHash(hashToken(sessionToken));
     if (session === null || isExpired(session.expiresAt, now)) return null;
@@ -192,6 +224,21 @@ export class IdentityService {
     return currentUser === null
       ? null
       : { currentUser, sessionId: session.id, principalKind: "human" };
+  }
+
+  async authenticateAgentContext(agentToken: string): Promise<AuthenticatedAgentIdentity | null> {
+    const parsed = agentTokenSecretSchema.safeParse(agentToken);
+    if (!parsed.success) return null;
+    const authenticated = await this.#repository.authenticateAgentToken(
+      hashToken(parsed.data),
+      iso(this.#clock()),
+    );
+    if (authenticated === null) return null;
+    return {
+      currentUser: authenticated.principal,
+      principalKind: "agent",
+      agentTokenId: authenticated.tokenId,
+    };
   }
 
   async refreshSession(sessionToken: string): Promise<RefreshedSession> {
@@ -244,17 +291,11 @@ export class IdentityService {
   async createInvitation(actorUserId: EntityId, email: Email, role: "member"): Promise<Invitation> {
     const now = this.#clock();
     return this.#repository.transaction(async (repository) => {
-      const actorMembership = await repository.findActiveMembershipByUserId(actorUserId);
-      if (actorMembership === null || actorMembership.role !== "owner") {
-        throw new ApiError(403, "FORBIDDEN", "Only a workspace owner may invite members");
-      }
-      if (!(await repository.lockWorkspace(actorMembership.workspaceId))) {
-        throw new ApiError(403, "FORBIDDEN", "Only a workspace owner may invite members");
-      }
-      const membership = await repository.findMembership(actorMembership.workspaceId, actorUserId);
-      if (membership?.status !== "active" || membership.role !== "owner") {
-        throw new ApiError(403, "FORBIDDEN", "Only a workspace owner may invite members");
-      }
+      const actorMembership = await this.#requireLockedOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may invite members",
+      );
       if (
         (await repository.countActiveMembers(actorMembership.workspaceId)) >= MAX_ACTIVE_MEMBERS
       ) {
@@ -275,6 +316,140 @@ export class IdentityService {
         expiresAt: iso(new Date(now.getTime() + INVITATION_TTL_MS)),
       });
       return invitationSchema.parse(invitation);
+    });
+  }
+
+  async listInvitations(actorUserId: EntityId): Promise<Invitation[]> {
+    const owner = await this.#requireOwner(actorUserId, this.#repository);
+    await this.#repository.expireInvitations(iso(this.#clock()));
+    return this.#repository.listInvitations(owner.workspaceId);
+  }
+
+  async revokeInvitation(actorUserId: EntityId, invitationId: EntityId): Promise<boolean> {
+    return this.#repository.transaction(async (repository) => {
+      const owner = await this.#requireOwner(actorUserId, repository);
+      const invitation = await repository.findInvitationById(invitationId);
+      if (invitation === null || invitation.workspaceId !== owner.workspaceId) return false;
+      return (await repository.markInvitationRevoked(invitationId)) !== null;
+    });
+  }
+
+  async listAgents(actorUserId: EntityId): Promise<Agent[]> {
+    const membership = await this.#requireOwner(actorUserId, this.#repository);
+    return this.#repository.listAgents(membership.workspaceId);
+  }
+
+  async createAgent(
+    actorUserId: EntityId,
+    input: { readonly username: string; readonly displayName: string },
+  ): Promise<Agent> {
+    return this.#repository.transaction(async (repository) => {
+      const owner = await this.#requireLockedOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may create agents",
+      );
+      if ((await repository.countActiveMembers(owner.workspaceId)) >= MAX_ACTIVE_MEMBERS) {
+        throw new ApiError(409, "CONFLICT", "The workspace is at capacity");
+      }
+      if ((await repository.findUserByUsername(input.username)) !== null) {
+        throw new ApiError(409, "CONFLICT", "That username is already in use");
+      }
+      try {
+        return await repository.insertAgent({
+          id: randomUUID(),
+          workspaceId: owner.workspaceId,
+          username: input.username,
+          displayName: input.displayName,
+          createdBy: actorUserId,
+        });
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new ApiError(409, "CONFLICT", "That username is already in use");
+        }
+        throw error;
+      }
+    });
+  }
+
+  async disableAgent(actorUserId: EntityId, agentUserId: EntityId): Promise<boolean> {
+    return this.#repository.transaction(async (repository) => {
+      const owner = await this.#requireLockedOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may disable agents",
+      );
+      if ((await repository.findAgent(owner.workspaceId, agentUserId)) === null) return false;
+      await repository.disableAgent(
+        owner.workspaceId,
+        agentUserId,
+        iso(this.#clock()),
+        actorUserId,
+      );
+      return true;
+    });
+  }
+
+  async listAgentTokens(actorUserId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
+    const owner = await this.#requireOwner(actorUserId, this.#repository);
+    if ((await this.#repository.findAgent(owner.workspaceId, agentUserId)) === null) {
+      throw new ApiError(404, "NOT_FOUND", "Agent not found");
+    }
+    return this.#repository.listAgentTokens(owner.workspaceId, agentUserId);
+  }
+
+  async createAgentToken(
+    actorUserId: EntityId,
+    agentUserId: EntityId,
+    input: { readonly label: string; readonly scopes: readonly AgentScope[] },
+  ): Promise<{ readonly token: string; readonly agentToken: AgentToken }> {
+    return this.#repository.transaction(async (repository) => {
+      const owner = await this.#requireLockedOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may create agent tokens",
+      );
+      const agent = await repository.findAgent(owner.workspaceId, agentUserId);
+      if (agent === null) throw new ApiError(404, "NOT_FOUND", "Agent not found");
+      if (agent.status !== "active") {
+        throw new ApiError(409, "CONFLICT", "Disabled agents cannot receive new tokens");
+      }
+
+      const uniqueScopes = new Set(input.scopes);
+      const scopes = AGENT_SCOPE_ORDER.filter((scope) => uniqueScopes.has(scope));
+      const issued = issueAgentToken();
+      const agentToken = await repository.insertAgentToken({
+        id: randomUUID(),
+        workspaceId: owner.workspaceId,
+        agentUserId,
+        tokenHash: issued.hash,
+        label: input.label,
+        scopes,
+        createdBy: actorUserId,
+        createdAt: iso(this.#clock()),
+      });
+      return { token: agentTokenSecretSchema.parse(issued.token), agentToken };
+    });
+  }
+
+  async revokeAgentToken(
+    actorUserId: EntityId,
+    agentUserId: EntityId,
+    tokenId: EntityId,
+  ): Promise<boolean> {
+    return this.#repository.transaction(async (repository) => {
+      const owner = await this.#requireLockedOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may revoke agent tokens",
+      );
+      if ((await repository.findAgent(owner.workspaceId, agentUserId)) === null) return false;
+      return repository.revokeAgentToken(
+        owner.workspaceId,
+        agentUserId,
+        tokenId,
+        iso(this.#clock()),
+      );
     });
   }
 
@@ -299,6 +474,39 @@ export class IdentityService {
         status: "active",
       });
     });
+  }
+
+  async #requireOwner(
+    actorUserId: EntityId,
+    repository: IdentityRepository,
+    message = "A workspace owner session is required",
+  ) {
+    const membership = await repository.findActiveMembershipByUserId(actorUserId);
+    if (membership === null || membership.role !== "owner") {
+      throw new ApiError(403, "FORBIDDEN", message);
+    }
+    return membership;
+  }
+
+  /**
+   * Take the workspace lock, then re-check ownership inside it. The first check picks the
+   * workspace to lock; only the second one is authoritative, because a concurrent transaction
+   * can revoke the actor's membership between them.
+   */
+  async #requireLockedOwner(
+    actorUserId: EntityId,
+    repository: IdentityRepository,
+    message: string,
+  ) {
+    const candidate = await this.#requireOwner(actorUserId, repository, message);
+    if (!(await repository.lockWorkspace(candidate.workspaceId))) {
+      throw new ApiError(403, "FORBIDDEN", message);
+    }
+    const owner = await this.#requireOwner(actorUserId, repository, message);
+    if (owner.workspaceId !== candidate.workspaceId) {
+      throw new ApiError(403, "FORBIDDEN", message);
+    }
+    return owner;
   }
 
   async #resolveActiveUser(email: Email): Promise<IdentityUser> {

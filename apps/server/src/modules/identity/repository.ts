@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  agentCurrentPrincipalSchema,
+  agentSchema,
+  agentTokenSchema,
   deviceSessionSchema,
   emailSchema,
   entityIdSchema,
@@ -9,6 +12,10 @@ import {
   userSchema,
   workspaceMembershipSchema,
   workspaceSchema,
+  type Agent,
+  type AgentCurrentPrincipal,
+  type AgentScope,
+  type AgentToken,
   type DeviceSession,
   type Email,
   type EntityId,
@@ -24,6 +31,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
 
 import { withTransaction } from "../../db/pool.js";
+import { insertSyncEvent } from "../workspace/sync-events.js";
 
 interface UserRow extends QueryResultRow {
   readonly id: unknown;
@@ -35,6 +43,47 @@ interface UserRow extends QueryResultRow {
   readonly created_at: unknown;
   readonly updated_at: unknown;
 }
+
+interface AgentRow extends QueryResultRow {
+  readonly user_id: unknown;
+  readonly workspace_id: unknown;
+  readonly username: unknown;
+  readonly display_name: unknown;
+  readonly avatar_url: unknown;
+  readonly user_created_at: unknown;
+  readonly user_updated_at: unknown;
+  readonly created_by: unknown;
+  readonly agent_created_at: unknown;
+  readonly disabled_at: unknown;
+}
+
+interface AgentTokenRow extends QueryResultRow {
+  readonly id: unknown;
+  readonly agent_user_id: unknown;
+  readonly label: unknown;
+  readonly scopes: unknown;
+  readonly created_by: unknown;
+  readonly created_at: unknown;
+  readonly last_used_at: unknown;
+  readonly revoked_at: unknown;
+}
+
+interface AuthenticatedAgentRow extends QueryResultRow {
+  readonly token_id: unknown;
+  readonly workspace_id: unknown;
+  readonly user_id: unknown;
+  readonly username: unknown;
+  readonly display_name: unknown;
+  readonly avatar_url: unknown;
+  readonly user_created_at: unknown;
+  readonly user_updated_at: unknown;
+  readonly role: unknown;
+  readonly scopes: unknown;
+  readonly last_used_at: unknown;
+}
+
+/** How stale an agent token's `last_used_at` may be before authentication refreshes it. */
+const AGENT_TOKEN_LAST_USED_REFRESH_MS = 60_000;
 
 interface WorkspaceRow extends QueryResultRow {
   readonly id: unknown;
@@ -159,6 +208,30 @@ export interface InsertDeviceSessionInput {
   readonly expiresAt: IsoDateTime;
 }
 
+export interface InsertAgentInput {
+  readonly id: EntityId;
+  readonly workspaceId: EntityId;
+  readonly username: string;
+  readonly displayName: string;
+  readonly createdBy: EntityId;
+}
+
+export interface InsertAgentTokenInput {
+  readonly id: EntityId;
+  readonly workspaceId: EntityId;
+  readonly agentUserId: EntityId;
+  readonly tokenHash: Buffer;
+  readonly label: string;
+  readonly scopes: readonly AgentScope[];
+  readonly createdBy: EntityId;
+  readonly createdAt: IsoDateTime;
+}
+
+export interface AuthenticatedAgent {
+  readonly principal: AgentCurrentPrincipal;
+  readonly tokenId: EntityId;
+}
+
 export type ConsumeMagicLinkResult =
   | { readonly status: "consumed"; readonly magicLink: MagicLinkRecord }
   | { readonly status: "already_consumed"; readonly magicLink: MagicLinkRecord }
@@ -179,7 +252,7 @@ function nullableTimestamp(value: unknown): string | null {
   return value === null ? null : timestamp(value);
 }
 
-function mapUser(row: UserRow): IdentityUser {
+function mapPublicUser(row: UserRow): User {
   const user = userSchema.parse({
     id: row.id,
     kind: row.kind,
@@ -189,7 +262,52 @@ function mapUser(row: UserRow): IdentityUser {
     createdAt: timestamp(row.created_at),
     updatedAt: timestamp(row.updated_at),
   });
+  return user;
+}
+
+function mapUser(row: UserRow): IdentityUser {
+  const user = mapPublicUser(row);
   return { ...user, email: emailSchema.nullable().parse(row.email) };
+}
+
+function mapAgent(row: AgentRow): Agent {
+  const disabledAt = nullableTimestamp(row.disabled_at);
+  return agentSchema.parse({
+    user: {
+      id: row.user_id,
+      kind: "agent",
+      username: row.username,
+      displayName: row.display_name,
+      avatarUrl: row.avatar_url,
+      createdAt: timestamp(row.user_created_at),
+      updatedAt: timestamp(row.user_updated_at),
+    },
+    workspaceId: row.workspace_id,
+    role: "member",
+    status: disabledAt === null ? "active" : "disabled",
+    createdBy: row.created_by,
+    createdAt: timestamp(row.agent_created_at),
+    disabledAt,
+  });
+}
+
+function mapAgentDirectoryUser(user: Agent["user"]): User {
+  // Keep member.updated compatible with the previous released `human | bot` User discriminator.
+  // The event is only an invalidation signal; agent administration and /auth/me retain `agent`.
+  return userSchema.parse({ ...user, kind: "human" });
+}
+
+function mapAgentToken(row: AgentTokenRow): AgentToken {
+  return agentTokenSchema.parse({
+    id: row.id,
+    agentUserId: row.agent_user_id,
+    label: row.label,
+    scopes: row.scopes,
+    createdBy: row.created_by,
+    createdAt: timestamp(row.created_at),
+    lastUsedAt: nullableTimestamp(row.last_used_at),
+    revokedAt: nullableTimestamp(row.revoked_at),
+  });
 }
 
 function mapWorkspace(row: WorkspaceRow): Workspace {
@@ -283,11 +401,26 @@ export class IdentityRepository {
     );
   }
 
+  /**
+   * Agent lifecycle mutations must publish their `member.updated` sync event on the same
+   * connection and transaction as the row changes they describe -- otherwise a rollback could
+   * leave a committed event behind, or a commit could leave an agent without one. `#database` is
+   * only ever the transactional `PoolClient` once `transaction()` has handed a scoped repository
+   * to its callback (see the constructor), so this just asserts that invariant instead of
+   * threading an extra client parameter through every caller.
+   */
+  #requireTransactionalClient(caller: string): PoolClient {
+    if (this.#transactionPool !== null) {
+      throw new Error(`${caller} must run inside repository.transaction(...)`);
+    }
+    return this.#database as PoolClient;
+  }
+
   async findUserById(id: EntityId): Promise<IdentityUser | null> {
     const result = await this.#database.query<UserRow>(
       `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
          FROM users
-        WHERE id = $1`,
+        WHERE id = $1 AND kind = 'human'`,
       [id],
     );
     return firstOrNull(result, mapUser);
@@ -304,14 +437,14 @@ export class IdentityRepository {
     return firstOrNull(result, mapUser);
   }
 
-  async findUserByUsername(username: string): Promise<IdentityUser | null> {
+  async findUserByUsername(username: string): Promise<User | null> {
     const result = await this.#database.query<UserRow>(
       `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
          FROM users
         WHERE username = $1`,
       [username],
     );
-    return firstOrNull(result, mapUser);
+    return firstOrNull(result, mapPublicUser);
   }
 
   async insertUser(input: InsertUserInput): Promise<IdentityUser> {
@@ -517,6 +650,19 @@ export class IdentityRepository {
     return firstOrNull(result, mapInvitation);
   }
 
+  async listInvitations(workspaceId: EntityId): Promise<Invitation[]> {
+    const result = await this.#database.query<InvitationRow>(
+      `SELECT id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
+              created_at, updated_at
+         FROM invitations
+        WHERE workspace_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1000`,
+      [workspaceId],
+    );
+    return result.rows.map(mapInvitation);
+  }
+
   async markInvitationAccepted(id: EntityId, acceptedAt: IsoDateTime): Promise<Invitation | null> {
     const result = await this.#database.query<InvitationRow>(
       `UPDATE invitations
@@ -698,5 +844,265 @@ export class IdentityRepository {
       [userId],
     );
     return result.rows.map(mapDeviceSession);
+  }
+
+  async insertAgent(input: InsertAgentInput): Promise<Agent> {
+    // Must be inside repository.transaction(...): the user/membership/agent rows and the
+    // member.updated sync event below have to commit or roll back together. The event only
+    // invalidates the client's member directory, so if it committed without the rows the client
+    // would re-read a directory that does not contain the agent yet -- and if the rows committed
+    // without the event, an already-bootstrapped client would never learn to re-read at all.
+    const client = this.#requireTransactionalClient("insertAgent");
+    await this.#database.query(
+      `INSERT INTO users (id, email, username, display_name, avatar_url, kind)
+       VALUES ($1, NULL, $2, $3, NULL, 'agent')`,
+      [input.id, input.username, input.displayName],
+    );
+    await this.upsertMembership({
+      workspaceId: input.workspaceId,
+      userId: input.id,
+      role: "member",
+      status: "active",
+    });
+    await this.#database.query(
+      `INSERT INTO agents (user_id, workspace_id, created_by)
+       VALUES ($1, $2, $3)`,
+      [input.id, input.workspaceId, input.createdBy],
+    );
+    const agent = await this.findAgent(input.workspaceId, input.id);
+    if (agent === null) throw new Error("Agent insert returned no row");
+    // member.updated invalidates the recipient's workspace member directory: it announces THAT
+    // the directory changed, not what it now is. Clients re-read GET /v1/members (or bootstrap)
+    // and replace their list; they must not upsert this payload. See the doc comment on
+    // memberUpdatedEventSchema for why the payload cannot be authoritative.
+    //
+    // Audience omitted: defaults to every active workspace member, same as workspace mutations,
+    // so every already-bootstrapped client is told to re-read and picks up the new agent.
+    await insertSyncEvent(client, {
+      workspaceId: input.workspaceId,
+      actorUserId: input.createdBy,
+      type: "member.updated",
+      conversationId: null,
+      payload: { member: mapAgentDirectoryUser(agent.user) },
+    });
+    return agent;
+  }
+
+  async findAgent(workspaceId: EntityId, userId: EntityId): Promise<Agent | null> {
+    const result = await this.#database.query<AgentRow>(
+      `SELECT agent.user_id,
+              agent.workspace_id,
+              user_account.username,
+              user_account.display_name,
+              user_account.avatar_url,
+              user_account.created_at AS user_created_at,
+              user_account.updated_at AS user_updated_at,
+              agent.created_by,
+              agent.created_at AS agent_created_at,
+              agent.disabled_at
+         FROM agents AS agent
+         JOIN users AS user_account ON user_account.id = agent.user_id
+        WHERE agent.workspace_id = $1 AND agent.user_id = $2`,
+      [workspaceId, userId],
+    );
+    return firstOrNull(result, mapAgent);
+  }
+
+  async listAgents(workspaceId: EntityId): Promise<Agent[]> {
+    const result = await this.#database.query<AgentRow>(
+      `SELECT agent.user_id,
+              agent.workspace_id,
+              user_account.username,
+              user_account.display_name,
+              user_account.avatar_url,
+              user_account.created_at AS user_created_at,
+              user_account.updated_at AS user_updated_at,
+              agent.created_by,
+              agent.created_at AS agent_created_at,
+              agent.disabled_at
+         FROM agents AS agent
+        JOIN users AS user_account ON user_account.id = agent.user_id
+        WHERE agent.workspace_id = $1
+        ORDER BY agent.created_at, agent.user_id
+        LIMIT 1000`,
+      [workspaceId],
+    );
+    return result.rows.map(mapAgent);
+  }
+
+  async disableAgent(
+    workspaceId: EntityId,
+    userId: EntityId,
+    disabledAt: IsoDateTime,
+    actorUserId: EntityId,
+  ): Promise<void> {
+    // Same transactional requirement as insertAgent: the membership revocation and the
+    // member.updated event must commit or roll back together, or a disabled agent could linger
+    // as a stale mention target for clients that never hear about the change.
+    const client = this.#requireTransactionalClient("disableAgent");
+    // Only rows that are still enabled match this WHERE, so rowCount tells us whether this call
+    // is the one that actually transitioned the agent -- a repeat disable (disabled_at already
+    // set) updates nothing here and must not fan out another member.updated event, even though
+    // the membership/token revocations below stay idempotent and safe to re-run regardless.
+    const disableResult = await this.#database.query(
+      `UPDATE agents
+          SET disabled_at = $3
+        WHERE workspace_id = $1 AND user_id = $2 AND disabled_at IS NULL`,
+      [workspaceId, userId, disabledAt],
+    );
+    const didTransition = (disableResult.rowCount ?? 0) > 0;
+    await this.#database.query(
+      `UPDATE workspace_memberships
+          SET status = 'revoked', updated_at = $3
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, userId, disabledAt],
+    );
+    await this.#database.query(
+      `UPDATE agent_tokens
+          SET revoked_at = coalesce(revoked_at, $3)
+        WHERE workspace_id = $1 AND agent_user_id = $2`,
+      [workspaceId, userId, disabledAt],
+    );
+    if (!didTransition) return;
+    const agent = await this.findAgent(workspaceId, userId);
+    if (agent === null) throw new Error("disableAgent could not find the agent it just updated");
+    // Same contract as insertAgent: this invalidates the recipient's member directory rather
+    // than describing the agent's new state. That is what makes disable work at all -- the
+    // payload's User cannot say "removed" (userSchema has no status field), but the directory
+    // the client re-reads is already correct, because GET /v1/members and bootstrap both join
+    // workspace_memberships on status = 'active' and the UPDATE above set 'revoked'.
+    //
+    // The membership row above is already 'revoked', so the default active-member audience
+    // correctly excludes the agent itself while still reaching every other bootstrapped client.
+    await insertSyncEvent(client, {
+      workspaceId,
+      actorUserId,
+      type: "member.updated",
+      conversationId: null,
+      payload: { member: mapAgentDirectoryUser(agent.user) },
+    });
+  }
+
+  async insertAgentToken(input: InsertAgentTokenInput): Promise<AgentToken> {
+    const result = await this.#database.query<AgentTokenRow>(
+      `INSERT INTO agent_tokens (
+         id, workspace_id, agent_user_id, token_hash, label, scopes, created_by, created_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8)
+       RETURNING id, agent_user_id, label, scopes, created_by, created_at, last_used_at, revoked_at`,
+      [
+        input.id,
+        input.workspaceId,
+        input.agentUserId,
+        input.tokenHash,
+        input.label,
+        [...input.scopes],
+        input.createdBy,
+        input.createdAt,
+      ],
+    );
+    return mapAgentToken(result.rows[0] as AgentTokenRow);
+  }
+
+  async listAgentTokens(workspaceId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
+    const result = await this.#database.query<AgentTokenRow>(
+      `SELECT id, agent_user_id, label, scopes, created_by, created_at, last_used_at, revoked_at
+        FROM agent_tokens
+        WHERE workspace_id = $1 AND agent_user_id = $2
+        ORDER BY created_at, id
+        LIMIT 1000`,
+      [workspaceId, agentUserId],
+    );
+    return result.rows.map(mapAgentToken);
+  }
+
+  async revokeAgentToken(
+    workspaceId: EntityId,
+    agentUserId: EntityId,
+    tokenId: EntityId,
+    revokedAt: IsoDateTime,
+  ): Promise<boolean> {
+    const result = await this.#database.query<IdRow>(
+      `UPDATE agent_tokens
+          SET revoked_at = coalesce(revoked_at, $4)
+        WHERE workspace_id = $1 AND agent_user_id = $2 AND id = $3
+        RETURNING id`,
+      [workspaceId, agentUserId, tokenId, revokedAt],
+    );
+    return result.rows[0] !== undefined;
+  }
+
+  async authenticateAgentToken(
+    tokenHash: Buffer,
+    usedAt: IsoDateTime,
+  ): Promise<AuthenticatedAgent | null> {
+    const result = await this.#database.query<AuthenticatedAgentRow>(
+      `SELECT token.id AS token_id,
+              token.workspace_id,
+              token.agent_user_id AS user_id,
+              user_account.username,
+              user_account.display_name,
+              user_account.avatar_url,
+              user_account.created_at AS user_created_at,
+              user_account.updated_at AS user_updated_at,
+              membership.role,
+              token.scopes,
+              token.last_used_at
+         FROM agent_tokens AS token
+         JOIN agents AS agent
+           ON agent.user_id = token.agent_user_id
+          AND agent.workspace_id = token.workspace_id
+         JOIN users AS user_account
+           ON user_account.id = agent.user_id
+         JOIN workspace_memberships AS membership
+           ON membership.workspace_id = token.workspace_id
+          AND membership.user_id = token.agent_user_id
+        WHERE token.token_hash = $1
+          AND token.revoked_at IS NULL
+          AND agent.disabled_at IS NULL
+          AND user_account.kind = 'agent'
+          AND membership.status = 'active'
+          AND membership.role = 'member'`,
+      [tokenHash],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+
+    // `last_used_at` is an audit breadcrumb, not a session clock. Writing it on every request
+    // turns each authentication into a write that takes a row lock, so concurrent requests
+    // carrying the same token serialize on it. Refreshing at most once per interval keeps the
+    // breadcrumb useful and leaves the hot path a lock-free read.
+    const lastUsedAt = nullableTimestamp(row.last_used_at);
+    const staleBefore = new Date(
+      Date.parse(usedAt) - AGENT_TOKEN_LAST_USED_REFRESH_MS,
+    ).toISOString();
+    if (lastUsedAt === null || lastUsedAt < staleBefore) {
+      await this.#database.query(
+        `UPDATE agent_tokens
+            SET last_used_at = $2
+          WHERE id = $1
+            AND (last_used_at IS NULL OR last_used_at < $3)`,
+        [row.token_id, usedAt, staleBefore],
+      );
+    }
+
+    return {
+      tokenId: entityIdSchema.parse(row.token_id),
+      principal: agentCurrentPrincipalSchema.parse({
+        type: "agent",
+        user: {
+          id: row.user_id,
+          kind: "agent",
+          username: row.username,
+          displayName: row.display_name,
+          avatarUrl: row.avatar_url,
+          createdAt: timestamp(row.user_created_at),
+          updatedAt: timestamp(row.user_updated_at),
+        },
+        workspaceId: row.workspace_id,
+        role: row.role,
+        scopes: row.scopes,
+      }),
+    };
   }
 }

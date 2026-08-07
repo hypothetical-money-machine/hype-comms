@@ -174,10 +174,15 @@ describe("realtime route", () => {
     expect(consumeTicket).not.toHaveBeenCalled();
   });
 
-  it("consumes a one-time ticket and emits the versioned handshake", async () => {
+  // `hmm-chat-cli watch` runs on `ws`, which sends no Origin, and the CLI supports human
+  // profiles as well as agent tokens. Requiring an Origin for device-session tickets made that
+  // flow redeem-then-403, burning a ticket per attempt.
+  it("accepts an originless client holding a device-session ticket", async () => {
     const consumeTicket = vi.fn().mockResolvedValue({
       userId: "10000000-0000-4000-8000-000000000001",
       workspaceId: "10000000-0000-4000-8000-000000000002",
+      deviceSessionId: "10000000-0000-4000-8000-000000000003",
+      agentTokenId: null,
     });
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
@@ -187,7 +192,32 @@ describe("realtime route", () => {
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
       `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
-      { origin: "app://bundle" },
+    );
+
+    const [data] = await once(socket, "message");
+    const event = systemConnectedEventSchema.parse(JSON.parse(data.toString()));
+    socket.close();
+
+    expect(event.workspaceSequence).toBe("9");
+    expect(consumeTicket).toHaveBeenCalledOnce();
+    expect(consumeTicket.mock.calls[0]?.[0]).toMatchObject({ origin: undefined });
+  });
+
+  it("accepts an originless agent client, consumes its ticket, and emits the handshake", async () => {
+    const consumeTicket = vi.fn().mockResolvedValue({
+      userId: "10000000-0000-4000-8000-000000000001",
+      workspaceId: "10000000-0000-4000-8000-000000000002",
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000004",
+    });
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      consumeRealtimeTicket: consumeTicket,
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
     );
 
     const [data] = await once(socket, "message");
@@ -197,5 +227,6 @@ describe("realtime route", () => {
     expect(event.workspaceSequence).toBe("9");
     expect(event.delivery).toBe("at_least_once");
     expect(consumeTicket).toHaveBeenCalledOnce();
+    expect(consumeTicket.mock.calls[0]?.[0]).toMatchObject({ origin: undefined });
   });
 });

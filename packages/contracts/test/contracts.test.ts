@@ -8,6 +8,9 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   apiErrorEnvelopeSchema,
+  agentTokenMetadataSchema,
+  agentTokenSecretSchema,
+  agentUserSchema,
   botAccessTokenSchema,
   botScopesSchema,
   channelSlugFromName,
@@ -15,6 +18,9 @@ import {
   clientCapabilitiesHeaderSchema,
   conversationSummarySchema,
   conversationSchema,
+  createAgentTokenRequestSchema,
+  currentAgentPrincipalSchema,
+  currentPrincipalSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
   currentUserSchema,
@@ -23,6 +29,7 @@ import {
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMessageReactionsRequestSchema,
+  memberUpdatedEventSchema,
   messageReactionTargetSchema,
   messageHistoryResponseSchema,
   messageSchema,
@@ -348,6 +355,97 @@ describe("entity contracts", () => {
         expectedVersion: 1,
         status: "done",
         beforeTaskId: TASK_ID,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("agent contracts", () => {
+  const agentUser = {
+    id: USER_ID,
+    kind: "agent",
+    username: "hermes",
+    displayName: "Hermes",
+    avatarUrl: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+
+  it("keeps human principals unchanged and gives agents a distinct scoped arm", () => {
+    expect(currentPrincipalSchema.parse(BOOTSTRAP.currentUser)).toEqual({
+      ...BOOTSTRAP.currentUser,
+      user: { ...BOOTSTRAP.currentUser.user, kind: "human" },
+    });
+    expect(
+      currentAgentPrincipalSchema.parse({
+        type: "agent",
+        user: agentUser,
+        workspaceId: WORKSPACE_ID,
+        role: "member",
+        scopes: ["workspace:read", "messages:write"],
+      }),
+    ).toMatchObject({ type: "agent", user: { username: "hermes" } });
+    expect(() =>
+      currentAgentPrincipalSchema.parse({
+        type: "agent",
+        user: agentUser,
+        workspaceId: WORKSPACE_ID,
+        role: "owner",
+        scopes: ["workspace:read"],
+      }),
+    ).toThrow();
+  });
+
+  it("validates prefixed secrets, default scopes, unique scopes, and secret-free metadata", () => {
+    const secret = `hmm_agent_${"a".repeat(43)}`;
+    expect(agentTokenSecretSchema.parse(secret)).toBe(secret);
+    expect(() => agentTokenSecretSchema.parse("a".repeat(43))).toThrow();
+    expect(createAgentTokenRequestSchema.parse({ label: "Gateway" })).toEqual({
+      label: "Gateway",
+      scopes: ["workspace:read", "messages:write"],
+    });
+    expect(() =>
+      createAgentTokenRequestSchema.parse({
+        label: "Gateway",
+        scopes: ["workspace:read", "workspace:read"],
+      }),
+    ).toThrow();
+
+    const metadata = {
+      id: MESSAGE_ID,
+      agentUserId: USER_ID,
+      label: "Gateway",
+      scopes: ["workspace:read", "messages:write"],
+      createdBy: USER_ID,
+      createdAt: NOW,
+      lastUsedAt: null,
+      revokedAt: null,
+    };
+    expect(agentTokenMetadataSchema.parse(metadata)).toEqual(metadata);
+    expect(() => agentTokenMetadataSchema.parse({ ...metadata, token: secret })).toThrow();
+  });
+
+  it("represents active and disabled agent records without adding fields to public users", () => {
+    expect(
+      agentUserSchema.parse({
+        user: agentUser,
+        workspaceId: WORKSPACE_ID,
+        role: "member",
+        status: "active",
+        createdBy: USER_ID,
+        createdAt: NOW,
+        disabledAt: null,
+      }),
+    ).toMatchObject({ status: "active" });
+    expect(() =>
+      agentUserSchema.parse({
+        user: agentUser,
+        workspaceId: WORKSPACE_ID,
+        role: "member",
+        status: "disabled",
+        createdBy: USER_ID,
+        createdAt: NOW,
+        disabledAt: null,
       }),
     ).toThrow();
   });
@@ -694,6 +792,64 @@ describe("transport contracts", () => {
       type: "reaction.removed",
     });
     expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
+  });
+
+  it("keeps member.updated a bare invalidation signal that cannot express removal", () => {
+    const member = {
+      id: USER_ID,
+      kind: "agent",
+      username: "hermes",
+      displayName: "Hermes",
+      avatarUrl: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000006",
+      type: "member.updated",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: null,
+      workspaceSequence: "43",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { member },
+    } as const;
+
+    expect(memberUpdatedEventSchema.parse(event)).toEqual(event);
+    expect(workspaceEventSchema.parse(event)).toMatchObject({ type: "member.updated" });
+    expect(Object.keys(memberUpdatedEventSchema.shape.payload.shape)).toEqual(["member"]);
+
+    // The payload is deliberately NOT authoritative: it is a User and a User has no status flag,
+    // so a disable cannot be expressed here and consumers must re-read GET /v1/members instead of
+    // upserting this member. These assertions exist so a future "just add a status flag" change
+    // fails loudly rather than silently reintroducing the upsert bug.
+    expect(() =>
+      memberUpdatedEventSchema.parse({
+        ...event,
+        payload: { member, removed: true },
+      }),
+    ).toThrow();
+    expect(() =>
+      memberUpdatedEventSchema.parse({
+        ...event,
+        payload: { member: { ...member, status: "revoked" } },
+      }),
+    ).toThrow();
+    expect(() => userSchema.parse({ ...member, status: "revoked" })).toThrow();
+    expect(() => userSchema.parse({ ...member, isActive: false })).toThrow();
+    expect(() => userSchema.parse({ ...member, disabledAt: NOW })).toThrow();
+
+    // A member.updated event is workspace-scoped: pinning these to null keeps it out of the
+    // per-conversation projection paths that would tempt a consumer to patch state from it.
+    expect(() =>
+      memberUpdatedEventSchema.parse({ ...event, conversationId: CONVERSATION_ID }),
+    ).toThrow();
+    expect(() =>
+      memberUpdatedEventSchema.parse({ ...event, conversationSequence: "42" }),
+    ).toThrow();
   });
 
   it("accepts legacy and canonical read-state events but rejects partial counts", () => {

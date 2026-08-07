@@ -2,21 +2,36 @@ import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
 
-export interface RealtimePrincipal {
-  readonly userId: string;
-  readonly workspaceId: string;
-  /** The device session the ticket was bound to, so a live socket stays revalidatable. */
-  readonly deviceSessionId: string;
-  /** False/absent for tickets issued to clients predating reaction sync events. */
-  readonly reactionEvents?: boolean;
-  /** False/absent for tickets issued to clients predating canonical read-state events. */
-  readonly readStateEvents?: boolean;
-  /** False/absent for tickets issued to clients predating conversation task events. */
-  readonly taskEvents?: boolean;
-}
+export type RealtimePrincipal =
+  | {
+      readonly userId: string;
+      readonly workspaceId: string;
+      /** The human device session the ticket was bound to. */
+      readonly deviceSessionId: string;
+      readonly agentTokenId: null;
+      /** False/absent for tickets issued to clients predating reaction sync events. */
+      readonly reactionEvents?: boolean;
+      /** False/absent for tickets issued to clients predating canonical read-state events. */
+      readonly readStateEvents?: boolean;
+      /** False/absent for tickets issued to clients predating conversation task events. */
+      readonly taskEvents?: boolean;
+    }
+  | {
+      readonly userId: string;
+      readonly workspaceId: string;
+      readonly deviceSessionId: null;
+      /** The agent credential the ticket was bound to. */
+      readonly agentTokenId: string;
+      /** False/absent for tickets issued to clients predating reaction sync events. */
+      readonly reactionEvents?: boolean;
+      /** False/absent for tickets issued to clients predating canonical read-state events. */
+      readonly readStateEvents?: boolean;
+      /** False/absent for tickets issued to clients predating conversation task events. */
+      readonly taskEvents?: boolean;
+    };
 
 /**
- * Outcome of re-checking a live connection's device session and workspace membership.
+ * Outcome of re-checking a live connection's bound credential and workspace membership.
  * `valid` means the socket may keep receiving events; every other arm must close it.
  */
 export type RealtimePrincipalRevalidation =
@@ -24,17 +39,23 @@ export type RealtimePrincipalRevalidation =
   | {
       readonly status: "invalid";
       readonly reason:
-        "unknown_session" | "session_revoked" | "session_expired" | "membership_inactive";
+        | "unknown_session"
+        | "session_revoked"
+        | "session_expired"
+        | "unknown_agent_token"
+        | "agent_token_revoked"
+        | "agent_disabled"
+        | "membership_inactive";
     };
 
-/** Implementations re-check the device session and membership without consuming anything. */
+/** Implementations re-check the bound device session/agent token and membership without consuming. */
 export type RevalidateRealtimePrincipal = (
   principal: RealtimePrincipal,
 ) => Promise<RealtimePrincipalRevalidation>;
 
 export interface ConsumeRealtimeTicketInput {
   readonly ticket: string;
-  readonly origin: string;
+  readonly origin: string | undefined;
   readonly request: FastifyRequest;
 }
 

@@ -11,7 +11,7 @@ import {
   type Message,
   type Reaction,
   type SendMessageOperation,
-  type WorkspaceBootstrapResponse,
+  type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
 } from "@hmm-chat/contracts";
 
@@ -40,7 +40,7 @@ const user = {
   updatedAt: NOW,
 } as const;
 
-const bootstrap: WorkspaceBootstrapResponse = {
+const bootstrap: HumanWorkspaceBootstrapResponse = {
   currentUser: {
     user,
     email: "morgan@example.com",

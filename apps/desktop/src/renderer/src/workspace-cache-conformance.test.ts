@@ -230,6 +230,21 @@ const reactionRemovedEvent: WorkspaceEvent = {
   workspaceSequence: "10",
 };
 
+/**
+ * Carries the agent the server has just disabled. `userSchema` has no status field, so the payload
+ * looks exactly like a profile edit — which is why applying it as an upsert re-asserted the
+ * disabled member instead of removing it.
+ */
+const disabledAgent: User = {
+  id: "10000000-0000-4000-8000-000000000072",
+  kind: "agent",
+  username: "hermes",
+  displayName: "Hermes",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
 const task: Task = {
   id: TASK_ID,
   workspaceId: WORKSPACE_ID,
@@ -249,6 +264,34 @@ const task: Task = {
   createdAt: NOW,
   updatedAt: NOW,
 };
+
+const memberUpdatedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000066",
+  type: "member.updated",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: null,
+  workspaceSequence: "11",
+  conversationSequence: null,
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: { member: disabledAgent },
+};
+
+/** One more than `workspaceSnapshotSchema.members`'s `.max(25)` — the list that bricks `load()`. */
+const overCapacityMembers: readonly User[] = Array.from({ length: 26 }, (_unused, index) => {
+  const suffix = String(index).padStart(2, "0");
+  return {
+    id: `10000000-0000-4000-8000-1000000000${suffix}`,
+    kind: "human",
+    username: `member-${suffix}`,
+    displayName: `Member ${suffix}`,
+    avatarUrl: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+});
 
 function taskEvent(value: Task, sequence: string): WorkspaceEvent {
   return {
@@ -524,6 +567,54 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(removed.reactions).toEqual([]);
   });
 
+  it("leaves the member list untouched when member.updated is applied", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    const before = await cache.load();
+
+    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(true);
+
+    const after = await cache.load();
+    // The guard the design rests on. `member.updated` announces THAT the directory changed, never
+    // what it now is, so the only correct local effect is advancing the cursor. Re-adding an
+    // upsert here is what made disabling a member re-assert it, and this assertion is what makes
+    // that unwriteable: the payload member must not appear, and no existing member may change.
+    expect(after.bootstrap?.members).toEqual(before.bootstrap?.members);
+    expect(after.bootstrap?.members.map((member) => member.id)).not.toContain(disabledAgent.id);
+    expect(after.syncCursor).toBe("11");
+    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(false);
+  });
+
+  it("does not discard a member replace that arrives before the first snapshot", async () => {
+    // A cache that has never seen replaceSnapshot (or has just had clearServerStatePreservingOutbox
+    // run) still has to accept a replaceMembers write rather than silently dropping it --
+    // WorkspaceRuntime clears its dirty flag once this call resolves regardless of what happened
+    // underneath, so a no-op here would lose the invalidation for good on a memory-only cache.
+    const cache = create();
+    await expect(cache.replaceMembers([morgan, alice])).resolves.toBeUndefined();
+
+    // No workspace row is cached yet, so bootstrap stays null for both implementations -- that
+    // half of the contract is unaffected by whether the write above actually landed.
+    const beforeSnapshot = await cache.load();
+    expect(beforeSnapshot.bootstrap).toBeNull();
+
+    // Once a real snapshot lands, both implementations must agree on the resulting member list.
+    await cache.replaceSnapshot(snapshot, []);
+    const state = await cache.load();
+    expect(state.bootstrap?.members.map((member) => member.id)).toEqual([ALICE_ID, MORGAN_ID]);
+  });
+
+  it("replaces the whole member directory rather than merging into it", async () => {
+    const cache = create();
+    await cache.replaceSnapshot({ ...snapshot, members: [morgan, alice, disabledAgent] }, []);
+
+    // The server's active-only answer after the disable: the agent is simply absent from it.
+    await cache.replaceMembers([morgan, alice]);
+
+    const state = await cache.load();
+    expect(state.bootstrap?.members.map((member) => member.id)).toEqual([ALICE_ID, MORGAN_ID]);
+  });
+
   it("replaces hydrated reactions for a history page and projects mutation responses", async () => {
     const cache = create();
     const reaction = reactionAddedEvent.payload.reaction;
@@ -577,6 +668,30 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   });
 });
 
+describe("PersistentWorkspaceCache durability", () => {
+  it("clamps an over-capacity cached member list instead of failing the load", async () => {
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, []);
+    // A client upgraded from the append-only build can hold 26 rows after a disable followed by a
+    // create. `workspaceSnapshotSchema.members` is `.max(25)` and `load()` parses through it
+    // inside WorkspaceRuntime.start()'s try block, so throwing here bricks the app for good.
+    await cache.replaceMembers(overCapacityMembers);
+
+    const state = await cache.load();
+    expect(state.bootstrap?.members).toHaveLength(25);
+    expect(state.bootstrap?.members.map((member) => member.displayName)).toEqual(
+      overCapacityMembers.slice(0, 25).map((member) => member.displayName),
+    );
+
+    // The next server-derived write repairs the truncation.
+    await cache.replaceMembers([morgan, alice]);
+    expect((await cache.load()).bootstrap?.members.map((member) => member.id)).toEqual([
+      ALICE_ID,
+      MORGAN_ID,
+    ]);
+  });
+});
+
 describe("workspace cache implementation parity", () => {
   it("returns identical loaded state from both implementations", async () => {
     const memory: WorkspaceCache = new MemoryWorkspaceCache();
@@ -589,6 +704,8 @@ describe("workspace cache implementation parity", () => {
       await cache.upsertHistory([messageSequence10, messageSequence1]);
       await cache.applyEvent(messageCreatedEvent);
       await cache.applyEvent(readCursorEvent);
+      await cache.applyEvent(memberUpdatedEvent);
+      await cache.replaceMembers([alice, morgan, disabledAgent]);
       await cache.upsertTasks([task]);
     }
 

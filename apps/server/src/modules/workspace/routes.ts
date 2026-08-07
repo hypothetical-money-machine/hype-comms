@@ -30,7 +30,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { ApiError } from "../../errors.js";
 import { requireTaskIdentity } from "../bots/request-auth.js";
 import type { BotService } from "../bots/service.js";
-import { requireAuthenticatedIdentity } from "../identity/request-auth.js";
+import { requireAgentScope, requireAuthenticatedIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "./repository.js";
 
@@ -119,16 +119,19 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   const { identityService, botService, repository } = options;
   app.get("/bootstrap", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     return repository.bootstrap(identity);
   });
 
   app.get("/members", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     return repository.listMembers(identity);
   });
 
   app.get("/conversations", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const query = listConversationsQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
     return repository.listConversations(identity, query.data.after, query.data.limit);
@@ -136,6 +139,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/channels", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "conversations:write");
     const result = createChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
     return reply
@@ -151,6 +155,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.patch("/channels/:id", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "conversations:write");
     const { id } = parameters(request.params);
     const result = archiveChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel update");
@@ -159,12 +164,14 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/channels/:id/members", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
     return repository.listChannelMembers(identity, id);
   });
 
   app.put("/channels/:id/members/:userId", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "conversations:write");
     const { id, userId } = memberParameters(request.params);
     const body = upsertChannelMemberRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel member");
@@ -173,12 +180,14 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.delete("/channels/:id/members/:userId", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "conversations:write");
     const { id, userId } = memberParameters(request.params);
     return repository.removeChannelMember(identity, id, userId);
   });
 
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "conversations:write");
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
@@ -188,6 +197,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/conversations/:id/messages", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
@@ -206,6 +216,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/messages/:id/thread", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid thread query");
@@ -214,6 +225,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/search", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const query = messageSearchQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid search query");
     return repository.searchMessages(
@@ -324,6 +336,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/conversations/:id/messages", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
     const { id } = parameters(request.params);
     const body = sendConversationMessageRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid message");
@@ -336,6 +349,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/reactions/query", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const body = listMessageReactionsRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction query");
     return repository.listMessageReactions(identity, body.data.messageIds);
@@ -343,18 +357,21 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.put("/messages/:id/reactions/:emoji", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
     const { id, emoji } = reactionParameters(request.params);
     return repository.addReaction(identity, id, emoji);
   });
 
   app.delete("/messages/:id/reactions/:emoji", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
     const { id, emoji } = reactionParameters(request.params);
     return repository.removeReaction(identity, id, emoji);
   });
 
   app.put("/conversations/:id/read-cursor", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "read-cursors:write");
     const { id } = parameters(request.params);
     const body = advanceReadCursorRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid read cursor");
@@ -363,6 +380,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.get("/sync", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
     const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
@@ -378,6 +396,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/realtime/tickets", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
     const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
     return repository.issueRealtimeTicket(
       identity,

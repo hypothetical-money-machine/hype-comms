@@ -2,13 +2,16 @@
 
 Hype Comms is a private, desktop-first team chat. We build it as our own daily communication
 tool, designed so it can grow into something other small teams can use. The current
-implementation combines invited-member magic-link access with a PostgreSQL-backed
-conversation core, reconnecting realtime delivery, and a restart-safe encrypted desktop outbox.
+implementation combines invited-member magic-link access, first-class scoped agent identities,
+a PostgreSQL-backed conversation core, reconnecting realtime delivery, and a restart-safe
+encrypted desktop outbox.
 
-See [ROADMAP.md](ROADMAP.md) for status and direction,
-[docs/architecture.md](docs/architecture.md) for the implementation contract, and
-[docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the SQLite-to-PostgreSQL
-cutover boundary.
+Product strategy and delivery work are tracked in
+[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
+contracts, [integrations/hermes-hmm-chat/README.md](integrations/hermes-hmm-chat/README.md) for
+the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
+SQLite-to-PostgreSQL cutover boundary.
 
 ## Joining a workspace
 
@@ -25,8 +28,10 @@ address has not been admitted yet.
 ```text
 apps/desktop       Electron main, preload, and React renderer
 apps/server        Fastify HTTP/WebSocket service and PostgreSQL migrations
+packages/cli       Node command-line client and machine-readable automation surface
 packages/contracts Strict Zod schemas shared across every wire boundary
-docs               Architecture and operational notes
+integrations       Separately distributed first-party platform adapters
+docs               Operational runbooks and showcase assets
 ```
 
 ## Prerequisites for development
@@ -128,6 +133,33 @@ HMM_CHAT_API_ORIGIN=https://chat-api.example.invalid npm run dev:desktop
 ```
 
 Plain HTTP to a non-loopback host is rejected.
+
+## CLI and agent integrations
+
+Build and run the workspace CLI with Node 24:
+
+```bash
+npm run build --workspace @hmm-chat/cli
+npm exec --workspace @hmm-chat/cli -- hmm-chat-cli --help
+```
+
+The CLI supports named private profiles plus `HMM_CHAT_API_ORIGIN`, `HMM_CHAT_TOKEN`,
+`HMM_CHAT_PROFILE`, and `HMM_CHAT_CONFIG_DIR` overrides. HTTPS is required except for loopback
+development servers. Human sessions can request and exchange magic links; agent credentials are
+read from a private prompt, stdin, an injected environment variable, or a `0600` profile file.
+Do not put credentials in command arguments.
+
+Workspace owners create agent members and their immutable scoped tokens through a human CLI
+profile. A token is shown once, at creation, and cannot be recovered later; revoke it and create a
+replacement if it is lost. Agents count toward the same 25-active-member limit as people. See the
+[CLI guide](packages/cli/README.md) for commands, JSON/NDJSON output, retry behavior, and stable
+exit codes.
+
+The [Hermes adapter](integrations/hermes-hmm-chat/README.md) runs the CLI as its transport. It
+wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
+one Hermes session per HMM conversation, and sends replies back to that canonical conversation.
+Install the server migration first, then the CLI, provision the agent and token, install the
+adapter under `~/.hermes/plugins/`, and finally start the Hermes gateway.
 
 ## Container deployment
 
@@ -305,6 +337,8 @@ harmless but not free, and is worth collapsing if CI minutes or feedback latency
 
 The current build serves one invited workspace of at most 25 active members. It covers
 workspace-visible and members-only channels, 1:1 DMs, paginated text history, authorized
-message search, mentions, unread state, ordered reconnect sync, date-separated timelines, and
-restart-safe sends. Threads, reactions, attachments, notifications, signed
-releases, and hosted operations are upcoming work — see [ROADMAP.md](ROADMAP.md).
+message search, mentions, reactions, unread state, ordered reconnect sync, date-separated
+timelines, scoped agent identities, and restart-safe sends. Threads, attachments,
+notifications, signed releases, and hosted operations are upcoming work. Product direction
+and delivery status are tracked in
+[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).

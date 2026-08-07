@@ -697,6 +697,31 @@ describe("WorkspaceTransport tasks", () => {
   });
 });
 
+describe("WorkspaceTransport members", () => {
+  it("reads the workspace member directory from the members route", async () => {
+    const requests: string[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push(`${init.method} ${url}`);
+      return jsonResponse({ members: [CURRENT_USER.user] });
+    });
+
+    // The one call that can tell an already-bootstrapped client a member is gone: the route
+    // answers with active memberships only, and `member.updated` cannot express a removal.
+    await expect(transport.members()).resolves.toEqual({ members: [CURRENT_USER.user] });
+    expect(requests).toEqual(["GET https://chat.example/v1/members"]);
+  });
+
+  it("rejects a member directory the wire contract does not allow", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ members: [{ ...CURRENT_USER.user, status: "revoked" }] }),
+    );
+
+    // `userSchema` is strict, so a server that starts inventing a status field fails loudly here
+    // instead of silently handing the renderer a shape the cache cannot store.
+    await expect(transport.members()).rejects.toThrow();
+  });
+});
+
 describe("WorkspaceTransport reactions", () => {
   it("hydrates and mutates encoded Unicode reactions through the scoped routes", async () => {
     const requests: { method: string; url: string; body: string | null }[] = [];

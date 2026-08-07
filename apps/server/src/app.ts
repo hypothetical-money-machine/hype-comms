@@ -103,14 +103,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           if (principal === null || principal === undefined) {
             throw new ApiError(401, "UNAUTHORIZED", "Realtime ticket is invalid or expired");
           }
-          return {
-            userId: principal.userId,
-            workspaceId: principal.workspaceId,
-            deviceSessionId: principal.deviceSessionId,
-            reactionEvents: principal.reactionEvents,
-            readStateEvents: principal.readStateEvents,
-            taskEvents: principal.taskEvents,
-          };
+          return principal;
         };
   await app.register(
     async (v1) => {

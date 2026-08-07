@@ -91,6 +91,11 @@ import {
   lockIdempotencyScope,
   runIdempotentMutation,
 } from "./idempotency.js";
+import {
+  insertSyncEvent,
+  insertSyncEventWithSequence,
+  nextWorkspaceSequence,
+} from "./sync-events.js";
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
@@ -113,7 +118,7 @@ interface WorkspaceRow extends QueryResultRow {
 
 interface UserRow extends QueryResultRow {
   id: string;
-  kind: "human" | "bot";
+  kind: "human" | "bot" | "agent";
   username: string;
   display_name: string;
   avatar_url: string | null;
@@ -240,7 +245,8 @@ interface EventRow extends QueryResultRow {
 interface TicketRow extends QueryResultRow {
   workspace_id: string;
   user_id: string;
-  device_session_id: string;
+  device_session_id: string | null;
+  agent_token_id: string | null;
   reaction_events: boolean;
   read_state_events: boolean;
   task_events: boolean;
@@ -249,6 +255,12 @@ interface TicketRow extends QueryResultRow {
 interface RealtimeSessionRow extends QueryResultRow {
   revoked: boolean;
   expired: boolean;
+  membership_inactive: boolean;
+}
+
+interface RealtimeAgentRow extends QueryResultRow {
+  revoked: boolean;
+  disabled: boolean;
   membership_inactive: boolean;
 }
 
@@ -272,14 +284,7 @@ export interface WorkspaceRepositoryHooks {
   readonly afterBootstrapCursorRead?: () => Promise<void>;
 }
 
-export interface ConsumedRealtimeTicket {
-  readonly workspaceId: string;
-  readonly userId: string;
-  readonly deviceSessionId: string;
-  readonly reactionEvents: boolean;
-  readonly readStateEvents: boolean;
-  readonly taskEvents: boolean;
-}
+export type ConsumedRealtimeTicket = RealtimePrincipal;
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
@@ -311,7 +316,11 @@ function mapWorkspace(row: WorkspaceRow) {
 function mapUser(row: UserRow) {
   return userSchema.parse({
     id: row.id,
-    kind: row.kind,
+    // Agent administration and self-authentication expose the distinct `agent` principal kind,
+    // but workspace member projections stay readable by the immediately previous desktop schema
+    // (`human | bot`). Existing clients already treated these non-email members as ordinary
+    // mention/DM targets, which is exactly the behavior this directory shape needs.
+    kind: row.kind === "agent" ? "human" : row.kind,
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
@@ -345,7 +354,7 @@ function conversationVisibilitySql(
       EXISTS (
         SELECT 1 FROM users AS visible_actor
          WHERE visible_actor.id = ${userParameter}
-           AND visible_actor.kind = 'human'
+           AND visible_actor.kind IN ('human', 'agent')
       )
       AND (
         (
@@ -882,7 +891,7 @@ export class WorkspaceRepository {
           WHERE membership.workspace_id = $1
             AND membership.user_id = $2
             AND membership.status = 'active'
-            AND user_account.kind = 'human'`,
+            AND user_account.kind IN ('human', 'agent')`,
         [identity.currentUser.workspaceId, memberId],
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
@@ -1081,7 +1090,7 @@ export class WorkspaceRepository {
           WHERE membership.workspace_id = $1
             AND membership.user_id = $2
             AND membership.status = 'active'
-            AND user_account.kind = 'human'`,
+            AND user_account.kind IN ('human', 'agent')`,
         [identity.currentUser.workspaceId, input.memberId],
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
@@ -2279,19 +2288,25 @@ export class WorkspaceRepository {
     readStateEvents = false,
     taskEvents = false,
   ) {
+    const deviceSessionId = identity.sessionId ?? null;
+    const agentTokenId = identity.agentTokenId ?? null;
+    if ((deviceSessionId === null) === (agentTokenId === null)) {
+      throw new Error("Realtime tickets require exactly one authenticated credential");
+    }
     const token = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(token).digest();
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
-         (id, workspace_id, user_id, device_session_id, token_hash, expires_at, reaction_events,
-          read_state_events, task_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
+          reaction_events, read_state_events, task_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
         identity.currentUser.user.id,
-        identity.sessionId,
+        deviceSessionId,
+        agentTokenId,
         hash,
         expiresAt,
         reactionEvents,
@@ -2314,46 +2329,123 @@ export class WorkspaceRepository {
           WHERE ticket.token_hash = $1
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
-         RETURNING ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-                   ticket.reaction_events, ticket.read_state_events, ticket.task_events
+         RETURNING ticket.workspace_id,
+                   ticket.user_id,
+                   ticket.device_session_id,
+                   ticket.agent_token_id,
+                   ticket.reaction_events,
+                   ticket.read_state_events,
+                   ticket.task_events
        )
-       SELECT ticket.workspace_id, ticket.user_id, ticket.device_session_id,
-              ticket.reaction_events, ticket.read_state_events, ticket.task_events
+       SELECT ticket.workspace_id,
+              ticket.user_id,
+              ticket.device_session_id,
+              ticket.agent_token_id,
+              ticket.reaction_events,
+              ticket.read_state_events,
+              ticket.task_events
          FROM consumed_ticket AS ticket
-         JOIN device_sessions AS session
-           ON session.id = ticket.device_session_id
-          AND session.user_id = ticket.user_id
-          AND session.revoked_at IS NULL
-          AND session.expires_at > clock_timestamp()
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
           AND membership.user_id = ticket.user_id
-          AND membership.status = 'active'`,
+          AND membership.status = 'active'
+        WHERE (
+            (
+              ticket.device_session_id IS NOT NULL
+              AND ticket.agent_token_id IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM device_sessions AS session
+                 WHERE session.id = ticket.device_session_id
+                   AND session.user_id = ticket.user_id
+                   AND session.revoked_at IS NULL
+                   AND session.expires_at > clock_timestamp()
+              )
+            )
+            OR
+            (
+              ticket.device_session_id IS NULL
+              AND ticket.agent_token_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM agent_tokens AS agent_token
+                  JOIN agents AS agent
+                    ON agent.user_id = agent_token.agent_user_id
+                   AND agent.workspace_id = agent_token.workspace_id
+                 WHERE agent_token.id = ticket.agent_token_id
+                   AND agent_token.workspace_id = ticket.workspace_id
+                   AND agent_token.agent_user_id = ticket.user_id
+                   AND agent_token.revoked_at IS NULL
+                   AND agent.disabled_at IS NULL
+              )
+            )
+          )`,
       [hash],
     );
     const row = result.rows[0];
-    return row === undefined
-      ? null
-      : {
-          workspaceId: row.workspace_id,
-          userId: row.user_id,
-          deviceSessionId: row.device_session_id,
-          reactionEvents: row.reaction_events,
-          readStateEvents: row.read_state_events,
-          taskEvents: row.task_events,
-        };
+    if (row === undefined) return null;
+    if (row.device_session_id !== null && row.agent_token_id === null) {
+      return {
+        workspaceId: row.workspace_id,
+        userId: row.user_id,
+        deviceSessionId: row.device_session_id,
+        agentTokenId: null,
+        reactionEvents: row.reaction_events,
+        readStateEvents: row.read_state_events,
+        taskEvents: row.task_events,
+      };
+    }
+    if (row.device_session_id === null && row.agent_token_id !== null) {
+      return {
+        workspaceId: row.workspace_id,
+        userId: row.user_id,
+        deviceSessionId: null,
+        agentTokenId: row.agent_token_id,
+        reactionEvents: row.reaction_events,
+        readStateEvents: row.read_state_events,
+        taskEvents: row.task_events,
+      };
+    }
+    throw new Error("Consumed realtime ticket has an invalid credential binding");
   }
 
   /**
-   * Re-check a live realtime connection's device session and workspace membership.
+   * Re-check a live realtime connection's bound credential and workspace membership.
    *
    * This is a read-only counterpart to {@link consumeRealtimeTicket}: it consumes nothing and
    * mutates nothing, so the realtime heartbeat can call it repeatedly. A socket authorized
-   * minutes ago must not outlive a revoked session, an expired session, or a revoked membership.
+   * minutes ago must not outlive a revoked/expired credential or a revoked membership.
    */
   async revalidateRealtimePrincipal(
     principal: RealtimePrincipal,
   ): Promise<RealtimePrincipalRevalidation> {
+    if (principal.agentTokenId !== null) {
+      const result = await this.pool.query<RealtimeAgentRow>(
+        `SELECT token.revoked_at IS NOT NULL AS revoked,
+                agent.disabled_at IS NOT NULL AS disabled,
+                coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
+           FROM agent_tokens AS token
+           LEFT JOIN agents AS agent
+             ON agent.user_id = token.agent_user_id
+            AND agent.workspace_id = token.workspace_id
+           LEFT JOIN workspace_memberships AS membership
+             ON membership.user_id = token.agent_user_id
+            AND membership.workspace_id = token.workspace_id
+          WHERE token.id = $1
+            AND token.workspace_id = $2
+            AND token.agent_user_id = $3`,
+        [principal.agentTokenId, principal.workspaceId, principal.userId],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return { status: "invalid", reason: "unknown_agent_token" };
+      if (row.revoked) return { status: "invalid", reason: "agent_token_revoked" };
+      if (row.disabled) return { status: "invalid", reason: "agent_disabled" };
+      if (row.membership_inactive) {
+        return { status: "invalid", reason: "membership_inactive" };
+      }
+      return { status: "valid" };
+    }
+
     const result = await this.pool.query<RealtimeSessionRow>(
       `SELECT session.revoked_at IS NOT NULL AS revoked,
               session.expires_at <= clock_timestamp() AS expired,
@@ -2786,7 +2878,7 @@ export class WorkspaceRepository {
               WHERE workspace_membership.workspace_id = $1
                 AND workspace_membership.status = 'active'
                 AND (
-                  user_account.kind = 'human'
+                  user_account.kind IN ('human', 'agent')
                   OR EXISTS (
                     SELECT 1
                       FROM bot_channel_grants AS grant_record
@@ -2812,7 +2904,7 @@ export class WorkspaceRepository {
                   WHERE membership.conversation_id = $1
                     AND membership.left_at IS NULL
                     AND workspace_membership.status = 'active'
-                    AND user_account.kind = 'human'
+                    AND user_account.kind IN ('human', 'agent')
                  UNION ALL
                  SELECT user_account.id, user_account.kind, user_account.username,
                         user_account.display_name, user_account.avatar_url,
@@ -2856,7 +2948,7 @@ export class WorkspaceRepository {
           WHERE membership.workspace_id = $1
             AND membership.status = 'active'
             AND (
-              user_account.kind = 'human'
+              user_account.kind IN ('human', 'agent')
               OR EXISTS (
                 SELECT 1
                   FROM bot_channel_grants AS grant_record
@@ -2881,7 +2973,7 @@ export class WorkspaceRepository {
             WHERE membership.conversation_id = $1
               AND membership.left_at IS NULL
               AND workspace_membership.status = 'active'
-              AND user_account.kind = 'human'
+              AND user_account.kind IN ('human', 'agent')
            UNION
            SELECT grant_record.bot_user_id AS user_id
              FROM bot_channel_grants AS grant_record
@@ -2994,6 +3086,14 @@ export class WorkspaceRepository {
     }
   }
 
+  /**
+   * Thin, conversation-flavored wrapper over the shared {@link insertSyncEvent} primitive (see
+   * `./sync-events.ts`). Every workspace mutation in this repository publishes through a
+   * `ConversationRow`, so the wrapper exists to keep those call sites unchanged; the actual
+   * `sync_events` / `sync_event_audiences` / `pg_notify` mechanics live in the shared module so
+   * the agent-lifecycle path (which has no conversation) can reuse them instead of duplicating
+   * the SQL.
+   */
   async #insertEvent(
     client: PoolClient,
     identity: AuthenticatedTaskIdentity,
@@ -3006,8 +3106,16 @@ export class WorkspaceRepository {
       readonly audienceUserIds?: readonly string[];
     },
   ): Promise<WorkspaceEvent> {
-    const sequence = await this.#nextWorkspaceSequence(client, identity.currentUser.workspaceId);
-    return this.#insertEventWithSequence(client, identity, sequence, input);
+    return insertSyncEvent(client, {
+      workspaceId: identity.currentUser.workspaceId,
+      actorUserId: identity.currentUser.user.id,
+      type: input.type,
+      conversationId: input.conversation.id,
+      conversationSequence: input.conversationSequence,
+      entityVersion: input.entityVersion,
+      payload: input.payload,
+      audienceUserIds: input.audienceUserIds,
+    });
   }
 
   async #insertEventWithSequence(
@@ -3023,75 +3131,20 @@ export class WorkspaceRepository {
       readonly audienceUserIds?: readonly string[];
     },
   ): Promise<WorkspaceEvent> {
-    const occurredAt = new Date().toISOString();
-    const event = workspaceEventSchema.parse({
-      version: 1,
-      id: randomUUID(),
-      type: input.type,
-      occurredAt,
+    return insertSyncEventWithSequence(client, sequence, {
       workspaceId: identity.currentUser.workspaceId,
+      actorUserId: identity.currentUser.user.id,
+      type: input.type,
       conversationId: input.conversation.id,
-      workspaceSequence: sequence,
-      conversationSequence: input.conversationSequence ?? null,
-      entityVersion: input.entityVersion ?? 1,
-      delivery: "at_least_once",
+      conversationSequence: input.conversationSequence,
+      entityVersion: input.entityVersion,
       payload: input.payload,
+      audienceUserIds: input.audienceUserIds,
     });
-    await client.query(
-      `INSERT INTO sync_events (
-         id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
-         event_type, actor_user_id, entity_version, payload, occurred_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
-      [
-        event.id,
-        event.workspaceId,
-        event.workspaceSequence,
-        event.conversationId,
-        event.conversationSequence,
-        event.type,
-        identity.currentUser.user.id,
-        event.entityVersion,
-        JSON.stringify(event.payload),
-        event.occurredAt,
-      ],
-    );
-    if (input.audienceUserIds === undefined) {
-      await client.query(
-        `INSERT INTO sync_event_audiences (event_id, workspace_id, user_id)
-         SELECT $1, $2, membership.user_id
-           FROM workspace_memberships AS membership
-           JOIN users AS user_account ON user_account.id = membership.user_id
-          WHERE membership.workspace_id = $2
-            AND membership.status = 'active'
-            AND user_account.kind = 'human'`,
-        [event.id, event.workspaceId],
-      );
-    } else {
-      await client.query(
-        `INSERT INTO sync_event_audiences (event_id, workspace_id, user_id)
-         SELECT $1, $2, unnest($3::uuid[])`,
-        [event.id, event.workspaceId, [...input.audienceUserIds]],
-      );
-    }
-    await client.query(`SELECT pg_notify('hmm_chat_events', $1)`, [
-      `${event.workspaceId}:${event.workspaceSequence}`,
-    ]);
-    return event;
   }
 
   async #nextWorkspaceSequence(client: PoolClient, workspaceId: string): Promise<string> {
-    const result = await client.query<{ next: string } & QueryResultRow>(
-      `UPDATE workspaces
-          SET last_event_sequence = last_event_sequence + 1,
-              updated_at = clock_timestamp()
-        WHERE id = $1
-        RETURNING last_event_sequence::text AS next`,
-      [workspaceId],
-    );
-    const sequence = result.rows[0]?.next;
-    if (sequence === undefined) throw new Error("Could not allocate workspace event sequence");
-    return sequence;
+    return nextWorkspaceSequence(client, workspaceId);
   }
 
   async #highWater(client: PoolClient, workspaceId: string): Promise<string> {

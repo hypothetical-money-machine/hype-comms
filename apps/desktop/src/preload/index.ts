@@ -19,6 +19,7 @@ import {
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
+  listMembersResponseSchema,
   listMessageReactionsRequestSchema,
   listMessageReactionsResponseSchema,
   magicLinkDeliveryStateSchema,
@@ -45,7 +46,7 @@ import {
   updateTaskOperationSchema,
   upsertChannelMemberRequestSchema,
   upsertChannelMemberOperationSchema,
-  workspaceBootstrapResponseSchema,
+  humanWorkspaceBootstrapResponseSchema,
   type ChatSessionState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
@@ -182,8 +183,12 @@ const desktopApi: DesktopApi = Object.freeze({
     await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoReset);
   },
   getWorkspaceBootstrap: async () =>
-    workspaceBootstrapResponseSchema.parse(
+    humanWorkspaceBootstrapResponseSchema.parse(
       await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceBootstrap),
+    ),
+  listWorkspaceMembers: async () =>
+    listMembersResponseSchema.parse(
+      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMembersList),
     ),
   listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
     listConversationsResponseSchema.parse(

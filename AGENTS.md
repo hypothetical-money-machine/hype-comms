@@ -6,9 +6,10 @@ Hype Comms is an npm-workspaces TypeScript monorepo. `apps/desktop` contains the
 main, preload, React renderer, and shared IPC types. `apps/server` contains the Fastify HTTP
 and WebSocket service. `packages/contracts` is the source of truth for strict Zod wire
 schemas shared by both apps. Tests live beside desktop source as `*.test.ts` or in each
-workspace's `test/` directory. Architecture and delivery decisions are in
-`docs/architecture.md` and `ROADMAP.md`; packaging checks live in `scripts/`. Do not edit or
-commit generated `dist/`, `release/`, `coverage/`, or `node_modules/` content.
+workspace's `test/` directory. Product strategy and delivery work live in the tracker;
+implementation behavior is defined by source, shared contracts, and tests. Packaging checks
+live in `scripts/`. Do not edit or commit generated `dist/`, `release/`, `coverage/`, or
+`node_modules/` content.
 
 ## Build, Test, and Development Commands
 

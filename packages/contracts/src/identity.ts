@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 import { entityIdSchema, isoDateTimeSchema } from "./common.js";
-import { userSchema, workspaceRoleSchema } from "./entities.js";
+import { invitationSchema, userSchema, workspaceRoleSchema } from "./entities.js";
+import { agentCurrentPrincipalSchema } from "./agents.js";
 
 const humanUserSchema = userSchema.extend({ kind: z.literal("human").default("human") });
 
@@ -62,10 +63,19 @@ export const currentUserSchema = z
   })
   .strict();
 
+/** Existing human responses remain unchanged; authenticated agents use the distinct agent arm. */
+export const currentPrincipalSchema = z.union([currentUserSchema, agentCurrentPrincipalSchema]);
+
 export const createInvitationSchema = z
   .object({
     email: emailSchema,
     role: workspaceRoleSchema.exclude(["owner"]),
+  })
+  .strict();
+
+export const listInvitationsResponseSchema = z
+  .object({
+    invitations: z.array(invitationSchema).max(1_000),
   })
   .strict();
 
@@ -82,5 +92,7 @@ export type RequestMagicLink = z.infer<typeof requestMagicLinkSchema>;
 export type VerifyMagicLink = z.infer<typeof verifyMagicLinkSchema>;
 export type DeviceSession = z.infer<typeof deviceSessionSchema>;
 export type CurrentUser = z.infer<typeof currentUserSchema>;
+export type CurrentPrincipal = z.infer<typeof currentPrincipalSchema>;
 export type CreateInvitation = z.infer<typeof createInvitationSchema>;
+export type ListInvitationsResponse = z.infer<typeof listInvitationsResponseSchema>;
 export type MagicLinkRequested = z.infer<typeof magicLinkRequestedSchema>;

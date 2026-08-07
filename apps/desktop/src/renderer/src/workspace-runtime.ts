@@ -368,6 +368,16 @@ export class WorkspaceRuntime {
   #scope: CacheScope | null = null;
   /** The highest workspace sequence this client has durably applied. */
   #syncCursor: string | null = null;
+  /**
+   * A `member.updated` invalidation has been seen and not yet answered by a successful refetch.
+   * Cleared only on success, so a failed re-read is retried by the next sync pass instead of
+   * silently leaving a disabled member in the directory until the app restarts.
+   */
+  #membersDirty = false;
+  /** Monotonic refetch id, so a slow response cannot overwrite a newer directory. */
+  #membersRequest = 0;
+  #membersRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  #membersAttempt = 0;
   #eventQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
   readonly #readTargets = new Map<string, ReadTarget>();
@@ -417,8 +427,12 @@ export class WorkspaceRuntime {
     const generation = ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#clearMembersRetryTimer();
+    this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#syncAttempt = 0;
+    // A fresh bootstrap answers any invalidation the previous session left unanswered.
+    this.#membersDirty = false;
     this.#clearReadTargets();
     this.#setState({ busy: true, error: null });
     this.#unsubscribeEvent?.();
@@ -487,6 +501,8 @@ export class WorkspaceRuntime {
     ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#clearMembersRetryTimer();
+    this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
@@ -495,6 +511,7 @@ export class WorkspaceRuntime {
     await this.#client.stopWorkspaceRealtime();
     this.#cache = null;
     this.#syncCursor = null;
+    this.#membersDirty = false;
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
@@ -1261,6 +1278,8 @@ export class WorkspaceRuntime {
     ++this.#generation;
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
+    this.#clearMembersRetryTimer();
+    this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#clearReadTargets();
     const scope = this.#scope;
@@ -1437,6 +1456,71 @@ export class WorkspaceRuntime {
     });
   }
 
+  /**
+   * Answers a `member.updated` invalidation by re-reading `GET /v1/members` and replacing the
+   * member list outright.
+   *
+   * The event cannot be applied as a delta: its payload is a bare `User` with no status field, so
+   * a disable would re-assert the disabled member rather than remove it. The server's directory is
+   * already filtered to active memberships, so replacing the list is both the removal path and the
+   * addition path. It is bounded at 25 members, unlike `#refreshSnapshot`, which re-downloads every
+   * conversation's history.
+   */
+  async #refreshMembers(generation: number): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return;
+    const request = ++this.#membersRequest;
+    try {
+      const response = await this.#client.listWorkspaceMembers();
+      // A slower earlier read must never overwrite the directory a later one already wrote.
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (request !== this.#membersRequest) return;
+      await cache.replaceMembers(response.members);
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (request !== this.#membersRequest) return;
+      this.#membersDirty = false;
+      // A read that recovers from an earlier failure clears the staleness that failure published.
+      // `#repairAndFlush` does this for the sync path; the retry timer has no such drain.
+      const recovered = this.#membersAttempt > 0;
+      this.#membersAttempt = 0;
+      this.#clearMembersRetryTimer();
+      const snapshot = this.#state.bootstrap;
+      if (snapshot === null) {
+        if (recovered) this.#setState({ stale: false });
+        return;
+      }
+      this.#setState({
+        bootstrap: { ...snapshot, members: [...response.members].sort(compareMembers) },
+        ...(recovered ? { stale: false } : {}),
+      });
+    } catch {
+      if (generation !== this.#generation) return;
+      // `#membersDirty` stays set, and a retry is armed here rather than left to the next sync
+      // pass. `#repairAndFlush` is the only drain site, and on a healthy realtime socket nothing
+      // schedules one -- its retry timer is armed only when `/v1/sync` itself returns retryable.
+      // Without this timer a single failed read would leave a disabled member resolvable until
+      // the app restarts, which is exactly what this refetch exists to prevent.
+      this.#setState({ stale: true });
+      this.#scheduleMembersRetry(generation);
+    }
+  }
+
+  #scheduleMembersRetry(generation: number): void {
+    this.#clearMembersRetryTimer();
+    this.#membersAttempt += 1;
+    this.#membersRetryTimer = setTimeout(() => {
+      this.#membersRetryTimer = null;
+      if (generation !== this.#generation || !this.#membersDirty) return;
+      void this.#refreshMembers(generation);
+    }, retryDelay(this.#membersAttempt));
+  }
+
+  #clearMembersRetryTimer(): void {
+    if (this.#membersRetryTimer === null) return;
+    clearTimeout(this.#membersRetryTimer);
+    this.#membersRetryTimer = null;
+  }
+
   async #repairAndFlush(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
@@ -1475,7 +1559,13 @@ export class WorkspaceRuntime {
         cursor = state.syncCursor ?? "0";
         continue;
       }
-      for (const event of result.response.events) await cache.applyEvent(event);
+      for (const event of result.response.events) {
+        // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
+        // here and drained once below. Without this the fix would only work while the app is
+        // online, and a disable that landed during a backfill would survive the catch-up.
+        if (event.type === "member.updated") this.#membersDirty = true;
+        await cache.applyEvent(event);
+      }
       await cache.advanceCursor(result.response.nextCursor);
       await this.#client.acknowledgeWorkspaceEvent(result.response.nextCursor);
       this.#syncCursor = result.response.nextCursor;
@@ -1483,8 +1573,14 @@ export class WorkspaceRuntime {
       if (!result.response.hasMore) break;
     }
     this.#syncAttempt = 0;
+    // Drained once for the whole backfill, and before the reload so the state this flush publishes
+    // is the refreshed directory rather than the stale cached one. Also the retry site for a
+    // realtime refetch that failed earlier.
+    if (this.#membersDirty) await this.#refreshMembers(generation);
     await this.#reloadCache();
-    this.#setState({ stale: false });
+    // A directory read that failed leaves the client genuinely stale, so the flush must not claim
+    // otherwise just because the event page drained.
+    this.#setState({ stale: this.#membersDirty });
     await this.#flushOutbox(generation);
   }
 
@@ -1608,6 +1704,13 @@ export class WorkspaceRuntime {
       await this.#refreshSnapshot(generation);
       return;
     }
+    if (event.type === "member.updated") {
+      // Announces THAT the directory changed, never what it now is. Re-read it instead of
+      // projecting the payload, or disabling a member would re-assert it as a mention target.
+      this.#membersDirty = true;
+      await this.#refreshMembers(generation);
+      return;
+    }
     // The event payload already carries everything the view needs, so the whole encrypted cache
     // does not have to be decrypted again for every message.
     this.#projectEvent(event);
@@ -1645,16 +1748,6 @@ export class WorkspaceRuntime {
       return;
     }
     if (snapshot === null) return;
-    if (event.type === "member.updated") {
-      const member = event.payload.member;
-      const updated = snapshot.members.some((existing) => existing.id === member.id)
-        ? snapshot.members.map((existing) => (existing.id === member.id ? member : existing))
-        : [...snapshot.members, member];
-      // A new member appends and a display-name change reorders, so re-sort as above.
-      const members = updated.sort(compareMembers);
-      this.#setState({ bootstrap: { ...snapshot, members } });
-      return;
-    }
     if (event.type === "read_cursor.updated") {
       const { readCursor, unreadCount, mentionCount } = event.payload;
       this.#setState({
@@ -1670,7 +1763,11 @@ export class WorkspaceRuntime {
       });
       return;
     }
-    if (event.type === "channel.membership_changed") return;
+    // Both are invalidation signals rather than deltas: `#applyWorkspaceEvent` answers them with a
+    // server re-read and never reaches this projection. `member.updated` in particular must have
+    // no upsert path here — that is the whole reason a disable used to re-assert the disabled
+    // member instead of removing it.
+    if (event.type === "channel.membership_changed" || event.type === "member.updated") return;
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,

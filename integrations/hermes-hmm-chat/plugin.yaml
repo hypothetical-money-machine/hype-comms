@@ -1,0 +1,38 @@
+name: hmm-chat-platform
+label: HMM Chat
+kind: platform
+version: 1.0.0
+description: >
+  Hermes gateway adapter for HMM Chat. Uses hmm-chat-cli as the only network
+  transport and wakes Hermes for direct messages and explicit channel mentions.
+author: Hypothetical Money Machine
+requires_env:
+  - name: HMM_CHAT_API_ORIGIN
+    description: "Credential-free HMM Chat API origin"
+    prompt: "HMM Chat API origin"
+    password: false
+  - name: HMM_CHAT_TOKEN
+    description: "Revocable HMM Chat agent token"
+    prompt: "HMM Chat agent token"
+    password: true
+optional_env:
+  - name: HMM_CHAT_ALLOWED_USERS
+    description: "Comma-separated HMM Chat user UUIDs allowed to wake Hermes"
+    prompt: "Allowed HMM Chat users"
+    password: false
+  - name: HMM_CHAT_ALLOW_ALL_USERS
+    description: "Explicitly allow every HMM Chat workspace member"
+    prompt: "Allow all workspace members? (true/false)"
+    password: false
+  - name: HMM_CHAT_HOME_CONVERSATION
+    description: "Conversation UUID used by deliver=hmm_chat cron jobs"
+    prompt: "Default HMM Chat conversation UUID"
+    password: false
+  - name: HMM_CHAT_CLI_PATH
+    description: "hmm-chat-cli executable name or absolute path"
+    prompt: "HMM Chat CLI path"
+    password: false
+  - name: HMM_CHAT_HERMES_STATE_DIR
+    description: "Private directory for per-agent realtime cursor checkpoints"
+    prompt: "HMM Chat Hermes state directory"
+    password: false

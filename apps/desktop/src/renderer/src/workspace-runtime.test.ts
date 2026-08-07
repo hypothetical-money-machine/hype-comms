@@ -16,6 +16,7 @@ import type {
   CreateTaskOperation,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListMembersResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   Message,
@@ -37,8 +38,9 @@ import type {
   TaskMutationResponse,
   ThemeState,
   UpdateState,
+  User,
+  HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
-  WorkspaceBootstrapResponse,
   WorkspaceEvent,
 } from "@hmm-chat/contracts";
 
@@ -68,7 +70,11 @@ const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
 const REACTION_ID = "20000000-0000-4000-8000-000000000011";
 const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
 const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
-const TASK_ID = "20000000-0000-4000-8000-000000000014";
+const AGENT_ID = "20000000-0000-4000-8000-000000000014";
+const MEMBER_EVENT_ID = "20000000-0000-4000-8000-000000000015";
+const SECOND_MEMBER_EVENT_ID = "20000000-0000-4000-8000-000000000016";
+const THIRD_MEMBER_EVENT_ID = "20000000-0000-4000-8000-000000000017";
+const TASK_ID = "20000000-0000-4000-8000-000000000018";
 const THREAD_REPLY_ID = "20000000-0000-4000-8000-000000000020";
 const THREAD_REPLY_CLIENT_ID = "20000000-0000-4000-8000-000000000021";
 const NOW = "2026-07-24T12:00:00.000Z";
@@ -94,6 +100,36 @@ const user = {
   createdAt: NOW,
   updatedAt: NOW,
 } as const;
+
+/**
+ * The case the invalidation signal exists for. Disabling this agent drops it from the server's
+ * member directory, but the `member.updated` payload has no field that can say so.
+ */
+const agent: User = {
+  id: AGENT_ID,
+  kind: "agent",
+  username: "hermes",
+  displayName: "Hermes",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+function memberUpdated(id: string, workspaceSequence: string, member: User): WorkspaceEvent {
+  return {
+    version: 1,
+    id,
+    type: "member.updated",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId: null,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { member },
+  };
+}
 
 function channel(id: string, slug: string): ConversationSummary {
   return {
@@ -121,8 +157,8 @@ function channel(id: string, slug: string): ConversationSummary {
 
 function bootstrapAt(
   syncCursor: string,
-  overrides: Partial<WorkspaceBootstrapResponse> = {},
-): WorkspaceBootstrapResponse {
+  overrides: Partial<HumanWorkspaceBootstrapResponse> = {},
+): HumanWorkspaceBootstrapResponse {
   return {
     currentUser: { user, email: "morgan@example.com", workspaceId: WORKSPACE_ID, role: "owner" },
     workspace: {
@@ -285,6 +321,8 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   loadCount = 0;
   reactionUpsertFailures = 0;
+  /** Ordered record of the calls whose relative order a test needs to pin, oldest first. */
+  readonly operations: string[] = [];
   readonly outboxMutations: {
     readonly type: "enqueue" | "remove";
     readonly clientMessageId: string;
@@ -304,6 +342,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
   async load(): Promise<CachedWorkspaceState> {
     this.loadCount += 1;
+    this.operations.push("load");
     return {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
@@ -319,6 +358,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
     const [snapshot, messages, reactions = [], tasks = []] = args;
+    this.operations.push("replaceSnapshot");
     this.#snapshot = snapshot;
     this.#messages.clear();
     for (const item of messages) this.#messages.set(item.id, item);
@@ -327,6 +367,12 @@ class FakeWorkspaceCache implements WorkspaceCache {
     this.#tasks.clear();
     for (const task of tasks) this.#tasks.set(task.id, task);
     this.#syncCursor = snapshot.syncCursor;
+  }
+
+  async replaceMembers(members: readonly User[]): Promise<void> {
+    this.operations.push("replaceMembers");
+    if (this.#snapshot === null) return;
+    this.#snapshot = { ...this.#snapshot, members: [...members] };
   }
 
   async upsertConversation(summary: ConversationSummary): Promise<void> {
@@ -350,6 +396,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     }
     this.#events.add(event.id);
     this.#syncCursor = event.workspaceSequence;
+    this.operations.push(`applyEvent:${event.type}`);
     if (event.type === "message.created") {
       this.#messages.set(event.payload.message.id, event.payload.message);
       this.#outbox.delete(event.payload.message.clientMessageId);
@@ -455,7 +502,7 @@ class FakeDesktopApi implements DesktopApi {
     resolvedThemeId: "dark",
     resolvedColorScheme: "dark",
   };
-  bootstrap: WorkspaceBootstrapResponse;
+  bootstrap: HumanWorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
     scope,
@@ -463,6 +510,13 @@ class FakeDesktopApi implements DesktopApi {
   };
   bootstrapRequests = 0;
   stopRequests = 0;
+  /** What `GET /v1/members` answers with. The real route lists active memberships only. */
+  members: readonly User[] = [user];
+  /** Queued directory responses, for tests that need a slow read to be overtaken by a newer one. */
+  readonly memberResults: (ListMembersResponse | Promise<ListMembersResponse>)[] = [];
+  /** How many upcoming directory reads fail, standing in for a server still coming back up. */
+  memberFailures = 0;
+  memberRequests = 0;
   /** How many upcoming bootstrap requests fail, standing in for a server still coming back up. */
   bootstrapFailures = 0;
   /** When set, every handshake is answered with a resync demand, as an unusable cursor is. */
@@ -515,7 +569,7 @@ class FakeDesktopApi implements DesktopApi {
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
   readonly #notificationListeners = new Set<(action: NotificationAction) => void>();
 
-  constructor(bootstrap: WorkspaceBootstrapResponse) {
+  constructor(bootstrap: HumanWorkspaceBootstrapResponse) {
     this.bootstrap = bootstrap;
   }
 
@@ -611,13 +665,24 @@ class FakeDesktopApi implements DesktopApi {
     this.cryptoStatus = { mode: "memory_only", scope, reason: "credential_store_unavailable" };
   }
 
-  async getWorkspaceBootstrap(): Promise<WorkspaceBootstrapResponse> {
+  async getWorkspaceBootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
     this.bootstrapRequests += 1;
     if (this.bootstrapFailures > 0) {
       this.bootstrapFailures -= 1;
       throw new Error("The workspace is temporarily unavailable");
     }
     return this.bootstrap;
+  }
+
+  async listWorkspaceMembers(): Promise<ListMembersResponse> {
+    this.memberRequests += 1;
+    if (this.memberFailures > 0) {
+      this.memberFailures -= 1;
+      throw new Error("The member directory is unavailable");
+    }
+    const queued = this.memberResults.shift();
+    if (queued !== undefined) return await queued;
+    return { members: [...this.members] };
   }
 
   async listConversations(
@@ -2025,38 +2090,199 @@ describe("WorkspaceRuntime", () => {
 
   it("orders a newly delivered member the way a cold load would", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
+    const alice: User = {
+      id: "20000000-0000-4000-8000-000000000011",
+      kind: "human",
+      username: "alice",
+      displayName: "Alice",
+      avatarUrl: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
 
-    api.emitWorkspaceEvent({
-      version: 1,
-      id: "20000000-0000-4000-8000-00000000000f",
-      type: "member.updated",
-      occurredAt: NOW,
-      workspaceId: WORKSPACE_ID,
-      conversationId: null,
-      workspaceSequence: "11",
-      conversationSequence: null,
-      entityVersion: 1,
-      delivery: "at_least_once",
-      payload: {
-        member: {
-          id: "20000000-0000-4000-8000-000000000011",
-          kind: "human",
-          username: "alice",
-          displayName: "Alice",
-          avatarUrl: null,
-          createdAt: NOW,
-          updatedAt: NOW,
-        },
-      },
-    });
-    await settle(() => runtime.state.bootstrap?.members.length === 2, "member application");
+    // The refetched directory arrives in the server's own order; the runtime still sorts it, so
+    // realtime application and a cold load agree.
+    api.members = [user, alice];
+    api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", alice));
+    await settle(() => runtime.state.bootstrap?.members.length === 2, "member directory refetch");
 
     expect(runtime.state.bootstrap?.members.map((item) => item.displayName)).toEqual([
       "Alice",
       "Morgan",
     ]);
+  });
+
+  it("drops a disabled member from the directory when member.updated arrives over realtime", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+
+    // The disable event carries the agent's own `User`, which has no field that can say "removed".
+    // Upserting it re-asserts the agent; only the server's active-only directory can drop it.
+    api.members = [user];
+    api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+    await settle(() => api.memberRequests === 1, "member directory refetch");
+    await settle(() => runtime.state.bootstrap?.members.length === 1, "disabled member removal");
+
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    // The mention picker and the DM sidebar both read this list, so the agent stops being a
+    // resolvable target without the client re-bootstrapping.
+    expect((await cache.load()).bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    expect(api.acknowledged).toContain("11");
+    expect(api.bootstrapRequests).toBe(1);
+  });
+
+  it("refreshes the directory from an offline backfill before reloading the cache", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [memberUpdated(MEMBER_EVENT_ID, "11", agent)],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    api.members = [user];
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    // The backfill loop bypasses #applyWorkspaceEvent, so the refetch has to be drained by the
+    // flush itself — and before the reload, or the reload would republish the stale cached list.
+    expect(cache.operations.slice(cache.operations.indexOf("applyEvent:member.updated"))).toEqual([
+      "applyEvent:member.updated",
+      "replaceMembers",
+      "load",
+      "load",
+    ]);
+  });
+
+  it("coalesces a backfilled batch of member.updated events into one directory read", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [
+          memberUpdated(MEMBER_EVENT_ID, "11", agent),
+          memberUpdated(SECOND_MEMBER_EVENT_ID, "12", agent),
+          memberUpdated(THIRD_MEMBER_EVENT_ID, "13", agent),
+        ],
+        nextCursor: "13",
+        highWaterCursor: "13",
+        hasMore: false,
+      },
+    });
+    api.members = [user];
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+
+    expect(api.memberRequests).toBe(1);
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+  });
+
+  it("retries a failed directory read on a healthy socket, with no sync pass to lean on", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      // Deliberately no queued sync result: nothing arms a sync retry, so `#repairAndFlush` is
+      // never re-entered. On a connected socket that is the normal state, and it used to mean a
+      // single failed read left the disabled member resolvable until the app restarted.
+      api.memberFailures = 1;
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+      const syncsAfterStart = api.syncedFrom.length;
+
+      api.members = [user];
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => api.memberRequests === 1, "failed member directory read");
+      expect(runtime.state.stale).toBe(true);
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+
+      // `retryDelay(1)` is bounded above by 2s.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle(() => api.memberRequests === 2, "retried member directory read");
+
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect(runtime.state.stale).toBe(false);
+      // The recovery must come from the directory retry itself, not from a sync pass.
+      expect(api.syncedFrom.length).toBe(syncsAfterStart);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a failed directory read pending instead of losing the invalidation", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      // Leaves a sync retry armed, which is where the unanswered invalidation is drained.
+      api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
+      api.memberFailures = 1;
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      api.members = [user];
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => api.memberRequests === 1, "failed member directory read");
+      expect(runtime.state.stale).toBe(true);
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle(() => api.memberRequests === 2, "retried member directory read");
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("discards a directory read that a newer read already superseded", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
+      const slow = deferred<ListMembersResponse>();
+      api.memberResults.push(slow.promise, { members: [user] });
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      // The realtime read stalls, so the sync retry's drain overtakes it with the newer answer.
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => api.memberRequests === 1, "stalled member directory read");
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle(() => api.memberRequests === 2, "overtaking member directory read");
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+
+      slow.resolve({ members: [user, agent] });
+      await drain();
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a directory read that lands after the runtime stopped", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const slow = deferred<ListMembersResponse>();
+    api.memberResults.push(slow.promise);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+    await settle(() => api.memberRequests === 1, "stalled member directory read");
+    await runtime.stop();
+    slow.resolve({ members: [user] });
+    await drain();
+
+    expect(runtime.state.bootstrap).toBeNull();
   });
 
   it("pages conversations that the bootstrap response could not carry", async () => {

@@ -95,6 +95,7 @@ const ownerPrincipal: RealtimePrincipal = {
   userId: ownerId,
   workspaceId,
   deviceSessionId: ownerSessionId,
+  agentTokenId: null,
 };
 
 /** The wire form of a conversation keyset cursor, so tests can page from an arbitrary anchor. */
@@ -1457,6 +1458,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
+      agentTokenId: null,
       reactionEvents: false,
       readStateEvents: false,
       taskEvents: false,
@@ -1468,6 +1470,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
+      agentTokenId: null,
       reactionEvents: true,
       readStateEvents: true,
       taskEvents: true,
