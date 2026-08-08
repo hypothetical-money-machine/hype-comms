@@ -1292,21 +1292,6 @@ button:disabled {
   margin-top: 7px;
 }
 
-.thread-summary {
-  margin-top: 7px;
-  padding: 3px 0;
-  border: 0;
-  background: transparent;
-  color: var(--theme-text-accent);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.thread-summary:hover {
-  color: var(--theme-text-strong);
-}
-
 .message-reactions.empty {
   display: none;
 }
@@ -1324,13 +1309,16 @@ button:disabled {
 }
 
 .message-reply-action {
-  display: inline-grid;
-  width: 27px;
-  padding: 0;
-  place-items: center;
+  display: inline-flex;
+  min-width: 27px;
+  padding: 0 5px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
 }
 
 .message-reply-action svg {
+  flex: none;
   width: 17px;
   height: 17px;
   fill: none;
@@ -1338,6 +1326,11 @@ button:disabled {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.5;
+}
+
+.message-reply-action span {
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .message-task-action {

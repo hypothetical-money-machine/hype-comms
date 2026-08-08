@@ -87,15 +87,17 @@ function renderMessage(overrides: {
 }
 
 describe("MessageRow thread action", () => {
-  it("opens a summarized thread from its reply-count action", () => {
+  it("folds the reply count into the hover action rail", () => {
     const onOpenThread = vi.fn();
-    renderMessage({ onOpenThread, replyCount: 3 });
+    const { container } = renderMessage({ onOpenThread, replyCount: 3 });
 
-    fireEvent.click(screen.getByRole("button", { name: "3 replies" }));
+    const threadAction = screen.getByRole("button", { name: "Open thread with 3 replies" });
+    expect(threadAction.closest(".message-action-rail")).not.toBeNull();
+    expect(threadAction.textContent).toBe("3");
+    expect(container.querySelector(".thread-summary")).toBeNull();
 
+    fireEvent.click(threadAction);
     expect(onOpenThread).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "Reply in thread" }));
-    expect(onOpenThread).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an empty thread in the hover action rail instead of showing a summary", () => {

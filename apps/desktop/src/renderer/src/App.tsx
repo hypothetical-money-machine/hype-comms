@@ -271,6 +271,10 @@ export function MessageRow({
 }) {
   const author = members.find((member) => member.id === message.authorId);
   const participantId = message.authorId ?? "former-member";
+  const threadActionLabel =
+    replyCount === 0
+      ? "Reply in thread"
+      : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
   return (
     <article
       className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
@@ -305,14 +309,15 @@ export function MessageRow({
               <button
                 className="message-reply-action"
                 type="button"
-                aria-label="Reply in thread"
-                title="Reply in thread"
+                aria-label={threadActionLabel}
+                title={threadActionLabel}
                 onClick={onOpenThread}
               >
                 <svg aria-hidden="true" viewBox="0 0 20 20">
                   <path d="M4 4.5h12v8H9l-4 3v-3H4z" />
                   <path d="M7 8.5h6" />
                 </svg>
+                {replyCount > 0 && <span aria-hidden="true">{replyCount}</span>}
               </button>
             )
           }
@@ -328,11 +333,6 @@ export function MessageRow({
             )
           }
         />
-        {onOpenThread !== undefined && replyCount > 0 && (
-          <button className="thread-summary" type="button" onClick={onOpenThread}>
-            {`${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`}
-          </button>
-        )}
       </div>
     </article>
   );
