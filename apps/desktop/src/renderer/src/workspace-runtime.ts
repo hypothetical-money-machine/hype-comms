@@ -18,6 +18,7 @@ import {
   type Task,
   type TaskPriority,
   type TaskStatus,
+  type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
 } from "@hmm-chat/contracts";
@@ -354,6 +355,8 @@ export class WorkspaceRuntime {
   #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #syncAttempt = 0;
+  /** True until the current sync pass has fully repaired and reloaded the local projection. */
+  #syncRecoveryPending = false;
   /**
    * Resync demands in the current chain. Only demands count: a failed download is retried without
    * touching this, and `system.connected` cannot reset it either, so the bound stays armed on a
@@ -362,6 +365,10 @@ export class WorkspaceRuntime {
   #resyncAttempt = 0;
   /** Transient failures of the resync now in flight, so its backoff grows the usual way. */
   #resyncFailures = 0;
+  /** True from a resync demand until its snapshot, sync pass, and realtime restart all succeed. */
+  #resyncRecoveryPending = false;
+  /** Monotonic demand id, so an older retry cannot settle a newer resync recovery. */
+  #resyncRequest = 0;
   /** When the resync now in place restarted realtime; how a chain is told from a fresh demand. */
   #resyncSettledAt: number | null = null;
   /** The signed-in scope, kept past `stop()` so a sign-out reset knows whose cache to delete. */
@@ -376,9 +383,13 @@ export class WorkspaceRuntime {
   #membersDirty = false;
   /** Monotonic refetch id, so a slow response cannot overwrite a newer directory. */
   #membersRequest = 0;
+  /** Serializes durable replacements in the active cache generation without delaying reads. */
+  #membersReplacementQueue: Promise<void> = Promise.resolve();
+  #membersReplacementAbortController = new AbortController();
   #membersRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #membersAttempt = 0;
   #eventQueue: Promise<void> = Promise.resolve();
+  #recoveryQueue: Promise<void> = Promise.resolve();
   readonly #historyCursors = new Map<string, string | null>();
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
@@ -423,14 +434,24 @@ export class WorkspaceRuntime {
     return result;
   }
 
+  /** Keeps sync and resync cache recovery mutually exclusive without blocking realtime events. */
+  #serializeRecovery(operation: () => Promise<void>): Promise<void> {
+    const result = this.#recoveryQueue.then(operation);
+    this.#recoveryQueue = result.catch(() => undefined);
+    return result;
+  }
+
   async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
     const generation = ++this.#generation;
+    this.#retireMembersReplacementQueue();
+    this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#clearMembersRetryTimer();
     this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#syncAttempt = 0;
+    this.#syncRecoveryPending = false;
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
@@ -439,8 +460,15 @@ export class WorkspaceRuntime {
     this.#unsubscribeConnection?.();
     this.#eventQueue = Promise.resolve();
     this.#unsubscribeEvent = this.#client.onWorkspaceEvent((event) => {
+      const resyncRequest = event.type === "system.resync_required" ? ++this.#resyncRequest : null;
+      if (resyncRequest !== null) {
+        // Publish the demand as soon as it arrives. A timer-based attempt can currently be awaiting
+        // network I/O on the recovery queue and must observe that a newer recovery owns staleness.
+        this.#resyncRecoveryPending = true;
+        this.#setState({ stale: true });
+      }
       this.#eventQueue = this.#eventQueue
-        .then(() => this.#handleRealtimeEvent(event, generation))
+        .then(() => this.#handleRealtimeEvent(event, generation, resyncRequest))
         .catch((error: unknown) => {
           if (generation === this.#generation) {
             this.#setState({
@@ -499,11 +527,14 @@ export class WorkspaceRuntime {
 
   async stop(): Promise<void> {
     ++this.#generation;
+    this.#retireMembersReplacementQueue();
+    this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#clearMembersRetryTimer();
     this.#membersAttempt = 0;
     this.#resetResyncState();
+    this.#syncRecoveryPending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
@@ -1276,11 +1307,14 @@ export class WorkspaceRuntime {
 
   async resetLocalCache(): Promise<void> {
     ++this.#generation;
+    this.#retireMembersReplacementQueue();
+    this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#clearMembersRetryTimer();
     this.#membersAttempt = 0;
     this.#resetResyncState();
+    this.#syncRecoveryPending = false;
     this.#clearReadTargets();
     const scope = this.#scope;
     await this.#client.stopWorkspaceRealtime();
@@ -1451,7 +1485,7 @@ export class WorkspaceRuntime {
       selectedThreadRootId,
       focusedThreadMessageId,
       ...(selectedThreadRootId === null ? { threadLoading: false, threadError: null } : {}),
-      stale: false,
+      stale: this.#syncRecoveryPending || this.#resyncRecoveryPending,
       error: null,
     });
   }
@@ -1472,29 +1506,43 @@ export class WorkspaceRuntime {
     const request = ++this.#membersRequest;
     try {
       const response = await this.#client.listWorkspaceMembers();
-      // A slower earlier read must never overwrite the directory a later one already wrote.
       if (generation !== this.#generation || cache !== this.#cache) return;
       if (request !== this.#membersRequest) return;
-      await cache.replaceMembers(response.members);
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      if (request !== this.#membersRequest) return;
+      const replaced = await this.#replaceMembersIfCurrent(
+        cache,
+        generation,
+        request,
+        response.members,
+      );
+      if (!replaced) return;
       this.#membersDirty = false;
       // A read that recovers from an earlier failure clears the staleness that failure published.
       // `#repairAndFlush` does this for the sync path; the retry timer has no such drain.
       const recovered = this.#membersAttempt > 0;
+      const clearsStale =
+        recovered &&
+        !this.#syncRecoveryPending &&
+        !this.#resyncRecoveryPending &&
+        this.#state.error === null;
       this.#membersAttempt = 0;
       this.#clearMembersRetryTimer();
       const snapshot = this.#state.bootstrap;
       if (snapshot === null) {
-        if (recovered) this.#setState({ stale: false });
+        if (clearsStale) this.#setState({ stale: false });
         return;
       }
       this.#setState({
         bootstrap: { ...snapshot, members: [...response.members].sort(compareMembers) },
-        ...(recovered ? { stale: false } : {}),
+        ...(clearsStale ? { stale: false } : {}),
       });
     } catch {
-      if (generation !== this.#generation) return;
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        request !== this.#membersRequest
+      ) {
+        return;
+      }
       // `#membersDirty` stays set, and a retry is armed here rather than left to the next sync
       // pass. `#repairAndFlush` is the only drain site, and on a healthy realtime socket nothing
       // schedules one -- its retry timer is armed only when `/v1/sync` itself returns retryable.
@@ -1503,6 +1551,54 @@ export class WorkspaceRuntime {
       this.#setState({ stale: true });
       this.#scheduleMembersRetry(generation);
     }
+  }
+
+  /**
+   * Commits directory replacements in order. A newer request may overtake an older network read,
+   * but once an older response has entered the cache its transaction must finish before the newer
+   * response writes. Otherwise the older transaction can finish last and leave stale members on
+   * disk even though its in-memory projection is correctly discarded.
+   */
+  async #replaceMembersIfCurrent(
+    cache: WorkspaceCache,
+    generation: number,
+    request: number,
+    members: readonly User[],
+  ): Promise<boolean> {
+    let replaced = false;
+    const signal = this.#membersReplacementAbortController.signal;
+    const replacement = this.#membersReplacementQueue.then(async () => {
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        request !== this.#membersRequest
+      ) {
+        return;
+      }
+      await cache.replaceMembers(members, signal);
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        request !== this.#membersRequest
+      ) {
+        return;
+      }
+      replaced = true;
+    });
+    this.#membersReplacementQueue = replacement.catch(() => undefined);
+    await replacement;
+    return replaced;
+  }
+
+  /**
+   * Detaches the next cache generation from writes that may still be waiting on an old cache's
+   * storage or crypto. Those writes retain their generation guards, but can no longer stall a
+   * current-session directory replacement indefinitely.
+   */
+  #retireMembersReplacementQueue(): void {
+    this.#membersReplacementAbortController.abort();
+    this.#membersReplacementAbortController = new AbortController();
+    this.#membersReplacementQueue = Promise.resolve();
   }
 
   #scheduleMembersRetry(generation: number): void {
@@ -1524,6 +1620,7 @@ export class WorkspaceRuntime {
   async #repairAndFlush(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
+    this.#syncRecoveryPending = true;
     this.#clearSyncRetryTimer();
     let state = await cache.load();
     let cursor = state.syncCursor ?? "0";
@@ -1578,13 +1675,19 @@ export class WorkspaceRuntime {
     // realtime refetch that failed earlier.
     if (this.#membersDirty) await this.#refreshMembers(generation);
     await this.#reloadCache();
+    this.#syncRecoveryPending = false;
     // A directory read that failed leaves the client genuinely stale, so the flush must not claim
-    // otherwise just because the event page drained.
-    this.#setState({ stale: this.#membersDirty });
+    // otherwise just because the event page drained. A resync remains stale until realtime has
+    // also restarted with the repaired cursor.
+    this.#setState({ stale: this.#membersDirty || this.#resyncRecoveryPending });
     await this.#flushOutbox(generation);
   }
 
-  async #handleRealtimeEvent(event: ProductRealtimeEvent, generation: number): Promise<void> {
+  async #handleRealtimeEvent(
+    event: ProductRealtimeEvent,
+    generation: number,
+    resyncRequest: number | null,
+  ): Promise<void> {
     if (generation !== this.#generation || this.#cache === null) return;
     if (event.type === "system.connected") {
       await this.#cache.advanceCursor(event.workspaceSequence);
@@ -1600,7 +1703,7 @@ export class WorkspaceRuntime {
       return;
     }
     if (event.type === "system.resync_required") {
-      await this.#resync(generation);
+      if (resyncRequest !== null) await this.#resync(generation, resyncRequest);
       return;
     }
     await this.#applyWorkspaceEvent(event, generation);
@@ -1612,8 +1715,15 @@ export class WorkspaceRuntime {
    * would be answered with another resync, and the client would re-download history forever, so
    * the first demand of a chain is answered at once and repeats wait for a backoff — then stop.
    */
-  async #resync(generation: number): Promise<void> {
-    if (this.#cache === null || generation !== this.#generation) return;
+  async #resync(generation: number, request: number): Promise<void> {
+    if (
+      this.#cache === null ||
+      generation !== this.#generation ||
+      request !== this.#resyncRequest
+    ) {
+      return;
+    }
+    this.#resyncRecoveryPending = true;
     await this.#client.stopWorkspaceRealtime();
     this.#setState({ stale: true });
     const settledAt = this.#resyncSettledAt;
@@ -1635,10 +1745,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (this.#resyncAttempt === 1) {
-      await this.#attemptResync(generation);
+      await this.#serializeRecovery(() => this.#attemptResync(generation, request));
       return;
     }
-    this.#scheduleResync(generation, retryDelay(this.#resyncAttempt));
+    this.#scheduleResync(generation, request, retryDelay(this.#resyncAttempt));
   }
 
   /**
@@ -1649,38 +1759,57 @@ export class WorkspaceRuntime {
    * seconds of downtime spent the whole budget, left no cached workspace behind, and reported a
    * server demanding resyncs it had never sent.
    */
-  async #attemptResync(generation: number): Promise<void> {
+  async #attemptResync(generation: number, request: number): Promise<void> {
     const cache = this.#cache;
-    if (cache === null || generation !== this.#generation) return;
+    if (cache === null || generation !== this.#generation || request !== this.#resyncRequest) {
+      return;
+    }
     try {
       await cache.clearServerStatePreservingOutbox();
+      if (generation !== this.#generation || request !== this.#resyncRequest) return;
       this.#syncCursor = null;
       await this.#refreshSnapshot(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
+      if (
+        generation !== this.#generation ||
+        this.#cache === null ||
+        request !== this.#resyncRequest
+      ) {
+        return;
+      }
       await this.#repairAndFlush(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
+      if (
+        generation !== this.#generation ||
+        this.#cache === null ||
+        request !== this.#resyncRequest
+      ) {
+        return;
+      }
       // Stamped before the handshake goes out, because the demand that answers it arrives on the
       // socket this opens: a chain has to be measured from the handshake, not from a reply to it.
       this.#resyncSettledAt = Date.now();
       await this.#restartRealtime(generation);
-      if (generation !== this.#generation) return;
+      if (generation !== this.#generation || request !== this.#resyncRequest) return;
       this.#resyncFailures = 0;
+      this.#resyncRecoveryPending = false;
+      this.#setState({ stale: this.#membersDirty || this.#syncRecoveryPending });
     } catch (error) {
-      if (generation !== this.#generation) return;
+      if (generation !== this.#generation || request !== this.#resyncRequest) return;
       // Realtime is stopped and the server-derived stores are already gone, so without rearming
       // here the client sits offline with no cached workspace until the user presses Retry. The
       // notice is the failure that actually happened, never the server-keeps-demanding dead end.
       this.#resyncFailures += 1;
       this.#setState({ stale: true, error: errorMessage(error, "Could not resync the workspace") });
-      this.#scheduleResync(generation, retryDelay(this.#resyncFailures));
+      this.#scheduleResync(generation, request, retryDelay(this.#resyncFailures));
     }
   }
 
-  #scheduleResync(generation: number, delayMs: number): void {
+  #scheduleResync(generation: number, request: number, delayMs: number): void {
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = null;
-      void this.#attemptResync(generation);
+      // A newer resync demand can supersede this request while the timer waits, but recovery
+      // remains independent from ordinary realtime events and never races another sync pass.
+      void this.#serializeRecovery(() => this.#attemptResync(generation, request));
     }, delayMs);
   }
 
@@ -1913,7 +2042,13 @@ export class WorkspaceRuntime {
     const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
     this.#syncRetryTimer = setTimeout(() => {
       this.#syncRetryTimer = null;
-      void this.#repairAndFlush(generation).catch((error: unknown) => {
+      // A resync also runs the repair loop. Rejoin its dedicated queue so two passes cannot share
+      // recovery flags or mutate the cache concurrently. A resync that already completed its own
+      // repair resets the attempt and makes this queued retry redundant.
+      void this.#serializeRecovery(async () => {
+        if (generation !== this.#generation || this.#syncAttempt === 0) return;
+        await this.#repairAndFlush(generation);
+      }).catch((error: unknown) => {
         if (generation === this.#generation) {
           this.#setState({
             stale: true,
@@ -1974,6 +2109,8 @@ export class WorkspaceRuntime {
     this.#clearResyncTimer();
     this.#resyncAttempt = 0;
     this.#resyncFailures = 0;
+    this.#resyncRecoveryPending = false;
+    this.#resyncRequest += 1;
     this.#resyncSettledAt = null;
   }
 }

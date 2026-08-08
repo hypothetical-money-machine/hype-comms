@@ -334,6 +334,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #tasks = new Map<string, Task>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
+  readonly memberReplaceBarriers: Promise<void>[] = [];
   upsertFailure: Error | null = null;
 
   get cursor(): string | null {
@@ -369,8 +370,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     this.#syncCursor = snapshot.syncCursor;
   }
 
-  async replaceMembers(members: readonly User[]): Promise<void> {
+  async replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void> {
     this.operations.push("replaceMembers");
+    const barrier = this.memberReplaceBarriers.shift();
+    if (barrier !== undefined) await barrier;
+    signal?.throwIfAborted();
     if (this.#snapshot === null) return;
     this.#snapshot = { ...this.#snapshot, members: [...members] };
   }
@@ -519,6 +523,10 @@ class FakeDesktopApi implements DesktopApi {
   memberRequests = 0;
   /** How many upcoming bootstrap requests fail, standing in for a server still coming back up. */
   bootstrapFailures = 0;
+  /** Queued bootstrap responses, for tests that need a resync download to remain in flight. */
+  readonly bootstrapResults: (
+    HumanWorkspaceBootstrapResponse | Promise<HumanWorkspaceBootstrapResponse>
+  )[] = [];
   /** When set, every handshake is answered with a resync demand, as an unusable cursor is. */
   resyncOnStart = false;
   /** When set, every handshake reports itself live first, exactly as the real server does. */
@@ -540,7 +548,7 @@ class FakeDesktopApi implements DesktopApi {
   readonly removeReactionResults: RemoveReactionResponse[] = [];
   readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
-  readonly syncResults: SyncAttemptResult[] = [];
+  readonly syncResults: (SyncAttemptResult | Promise<SyncAttemptResult>)[] = [];
   readonly sendResults: SendAttemptResult[] = [];
   readonly channelResults: (
     ConversationMutationResponse | Promise<ConversationMutationResponse>
@@ -671,6 +679,8 @@ class FakeDesktopApi implements DesktopApi {
       this.bootstrapFailures -= 1;
       throw new Error("The workspace is temporarily unavailable");
     }
+    const queued = this.bootstrapResults.shift();
+    if (queued !== undefined) return await queued;
     return this.bootstrap;
   }
 
@@ -856,17 +866,15 @@ class FakeDesktopApi implements DesktopApi {
 
   async syncWorkspace(after: string): Promise<SyncAttemptResult> {
     this.syncedFrom.push(after);
-    return (
-      this.syncResults.shift() ?? {
-        status: "accepted",
-        response: {
-          events: [],
-          nextCursor: after,
-          highWaterCursor: after,
-          hasMore: false,
-        },
-      }
-    );
+    return await (this.syncResults.shift() ?? {
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: after,
+        highWaterCursor: after,
+        hasMore: false,
+      },
+    });
   }
 
   async startWorkspaceRealtime(after: string): Promise<void> {
@@ -1536,6 +1544,84 @@ describe("WorkspaceRuntime", () => {
     await drain();
     expect(api.bootstrapRequests).toBe(2);
     expect(api.startedCursors).toEqual(["5", "40"]);
+  });
+
+  it("does not let an older retry settle a newer resync demand", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("5"));
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      const olderRetry = deferred<HumanWorkspaceBootstrapResponse>();
+      api.bootstrap = bootstrapAt("50");
+      api.bootstrapFailures = 1;
+      api.bootstrapResults.push(olderRetry.promise);
+      api.emitWorkspaceEvent(resyncRequired);
+      await settle(() => runtime.state.error !== null, "failed first resync attempt");
+
+      // The timer retry reaches its bootstrap request and stalls. A newer server demand must keep
+      // ownership of stale state even after this older download eventually succeeds.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.bootstrapRequests === 3, "stalled older resync retry");
+      api.emitWorkspaceEvent(resyncRequired);
+      olderRetry.resolve(bootstrapAt("40"));
+      await settle(() => api.stopRequests === 2, "newer resync demand");
+
+      expect(api.startedCursors).toEqual(["5"]);
+      expect(runtime.state.stale).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.startedCursors.length === 2, "newer resync recovery");
+      expect(api.startedCursors).toEqual(["5", "50"]);
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes an in-flight sync retry with a realtime resync demand", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 1_000 });
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      const olderSync = deferred<SyncAttemptResult>();
+      api.syncResults.push(olderSync.promise);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.syncedFrom.length === 2, "in-flight sync retry");
+
+      api.bootstrap = bootstrapAt("40");
+      api.emitWorkspaceEvent(resyncRequired);
+      await drain();
+
+      // The resync stops the rejected socket immediately, but its cache recovery stays queued
+      // behind the timer retry instead of starting a second repair pass.
+      expect(api.stopRequests).toBe(1);
+      expect(api.bootstrapRequests).toBe(1);
+      expect(api.startedCursors).toEqual(["10"]);
+      expect(runtime.state.stale).toBe(true);
+
+      olderSync.resolve({
+        status: "accepted",
+        response: {
+          events: [],
+          nextCursor: "10",
+          highWaterCursor: "10",
+          hasMore: false,
+        },
+      });
+      await settle(() => api.startedCursors.length === 2, "serialized resync recovery");
+      await settle(() => !runtime.state.stale, "settled serialized resync recovery");
+      expect(api.startedCursors).toEqual(["10", "40"]);
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds a resync chain whose handshakes each report the connection live", async () => {
@@ -2219,12 +2305,15 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
-  it("keeps a failed directory read pending instead of losing the invalidation", async () => {
+  it("keeps stale state while an independent sync recovery is still pending", async () => {
     vi.useFakeTimers();
     try {
       const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
-      // Leaves a sync retry armed, which is where the unanswered invalidation is drained.
+      const syncRecovery = deferred<SyncAttemptResult>();
+      // The first attempt arms a retry; the retry then remains in flight while the independent
+      // member-directory retry succeeds.
       api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
+      api.syncResults.push(syncRecovery.promise);
       api.memberFailures = 1;
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
@@ -2237,9 +2326,55 @@ describe("WorkspaceRuntime", () => {
 
       await vi.advanceTimersByTimeAsync(2_000);
       await settle(() => api.memberRequests === 2, "retried member directory read");
+      await settle(() => api.syncedFrom.length === 2, "in-flight sync recovery");
       expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect(runtime.state.stale).toBe(true);
+
+      syncRecovery.resolve({
+        status: "accepted",
+        response: {
+          events: [],
+          nextCursor: "11",
+          highWaterCursor: "11",
+          hasMore: false,
+        },
+      });
+      await settle(() => !runtime.state.stale, "completed sync recovery");
       expect(runtime.state.stale).toBe(false);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps stale state while an independent resync recovery is still pending", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      api.bootstrap = bootstrapAt("40", { members: [user] });
+      api.bootstrapFailures = 2;
+      api.memberFailures = 1;
+
+      // Queue the resync first so its first retry also fails before the member retry recovers.
+      api.emitWorkspaceEvent(resyncRequired);
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => api.bootstrapRequests === 2, "failed resync download");
+      await settle(() => api.memberRequests === 1, "failed member directory read");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.bootstrapRequests === 3, "failed resync retry");
+      await settle(() => api.memberRequests === 2, "retried member directory read");
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect(runtime.state.stale).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.startedCursors.length === 2, "completed resync recovery");
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      random.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -2267,6 +2402,74 @@ describe("WorkspaceRuntime", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("serializes durable member replacements when a newer refetch overtakes a stalled write", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
+      api.memberResults.push({ members: [user, agent] }, { members: [user] });
+      const stalledWrite = deferred<void>();
+      const cache = new FakeWorkspaceCache();
+      cache.memberReplaceBarriers.push(stalledWrite.promise);
+      const runtime = runtimeWith(api, cache);
+      await runtime.start(session);
+
+      // The older response reaches the cache first but cannot finish its replacement. The sync
+      // retry then fetches the newer directory while that durable write is still stalled.
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => api.memberRequests === 1, "first member directory read");
+      await settle(
+        () => cache.operations.filter((operation) => operation === "replaceMembers").length === 1,
+        "stalled member replacement",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle(() => api.memberRequests === 2, "overtaking member directory read");
+
+      stalledWrite.resolve();
+      await settle(
+        () => cache.operations.filter((operation) => operation === "replaceMembers").length === 2,
+        "serialized member replacements",
+      );
+      await settle(() => runtime.state.bootstrap?.members.length === 1, "fresh member projection");
+
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect((await cache.load()).bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a stopped session's stalled member write block the current session", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    api.memberResults.push({ members: [user, agent] });
+    const stalledWrite = deferred<void>();
+    const cache = new FakeWorkspaceCache();
+    cache.memberReplaceBarriers.push(stalledWrite.promise);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+    await settle(
+      () => cache.operations.filter((operation) => operation === "replaceMembers").length === 1,
+      "old session member replacement",
+    );
+    await runtime.stop();
+
+    await runtime.start(session);
+    api.members = [user];
+    api.emitWorkspaceEvent(memberUpdated(SECOND_MEMBER_EVENT_ID, "11", agent));
+    await settle(() => api.memberRequests === 2, "current session member directory read");
+    await settle(
+      () => runtime.state.bootstrap?.members.length === 1,
+      "current session member replacement",
+    );
+    stalledWrite.resolve();
+    await drain();
+
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+    expect((await cache.load()).bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
   });
 
   it("ignores a directory read that lands after the runtime stopped", async () => {

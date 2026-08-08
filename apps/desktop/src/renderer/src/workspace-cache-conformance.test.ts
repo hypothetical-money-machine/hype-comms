@@ -615,6 +615,21 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.bootstrap?.members.map((member) => member.id)).toEqual([ALICE_ID, MORGAN_ID]);
   });
 
+  it("leaves the member directory unchanged when a replacement is aborted", async () => {
+    const cache = create();
+    await cache.replaceSnapshot({ ...snapshot, members: [morgan, alice, disabledAgent] }, []);
+    const before = (await cache.load()).bootstrap?.members;
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await expect(cache.replaceMembers([morgan], abortController.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    const state = await cache.load();
+    expect(state.bootstrap?.members).toEqual(before);
+  });
+
   it("replaces hydrated reactions for a history page and projects mutation responses", async () => {
     const cache = create();
     const reaction = reactionAddedEvent.payload.reaction;

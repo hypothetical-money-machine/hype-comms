@@ -84,8 +84,9 @@ export interface WorkspaceCache {
    * This is the only writer of the cached member list outside `replaceSnapshot`. `member.updated`
    * deliberately does not write here: its payload is a bare `User` with no status field, so it
    * cannot express a removal, and upserting it would re-assert a member the server just disabled.
+   * A caller may abort a replacement when the cache generation that requested it is retired.
    */
-  replaceMembers(members: readonly User[]): Promise<void>;
+  replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void>;
   /** Persists a mutation projection without claiming that its workspace cursor was applied. */
   upsertConversation(summary: ConversationSummary): Promise<void>;
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
@@ -703,18 +704,19 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     await this.#evictMessages();
   }
 
-  async replaceMembers(members: readonly User[]): Promise<void> {
+  async replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void> {
     const parsed = members.map((member) => userSchema.parse(member)).sort(compareMembers);
     const encrypted = await encryptRecords(
       this.#crypto,
       parsed.map((member) => protectedRecord("member", member.id, member)),
     );
+    signal?.throwIfAborted();
     await this.#database.transaction(
       "rw",
       this.#database.metadata,
       this.#database.members,
       async () => {
-        await this.#writeMembers(parsed, encrypted);
+        await this.#writeMembers(parsed, encrypted, signal);
       },
     );
   }
@@ -1142,8 +1144,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   async #writeMembers(
     members: readonly User[],
     encrypted: ReadonlyMap<string, CacheCiphertext>,
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     await this.#database.members.clear();
+    signal?.throwIfAborted();
     await this.#database.members.bulkPut(
       members.map((member) => ({
         id: member.id,
@@ -1151,6 +1156,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         value: encryptedValue(encrypted, "member", member.id),
       })),
     );
+    signal?.throwIfAborted();
   }
 
   async #recordEvent(event: WorkspaceEvent): Promise<void> {
@@ -1254,11 +1260,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#lastSyncedAt = new Date().toISOString();
   }
 
-  async replaceMembers(members: readonly User[]): Promise<void> {
+  async replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void> {
     const parsed = members.map((member) => userSchema.parse(member)).sort(compareMembers);
     // Persists regardless of `#snapshot`, matching PersistentWorkspaceCache's independent members
     // table -- a replaceMembers call that arrives before the first replaceSnapshot must not be
     // silently discarded, even though `load()` still reports no bootstrap until a snapshot exists.
+    signal?.throwIfAborted();
     this.#members = parsed;
     if (this.#snapshot !== null) this.#snapshot = { ...this.#snapshot, members: parsed };
   }
