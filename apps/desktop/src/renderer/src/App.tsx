@@ -15,6 +15,9 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ClientVersion } from "./client-version";
+import { ConversationHealth } from "./conversation-health";
+import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
+import { ArchivedConversationNotice, ConversationEmptyState } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
@@ -426,8 +429,7 @@ export function App({ client, theme }: AppProps) {
     observedEnds: new Set<string>(),
   });
   const threadList = useRef<HTMLDivElement>(null);
-  const threadComposer = useRef<HTMLInputElement>(null);
-  const threadSubmissionPending = useRef(false);
+  const threadComposer = useRef<HTMLTextAreaElement>(null);
   const stickToThreadBottom = useRef(true);
   const threadReadTrackingFrame = useRef<number | null>(null);
   const threadReadTrackingRootId = useRef<string | null>(null);
@@ -866,22 +868,14 @@ export function App({ client, theme }: AppProps) {
     runtime.openTaskSource(task);
   };
 
-  const sendThreadReply = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
+  const sendThreadReply = async (): Promise<void> => {
     const submittedDraft = threadDraft;
     const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
     const threadRootId = runtimeState.selectedThreadRootId;
-    if (
-      body === "" ||
-      conversationId === null ||
-      threadRootId === null ||
-      bootstrap === null ||
-      threadSubmissionPending.current
-    ) {
+    if (body === "" || conversationId === null || threadRootId === null || bootstrap === null) {
       return;
     }
-    threadSubmissionPending.current = true;
     const mentionedUserIds = mentionedMemberIds(
       body,
       bootstrap.members,
@@ -903,8 +897,6 @@ export function App({ client, theme }: AppProps) {
       setThreadComposerError("");
     } catch (error) {
       setThreadComposerError(errorMessage(error, "Could not queue the reply"));
-    } finally {
-      threadSubmissionPending.current = false;
     }
   };
 
@@ -1100,14 +1092,22 @@ export function App({ client, theme }: AppProps) {
               key={summary.conversation.id}
               onClick={() => runtime.selectConversation(summary.conversation.id)}
             >
-              <span>
-                {summary.conversation.access === "members" ? "🔒 " : "# "}
-                {summary.conversation.name}
-                {summary.conversation.isArchived ? " (archived)" : ""}
+              <span
+                className="conversation-label conversation-label-channel"
+                title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
+              >
+                <span className="conversation-type-icon channel-icon" aria-hidden="true">
+                  {summary.conversation.access === "members" ? "🔒" : "#"}
+                </span>
+                <span className="conversation-label-text">
+                  {summary.conversation.name}
+                  {summary.conversation.isArchived ? " (archived)" : ""}
+                </span>
               </span>
-              {(summary.unreadCount > 0 || summary.mentionCount > 0) && (
-                <span className="badge">{summary.mentionCount || summary.unreadCount}</span>
-              )}
+              <ConversationBadge
+                unreadCount={summary.unreadCount}
+                mentionCount={summary.mentionCount}
+              />
             </button>
           ))}
 
@@ -1125,10 +1125,17 @@ export function App({ client, theme }: AppProps) {
               key={summary.conversation.id}
               onClick={() => runtime.selectConversation(summary.conversation.id)}
             >
-              <span>● {runtime.conversationName(summary)}</span>
-              {(summary.unreadCount > 0 || summary.mentionCount > 0) && (
-                <span className="badge">{summary.mentionCount || summary.unreadCount}</span>
-              )}
+              <span
+                className="conversation-label conversation-label-direct-message"
+                title={runtime.conversationName(summary)}
+              >
+                <DirectMessageIcon />
+                <span className="conversation-label-text">{runtime.conversationName(summary)}</span>
+              </span>
+              <ConversationBadge
+                unreadCount={summary.unreadCount}
+                mentionCount={summary.mentionCount}
+              />
             </button>
           ))}
         </nav>
@@ -1171,30 +1178,14 @@ export function App({ client, theme }: AppProps) {
                   {selectedSummary.conversation.topic}
                 </p>
               )}
-            <p className="conversation-connection">
-              {runtimeState.connection}
-              {runtimeState.stale ? " · cached state may be stale" : ""}
-              {runtimeState.cacheMode === "memory_only" ? " · memory-only cache" : ""}
-            </p>
-            {workspaceNotice !== null && (
-              <p className="composer-error" role="alert">
-                {workspaceNotice}{" "}
-                <button
-                  className="quiet-button"
-                  type="button"
-                  onClick={() => void runtime.start(session)}
-                >
-                  Retry
-                </button>{" "}
-                <button
-                  className="quiet-button"
-                  type="button"
-                  onClick={() => void rebuildLocalCache(session)}
-                >
-                  Reset local cache
-                </button>
-              </p>
-            )}
+            <ConversationHealth
+              connection={runtimeState.connection}
+              stale={runtimeState.stale}
+              cacheMode={runtimeState.cacheMode}
+              notice={workspaceNotice}
+              onRetry={() => void runtime.start(session)}
+              onResetCache={() => void rebuildLocalCache(session)}
+            />
           </div>
           {selectedSummary !== undefined &&
             (tasksAvailable || selectedSummary.conversation.kind === "channel") && (
@@ -1307,10 +1298,14 @@ export function App({ client, theme }: AppProps) {
                   </button>
                 )}
               {messages.length === 0 && pending.length === 0 ? (
-                <div className="empty-state">
-                  <h3>No messages yet</h3>
-                  <p>Start the conversation.</p>
-                </div>
+                <ConversationEmptyState
+                  conversationName={
+                    selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
+                  }
+                  kind={selectedSummary?.conversation.kind ?? null}
+                  personal={selectedIsPersonal === true}
+                  archived={selectedSummary?.conversation.isArchived ?? false}
+                />
               ) : (
                 messages.map((message, index) => (
                   <Fragment key={message.id}>
@@ -1397,16 +1392,20 @@ export function App({ client, theme }: AppProps) {
               })}
             </div>
 
-            <MessageComposer
-              conversationName={
-                selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
-              }
-              draft={draft}
-              disabled={selectedSummary === undefined || selectedSummary.conversation.isArchived}
-              error={composerError}
-              onDraftChange={setDraft}
-              onSubmit={send}
-            />
+            {selectedSummary?.conversation.isArchived === true ? (
+              <ArchivedConversationNotice />
+            ) : (
+              <MessageComposer
+                conversationName={
+                  selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
+                }
+                draft={draft}
+                disabled={selectedSummary === undefined}
+                error={composerError}
+                onDraftChange={setDraft}
+                onSubmit={send}
+              />
+            )}
           </>
         )}
       </section>
@@ -1561,43 +1560,29 @@ export function App({ client, theme }: AppProps) {
             )}
           </div>
 
-          <form
-            className="composer thread-composer"
-            onSubmit={(event) => void sendThreadReply(event)}
-          >
-            <label className="sr-only" htmlFor="thread-message-composer">
-              Reply
-            </label>
-            <input
-              id="thread-message-composer"
-              ref={threadComposer}
-              value={threadDraft}
-              onChange={(event) =>
+          {selectedSummary?.conversation.isArchived === true ? (
+            <ArchivedConversationNotice thread />
+          ) : (
+            <MessageComposer
+              conversationName={null}
+              draft={threadDraft}
+              disabled={threadRoot === undefined}
+              error={threadComposerError}
+              inputId="thread-message-composer"
+              inputLabel="Reply"
+              inputRef={threadComposer}
+              placeholder="Reply in thread"
+              submitLabel="Reply"
+              variantClassName="thread-composer"
+              onDraftChange={(value) =>
                 setThreadDrafts((current) => ({
                   ...current,
-                  [selectedThreadRootId]: event.target.value,
+                  [selectedThreadRootId]: value,
                 }))
               }
-              placeholder="Reply in thread"
-              disabled={threadRoot === undefined || selectedSummary?.conversation.isArchived}
-              maxLength={4_000}
+              onSubmit={sendThreadReply}
             />
-            <button
-              type="submit"
-              disabled={
-                threadDraft.trim() === "" ||
-                threadRoot === undefined ||
-                selectedSummary?.conversation.isArchived
-              }
-            >
-              Reply
-            </button>
-            {threadComposerError !== "" && (
-              <p className="composer-error" role="alert">
-                {threadComposerError}
-              </p>
-            )}
-          </form>
+          )}
         </aside>
       )}
       {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (

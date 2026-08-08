@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { MessageSearchResult, User } from "@hmm-chat/contracts";
+import type { MessageSearchResponse, MessageSearchResult, User } from "@hmm-chat/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -109,6 +109,82 @@ describe("WorkspaceSearch", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Search is temporarily unavailable",
     );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
+  it("clears stale results and pagination when the submitted query changes", async () => {
+    const search = vi.fn().mockResolvedValue({ results: [result], nextCursor: "next-page" });
+    renderSearch(search);
+    submitQuery("quarterly avalanche");
+    await screen.findByText(result.message.body);
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), {
+      target: { value: "another query" },
+    });
+
+    expect(screen.queryByText(result.message.body)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("restores trigger focus when the dialog closes", async () => {
+    renderSearch();
+    const trigger = screen.getByRole("button", { name: "Search messages" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("searchbox", { name: "Search messages" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("ignores a late search response after the dialog closes", async () => {
+    let resolveSearch: (response: MessageSearchResponse) => void = () => undefined;
+    const pending = new Promise<MessageSearchResponse>((resolve) => {
+      resolveSearch = resolve;
+    });
+    const search = vi.fn().mockReturnValue(pending);
+    renderSearch(search);
+    submitQuery("quarterly avalanche");
+    await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+
+    const trigger = screen.getByRole("button", { name: "Search messages" });
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    resolveSearch({ results: [result], nextCursor: "next-page" });
+    await pending;
+    await Promise.resolve();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.queryByText(result.message.body)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(
+      (screen.getByRole("searchbox", { name: "Search messages" }) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("does not close a newly reopened dialog when an old result finishes opening", async () => {
+    let resolveOpen: () => void = () => undefined;
+    const pendingOpen = new Promise<void>((resolve) => {
+      resolveOpen = resolve;
+    });
+    const { openResult } = renderSearch(undefined, vi.fn().mockReturnValue(pendingOpen));
+    submitQuery("quarterly avalanche");
+    await screen.findByText(result.message.body);
+
+    fireEvent.click(screen.getByRole("button", { name: /Quarterly avalanche review/ }));
+    await waitFor(() => expect(openResult).toHaveBeenCalledWith(result));
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+
+    resolveOpen();
+    await pendingOpen;
+    await Promise.resolve();
+
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
 });

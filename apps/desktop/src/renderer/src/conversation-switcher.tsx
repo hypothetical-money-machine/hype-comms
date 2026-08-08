@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
+import { DirectMessageIcon } from "./conversation-indicators";
 
 export interface SwitcherConversation {
   readonly id: string;
@@ -183,10 +184,19 @@ export function ConversationSwitcher({
                         onMouseEnter={() => setSelectedIndex(index)}
                         onClick={() => choose(conversation.id)}
                       >
-                        <span className="quick-switcher-icon" aria-hidden="true">
-                          {conversation.kind === "channel" ? "#" : "●"}
+                        {conversation.kind === "channel" ? (
+                          <span
+                            className="quick-switcher-icon conversation-type-icon channel-icon"
+                            aria-hidden="true"
+                          >
+                            #
+                          </span>
+                        ) : (
+                          <DirectMessageIcon className="quick-switcher-icon" />
+                        )}
+                        <span className="quick-switcher-name" title={conversation.name}>
+                          {conversation.name}
                         </span>
-                        <span>{conversation.name}</span>
                         <small>
                           {conversation.isArchived
                             ? "Archived channel"

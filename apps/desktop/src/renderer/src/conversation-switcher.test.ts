@@ -79,4 +79,19 @@ describe("ConversationSwitcher", () => {
     fireEvent.change(searchbox, { target: { value: "missing" } });
     expect(screen.getByText("No matching conversations")).toBeTruthy();
   });
+
+  it("uses neutral direct-message iconography and a truncatable name", () => {
+    renderSwitcher();
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Jump to a conversation" }), {
+      target: { value: "Claire" },
+    });
+
+    const result = screen.getByRole("button", { name: /Claire/ });
+    expect(result.textContent).not.toContain("●");
+    expect(result.querySelector(".direct-message-avatar")).toBeTruthy();
+    const name = result.querySelector(".quick-switcher-name");
+    expect(name?.textContent).toBe("Claire");
+    expect(name?.getAttribute("title")).toBe("Claire");
+  });
 });

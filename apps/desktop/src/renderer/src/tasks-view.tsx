@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 
 import type { Task, TaskPriority, TaskStatus, User } from "@hmm-chat/contracts";
 
@@ -79,6 +79,19 @@ function priorityLabel(priority: TaskPriority): string {
   return PRIORITIES.find((entry) => entry.value === priority)?.label ?? priority;
 }
 
+function statusLabel(status: TaskStatus): string {
+  return COLUMNS.find((entry) => entry.status === status)?.label ?? status;
+}
+
+function memberInitials(name: string): string {
+  const words = name.trim().split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return "?";
+  return words
+    .slice(0, 2)
+    .map((word) => word[0]?.toLocaleUpperCase() ?? "")
+    .join("");
+}
+
 function dueLabel(dueOn: string | null): string | null {
   if (dueOn === null) return null;
   const [year, month, day] = dueOn.split("-").map(Number);
@@ -88,11 +101,73 @@ function dueLabel(dueOn: string | null): string | null {
   );
 }
 
+type DueState = "overdue" | "today" | "upcoming" | "complete";
+
+function localDate(now = new Date()): string {
+  const year = String(now.getFullYear()).padStart(4, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dueState(task: Task): DueState | null {
+  if (task.dueOn === null) return null;
+  if (task.status === "done") return "complete";
+  const today = localDate();
+  return task.dueOn < today ? "overdue" : task.dueOn === today ? "today" : "upcoming";
+}
+
+function PriorityChip({ priority }: { readonly priority: TaskPriority }) {
+  if (priority === "none") return null;
+  const label = priorityLabel(priority);
+  return (
+    <span className={`task-priority-chip priority-${priority}`} aria-label={`Priority: ${label}`}>
+      {label}
+    </span>
+  );
+}
+
+function DueBadge({ task }: { readonly task: Task }) {
+  const label = dueLabel(task.dueOn);
+  const state = dueState(task);
+  if (label === null || state === null) return null;
+  const stateLabel = state === "complete" ? "completed" : state;
+  return (
+    <span className={`task-due-badge due-${state}`} aria-label={`Due ${label}, ${stateLabel}`}>
+      {state === "overdue" ? "Overdue · " : state === "today" ? "Today · " : ""}
+      {label}
+    </span>
+  );
+}
+
+function AssigneeBadge({
+  members,
+  userId,
+}: {
+  readonly members: readonly User[];
+  userId: string | null;
+}) {
+  const name = memberName(members, userId);
+  return (
+    <span className="task-assignee-badge" aria-label={`Assignee: ${name}`}>
+      <span className="task-assignee-initials" aria-hidden="true">
+        {memberInitials(name)}
+      </span>
+      <span>{name}</span>
+    </span>
+  );
+}
+
 function TaskCard({
   task,
   members,
   sourceName,
   disabled,
+  moving,
+  canMoveEarlier,
+  canMoveLater,
+  canMoveLeft,
+  canMoveRight,
   onSelect,
   onDragStart,
   onDropBefore,
@@ -105,6 +180,11 @@ function TaskCard({
   readonly members: readonly User[];
   readonly sourceName: string;
   readonly disabled: boolean;
+  readonly moving: boolean;
+  readonly canMoveEarlier: boolean;
+  readonly canMoveLater: boolean;
+  readonly canMoveLeft: boolean;
+  readonly canMoveRight: boolean;
   readonly onSelect: () => void;
   readonly onDragStart: (event: DragEvent<HTMLElement>) => void;
   readonly onDropBefore: (event: DragEvent<HTMLElement>) => void;
@@ -113,11 +193,12 @@ function TaskCard({
   readonly onMoveLeft: () => void;
   readonly onMoveRight: () => void;
 }) {
-  const due = dueLabel(task.dueOn);
+  const status = statusLabel(task.status);
   return (
     <article
       className={`task-card priority-${task.priority}`}
       draggable={!disabled}
+      aria-busy={moving}
       onDragStart={onDragStart}
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDropBefore}
@@ -127,30 +208,63 @@ function TaskCard({
           {sourceName} · {task.number}
         </span>
         <strong>{task.title}</strong>
+        <span className="sr-only">Status: {status}</span>
         <span className="task-card-meta">
-          <span>{memberName(members, task.assigneeId)}</span>
-          {task.priority !== "none" && <span>{priorityLabel(task.priority)}</span>}
-          {due !== null && <span>{due}</span>}
+          <AssigneeBadge members={members} userId={task.assigneeId} />
+          <PriorityChip priority={task.priority} />
+          <DueBadge task={task} />
         </span>
+        {moving && (
+          <span className="task-card-pending" role="status">
+            Moving task…
+          </span>
+        )}
       </button>
-      {!disabled && (
-        <div className="task-card-moves" aria-label={`Move ${task.title}`}>
-          <button type="button" title="Move left" onClick={onMoveLeft}>
-            ←
-          </button>
-          <button type="button" title="Move up" onClick={onMoveEarlier}>
-            ↑
-          </button>
-          <button type="button" title="Move down" onClick={onMoveLater}>
-            ↓
-          </button>
-          <button type="button" title="Move right" onClick={onMoveRight}>
-            →
-          </button>
-        </div>
-      )}
+      <div className="task-card-moves" role="group" aria-label={`Move ${task.title}`}>
+        <button
+          type="button"
+          title="Move left"
+          aria-label={`Move ${task.title} to ${statusLabel(adjacentStatus(task.status, -1))}`}
+          disabled={disabled || !canMoveLeft}
+          onClick={onMoveLeft}
+        >
+          ←
+        </button>
+        <button
+          type="button"
+          title="Move up"
+          aria-label={`Move ${task.title} earlier in ${status}`}
+          disabled={disabled || !canMoveEarlier}
+          onClick={onMoveEarlier}
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          title="Move down"
+          aria-label={`Move ${task.title} later in ${status}`}
+          disabled={disabled || !canMoveLater}
+          onClick={onMoveLater}
+        >
+          ↓
+        </button>
+        <button
+          type="button"
+          title="Move right"
+          aria-label={`Move ${task.title} to ${statusLabel(adjacentStatus(task.status, 1))}`}
+          disabled={disabled || !canMoveRight}
+          onClick={onMoveRight}
+        >
+          →
+        </button>
+      </div>
     </article>
   );
+}
+
+function adjacentStatus(status: TaskStatus, offset: -1 | 1): TaskStatus {
+  const index = COLUMNS.findIndex((column) => column.status === status);
+  return COLUMNS[Math.max(0, Math.min(COLUMNS.length - 1, index + offset))]?.status ?? status;
 }
 
 export function TasksView({
@@ -179,6 +293,10 @@ export function TasksView({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [formError, setFormError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
+  const creatingRef = useRef(false);
+  const movingTaskIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     rememberMode(conversationId, mode);
@@ -226,7 +344,9 @@ export function TasksView({
   const submitTask = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const trimmed = title.trim();
-    if (trimmed === "") return;
+    if (trimmed === "" || creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
     try {
       await onCreate({
         title: trimmed,
@@ -241,6 +361,9 @@ export function TasksView({
       setFormError("");
     } catch (caught) {
       setFormError(caught instanceof Error ? caught.message : "Could not create the task");
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
     }
   };
 
@@ -249,22 +372,59 @@ export function TasksView({
     status: TaskStatus,
     beforeTaskId: string | null,
   ): Promise<void> => {
-    if (archived || (personal && isConversationArchived(task.conversationId))) return;
+    if (
+      archived ||
+      isConversationArchived(task.conversationId) ||
+      movingTaskIdRef.current !== null
+    ) {
+      return;
+    }
+    movingTaskIdRef.current = task.id;
+    setMovingTaskId(task.id);
     try {
       await onMove(task.id, status, beforeTaskId);
       setFormError("");
     } catch (caught) {
       setFormError(caught instanceof Error ? caught.message : "Could not move the task");
+    } finally {
+      movingTaskIdRef.current = null;
+      setMovingTaskId(null);
     }
   };
 
-  const adjacentStatus = (status: TaskStatus, offset: -1 | 1): TaskStatus => {
-    const index = COLUMNS.findIndex((column) => column.status === status);
-    return COLUMNS[Math.max(0, Math.min(COLUMNS.length - 1, index + offset))]?.status ?? status;
-  };
+  const collectionBusy = busy || creating || movingTaskId !== null;
+  const emptyState =
+    visibleTasks.length === 0
+      ? busy
+        ? {
+            title: "Loading tasks…",
+            detail: "Fetching the latest work for this conversation.",
+          }
+        : error !== null
+          ? {
+              title: "Tasks could not be loaded",
+              detail: "Return to Chat and open Tasks again to retry.",
+            }
+          : archived
+            ? {
+                title: "No archived tasks",
+                detail: "This channel is archived, so its task board is read-only.",
+              }
+            : personal
+              ? {
+                  title: includeAssigned ? "You're all caught up" : "Your personal list is empty",
+                  detail: includeAssigned
+                    ? "Tasks you add here or that others assign to you will appear here."
+                    : "Add a personal task whenever something needs your attention.",
+                }
+              : {
+                  title: "No tasks yet",
+                  detail: "Add the first task when work emerges from the conversation.",
+                }
+      : null;
 
   return (
-    <section className="tasks-view">
+    <section className="tasks-view" aria-busy={collectionBusy}>
       <header className="tasks-toolbar">
         <div className="tasks-title">
           <h3>{personal ? "My Tasks" : "Channel tasks"}</h3>
@@ -300,8 +460,16 @@ export function TasksView({
         </div>
       </header>
 
-      {!archived && (
-        <form className="task-quick-add" onSubmit={(event) => void submitTask(event)}>
+      {archived ? (
+        <p className="task-readonly-banner" role="note">
+          Archived channel · Tasks are read-only.
+        </p>
+      ) : (
+        <form
+          className="task-quick-add"
+          aria-busy={creating}
+          onSubmit={(event) => void submitTask(event)}
+        >
           <input
             aria-label="Task title"
             value={title}
@@ -338,10 +506,16 @@ export function TasksView({
             value={dueOn}
             onChange={(event) => setDueOn(event.target.value)}
           />
-          <button type="submit" disabled={busy || title.trim() === ""}>
-            Add task
+          <button type="submit" disabled={busy || creating || title.trim() === ""}>
+            {creating ? "Adding task…" : "Add task"}
           </button>
         </form>
+      )}
+
+      {busy && visibleTasks.length > 0 && !creating && movingTaskId === null && (
+        <p className="task-progress" role="status">
+          Refreshing tasks…
+        </p>
       )}
 
       {(error !== null || formError !== "") && (
@@ -350,7 +524,12 @@ export function TasksView({
         </p>
       )}
 
-      {mode === "board" ? (
+      {emptyState !== null ? (
+        <div className="task-empty-state task-collection-state" role={busy ? "status" : undefined}>
+          <h4>{emptyState.title}</h4>
+          <p>{emptyState.detail}</p>
+        </div>
+      ) : mode === "board" ? (
         <div className="kanban-board" role="region" aria-label="Kanban board">
           {COLUMNS.map((column) => {
             const columnTasks = byStatus.get(column.status) ?? [];
@@ -371,57 +550,64 @@ export function TasksView({
                   <span>{columnTasks.length}</span>
                 </header>
                 <div className="kanban-cards">
-                  {columnTasks.map((task) => (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      members={members}
-                      sourceName={conversationName(task.conversationId)}
-                      disabled={archived || isConversationArchived(task.conversationId)}
-                      onSelect={() => setSelectedTaskId(task.id)}
-                      onDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = "move";
-                        setDraggedTaskId(task.id);
-                      }}
-                      onDropBefore={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const dragged = visibleTasks.find(
-                          (candidate) => candidate.id === draggedTaskId,
-                        );
-                        if (dragged !== undefined && dragged.id !== task.id) {
-                          void move(
-                            dragged,
-                            column.status,
-                            dragged.conversationId === task.conversationId ? task.id : null,
+                  {columnTasks.map((task) => {
+                    const siblings = columnTasks.filter(
+                      (candidate) => candidate.conversationId === task.conversationId,
+                    );
+                    const siblingIndex = siblings.findIndex(
+                      (candidate) => candidate.id === task.id,
+                    );
+                    const taskReadOnly =
+                      archived ||
+                      isConversationArchived(task.conversationId) ||
+                      movingTaskId !== null;
+                    return (
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        members={members}
+                        sourceName={conversationName(task.conversationId)}
+                        disabled={taskReadOnly}
+                        moving={movingTaskId === task.id}
+                        canMoveEarlier={siblingIndex > 0}
+                        canMoveLater={siblingIndex >= 0 && siblingIndex < siblings.length - 1}
+                        canMoveLeft={COLUMNS[0]?.status !== task.status}
+                        canMoveRight={COLUMNS.at(-1)?.status !== task.status}
+                        onSelect={() => setSelectedTaskId(task.id)}
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          setDraggedTaskId(task.id);
+                        }}
+                        onDropBefore={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const dragged = visibleTasks.find(
+                            (candidate) => candidate.id === draggedTaskId,
                           );
-                        }
-                        setDraggedTaskId(null);
-                      }}
-                      onMoveEarlier={() => {
-                        const siblings = columnTasks.filter(
-                          (candidate) => candidate.conversationId === task.conversationId,
-                        );
-                        const siblingIndex = siblings.findIndex(
-                          (candidate) => candidate.id === task.id,
-                        );
-                        const before = siblings[siblingIndex - 1];
-                        if (before !== undefined) void move(task, column.status, before.id);
-                      }}
-                      onMoveLater={() => {
-                        const siblings = columnTasks.filter(
-                          (candidate) => candidate.conversationId === task.conversationId,
-                        );
-                        const siblingIndex = siblings.findIndex(
-                          (candidate) => candidate.id === task.id,
-                        );
-                        const afterNext = siblings[siblingIndex + 2];
-                        void move(task, column.status, afterNext?.id ?? null);
-                      }}
-                      onMoveLeft={() => void move(task, adjacentStatus(task.status, -1), null)}
-                      onMoveRight={() => void move(task, adjacentStatus(task.status, 1), null)}
-                    />
-                  ))}
+                          if (dragged !== undefined && dragged.id !== task.id) {
+                            void move(
+                              dragged,
+                              column.status,
+                              dragged.conversationId === task.conversationId ? task.id : null,
+                            );
+                          }
+                          setDraggedTaskId(null);
+                        }}
+                        onMoveEarlier={() => {
+                          const before = siblings[siblingIndex - 1];
+                          if (before !== undefined) void move(task, column.status, before.id);
+                        }}
+                        onMoveLater={() => {
+                          const afterNext = siblings[siblingIndex + 2];
+                          if (siblingIndex < siblings.length - 1) {
+                            void move(task, column.status, afterNext?.id ?? null);
+                          }
+                        }}
+                        onMoveLeft={() => void move(task, adjacentStatus(task.status, -1), null)}
+                        onMoveRight={() => void move(task, adjacentStatus(task.status, 1), null)}
+                      />
+                    );
+                  })}
                   {columnTasks.length === 0 && <p className="kanban-empty">Drop a task here</p>}
                 </div>
               </section>
@@ -431,28 +617,27 @@ export function TasksView({
       ) : (
         <div className="task-list-view">
           {visibleTasks.map((task) => (
-            <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)}>
+            <button
+              key={task.id}
+              type="button"
+              className={`task-list-row status-${task.status}`}
+              onClick={() => setSelectedTaskId(task.id)}
+            >
               <span className={`task-check status-${task.status}`} aria-hidden="true">
                 {task.status === "done" ? "✓" : ""}
               </span>
               <span className="task-list-copy">
                 <strong>{task.title}</strong>
-                <small>
-                  {conversationName(task.conversationId)} · {memberName(members, task.assigneeId)}
-                </small>
+                <span className="sr-only">Status: {statusLabel(task.status)}</span>
+                <small>{conversationName(task.conversationId)}</small>
               </span>
               <span className="task-list-detail">
-                {task.priority !== "none" && priorityLabel(task.priority)}
-                {dueLabel(task.dueOn) ?? ""}
+                <AssigneeBadge members={members} userId={task.assigneeId} />
+                <PriorityChip priority={task.priority} />
+                <DueBadge task={task} />
               </span>
             </button>
           ))}
-          {visibleTasks.length === 0 && (
-            <div className="task-empty-state">
-              <h4>Nothing on the board</h4>
-              <p>Add the first task when work emerges from the conversation.</p>
-            </div>
-          )}
         </div>
       )}
 
@@ -502,8 +687,24 @@ function TaskDetail({
   const [dueOn, setDueOn] = useState(task.dueOn ?? "");
   const [status, setStatus] = useState(task.status);
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const titleInput = useRef<HTMLInputElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef(
+    document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
+  const titleId = `task-detail-title-${task.id}`;
 
   useEffect(() => {
+    const focusTarget = disabled ? closeButton.current : titleInput.current;
+    focusTarget?.focus();
+    const restoreTarget = previouslyFocused.current;
+    return () => restoreTarget?.focus();
+  }, [disabled]);
+
+  useEffect(() => {
+    if (savingRef.current) return;
     setTitle(task.title);
     setDescription(task.description ?? "");
     setPriority(task.priority);
@@ -514,6 +715,9 @@ function TaskDetail({
 
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
+    if (disabled || title.trim() === "" || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
     try {
       let current = task;
       if (status !== task.status) current = await onMove(task.id, status, null);
@@ -528,31 +732,64 @@ function TaskDetail({
       onClose();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save the task");
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
   return (
-    <aside className="task-detail" aria-label={`Task ${task.number}`}>
+    <aside
+      className="task-detail"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-busy={saving}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !saving) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
       <header>
         <div>
           <span>
             {sourceName} · {task.number}
           </span>
-          <h3>Task details</h3>
+          <h3 id={titleId}>Task details</h3>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close task details">
+        <button
+          ref={closeButton}
+          type="button"
+          disabled={saving}
+          onClick={onClose}
+          aria-label="Close task details"
+        >
           ×
         </button>
       </header>
       <form onSubmit={(event) => void save(event)}>
+        {disabled && (
+          <p className="task-readonly-banner" role="note">
+            This task belongs to an archived channel and is read-only.
+          </p>
+        )}
         <label>
           Title
-          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={240} />
+          <input
+            ref={titleInput}
+            value={title}
+            disabled={disabled || saving}
+            onChange={(event) => setTitle(event.target.value)}
+            maxLength={240}
+          />
         </label>
         <label>
           Description
           <textarea
             value={description}
+            disabled={disabled || saving}
             onChange={(event) => setDescription(event.target.value)}
             maxLength={10_000}
             rows={6}
@@ -563,6 +800,7 @@ function TaskDetail({
             Status
             <select
               value={status}
+              disabled={disabled || saving}
               onChange={(event) => setStatus(event.target.value as TaskStatus)}
             >
               {COLUMNS.map((column) => (
@@ -574,7 +812,11 @@ function TaskDetail({
           </label>
           <label>
             Assignee
-            <select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}>
+            <select
+              value={assigneeId}
+              disabled={disabled || saving}
+              onChange={(event) => setAssigneeId(event.target.value)}
+            >
               <option value="">Unassigned</option>
               {assignableMembers.map((member) => (
                 <option key={member.id} value={member.id}>
@@ -587,6 +829,7 @@ function TaskDetail({
             Priority
             <select
               value={priority}
+              disabled={disabled || saving}
               onChange={(event) => setPriority(event.target.value as TaskPriority)}
             >
               {PRIORITIES.map((entry) => (
@@ -598,11 +841,21 @@ function TaskDetail({
           </label>
           <label>
             Due date
-            <input type="date" value={dueOn} onChange={(event) => setDueOn(event.target.value)} />
+            <input
+              type="date"
+              value={dueOn}
+              disabled={disabled || saving}
+              onChange={(event) => setDueOn(event.target.value)}
+            />
           </label>
         </div>
         {task.sourceMessageId !== null && (
-          <button className="task-source-link" type="button" onClick={() => onOpenSource(task)}>
+          <button
+            className="task-source-link"
+            type="button"
+            disabled={saving}
+            onClick={() => onOpenSource(task)}
+          >
             Open source message
           </button>
         )}
@@ -612,11 +865,11 @@ function TaskDetail({
           </p>
         )}
         <footer>
-          <button type="button" onClick={onClose}>
+          <button type="button" disabled={saving} onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" disabled={disabled || title.trim() === ""}>
-            Save task
+          <button type="submit" disabled={disabled || saving || title.trim() === ""}>
+            {saving ? "Saving…" : "Save task"}
           </button>
         </footer>
       </form>

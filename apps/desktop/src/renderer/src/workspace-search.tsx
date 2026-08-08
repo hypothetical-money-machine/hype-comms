@@ -1,5 +1,5 @@
 import type { MessageSearchResponse, MessageSearchResult, User } from "@hmm-chat/contracts";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 
 interface WorkspaceSearchProps {
@@ -37,16 +37,37 @@ export function WorkspaceSearch({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const openState = useRef(false);
+  const requestGeneration = useRef(0);
+
+  const openSearch = useCallback(() => {
+    openState.current = true;
+    setOpen(true);
+  }, []);
+
+  const closeSearch = useCallback((restoreFocus: boolean) => {
+    openState.current = false;
+    requestGeneration.current += 1;
+    setOpen(false);
+    setQuery("");
+    setSubmittedQuery("");
+    setResults([]);
+    setNextCursor(null);
+    setLoading(false);
+    setError("");
+    if (restoreFocus) trigger.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     input.current?.focus();
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && !loading) setOpen(false);
+      if (event.key === "Escape") closeSearch(true);
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [loading, open]);
+  }, [closeSearch, open]);
 
   const run = async (after?: string): Promise<void> => {
     const normalized = after === undefined ? query.trim() : submittedQuery;
@@ -55,19 +76,27 @@ export function WorkspaceSearch({
       input.current?.focus();
       return;
     }
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
+    if (after === undefined) {
+      setSubmittedQuery(normalized);
+      setResults([]);
+      setNextCursor(null);
+    }
     setLoading(true);
     setError("");
     try {
       const response = await search(normalized, after);
-      setSubmittedQuery(normalized);
+      if (!openState.current || generation !== requestGeneration.current) return;
       setResults((current) =>
         after === undefined ? response.results : [...current, ...response.results],
       );
       setNextCursor(response.nextCursor);
     } catch (searchError) {
+      if (!openState.current || generation !== requestGeneration.current) return;
       setError(errorMessage(searchError));
     } finally {
-      setLoading(false);
+      if (openState.current && generation === requestGeneration.current) setLoading(false);
     }
   };
 
@@ -78,7 +107,7 @@ export function WorkspaceSearch({
 
   return (
     <>
-      <button className="workspace-search-button" type="button" onClick={() => setOpen(true)}>
+      <button ref={trigger} className="workspace-search-button" type="button" onClick={openSearch}>
         <span>
           <span aria-hidden="true">⌕</span>
           Search messages
@@ -86,7 +115,7 @@ export function WorkspaceSearch({
       </button>
       {open &&
         createPortal(
-          <div className="dialog-backdrop" onMouseDown={loading ? undefined : () => setOpen(false)}>
+          <div className="dialog-backdrop" onMouseDown={() => closeSearch(true)}>
             <section
               className="workspace-search-dialog"
               role="dialog"
@@ -100,12 +129,7 @@ export function WorkspaceSearch({
                   <p className="eyebrow">Workspace search</p>
                   <h2 id="workspace-search-title">Find a message</h2>
                 </div>
-                <button
-                  type="button"
-                  aria-label="Close search"
-                  disabled={loading}
-                  onClick={() => setOpen(false)}
-                >
+                <button type="button" aria-label="Close search" onClick={() => closeSearch(true)}>
                   ×
                 </button>
               </header>
@@ -122,8 +146,16 @@ export function WorkspaceSearch({
                   autoComplete="off"
                   placeholder="Search channels and direct messages"
                   onChange={(event) => {
-                    setQuery(event.target.value);
+                    const nextQuery = event.target.value;
+                    setQuery(nextQuery);
                     setError("");
+                    if (submittedQuery !== "" && nextQuery.trim() !== submittedQuery) {
+                      requestGeneration.current += 1;
+                      setSubmittedQuery("");
+                      setResults([]);
+                      setNextCursor(null);
+                      setLoading(false);
+                    }
                   }}
                 />
                 <button type="submit" disabled={loading || query.trim().length < 2}>
@@ -145,11 +177,20 @@ export function WorkspaceSearch({
                       <li key={result.message.id}>
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
+                            const generation = requestGeneration.current;
                             void openResult(result)
-                              .then(() => setOpen(false))
-                              .catch((openError: unknown) => setError(errorMessage(openError)))
-                          }
+                              .then(() => {
+                                if (openState.current && generation === requestGeneration.current) {
+                                  closeSearch(false);
+                                }
+                              })
+                              .catch((openError: unknown) => {
+                                if (openState.current && generation === requestGeneration.current) {
+                                  setError(errorMessage(openError));
+                                }
+                              });
+                          }}
                         >
                           <span className="search-result-context">
                             <strong>{conversationName(result.message.conversationId)}</strong>

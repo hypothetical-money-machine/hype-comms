@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type Ref,
+} from "react";
 
 const MIN_COMPOSER_HEIGHT = 44;
 const MAX_COMPOSER_HEIGHT = 132;
@@ -8,6 +16,12 @@ export function MessageComposer({
   draft,
   disabled,
   error,
+  inputId = "message",
+  inputLabel = "Message",
+  inputRef,
+  placeholder,
+  submitLabel = "Send",
+  variantClassName,
   onDraftChange,
   onSubmit,
 }: {
@@ -15,6 +29,12 @@ export function MessageComposer({
   readonly draft: string;
   readonly disabled: boolean;
   readonly error: string;
+  readonly inputId?: string;
+  readonly inputLabel?: string;
+  readonly inputRef?: Ref<HTMLTextAreaElement>;
+  readonly placeholder?: string;
+  readonly submitLabel?: string;
+  readonly variantClassName?: string;
   readonly onDraftChange: (value: string) => void;
   readonly onSubmit: () => Promise<void>;
 }) {
@@ -56,33 +76,49 @@ export function MessageComposer({
     if (!sendDisabled) event.currentTarget.form?.requestSubmit();
   };
 
+  const assignInputRef = useCallback(
+    (element: HTMLTextAreaElement | null) => {
+      input.current = element;
+      if (typeof inputRef === "function") inputRef(element);
+      else if (inputRef !== undefined && inputRef !== null) inputRef.current = element;
+    },
+    [inputRef],
+  );
+
+  const hintId = `${inputId}-hint`;
+  const effectivePlaceholder =
+    placeholder ??
+    (conversationName === null ? "Choose a conversation" : `Message ${conversationName}`);
+
   return (
-    <form className="composer" onSubmit={submit} aria-busy={isSubmitting}>
+    <form
+      className={variantClassName === undefined ? "composer" : `composer ${variantClassName}`}
+      onSubmit={submit}
+      aria-busy={isSubmitting}
+    >
       <div className="composer-input">
-        <label className="sr-only" htmlFor="message">
-          Message
+        <label className="sr-only" htmlFor={inputId}>
+          {inputLabel}
         </label>
         <textarea
-          ref={input}
-          id="message"
+          ref={assignInputRef}
+          id={inputId}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={
-            conversationName === null ? "Choose a conversation" : `Message ${conversationName}`
-          }
+          placeholder={effectivePlaceholder}
           disabled={disabled}
           maxLength={4_000}
           rows={1}
           enterKeyHint="send"
-          aria-describedby="composer-hint"
+          aria-describedby={hintId}
         />
-        <p className="composer-hint" id="composer-hint">
+        <p className="composer-hint" id={hintId}>
           <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
         </p>
       </div>
       <button type="submit" disabled={sendDisabled}>
-        Send
+        {submitLabel}
       </button>
       {error !== "" && (
         <p className="composer-error" role="alert">

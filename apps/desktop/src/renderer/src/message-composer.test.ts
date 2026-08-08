@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createElement } from "react";
+import { createElement, createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MessageComposer } from "./message-composer";
@@ -41,6 +41,17 @@ describe("MessageComposer", () => {
     expect(screen.getByText(/for a new line/)).toBeTruthy();
   });
 
+  it("does not submit while an input method editor is composing", () => {
+    const { props } = renderComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    const event = new KeyboardEvent("keydown", { bubbles: true, key: "Enter" });
+    Object.defineProperty(event, "isComposing", { value: true });
+
+    fireEvent(textbox, event);
+
+    expect(props.onSubmit).not.toHaveBeenCalled();
+  });
+
   it("allows only one submission while the current send is pending", async () => {
     let finishSubmission: (() => void) | undefined;
     const pendingSubmission = new Promise<void>((resolve) => {
@@ -74,6 +85,28 @@ describe("MessageComposer", () => {
 
     rerender(createElement(MessageComposer, { ...props, conversationName: "# Launch Planning" }));
     expect(textbox.placeholder).toBe("Message # Launch Planning");
+  });
+
+  it("supports a focused thread-reply variant without losing shared composer behavior", () => {
+    const inputRef = createRef<HTMLTextAreaElement>();
+    const { props } = renderComposer({
+      conversationName: null,
+      inputId: "thread-message-composer",
+      inputLabel: "Reply",
+      inputRef,
+      placeholder: "Reply in thread",
+      submitLabel: "Reply",
+      variantClassName: "thread-composer",
+    });
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+
+    expect(textbox.id).toBe("thread-message-composer");
+    expect(textbox.placeholder).toBe("Reply in thread");
+    expect(textbox.closest("form")?.classList.contains("thread-composer")).toBe(true);
+    expect(inputRef.current).toBe(textbox);
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(props.onSubmit).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Reply" })).toBeTruthy();
   });
 
   it("disables sending when the conversation is unavailable or the draft is blank", () => {
