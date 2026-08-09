@@ -19,6 +19,7 @@ RUN apt-get update \
     git-lfs \
     jq \
     libarchive-tools \
+    postgresql-16 \
     python3 \
     unzip \
     xz-utils \

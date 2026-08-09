@@ -1,11 +1,13 @@
 # Local Linux release runner
 
-The ARM64 runner replaces the GitHub-hosted Linux release lane with an isolated Ubuntu
-container running natively on the Apple-silicon Mac Mini. The legacy x64 service remains
-available for ad hoc release-environment compatibility checks; pull-request smoke packaging
-runs on the separate always-on x64 CI runner. Each service uses the matching official GitHub
-Actions runner and AWS CLI binaries, stores only runner state in its own named Docker volume,
-and does not mount the host filesystem or Docker socket.
+The ARM64 runner replaces the GitHub-hosted Linux release lane and runs the required PostgreSQL
+CI job in an isolated Ubuntu container, natively on the Apple-silicon Mac Mini. PostgreSQL 16 is
+baked into the image so CI can create an unprivileged, job-scoped database cluster without a
+Docker socket or passwordless sudo. The legacy x64 service remains available for ad hoc
+release-environment compatibility checks; pull-request smoke packaging runs on the separate
+always-on x64 CI runner. Each service uses the matching official GitHub Actions runner and AWS
+CLI binaries, stores only runner state in its own named Docker volume, and does not mount the host
+filesystem or Docker socket.
 
 Build and register the ARM64 runner once:
 
@@ -23,6 +25,15 @@ RUNNER_TOKEN="$runner_token" docker compose -f docker-compose.runner.yml run \
   linux-arm64
 unset runner_token
 docker compose -f docker-compose.runner.yml up --detach linux-arm64
+```
+
+After a runner image change, rebuild and recreate the service. The existing GitHub registration
+survives in its named volume:
+
+```bash
+docker compose -f docker-compose.runner.yml up --detach --build --force-recreate linux-arm64
+docker compose -f docker-compose.runner.yml exec linux-arm64 \
+  /usr/lib/postgresql/16/bin/postgres --version
 ```
 
 Check the local container and GitHub registration:
