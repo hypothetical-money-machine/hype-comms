@@ -14,6 +14,7 @@ import type {
 import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
+import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { ConversationHealth } from "./conversation-health";
 import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
@@ -257,6 +258,8 @@ export function MessageRow({
   onOpenThread,
   replyCount = 0,
   domIdPrefix = "message",
+  channelReferences,
+  onOpenChannel,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -271,6 +274,8 @@ export function MessageRow({
   readonly onOpenThread?: () => void;
   readonly replyCount?: number;
   readonly domIdPrefix?: string;
+  readonly channelReferences?: readonly ChannelReferenceTarget[];
+  readonly onOpenChannel?: (conversationId: string) => void;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   const participantId = message.authorId ?? "former-member";
@@ -299,7 +304,11 @@ export function MessageRow({
           <strong>{author?.displayName ?? "Former member"}</strong>
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
-        <MessageBody body={message.body} />
+        <MessageBody
+          body={message.body}
+          channels={channelReferences}
+          onOpenChannel={onOpenChannel}
+        />
         <MessageReactions
           reactions={reactions}
           members={members}
@@ -350,6 +359,8 @@ export function PendingMessageRow({
   onRetry,
   onDiscard,
   mutationsDisabled = false,
+  channelReferences,
+  onOpenChannel,
 }: {
   readonly item: OutboxItem;
   readonly currentUser: User;
@@ -359,6 +370,8 @@ export function PendingMessageRow({
   readonly onRetry: () => void;
   readonly onDiscard: () => void;
   readonly mutationsDisabled?: boolean;
+  readonly channelReferences?: readonly ChannelReferenceTarget[];
+  readonly onOpenChannel?: (conversationId: string) => void;
 }) {
   const pendingStatus = editing ? "editing" : item.status.replaceAll("_", " ");
   return (
@@ -379,6 +392,8 @@ export function PendingMessageRow({
         </header>
         <MessageBody
           body={item.operation.message.body}
+          channels={channelReferences}
+          onOpenChannel={onOpenChannel}
           suffix={
             continuation ? <span className="pending-status"> · {pendingStatus}</span> : undefined
           }
@@ -1028,6 +1043,11 @@ export function App({ client, theme }: AppProps) {
   const directMessages = bootstrap.conversations.filter(
     (summary) => summary.conversation.kind === "direct_message",
   );
+  const channelReferences: ChannelReferenceTarget[] = channels.flatMap((summary) =>
+    summary.conversation.slug === null
+      ? []
+      : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
+  );
   const currentUserId = bootstrap.currentUser.user.id;
 
   return (
@@ -1330,6 +1350,8 @@ export function App({ client, theme }: AppProps) {
                       }
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
+                      channelReferences={channelReferences}
+                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
                       replyCount={Math.max(
                         threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
                         loadedReplyCountByRoot.get(message.id) ?? 0,
@@ -1386,6 +1408,8 @@ export function App({ client, theme }: AppProps) {
                       onDiscard={() =>
                         void runtime.discardMessage(item.operation.message.clientMessageId)
                       }
+                      channelReferences={channelReferences}
+                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
                     />
                   </Fragment>
                 );
@@ -1461,6 +1485,8 @@ export function App({ client, theme }: AppProps) {
                   highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
                   continuation={false}
                   domIdPrefix="thread-message"
+                  channelReferences={channelReferences}
+                  onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
                 />
                 <div className="thread-replies-heading" role="separator">
                   <span>
@@ -1499,6 +1525,8 @@ export function App({ client, theme }: AppProps) {
                         threadReplies[index - 1] ?? null,
                       )}
                       domIdPrefix="thread-message"
+                      channelReferences={channelReferences}
+                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
                     />
                   </Fragment>
                 ))}
@@ -1550,6 +1578,10 @@ export function App({ client, theme }: AppProps) {
                         }
                         onDiscard={() =>
                           void runtime.discardMessage(item.operation.message.clientMessageId)
+                        }
+                        channelReferences={channelReferences}
+                        onOpenChannel={(conversationId) =>
+                          runtime.selectConversation(conversationId)
                         }
                       />
                     </Fragment>

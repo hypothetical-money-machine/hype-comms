@@ -1395,6 +1395,21 @@ button:disabled {
   margin-top: 0;
 }
 
+.channel-reference {
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--theme-accent-surface);
+  color: var(--theme-text-accent);
+  line-height: inherit;
+  cursor: pointer;
+}
+
+.channel-reference:hover {
+  background: var(--theme-accent-surface-strong);
+  text-decoration: underline;
+}
+
 .message-reaction-controls {
   display: contents;
 }

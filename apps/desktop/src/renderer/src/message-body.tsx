@@ -1,5 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 
+import { segmentMessageBody, type ChannelReferenceTarget } from "./channel-references";
+
 const HTTPS_URL = /https:\/\/[^\s<>"']+/giu;
 const TRAILING_PUNCTUATION = new Set([".", ",", "!", "?", ";", ":"]);
 const BRACKETS = [
@@ -44,20 +46,62 @@ function normalizeHttpsUrl(value: string): string | null {
   }
 }
 
-function linkedBody(body: string): ReactNode[] {
+/**
+ * Renders a message body with HTTPS URLs as external links and, when the caller can navigate,
+ * `#channel` references as navigation buttons. Everything else stays the literal text the author
+ * wrote — the surrounding styles rely on `pre-wrap` whitespace, which plain text nodes, inline
+ * links, and inline buttons all preserve. URL spans are carved out first so a fragment such as
+ * `https://example.com/#general` stays inside the link; channel references resolve only in the
+ * text between URLs.
+ */
+export function MessageBody({
+  body,
+  suffix,
+  channels = [],
+  onOpenChannel,
+}: {
+  readonly body: string;
+  readonly suffix?: ReactNode;
+  readonly channels?: readonly ChannelReferenceTarget[];
+  readonly onOpenChannel?: (conversationId: string) => void;
+}) {
   const nodes: ReactNode[] = [];
+  const pushText = (text: string): void => {
+    if (text === "") return;
+    if (onOpenChannel === undefined) {
+      nodes.push(text);
+      return;
+    }
+    for (const segment of segmentMessageBody(text, channels)) {
+      if (segment.kind === "channel") {
+        const { conversationId } = segment;
+        nodes.push(
+          <button
+            type="button"
+            className="channel-reference"
+            onClick={() => onOpenChannel(conversationId)}
+          >
+            {segment.text}
+          </button>,
+        );
+      } else {
+        nodes.push(segment.text);
+      }
+    }
+  };
+
   let cursor = 0;
   for (const match of body.matchAll(HTTPS_URL)) {
     const start = match.index;
     const candidate = match[0];
-    if (start > cursor) nodes.push(body.slice(cursor, start));
+    pushText(body.slice(cursor, start));
     const { url, trailing } = trimUrlCandidate(candidate);
     const href = normalizeHttpsUrl(url);
     if (href === null) {
       nodes.push(candidate);
     } else {
       nodes.push(
-        <a key={`${String(start)}-${url}`} href={href} target="_blank" rel="noreferrer noopener">
+        <a href={href} target="_blank" rel="noreferrer noopener">
           {url}
         </a>,
       );
@@ -65,20 +109,11 @@ function linkedBody(body: string): ReactNode[] {
     }
     cursor = start + candidate.length;
   }
-  if (cursor < body.length) nodes.push(body.slice(cursor));
-  return nodes;
-}
+  pushText(body.slice(cursor));
 
-export function MessageBody({
-  body,
-  suffix,
-}: {
-  readonly body: string;
-  readonly suffix?: ReactNode;
-}) {
   return (
     <p className="message-body">
-      {linkedBody(body).map((node, index) => (
+      {nodes.map((node, index) => (
         <Fragment key={index}>{node}</Fragment>
       ))}
       {suffix}
