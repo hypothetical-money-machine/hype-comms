@@ -12,6 +12,7 @@ import {
   channelMemberTargetSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  compactModePreferenceSchema,
   conversationMutationResponseSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
@@ -68,6 +69,7 @@ import {
 } from "@hmm-chat/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
+import { resolveInitialCompactModeArgument } from "../shared/compact-mode";
 import type {
   DesktopApi,
   DesktopPlatform,
@@ -113,11 +115,13 @@ if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
 }
 const initialThemeState = resolveInitialThemeStateArgument(process.argv);
 const isHeadless = ipcRenderer.sendSync(DESKTOP_CHANNELS.automationHeadless) === true;
+const initialCompactMode = resolveInitialCompactModeArgument(process.argv);
 
 const desktopApi: DesktopApi = Object.freeze({
   platform: platform as DesktopPlatform,
   isHeadless,
   initialThemeState,
+  initialCompactMode,
   getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
   getUpdateState: async () =>
     updateStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.updateState)),
@@ -141,6 +145,21 @@ const desktopApi: DesktopApi = Object.freeze({
     ),
   onThemeStateChanged: (listener: (state: ThemeState) => void) =>
     subscribe(DESKTOP_CHANNELS.themeChanged, listener, isBuiltInThemeState),
+  getCompactMode: async () =>
+    compactModePreferenceSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.compactModeState)),
+  setCompactMode: async (enabled: boolean) =>
+    compactModePreferenceSchema.parse(
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.compactModeSet,
+        compactModePreferenceSchema.parse(enabled),
+      ),
+    ),
+  onCompactModeChanged: (listener: (enabled: boolean) => void) =>
+    subscribe(
+      DESKTOP_CHANNELS.compactModeChanged,
+      listener,
+      (value): value is boolean => compactModePreferenceSchema.safeParse(value).success,
+    ),
   getServerStatus: () => ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
   getSessionState: async () =>
     chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),

@@ -16,6 +16,9 @@ import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
+import { CompactHotzone } from "./compact-hotzone";
+import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { CompactModeToggle } from "./compact-mode-toggle";
 import { ConversationHealth } from "./conversation-health";
 import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
 import { ArchivedConversationNotice, ConversationEmptyState } from "./conversation-states";
@@ -34,6 +37,9 @@ import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
 import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
+import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
+import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
+import { useCompactModeEnabled } from "./use-compact-mode-enabled";
 import { useConversationDrafts } from "./use-conversation-drafts";
 import { WorkspaceSearch } from "./workspace-search";
 import type { OutboxItem } from "./workspace-cache";
@@ -48,6 +54,7 @@ type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: 
 interface AppProps {
   readonly client: DesktopApi;
   readonly theme: ThemeRuntime;
+  readonly compactMode: CompactModeRuntime;
 }
 
 type UpdateClient = Pick<
@@ -416,7 +423,7 @@ export function PendingMessageRow({
   );
 }
 
-export function App({ client, theme }: AppProps) {
+export function App({ client, theme, compactMode }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const isHeadless = client.isHeadless === true;
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
@@ -457,8 +464,23 @@ export function App({ client, theme }: AppProps) {
     readonly newestReplyId: string | null;
     readonly pendingCount: number;
   }>({ rootId: null, newestReplyId: null, pendingCount: 0 });
+  const compact = useCompactModeEnabled(compactMode);
+  const chrome = useCompactChrome(compact);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
+
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent): void => {
+      if (event.repeat) return;
+      if (!isCompactModeShortcut(event, client.platform)) return;
+      event.preventDefault();
+      compactMode.toggle().catch((error: unknown) => {
+        console.error("Could not toggle compact mode", error);
+      });
+    };
+    document.addEventListener("keydown", onShortcut);
+    return () => document.removeEventListener("keydown", onShortcut);
+  }, [client, compactMode]);
 
   const applySession = useCallback(
     (next: ChatSessionState) => {
@@ -623,6 +645,12 @@ export function App({ client, theme }: AppProps) {
       : runtime.loadConversationTasks(conversationId);
     void request.catch(() => undefined);
   }, [paneView, runtime, runtimeState.selectedConversationId, selectedIsPersonal, tasksAvailable]);
+
+  useBackgroundUnreadSignal(
+    bootstrap?.conversations ?? null,
+    runtimeState.selectedConversationId,
+    chrome.notifyUnread,
+  );
 
   useEffect(() => {
     if (editingClientMessageId === null) return;
@@ -1055,11 +1083,12 @@ export function App({ client, theme }: AppProps) {
       className={selectedThreadRootId === null ? "shell" : "shell thread-open"}
       data-testid="workspace-ready"
     >
-      <aside className="workspace-rail" aria-label="Workspace">
+      {compact && <CompactHotzone chrome={chrome} />}
+      <aside className="workspace-rail" aria-label="Workspace" {...chrome.chromeProps}>
         <div className="workspace-mark">H</div>
       </aside>
 
-      <aside className="sidebar">
+      <aside className="sidebar" {...chrome.chromeProps}>
         <header className="workspace-header">
           <div>
             <p className="eyebrow">Workspace</p>
@@ -1080,6 +1109,7 @@ export function App({ client, theme }: AppProps) {
           selectedConversationId={runtimeState.selectedConversationId}
           platform={client.platform}
           onSelect={(conversationId) => runtime.selectConversation(conversationId)}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
 
         <WorkspaceSearch
@@ -1094,12 +1124,16 @@ export function App({ client, theme }: AppProps) {
           }}
           search={(query, after) => runtime.searchMessages(query, after)}
           openResult={(result) => runtime.openSearchResult(result)}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
 
         <nav aria-label="Conversations">
           <div className="nav-heading">
             <span>Channels</span>
-            <ChannelCreatePopover onCreate={createChannel} />
+            <ChannelCreatePopover
+              onCreate={createChannel}
+              onOpenChange={chrome.onPopoverOpenChange}
+            />
           </div>
           {channels.map((summary) => (
             <button
@@ -1179,6 +1213,7 @@ export function App({ client, theme }: AppProps) {
 
         <footer className="sidebar-footer">
           <ThemeSelector theme={theme} />
+          <CompactModeToggle compactMode={compactMode} platform={client.platform} />
           <UpdateControl client={client} />
           <ClientVersion client={client} />
         </footer>

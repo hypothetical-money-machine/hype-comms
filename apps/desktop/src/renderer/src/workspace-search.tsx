@@ -2,11 +2,14 @@ import type { MessageSearchResponse, MessageSearchResult, User } from "@hmm-chat
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 
+import { useOpenChangeNotifier } from "./use-open-change-notifier";
+
 interface WorkspaceSearchProps {
   readonly members: readonly User[];
   readonly conversationName: (conversationId: string) => string;
   readonly search: (query: string, after?: string) => Promise<MessageSearchResponse>;
   readonly openResult: (result: MessageSearchResult) => Promise<void>;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
 function errorMessage(error: unknown): string {
@@ -28,6 +31,7 @@ export function WorkspaceSearch({
   conversationName,
   search,
   openResult,
+  onOpenChange,
 }: WorkspaceSearchProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -68,6 +72,8 @@ export function WorkspaceSearch({
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [closeSearch, open]);
+
+  useOpenChangeNotifier(open, onOpenChange);
 
   const run = async (after?: string): Promise<void> => {
     const normalized = after === undefined ? query.trim() : submittedQuery;

@@ -40,10 +40,13 @@ export function ThemeSelector({ theme }: ThemeSelectorProps) {
     <div className="theme-control">
       <label htmlFor={selectId}>Appearance</label>
       <div className="theme-control-row">
+        {/* Disabling the select mid-save would blur it — losing the user's tab position and
+            letting compact mode's chrome auto-hide under them — so re-entrancy is guarded in
+            choose() instead. */}
         <select
           id={selectId}
           value={state.preference}
-          disabled={saving}
+          aria-busy={saving}
           aria-describedby={descriptionId}
           onChange={(event) => {
             const parsed = themePreferenceSchema.safeParse(event.currentTarget.value);

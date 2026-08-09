@@ -4,6 +4,7 @@ export * from "./bots.js";
 export * from "./cache.js";
 export * from "./channel-slug.js";
 export * from "./chat.js";
+export * from "./compact-mode.js";
 export * from "./entities.js";
 export * from "./http.js";
 export * from "./identity.js";

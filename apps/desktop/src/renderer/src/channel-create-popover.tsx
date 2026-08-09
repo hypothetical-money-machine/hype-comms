@@ -10,6 +10,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useOpenChangeNotifier } from "./use-open-change-notifier";
+
 interface ChannelCreatePopoverProps {
   readonly onCreate: (
     name: string,
@@ -17,6 +19,7 @@ interface ChannelCreatePopoverProps {
     topic: string | null,
     access: ChannelAccess,
   ) => Promise<void>;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
 interface PopoverPosition {
@@ -37,7 +40,7 @@ const ANCHOR_GAP = 10;
 const POPOVER_WIDTH = 320;
 const ARROW_MARGIN = 18;
 
-export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
+export function ChannelCreatePopover({ onCreate, onOpenChange }: ChannelCreatePopoverProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
@@ -69,6 +72,8 @@ export function ChannelCreatePopover({ onCreate }: ChannelCreatePopoverProps) {
       trigger.current?.focus();
     }
   }, [open]);
+
+  useOpenChangeNotifier(open, onOpenChange);
 
   const updatePosition = useCallback(() => {
     const anchor = trigger.current;

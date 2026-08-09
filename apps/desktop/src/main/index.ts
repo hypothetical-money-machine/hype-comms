@@ -7,6 +7,7 @@ import {
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
   channelMemberTargetSchema,
+  compactModePreferenceSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
   directConversationRequestSchema,
@@ -37,6 +38,7 @@ import {
   net,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
 } from "electron";
@@ -45,6 +47,7 @@ import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
+import { createInitialCompactModeArgument } from "../shared/compact-mode";
 import type {
   NotificationAction,
   RealtimeConnectionState,
@@ -58,6 +61,8 @@ import {
 } from "./auth-callback";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
+import { CompactModeController } from "./compact-mode-controller";
+import { CompactModePreferenceStore } from "./compact-mode-preference-store";
 import {
   callbackForSignedOutSession,
   consumeDevelopmentAuthCallbackFile,
@@ -91,6 +96,13 @@ import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } f
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
+const WINDOW_MIN_HEIGHT = 640;
+const WINDOW_MIN_WIDTH = 960;
+/**
+ * Compact mode hides the workspace rail and sidebar, so the window may shrink further.
+ * Mirrored by the `html[data-compact] body` min-width in renderer styles.css.
+ */
+const COMPACT_WINDOW_MIN_WIDTH = 640;
 
 protectMainProcessLogStreams([process.stdout, process.stderr]);
 
@@ -151,6 +163,8 @@ let realtimeState: RealtimeConnectionState = "offline";
 let updateController: UpdateController | null = null;
 let themeController: ThemeController | null = null;
 let stopThemeSubscription: (() => void) | null = null;
+let compactModeController: CompactModeController | null = null;
+let stopCompactModeSubscription: (() => void) | null = null;
 
 function createUpdateSource(): UpdateSource {
   return {
@@ -249,6 +263,41 @@ function deliverThemeState(state: ThemeState): void {
   sendToRenderer(DESKTOP_CHANNELS.themeChanged, state);
 }
 
+/** The single owner of the compact-mode window-size policy; call from every site that applies it. */
+function applyCompactModeWindowBounds(window: BrowserWindow, enabled: boolean): void {
+  if (enabled) {
+    window.setMinimumSize(COMPACT_WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT);
+    return;
+  }
+  // The restored minimum is clamped to the display's work area: reinstating a raw 960px
+  // minimum on a narrower display would stop the bounds update below from ever bringing the
+  // window back inside the usable screen.
+  const workArea = screen.getDisplayMatching(window.getBounds()).workArea;
+  const minimumWidth = Math.min(WINDOW_MIN_WIDTH, workArea.width);
+  window.setMinimumSize(minimumWidth, WINDOW_MIN_HEIGHT);
+  // A maximized or fullscreen window already spans its display; resizing it here would
+  // silently un-maximize it (and could exceed the screen on narrow displays).
+  if (window.isMaximized() || window.isFullScreen()) {
+    return;
+  }
+  // Leaving compact mode has to widen a window the user shrank below the standard minimum,
+  // otherwise the restored rail and sidebar have nowhere to go — but the widened window must
+  // stay inside its display's work area instead of growing past the screen edge.
+  const bounds = window.getBounds();
+  if (bounds.width >= minimumWidth) {
+    return;
+  }
+  const x = Math.max(workArea.x, Math.min(bounds.x, workArea.x + workArea.width - minimumWidth));
+  window.setBounds({ x, y: bounds.y, width: minimumWidth, height: bounds.height });
+}
+
+function deliverCompactModeState(enabled: boolean): void {
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    applyCompactModeWindowBounds(mainWindow, enabled);
+  }
+  sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, enabled);
+}
+
 function flushPendingRendererEvents(): void {
   if (chatSession !== null) {
     sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
@@ -258,6 +307,9 @@ function flushPendingRendererEvents(): void {
   }
   if (themeController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.themeChanged, themeController.state);
+  }
+  if (compactModeController !== null) {
+    sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, compactModeController.enabled);
   }
   while (pendingNotificationActions.length > 0) {
     const action = pendingNotificationActions.shift();
@@ -440,6 +492,36 @@ function registerIpcHandlers(): void {
       return await themeController.setPreference(parsed.data);
     } catch (error) {
       throw new Error("Could not save the appearance preference", { cause: error });
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.compactModeState);
+  ipcMain.handle(DESKTOP_CHANNELS.compactModeState, (event): boolean => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted compact-mode-state IPC sender");
+    }
+    if (compactModeController === null) {
+      throw new Error("Compact mode is unavailable");
+    }
+    return compactModeController.enabled;
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.compactModeSet);
+  ipcMain.handle(DESKTOP_CHANNELS.compactModeSet, async (event, preference: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted compact-mode-set IPC sender");
+    }
+    if (compactModeController === null) {
+      throw new Error("Compact mode is unavailable");
+    }
+    const parsed = compactModePreferenceSchema.safeParse(preference);
+    if (!parsed.success) {
+      throw new Error("Invalid compact mode preference");
+    }
+    try {
+      return await compactModeController.setEnabled(parsed.data);
+    } catch (error) {
+      throw new Error("Could not save the compact mode preference", { cause: error });
     }
   });
 
@@ -762,11 +844,15 @@ async function createMainWindow(): Promise<BrowserWindow> {
   if (themeController === null) {
     throw new Error("Appearance must be initialized before creating a window");
   }
+  if (compactModeController === null) {
+    throw new Error("Compact mode must be initialized before creating a window");
+  }
+  const compactModeEnabled = compactModeController.enabled;
   const window = new BrowserWindow({
     width: headlessDesktopConfiguration?.contentWidth ?? 1_280,
     height: headlessDesktopConfiguration?.contentHeight ?? 800,
     ...(headlessDesktopConfiguration === null
-      ? { minWidth: 960, minHeight: 640 }
+      ? { minWidth: WINDOW_MIN_WIDTH, minHeight: WINDOW_MIN_HEIGHT }
       : {
           focusable: headlessDesktopConfiguration.focusable,
           useContentSize: true,
@@ -777,7 +863,10 @@ async function createMainWindow(): Promise<BrowserWindow> {
     title: "Hype Comms",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
-      additionalArguments: [createInitialThemeStateArgument(themeController.state)],
+      additionalArguments: [
+        createInitialThemeStateArgument(themeController.state),
+        createInitialCompactModeArgument(compactModeEnabled),
+      ],
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -798,6 +887,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
   mainWindow = window;
   rendererReady = false;
+  applyCompactModeWindowBounds(window, compactModeEnabled);
   blockNavigation(window.webContents);
 
   if (shouldShowDesktopWindow(headlessDesktopConfiguration)) {
@@ -921,8 +1011,14 @@ if (!hasSingleInstanceLock) {
         nativeTheme,
         persistence: new ThemePreferenceStore({ userDataPath: app.getPath("userData") }),
       });
-      await themeController.initialize();
+      compactModeController = new CompactModeController({
+        persistence: new CompactModePreferenceStore({ userDataPath: app.getPath("userData") }),
+      });
+      // Two independent preference files; reading them sequentially would serialize disk I/O
+      // on the window-show critical path.
+      await Promise.all([themeController.initialize(), compactModeController.initialize()]);
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
+      stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
 
       chatSession = new ChatSession({
         apiOrigin: __HMM_CHAT_API_ORIGIN__,
@@ -1022,5 +1118,8 @@ if (!hasSingleInstanceLock) {
     stopThemeSubscription?.();
     stopThemeSubscription = null;
     themeController?.dispose();
+    stopCompactModeSubscription?.();
+    stopCompactModeSubscription = null;
+    compactModeController?.dispose();
   });
 }

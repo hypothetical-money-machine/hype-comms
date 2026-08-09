@@ -67,7 +67,14 @@ export interface ThemeTransport {
   readonly onThemeStateChanged: (listener: (state: ThemeState) => void) => () => void;
 }
 
-export interface DesktopApi extends SessionTransport, ThemeTransport {
+export interface CompactModeTransport {
+  readonly initialCompactMode: boolean;
+  readonly getCompactMode: () => Promise<boolean>;
+  readonly setCompactMode: (enabled: boolean) => Promise<boolean>;
+  readonly onCompactModeChanged: (listener: (enabled: boolean) => void) => () => void;
+}
+
+export interface DesktopApi extends SessionTransport, ThemeTransport, CompactModeTransport {
   readonly platform: DesktopPlatform;
   /** True only for the unpackaged, hidden-window automation client. */
   readonly isHeadless?: boolean;

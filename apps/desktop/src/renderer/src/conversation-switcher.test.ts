@@ -69,6 +69,30 @@ describe("ConversationSwitcher", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("reports open state through onOpenChange", () => {
+    const onOpenChange = vi.fn();
+    render(
+      createElement(ConversationSwitcher, {
+        conversations,
+        selectedConversationId: "general",
+        platform: "darwin",
+        onSelect: vi.fn(),
+        onOpenChange,
+      }),
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    const trigger = screen.getByRole("button", { name: /Jump to/ });
+    fireEvent.click(trigger);
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+
+    const searchbox = screen.getByRole("searchbox", { name: "Jump to a conversation" });
+    fireEvent.keyDown(searchbox, { key: "Escape" });
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
+
   it("labels archived results and reports an empty filter", () => {
     renderSwitcher();
     fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));

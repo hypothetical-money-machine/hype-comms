@@ -149,6 +149,32 @@ describe("ChannelCreatePopover", () => {
     );
   });
 
+  it("reports open state through onOpenChange", () => {
+    const onOpenChange = vi.fn();
+    const onCreate = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    render(
+      createElement(
+        "nav",
+        null,
+        createElement(
+          "div",
+          { className: "nav-heading" },
+          createElement(ChannelCreatePopover, { onCreate, onOpenChange }),
+        ),
+      ),
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    const trigger = screen.getByRole("button", { name: "Create channel" });
+    fireEvent.click(trigger);
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(trigger);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
+
   it("anchors the portal to the trigger and recalculates after sidebar scroll", async () => {
     const { trigger } = renderPopover();
     let anchorLeft = 360;

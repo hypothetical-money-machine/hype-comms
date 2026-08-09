@@ -506,6 +506,7 @@ class FakeDesktopApi implements DesktopApi {
     resolvedThemeId: "dark",
     resolvedColorScheme: "dark",
   };
+  readonly initialCompactMode = false;
   bootstrap: HumanWorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -650,6 +651,18 @@ class FakeDesktopApi implements DesktopApi {
 
   onThemeStateChanged(): () => void {
     throw new Error("The runtime test does not observe theme state");
+  }
+
+  async getCompactMode(): Promise<boolean> {
+    throw new Error("The runtime test does not report compact mode");
+  }
+
+  async setCompactMode(): Promise<boolean> {
+    throw new Error("The runtime test does not set compact mode");
+  }
+
+  onCompactModeChanged(): () => void {
+    throw new Error("The runtime test does not observe compact mode");
   }
 
   onNotificationAction(listener: (action: NotificationAction) => void): () => void {

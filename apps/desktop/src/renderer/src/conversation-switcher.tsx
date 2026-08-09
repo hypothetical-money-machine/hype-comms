@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
 import { DirectMessageIcon } from "./conversation-indicators";
+import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 export interface SwitcherConversation {
   readonly id: string;
@@ -16,6 +17,7 @@ interface ConversationSwitcherProps {
   readonly selectedConversationId: string | null;
   readonly platform: DesktopPlatform;
   readonly onSelect: (conversationId: string) => void;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
 function shortcutLabel(platform: DesktopPlatform): string {
@@ -27,6 +29,7 @@ export function ConversationSwitcher({
   selectedConversationId,
   platform,
   onSelect,
+  onOpenChange,
 }: ConversationSwitcherProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -92,6 +95,8 @@ export function ConversationSwitcher({
     if (!open) return;
     selectedOption.current?.scrollIntoView?.({ block: "nearest" });
   }, [open, selectedIndex]);
+
+  useOpenChangeNotifier(open, onOpenChange);
 
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
     if (event.key === "Escape") {

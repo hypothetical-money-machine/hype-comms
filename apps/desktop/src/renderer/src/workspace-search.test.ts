@@ -102,6 +102,28 @@ describe("WorkspaceSearch", () => {
     expect(search).toHaveBeenLastCalledWith("quarterly avalanche", "next-page");
   });
 
+  it("reports open state through onOpenChange", () => {
+    const onOpenChange = vi.fn();
+    render(
+      createElement(WorkspaceSearch, {
+        members: [member],
+        conversationName: () => "# General",
+        search: vi.fn().mockResolvedValue({ results: [], nextCursor: null }),
+        openResult: vi.fn().mockResolvedValue(undefined),
+        onOpenChange,
+      }),
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a failed search in the dialog with a useful error", async () => {
     renderSearch(vi.fn().mockRejectedValue(new Error("Search is temporarily unavailable")));
     submitQuery("quarterly avalanche");
