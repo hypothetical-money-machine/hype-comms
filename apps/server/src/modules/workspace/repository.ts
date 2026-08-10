@@ -176,6 +176,15 @@ interface MessageRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
+interface MessageAuthorizationRow extends QueryResultRow {
+  conversation_visible: boolean;
+  is_archived: boolean;
+}
+
+interface WorkspaceMembershipAuthorizationRow extends QueryResultRow {
+  workspace_active: boolean;
+}
+
 interface SearchMessageRow extends MessageRow {
   search_rank: string;
 }
@@ -282,6 +291,14 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
+  /** Test seam for holding the message-delivery conversation lock. */
+  readonly afterConversationLocked?: () => Promise<void>;
+  /** Test seam for holding message delivery after its authorization locks and reads. */
+  readonly afterMessageAuthorizationLocked?: () => Promise<void>;
+  /** Test seam for holding the conversation lock before an archive commits. */
+  readonly afterArchiveConversationLocked?: () => Promise<void>;
+  /** Test seam for holding the conversation lock before a member removal commits. */
+  readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
 }
 
 export type ConsumedRealtimeTicket = RealtimePrincipal;
@@ -954,6 +971,7 @@ export class WorkspaceRepository {
   ): Promise<ChannelMembershipMutationResponse> {
     return this.#transaction(async (client) => {
       const conversation = await this.#requireManagedChannel(client, identity, conversationId);
+      await this.hooks.afterRemoveChannelMemberConversationLocked?.();
       await lockIdempotencyScope(client, `channel-membership:${conversationId}:${memberId}`);
       const existing = await client.query<ConversationMembershipRow>(
         `SELECT *
@@ -1025,42 +1043,37 @@ export class WorkspaceRepository {
       throw new ApiError(403, "FORBIDDEN", "Only the workspace owner can archive channels");
     }
     return this.#transaction(async (client) => {
-      const updated = await client.query<ConversationRow>(
-        `UPDATE conversations AS conversation
-            SET is_archived = true, updated_at = clock_timestamp()
+      const locked = await client.query<ConversationRow>(
+        `SELECT *
+           FROM conversations AS conversation
           WHERE conversation.id = $1
             AND conversation.workspace_id = $2
             AND conversation.kind = 'channel'
             AND conversation.slug <> 'general'
-            AND conversation.is_archived = false
             AND ${conversationVisibilitySql("conversation", "$3")}
-          RETURNING *`,
+          FOR UPDATE`,
         [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
-      let row = updated.rows[0];
-      if (row === undefined) {
-        const replay = await client.query<ConversationRow>(
-          `SELECT *
-             FROM conversations AS conversation
-            WHERE conversation.id = $1
-              AND conversation.workspace_id = $2
-              AND conversation.kind = 'channel'
-              AND conversation.slug <> 'general'
-              AND conversation.is_archived = true
-              AND ${conversationVisibilitySql("conversation", "$3")}`,
-          [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
-        );
-        row = replay.rows[0];
-      }
-      if (row === undefined) {
+      const current = locked.rows[0];
+      if (current === undefined) {
         throw new ApiError(404, "NOT_FOUND", "Channel not found or cannot be archived");
       }
-      if (row.is_archived && updated.rows[0] === undefined) {
+      await this.hooks.afterArchiveConversationLocked?.();
+      if (current.is_archived) {
         return conversationMutationResponseSchema.parse({
-          conversation: await this.#conversationSummary(client, identity, row),
+          conversation: await this.#conversationSummary(client, identity, current),
           syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
         });
       }
+      const updated = await client.query<ConversationRow>(
+        `UPDATE conversations
+            SET is_archived = true, updated_at = clock_timestamp()
+          WHERE id = $1
+          RETURNING *`,
+        [conversationId],
+      );
+      const row = updated.rows[0];
+      if (row === undefined) throw new Error("Channel archive returned no row");
       const audienceUserIds = await this.#conversationAudience(client, row);
       const event = await this.#insertEvent(client, identity, {
         type: "channel.archived",
@@ -1965,18 +1978,76 @@ export class WorkspaceRepository {
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     return this.#transaction(async (client) => {
-      // Serialize attempts for the same author/key before checking for an existing message.
-      // Without this lock, two requests that arrive together can both miss the initial lookup,
-      // with the loser surfacing a unique-constraint error instead of the canonical response.
+      // Global lock order for delivery and revocation is: per-message idempotency advisory lock,
+      // conversation row, sender workspace-membership row, domain rows, then workspace sequence.
+      // Archive and channel-membership mutations start with the same conversation row; identity
+      // revocations lock the target workspace membership before the workspace sequence row.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
         `${identity.currentUser.user.id}:${input.clientMessageId}`,
       ]);
-      const conversation = await this.#requireVisibleConversation(
-        client,
-        identity,
-        conversationId,
-        false,
+
+      const locked = await client.query<ConversationRow>(
+        `SELECT *
+           FROM conversations
+          WHERE id = $1
+            AND workspace_id = $2
+          FOR UPDATE`,
+        [conversationId, identity.currentUser.workspaceId],
       );
+      const conversation = locked.rows[0];
+      if (conversation === undefined) {
+        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+      }
+      await this.hooks.afterConversationLocked?.();
+
+      // Run after any row-lock wait under READ COMMITTED. Request identity is only a routing hint;
+      // authorization must reflect membership state committed while this transaction waited. The
+      // share lock also prevents an active membership from being revoked before delivery commits.
+      const workspaceAuthorization = await client.query<WorkspaceMembershipAuthorizationRow>(
+        `SELECT membership.status = 'active'
+                  AND actor.kind IN ('human', 'agent') AS workspace_active
+           FROM workspace_memberships AS membership
+           JOIN users AS actor ON actor.id = membership.user_id
+          WHERE membership.workspace_id = $1
+            AND membership.user_id = $2
+          FOR SHARE OF membership`,
+        [identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      if (!workspaceAuthorization.rows[0]?.workspace_active) {
+        throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
+      }
+
+      const authorized = await client.query<MessageAuthorizationRow>(
+        `SELECT conversation.is_archived,
+                CASE
+                  WHEN conversation.kind = 'direct_message' THEN
+                    conversation.dm_user_low_id = $2 OR conversation.dm_user_high_id = $2
+                  WHEN conversation.channel_access = 'workspace' THEN true
+                  WHEN conversation.channel_access = 'members' THEN EXISTS (
+                    SELECT 1
+                      FROM conversation_memberships AS channel_membership
+                     WHERE channel_membership.conversation_id = conversation.id
+                       AND channel_membership.user_id = $2
+                       AND channel_membership.left_at IS NULL
+                  )
+                  ELSE false
+                END AS conversation_visible
+           FROM conversations AS conversation
+          WHERE conversation.id = $1
+            AND conversation.workspace_id = $3`,
+        [conversationId, identity.currentUser.user.id, identity.currentUser.workspaceId],
+      );
+      const access = authorized.rows[0];
+      if (access === undefined) {
+        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+      }
+      if (!access.conversation_visible) {
+        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+      }
+      await this.hooks.afterMessageAuthorizationLocked?.();
+
+      // Authorization precedes reconciliation: archive does not hide a committed response from
+      // an authorized sender, while revoked membership still prevents replay.
       const existing = await client.query<MessageRow>(
         `SELECT *
            FROM messages
@@ -1997,7 +2068,7 @@ export class WorkspaceRepository {
           syncCursor: replay.committed_workspace_sequence,
         });
       }
-      if (conversation.is_archived) {
+      if (access.is_archived) {
         throw new ApiError(404, "NOT_FOUND", "Conversation not found");
       }
       if (input.threadRootId !== null) {
@@ -2027,6 +2098,7 @@ export class WorkspaceRepository {
       if (conversationSequence === undefined)
         throw new Error("Could not allocate message sequence");
 
+      // Keep workspace sequence allocation last among contended authorization/domain locks.
       const workspaceSequence = await this.#nextWorkspaceSequence(
         client,
         identity.currentUser.workspaceId,
@@ -2818,6 +2890,8 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
   ): Promise<ConversationRow> {
+    // Membership mutations take message delivery's canonical conversation row lock before
+    // inspecting or changing conversation_memberships.
     const conversation = await this.#requireVisibleConversation(
       client,
       identity,

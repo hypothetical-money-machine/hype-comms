@@ -501,6 +501,16 @@ export class IdentityRepository {
     return result.rows[0] !== undefined;
   }
 
+  async lockWorkspaceMembership(workspaceId: EntityId, userId: EntityId): Promise<void> {
+    await this.#database.query(
+      `SELECT 1
+         FROM workspace_memberships
+        WHERE workspace_id = $1 AND user_id = $2
+        FOR UPDATE`,
+      [workspaceId, userId],
+    );
+  }
+
   async lockWorkspaceIdentity(): Promise<void> {
     await this.#database.query("SELECT pg_advisory_xact_lock($1::bigint)", ["3247861932147782"]);
   }
@@ -639,12 +649,13 @@ export class IdentityRepository {
     return firstOrNull(result, mapInvitation);
   }
 
-  async findInvitationById(id: EntityId): Promise<Invitation | null> {
+  async findInvitationById(id: EntityId, lock = false): Promise<Invitation | null> {
     const result = await this.#database.query<InvitationRow>(
       `SELECT id, workspace_id, email, role, status, invited_by, expires_at, accepted_at,
               created_at, updated_at
          FROM invitations
-        WHERE id = $1`,
+        WHERE id = $1
+        ${lock ? "FOR UPDATE" : ""}`,
       [id],
     );
     return firstOrNull(result, mapInvitation);

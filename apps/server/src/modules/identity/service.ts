@@ -374,11 +374,22 @@ export class IdentityService {
 
   async disableAgent(actorUserId: EntityId, agentUserId: EntityId): Promise<boolean> {
     return this.#repository.transaction(async (repository) => {
+      const candidate = await this.#requireOwner(
+        actorUserId,
+        repository,
+        "Only a workspace owner may disable agents",
+      );
+      // Delivery locks this target row before allocating a workspace sequence. Match that order
+      // before #requireLockedOwner takes the workspace row so neither transaction can deadlock.
+      await repository.lockWorkspaceMembership(candidate.workspaceId, agentUserId);
       const owner = await this.#requireLockedOwner(
         actorUserId,
         repository,
         "Only a workspace owner may disable agents",
       );
+      if (owner.workspaceId !== candidate.workspaceId) {
+        throw new ApiError(403, "FORBIDDEN", "Only a workspace owner may disable agents");
+      }
       if ((await repository.findAgent(owner.workspaceId, agentUserId)) === null) return false;
       await repository.disableAgent(
         owner.workspaceId,
@@ -523,7 +534,10 @@ export class IdentityService {
     now: Date,
   ): Promise<IdentityUser> {
     return this.#repository.transaction(async (repository) => {
-      const invitation = await repository.findInvitationById(invitationId);
+      // Serialize redemption before resolving a possibly-new user, then use membership before
+      // workspace for an existing row. The invitation lock also prevents concurrent links for
+      // the same invitation from racing user creation before either reaches the workspace lock.
+      const invitation = await repository.findInvitationById(invitationId, true);
       if (
         invitation === null ||
         invitation.email !== email ||
@@ -532,10 +546,13 @@ export class IdentityService {
       ) {
         throw unauthenticated();
       }
-      if (!(await repository.lockWorkspace(invitation.workspaceId))) throw unauthenticated();
-
       const user =
         (await repository.findUserByEmail(email)) ?? (await this.#insertUser(repository, email));
+      // Existing memberships use the same membership-before-workspace order as delivery and
+      // revocation. A new user has no row to lock and cannot be an authenticated sender yet.
+      await repository.lockWorkspaceMembership(invitation.workspaceId, user.id);
+      if (!(await repository.lockWorkspace(invitation.workspaceId))) throw unauthenticated();
+
       const membership = await repository.findMembership(invitation.workspaceId, user.id);
       if (
         membership?.status !== "active" &&
