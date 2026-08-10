@@ -232,7 +232,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
 
   app.post("/auth/session/refresh", async (request, reply) => {
     const token = requiredSessionToken(request);
-    const session = await service.refreshSession(token);
+    const session = await service.refreshSession(token, request.log);
     setSessionCookie(reply, session, cookieSecure);
     return reply.code(204).send();
   });

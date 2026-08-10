@@ -51,6 +51,7 @@ describe("operational routes", () => {
     const token = "metrics-token-that-is-at-least-32-characters";
     const databasePool = { totalCount: 5, idleCount: 3, waitingCount: 1 };
     const metrics = new MetricsRegistry(databasePool);
+    metrics.refreshTokenReuseDetected();
     const app = await buildApp({ metrics: { registry: metrics, token } });
     apps.push(app);
     await app.inject({ method: "GET", url: "/livez" });
@@ -77,6 +78,7 @@ describe("operational routes", () => {
       'hmm_chat_http_requests_total{method="GET",route="/livez",status_code="200"} 1',
     );
     expect(authorized.body).toContain('hmm_chat_postgres_pool_connections{state="waiting"} 1');
+    expect(authorized.body).toMatch(/^hmm_chat_refresh_token_reuse_total 1$/m);
   });
 
   it("answers malformed bodies with 400 rather than an internal error", async () => {

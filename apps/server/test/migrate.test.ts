@@ -56,6 +56,30 @@ async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<v
   }
 }
 
+async function withoutTokenLineageMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-token-lineage-migrations-"));
+  const source = new URL("../src/db/migrations/", import.meta.url);
+  try {
+    const filenames = await readdir(source);
+    await Promise.all(
+      filenames
+        .filter(
+          (filename) =>
+            filename.endsWith(".sql") && filename !== "0015_device_session_token_history.sql",
+        )
+        .map(async (filename) => {
+          await writeFile(
+            path.join(directory, filename),
+            await readFile(new URL(filename, source)),
+          );
+        }),
+    );
+    await fn(pathToFileURL(`${directory}${path.sep}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 describeWithPostgres("runMigrations", () => {
   it("applies migrations cleanly and is idempotent", async () => {
     await withFreshSchema(async (pool) => {
@@ -75,6 +99,7 @@ describeWithPostgres("runMigrations", () => {
           "0011_bot_task_principals.sql",
           "0012_task_actor_attribution.sql",
           "0013_agents.sql",
+          "0015_device_session_token_history.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -97,6 +122,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0011_bot_task_principals.sql" },
         { filename: "0012_task_actor_attribution.sql" },
         { filename: "0013_agents.sql" },
+        { filename: "0015_device_session_token_history.sql" },
       ]);
 
       const userId = randomUUID();
@@ -340,6 +366,59 @@ describeWithPostgres("runMigrations", () => {
         [taskId],
       );
       expect(actor.rows).toEqual([{ updated_by: userId }]);
+    });
+  });
+
+  it("upgrades active sessions and records subsequent token rotations", async () => {
+    await withFreshSchema(async (pool) => {
+      await withoutTokenLineageMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+
+        const userId = randomUUID();
+        const sessionId = randomUUID();
+        const previousHash = Buffer.alloc(32, 41);
+        const nextHash = Buffer.alloc(32, 42);
+        const originalExpiry = "2026-07-25T12:00:00.000Z";
+        await pool.query(
+          `INSERT INTO users (id, email, username, display_name)
+           VALUES ($1, 'upgrade@example.test', 'upgrade', 'Upgrade')`,
+          [userId],
+        );
+        await pool.query(
+          `INSERT INTO device_sessions
+             (id, user_id, token_hash, label, created_at, last_seen_at, expires_at)
+           VALUES ($1, $2, $3, 'Previous server', $4, $4, $5)`,
+          [sessionId, userId, previousHash, "2026-07-24T12:00:00.000Z", originalExpiry],
+        );
+
+        await expect(runMigrations(pool)).resolves.toEqual({
+          applied: ["0015_device_session_token_history.sql"],
+        });
+        await pool.query(
+          `UPDATE device_sessions
+              SET token_hash = $2, last_seen_at = $3, expires_at = $4
+            WHERE id = $1`,
+          [sessionId, nextHash, "2026-07-24T13:00:00.000Z", "2026-08-23T13:00:00.000Z"],
+        );
+        const history = await pool.query<{
+          token_hash: Buffer;
+          expires_at: Date;
+          rotation_xid: string;
+        }>(
+          `SELECT token_hash, expires_at, rotation_xid::text
+             FROM device_session_token_history
+            WHERE device_session_id = $1`,
+          [sessionId],
+        );
+
+        expect(history.rows).toEqual([
+          {
+            token_hash: previousHash,
+            expires_at: new Date(originalExpiry),
+            rotation_xid: expect.stringMatching(/^\d+$/),
+          },
+        ]);
+      });
     });
   });
 

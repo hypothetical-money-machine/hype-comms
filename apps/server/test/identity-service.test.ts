@@ -52,6 +52,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
   let sender: FakeEmailSender;
   let nowMs: number;
   let service: IdentityService;
+  let reuseDetections: number;
 
   beforeAll(async () => {
     if (testDatabaseUrl === undefined) return;
@@ -70,12 +71,14 @@ describeWithPostgres("IdentityService and identity routes", () => {
     repository = new IdentityRepository(pool);
     sender = new FakeEmailSender();
     nowMs = initialNow;
+    reuseDetections = 0;
     service = new IdentityService(
       repository,
       sender,
       new SignInThrottle({ maxFailures: 10, windowMs: 15 * 60_000, now: () => nowMs }),
       () => new Date(nowMs),
       "http://127.0.0.1:3000",
+      { tokenReuseDetected: () => (reuseDetections += 1) },
     );
   });
 
@@ -356,6 +359,121 @@ describeWithPostgres("IdentityService and identity routes", () => {
       email: "owner@example.com",
       role: "owner",
     });
+  });
+
+  it("revokes a rotated lineage when its historical refresh token is replayed", async () => {
+    await seedOwner();
+    const original = await signIn("owner@example.com");
+    const record = await repository.findDeviceSessionByTokenHash(hashToken(original.token));
+    if (record === null) throw new Error("Session was not created");
+    const successor = await service.refreshSession(original.token);
+    const warnings: Array<{ readonly details: Record<string, unknown>; readonly message: string }> =
+      [];
+
+    await expect(
+      service.refreshSession(original.token, {
+        error() {},
+        warn(details, message) {
+          warnings.push({ details, message });
+        },
+      }),
+    ).rejects.toMatchObject({ statusCode: 401, code: "UNAUTHORIZED" });
+    await expect(service.refreshSession(successor.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+
+    expect(reuseDetections).toBe(1);
+    expect(warnings).toEqual([
+      {
+        details: { deviceSessionId: record.id },
+        message: "Refresh-token reuse detected; device-session lineage revoked",
+      },
+    ]);
+  });
+
+  it("keeps sequential rotation working across several token generations", async () => {
+    await seedOwner();
+    const original = await signIn("owner@example.com");
+    const historicalHashes = [hashToken(original.token)];
+    let current = original;
+
+    for (let generation = 0; generation < 3; generation += 1) {
+      current = await service.refreshSession(current.token);
+      if (generation < 2) historicalHashes.push(hashToken(current.token));
+    }
+    const history = await pool.query<{ token_hash: Buffer }>(
+      "SELECT token_hash FROM device_session_token_history",
+    );
+
+    expect(await service.authenticate(current.token)).toMatchObject({
+      email: "owner@example.com",
+    });
+    expect(
+      history.rows.map(({ token_hash: tokenHash }) => tokenHash.toString("hex")).sort(),
+    ).toEqual(historicalHashes.map((tokenHash) => tokenHash.toString("hex")).sort());
+    expect(reuseDetections).toBe(0);
+  });
+
+  it("does not flag two overlapping legitimate rotations as token reuse", async () => {
+    await seedOwner();
+    const original = await signIn("owner@example.com");
+
+    const attempts = await Promise.allSettled([
+      service.refreshSession(original.token),
+      service.refreshSession(original.token),
+    ]);
+    const winners = attempts.filter(
+      (attempt): attempt is PromiseFulfilledResult<Awaited<typeof original>> =>
+        attempt.status === "fulfilled",
+    );
+
+    expect(winners).toHaveLength(1);
+    expect(attempts.filter(({ status }) => status === "rejected")).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({ statusCode: 401, code: "UNAUTHORIZED" }),
+      }),
+    ]);
+    await expect(service.refreshSession(winners[0]?.value.token ?? "")).resolves.toBeDefined();
+    const history = await pool.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM device_session_token_history",
+    );
+    expect(history.rows[0]?.count).toBe(2);
+    expect(reuseDetections).toBe(0);
+  });
+
+  it("does not revoke a lineage for reuse after the historical credential expires", async () => {
+    await seedOwner();
+    const original = await signIn("owner@example.com");
+    nowMs += 29 * 24 * 60 * 60_000;
+    const successor = await service.refreshSession(original.token);
+    nowMs += 2 * 24 * 60 * 60_000;
+
+    await expect(service.refreshSession(original.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+    await expect(service.deleteExpiredDeviceSessionTokenHistory()).resolves.toBe(1);
+    await expect(service.refreshSession(successor.token)).resolves.toBeDefined();
+    expect(reuseDetections).toBe(0);
+  });
+
+  it("scopes historical-token reuse revocation to one device lineage", async () => {
+    await seedOwner();
+    const compromised = await signIn("owner@example.com", "127.0.0.1");
+    const unrelated = await signIn("owner@example.com", "127.0.0.2");
+    const compromisedSuccessor = await service.refreshSession(compromised.token);
+
+    await expect(service.refreshSession(compromised.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+    await expect(service.refreshSession(compromisedSuccessor.token)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    });
+    await expect(service.refreshSession(unrelated.token)).resolves.toBeDefined();
+    expect(reuseDetections).toBe(1);
   });
 
   it("slides the session expiry on refresh so an active device is never signed out", async () => {

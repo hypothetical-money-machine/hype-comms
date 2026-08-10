@@ -22,6 +22,7 @@ function label(value: string): string {
 export class MetricsRegistry {
   readonly #http = new Map<string, HttpMetricSample>();
   #realtimeConnections = 0;
+  #refreshTokenReuse = 0;
 
   constructor(private readonly databasePool?: DatabasePoolMetrics) {}
 
@@ -45,6 +46,10 @@ export class MetricsRegistry {
 
   realtimeDisconnected(): void {
     this.#realtimeConnections = Math.max(0, this.#realtimeConnections - 1);
+  }
+
+  refreshTokenReuseDetected(): void {
+    this.#refreshTokenReuse += 1;
   }
 
   render(): string {
@@ -80,6 +85,9 @@ export class MetricsRegistry {
       "# HELP hmm_chat_realtime_connections Current authenticated realtime connections.",
       "# TYPE hmm_chat_realtime_connections gauge",
       `hmm_chat_realtime_connections ${this.#realtimeConnections}`,
+      "# HELP hmm_chat_refresh_token_reuse_total Detected refresh-token reuse attempts.",
+      "# TYPE hmm_chat_refresh_token_reuse_total counter",
+      `hmm_chat_refresh_token_reuse_total ${this.#refreshTokenReuse}`,
     );
     if (this.databasePool !== undefined) {
       lines.push(

@@ -74,6 +74,11 @@ export interface SeedOwnerInput {
  */
 export interface ServiceLogger {
   error(details: Record<string, unknown>, message: string): void;
+  warn?(details: Record<string, unknown>, message: string): void;
+}
+
+export interface IdentitySecurityEvents {
+  tokenReuseDetected(): void;
 }
 
 function iso(date: Date): string {
@@ -122,6 +127,7 @@ export class IdentityService {
   readonly #throttle: SignInThrottle;
   readonly #clock: () => Date;
   readonly #publicAppUrl: string;
+  readonly #securityEvents: IdentitySecurityEvents | undefined;
 
   constructor(
     repository: IdentityRepository,
@@ -129,12 +135,14 @@ export class IdentityService {
     throttle: SignInThrottle,
     clock: () => Date,
     publicAppUrl: string,
+    securityEvents?: IdentitySecurityEvents,
   ) {
     this.#repository = repository;
     this.#emailSender = emailSender;
     this.#throttle = throttle;
     this.#clock = clock;
     this.#publicAppUrl = publicAppUrl;
+    this.#securityEvents = securityEvents;
   }
 
   async requestMagicLink(
@@ -241,27 +249,28 @@ export class IdentityService {
     };
   }
 
-  async refreshSession(sessionToken: string): Promise<RefreshedSession> {
+  async refreshSession(sessionToken: string, logger?: ServiceLogger): Promise<RefreshedSession> {
     const now = this.#clock();
-    const previousHash = hashToken(sessionToken);
-    const session = await this.#repository.findDeviceSessionByTokenHash(previousHash);
-    if (session === null || isExpired(session.expiresAt, now)) throw unauthenticated();
-
     // The refresh credential is a sliding window, not a countdown to a fixed date: every rotation
     // moves the expiry a full TTL past now, so a device that keeps refreshing never has to redeem
-    // another sign-in link. Rotation still refuses a revoked or already-expired session, so this
-    // cannot revive one, and it stays a 30-day window for a device that goes quiet.
+    // another sign-in link. The repository also detects historical-token reuse and revokes only
+    // that device lineage, while distinguishing a genuinely concurrent rotation.
     const next = issueToken();
     const renewedExpiresAt = new Date(now.getTime() + SESSION_TTL_MS);
-    const rotated = await this.#repository.rotateDeviceSession(
-      previousHash,
-      next.hash,
-      iso(now),
-      iso(renewedExpiresAt),
-    );
-    if (rotated.status !== "rotated" || isExpired(rotated.session.expiresAt, now)) {
-      throw unauthenticated();
+    const rotated = await this.#repository.refreshDeviceSession({
+      previousTokenHash: hashToken(sessionToken),
+      nextTokenHash: next.hash,
+      refreshedAt: iso(now),
+      expiresAt: iso(renewedExpiresAt),
+    });
+    if (rotated.status === "reused") {
+      this.#securityEvents?.tokenReuseDetected();
+      logger?.warn?.(
+        { deviceSessionId: rotated.deviceSessionId },
+        "Refresh-token reuse detected; device-session lineage revoked",
+      );
     }
+    if (rotated.status !== "rotated") throw unauthenticated();
     return {
       token: sessionTokenSchema.parse(next.token),
       expiresAt: rotated.session.expiresAt,
@@ -286,6 +295,10 @@ export class IdentityService {
       iso(this.#clock()),
     );
     return revoked !== null;
+  }
+
+  async deleteExpiredDeviceSessionTokenHistory(): Promise<number> {
+    return this.#repository.deleteExpiredDeviceSessionTokenHistory(iso(this.#clock()));
   }
 
   async createInvitation(actorUserId: EntityId, email: Email, role: "member"): Promise<Invitation> {

@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const lifecycle = new Lifecycle();
   let pool: Pool | undefined;
+  let metricsRegistry: MetricsRegistry | undefined;
   let startedRealtimeHub: RealtimeEventHub | undefined;
   let identity:
     | {
@@ -42,6 +43,8 @@ async function main(): Promise<void> {
     if (config.database !== undefined) {
       const databasePool = createPool(config.database);
       pool = databasePool;
+      metricsRegistry =
+        config.metricsToken === undefined ? undefined : new MetricsRegistry(databasePool);
       await runMigrations(databasePool);
       lifecycle.addCheck("database", async () => {
         await databasePool.query("SELECT 1");
@@ -60,6 +63,9 @@ async function main(): Promise<void> {
         new SignInThrottle(),
         () => new Date(),
         config.publicApiUrl,
+        metricsRegistry === undefined
+          ? undefined
+          : { tokenReuseDetected: () => metricsRegistry?.refreshTokenReuseDetected() },
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
       identity = {
@@ -85,7 +91,10 @@ async function main(): Promise<void> {
     const metrics =
       config.metricsToken === undefined
         ? undefined
-        : { registry: new MetricsRegistry(pool), token: config.metricsToken };
+        : {
+            registry: metricsRegistry ?? new MetricsRegistry(pool),
+            token: config.metricsToken,
+          };
     app = await buildApp({
       logger: createLoggerOptions(config),
       lifecycle,
@@ -112,6 +121,19 @@ async function main(): Promise<void> {
       );
       maintenance.unref();
       app.addHook("onClose", async () => clearInterval(maintenance));
+    }
+    if (identity !== undefined) {
+      const service = identity.service;
+      const tokenHistoryMaintenance = setInterval(
+        () => {
+          void service.deleteExpiredDeviceSessionTokenHistory().catch((error: unknown) => {
+            app.log.error({ err: error }, "Device-session token history cleanup failed");
+          });
+        },
+        60 * 60 * 1_000,
+      );
+      tokenHistoryMaintenance.unref();
+      app.addHook("onClose", async () => clearInterval(tokenHistoryMaintenance));
     }
   } catch (error) {
     await startedRealtimeHub?.close();

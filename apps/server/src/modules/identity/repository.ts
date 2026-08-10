@@ -135,6 +135,10 @@ interface DeviceSessionRow extends QueryResultRow {
   readonly revoked_at: unknown;
 }
 
+interface DeviceSessionRotationRow extends DeviceSessionRow {
+  readonly rotation_snapshot: unknown;
+}
+
 interface CountRow extends QueryResultRow {
   readonly count: unknown;
 }
@@ -239,6 +243,18 @@ export type ConsumeMagicLinkResult =
 
 export type RotateDeviceSessionResult =
   | { readonly status: "rotated"; readonly session: DeviceSession }
+  | { readonly status: "unavailable" };
+
+export interface RefreshDeviceSessionInput {
+  readonly previousTokenHash: Buffer;
+  readonly nextTokenHash: Buffer;
+  readonly refreshedAt: IsoDateTime;
+  readonly expiresAt: IsoDateTime;
+}
+
+export type RefreshDeviceSessionResult =
+  | { readonly status: "rotated"; readonly session: DeviceSession }
+  | { readonly status: "reused"; readonly deviceSessionId: EntityId }
   | { readonly status: "unavailable" };
 
 function timestamp(value: unknown): string {
@@ -808,6 +824,68 @@ export class IdentityRepository {
     );
     const session = firstOrNull(result, mapDeviceSession);
     return session === null ? { status: "unavailable" } : { status: "rotated", session };
+  }
+
+  /**
+   * Rotate a refresh credential or revoke its device lineage when a historical credential is
+   * presented after its rotation committed. The update captures its starting MVCC snapshot while
+   * remaining the only statement on the normal path. If a concurrent rotation wins the row lock,
+   * its transaction is absent from this attempt's snapshot and must not be mistaken for reuse.
+   */
+  async refreshDeviceSession(
+    input: RefreshDeviceSessionInput,
+  ): Promise<RefreshDeviceSessionResult> {
+    return this.transaction(async (repository) => {
+      const rotation = await repository.#database.query<DeviceSessionRotationRow>(
+        `WITH rotation_attempt AS MATERIALIZED (
+           SELECT pg_current_snapshot() AS snapshot
+         ), rotated AS (
+           UPDATE device_sessions
+              SET token_hash = $2,
+                  last_seen_at = $3,
+                  expires_at = $4
+             FROM rotation_attempt
+            WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $3
+           RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at
+         )
+         SELECT rotation_attempt.snapshot::text AS rotation_snapshot,
+                rotated.id, rotated.user_id, rotated.label, rotated.created_at,
+                rotated.last_seen_at, rotated.expires_at, rotated.revoked_at
+           FROM rotation_attempt
+           LEFT JOIN rotated ON true`,
+        [input.previousTokenHash, input.nextTokenHash, input.refreshedAt, input.expiresAt],
+      );
+      const row = rotation.rows[0];
+      if (row === undefined || typeof row.rotation_snapshot !== "string") {
+        throw new TypeError("Expected Postgres to return the rotation snapshot as text");
+      }
+      if (typeof row.id === "string") {
+        return { status: "rotated", session: mapDeviceSession(row) };
+      }
+
+      const history = await repository.#database.query<IdRow>(
+        `SELECT device_session_id AS id
+           FROM device_session_token_history
+          WHERE token_hash = $1
+            AND expires_at > $2
+            AND pg_visible_in_snapshot(rotation_xid, $3::pg_snapshot)`,
+        [input.previousTokenHash, input.refreshedAt, row.rotation_snapshot],
+      );
+      const deviceSessionId = history.rows[0]?.id;
+      if (typeof deviceSessionId !== "string") return { status: "unavailable" };
+
+      const id = entityIdSchema.parse(deviceSessionId);
+      await repository.revokeDeviceSession(id, input.refreshedAt);
+      return { status: "reused", deviceSessionId: id };
+    });
+  }
+
+  async deleteExpiredDeviceSessionTokenHistory(expiredAt: IsoDateTime): Promise<number> {
+    const result = await this.#database.query(
+      "DELETE FROM device_session_token_history WHERE expires_at <= $1",
+      [expiredAt],
+    );
+    return result.rowCount ?? 0;
   }
 
   async revokeDeviceSession(id: EntityId, revokedAt: IsoDateTime): Promise<DeviceSession | null> {
