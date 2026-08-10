@@ -1,5 +1,6 @@
 import "fake-indexeddb/auto";
 
+import Dexie from "dexie";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -9,6 +10,7 @@ import {
   type CacheEncryptBatchRequest,
   type ConversationSummary,
   type Message,
+  type SendMessageOperation,
   type Task,
   type User,
   type WorkspaceEvent,
@@ -277,6 +279,39 @@ const memberUpdatedEvent: WorkspaceEvent = {
   entityVersion: 1,
   delivery: "at_least_once",
   payload: { member: disabledAgent },
+};
+
+const selfRemovedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000067",
+  type: "channel.membership_changed",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "12",
+  conversationSequence: null,
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: { memberId: MORGAN_ID, action: "removed" },
+};
+
+const otherMemberRemovedEvent: WorkspaceEvent = {
+  ...selfRemovedEvent,
+  id: "10000000-0000-4000-8000-000000000068",
+  payload: { memberId: ALICE_ID, action: "removed" },
+};
+
+const queuedAlphaMessage: SendMessageOperation = {
+  conversationId: ALPHA_ID,
+  idempotencyKey: "10000000-0000-4000-8000-000000000069",
+  message: {
+    threadRootId: MESSAGE_SEQUENCE_2_ID,
+    body: "Must not cross a membership repair",
+    bodyFormat: "hmm_markdown_v1",
+    clientMessageId: "10000000-0000-4000-8000-000000000069",
+    mentionedUserIds: [],
+    attachmentIds: [],
+  },
 };
 
 /** One more than `workspaceSnapshotSchema.members`'s `.max(25)` — the list that bricks `load()`. */
@@ -585,6 +620,72 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(false);
   });
 
+  it("purges every conversation-scoped row when the current user is removed", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      snapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+      [task],
+    );
+    await cache.enqueue(queuedAlphaMessage, NOW);
+
+    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toBe(true);
+
+    const state = await cache.load();
+    expect(
+      state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
+    ).toBe(false);
+    expect(state.messages.filter((message) => message.conversationId === ALPHA_ID)).toEqual([]);
+    expect(state.reactions).toEqual([]);
+    expect(state.tasks.filter((item) => item.conversationId === ALPHA_ID)).toEqual([]);
+    expect(state.outbox.filter((item) => item.operation.conversationId === ALPHA_ID)).toEqual([]);
+    expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+    await expect(cache.applyEvent(reactionAddedEvent)).rejects.toThrow(
+      "Membership repair must complete",
+    );
+    await expect(cache.enqueue(queuedAlphaMessage, NOW)).rejects.toThrow(
+      "Membership repair must complete",
+    );
+  });
+
+  it("purges a reaction even when its message row is absent", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(true);
+    expect((await cache.load()).reactions).toEqual([reactionAddedEvent.payload.reaction]);
+
+    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toBe(true);
+
+    expect((await cache.load()).reactions).toEqual([]);
+  });
+
+  it("does not purge a conversation when a different member is removed", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      snapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+      [task],
+    );
+    await cache.enqueue(queuedAlphaMessage, NOW);
+
+    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(true);
+
+    const state = await cache.load();
+    expect(
+      state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
+    ).toBe(true);
+    expect(state.messages).toContainEqual(messageSequence2);
+    expect(state.reactions).toContainEqual(reactionAddedEvent.payload.reaction);
+    expect(state.tasks).toContainEqual(task);
+    expect(state.outbox[0]?.operation).toEqual(queuedAlphaMessage);
+    expect(state.repairMarker).toMatchObject({
+      conversationId: ALPHA_ID,
+      selfRemoval: false,
+    });
+  });
+
   it("does not discard a member replace that arrives before the first snapshot", async () => {
     // A cache that has never seen replaceSnapshot (or has just had clearServerStatePreservingOutbox
     // run) still has to accept a replaceMembers write rather than silently dropping it --
@@ -638,7 +739,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.upsertHistory([messageSequence2], []);
     expect((await cache.load()).reactions).toEqual([]);
 
-    await cache.upsertReaction(reaction);
+    await cache.upsertReaction(reaction, ALPHA_ID);
     expect((await cache.load()).reactions).toEqual([reaction]);
     await cache.removeReaction(reaction.id);
     expect((await cache.load()).reactions).toEqual([]);
@@ -684,6 +785,74 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 });
 
 describe("PersistentWorkspaceCache durability", () => {
+  it("keeps a completed self-removal purge durable across reopen", async () => {
+    const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await first.replaceSnapshot(
+      snapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+      [task],
+    );
+    await first.enqueue(queuedAlphaMessage, NOW);
+    await first.applyEvent(selfRemovedEvent);
+
+    const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const state = await reopened.load();
+    expect(
+      state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
+    ).toBe(false);
+    expect(state.messages).toEqual([]);
+    expect(state.reactions).toEqual([]);
+    expect(state.tasks).toEqual([]);
+    expect(state.outbox).toEqual([]);
+    expect(state.repairMarker?.conversationId).toBe(ALPHA_ID);
+  });
+
+  it("finishes a staged self-removal purge before exposing a reopened cache", async () => {
+    const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await first.replaceSnapshot(
+      snapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+      [task],
+    );
+    await first.enqueue(queuedAlphaMessage, NOW);
+
+    const database = new Dexie(`hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`);
+    await database.open();
+    await database.table("metadata").update("state", {
+      repairMarker: {
+        kind: "membership",
+        eventId: selfRemovedEvent.id,
+        workspaceSequence: selfRemovedEvent.workspaceSequence,
+        conversationId: ALPHA_ID,
+        selfRemoval: true,
+      },
+    });
+    database.close();
+
+    const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const state = await reopened.load();
+    expect(
+      state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
+    ).toBe(false);
+    expect(state.messages).toEqual([]);
+    expect(state.reactions).toEqual([]);
+    expect(state.tasks).toEqual([]);
+    expect(state.outbox).toEqual([]);
+    expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+  });
+
+  it("purges an orphaned reaction when a staged removal is reopened", async () => {
+    const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await first.replaceSnapshot(snapshot, []);
+    await first.applyEvent(reactionAddedEvent);
+    await first.stageMembershipRepair(selfRemovedEvent);
+
+    const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    expect((await reopened.load()).reactions).toEqual([]);
+  });
+
   it("clamps an over-capacity cached member list instead of failing the load", async () => {
     const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
     await cache.replaceSnapshot(snapshot, []);

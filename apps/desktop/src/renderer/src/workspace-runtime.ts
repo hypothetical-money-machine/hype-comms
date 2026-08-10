@@ -31,6 +31,7 @@ import {
   compareTasks,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  type CachedWorkspaceState,
   type OutboxItem,
   type OutboxStatus,
   type WorkspaceCache,
@@ -390,6 +391,14 @@ export class WorkspaceRuntime {
   #membersAttempt = 0;
   #eventQueue: Promise<void> = Promise.resolve();
   #recoveryQueue: Promise<void> = Promise.resolve();
+  /** Blocks delivery and cursor work from the instant a membership invalidation is observed. */
+  #membershipRepairPending = false;
+  /** Invalidates snapshot requests that began before the latest membership barrier. */
+  #membershipEpoch = 0;
+  /** Membership frames accepted by this renderer session but not yet durably repaired and acked. */
+  readonly #acceptedMembershipRepairs = new Map<string, string>();
+  /** Retires frames queued by the realtime session stopped for authoritative membership repair. */
+  #realtimeEpoch = 0;
   readonly #historyCursors = new Map<string, string | null>();
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
@@ -452,6 +461,9 @@ export class WorkspaceRuntime {
     this.#resetResyncState();
     this.#syncAttempt = 0;
     this.#syncRecoveryPending = false;
+    this.#membershipRepairPending = false;
+    this.#acceptedMembershipRepairs.clear();
+    this.#realtimeEpoch += 1;
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
@@ -460,6 +472,17 @@ export class WorkspaceRuntime {
     this.#unsubscribeConnection?.();
     this.#eventQueue = Promise.resolve();
     this.#unsubscribeEvent = this.#client.onWorkspaceEvent((event) => {
+      const realtimeEpoch = this.#realtimeEpoch;
+      if (event.type === "channel.membership_changed") {
+        // Acceptance happens before queueing. A repair ahead of this one may retire the socket,
+        // but it must not retire this obligation or acknowledge a cursor that crosses it.
+        this.#acceptedMembershipRepairs.set(event.id, event.workspaceSequence);
+        this.#membershipRepairPending = true;
+        this.#membershipEpoch += 1;
+        this.#clearRetryTimer();
+        this.#clearReadTargets();
+        this.#beginMembershipBarrier(event);
+      }
       const resyncRequest = event.type === "system.resync_required" ? ++this.#resyncRequest : null;
       if (resyncRequest !== null) {
         // Publish the demand as soon as it arrives. A timer-based attempt can currently be awaiting
@@ -468,7 +491,7 @@ export class WorkspaceRuntime {
         this.#setState({ stale: true });
       }
       this.#eventQueue = this.#eventQueue
-        .then(() => this.#handleRealtimeEvent(event, generation, resyncRequest))
+        .then(() => this.#handleRealtimeEvent(event, generation, resyncRequest, realtimeEpoch))
         .catch((error: unknown) => {
           if (generation === this.#generation) {
             this.#setState({
@@ -494,6 +517,8 @@ export class WorkspaceRuntime {
       this.#cache = this.#createCache(cryptoStatus);
       const cached = await this.#cache.load();
       if (generation !== this.#generation) return;
+      this.#membershipRepairPending =
+        cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
       this.#setState({
         bootstrap: cached.bootstrap,
@@ -535,6 +560,9 @@ export class WorkspaceRuntime {
     this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#syncRecoveryPending = false;
+    this.#membershipRepairPending = false;
+    this.#acceptedMembershipRepairs.clear();
+    this.#realtimeEpoch += 1;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
@@ -661,6 +689,16 @@ export class WorkspaceRuntime {
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
+    if (this.#membershipRepairPending) {
+      throw new Error("Membership repair must complete before sending messages");
+    }
+    if (
+      !this.#state.bootstrap?.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      )
+    ) {
+      throw new Error("This conversation is no longer available");
+    }
     const clientMessageId = crypto.randomUUID();
     const operation = sendMessageOperationSchema.parse({
       conversationId,
@@ -1116,6 +1154,10 @@ export class WorkspaceRuntime {
     if (cache === null || this.#state.bootstrap === null) {
       throw new Error("Workspace is still loading");
     }
+    const conversationId =
+      this.#state.messages.find((message) => message.id === messageId)?.conversationId ??
+      this.#state.selectedConversationId;
+    if (conversationId === null) throw new Error("Message is unavailable");
     const result = await this.#client.addMessageReaction(messageId, emoji);
     if (generation !== this.#generation || cache !== this.#cache) return;
     await this.#serialize(async () => {
@@ -1123,7 +1165,14 @@ export class WorkspaceRuntime {
       if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
         return;
       }
-      await cache.upsertReaction(result.reaction);
+      if (
+        !this.#state.bootstrap?.conversations.some(
+          (summary) => summary.conversation.id === conversationId,
+        )
+      ) {
+        return;
+      }
+      await cache.upsertReaction(result.reaction, conversationId);
       if (generation !== this.#generation || cache !== this.#cache) return;
       this.#setState({ reactions: mergeReactions(this.#state.reactions, [result.reaction]) });
     });
@@ -1315,6 +1364,9 @@ export class WorkspaceRuntime {
     this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#syncRecoveryPending = false;
+    this.#membershipRepairPending = false;
+    this.#acceptedMembershipRepairs.clear();
+    this.#realtimeEpoch += 1;
     this.#clearReadTargets();
     const scope = this.#scope;
     await this.#client.stopWorkspaceRealtime();
@@ -1375,6 +1427,7 @@ export class WorkspaceRuntime {
   async #refreshSnapshot(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null) return;
+    const membershipEpoch = this.#membershipEpoch;
     const openThreadRootId = this.#state.selectedThreadRootId;
     const openThreadConversationId = this.#state.selectedConversationId;
     const snapshot = await this.#fetchSnapshot();
@@ -1446,13 +1499,15 @@ export class WorkspaceRuntime {
         hydrated.reactions,
       );
     }
-    if (generation !== this.#generation) return;
+    if (generation !== this.#generation || membershipEpoch !== this.#membershipEpoch) return;
     const retainedTasks = this.#state.tasks.filter((task) =>
       visibleConversationIds.has(task.conversationId),
     );
     await cache.replaceSnapshot(snapshot, refreshedMessages, refreshedReactions, retainedTasks);
     const loaded = await cache.load();
-    if (generation !== this.#generation) return;
+    if (generation !== this.#generation || membershipEpoch !== this.#membershipEpoch) return;
+    this.#membershipRepairPending =
+      loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
     this.#syncCursor = loaded.syncCursor;
     const loadedSnapshot = loaded.bootstrap;
     const currentSelection = this.#state.selectedConversationId;
@@ -1656,13 +1711,25 @@ export class WorkspaceRuntime {
         cursor = state.syncCursor ?? "0";
         continue;
       }
+      let repairedMembership = false;
       for (const event of result.response.events) {
         // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
         // here and drained once below. Without this the fix would only work while the app is
         // online, and a disable that landed during a backfill would survive the catch-up.
         if (event.type === "member.updated") this.#membersDirty = true;
+        if (event.type === "channel.membership_changed") {
+          const repaired = await this.#repairMembershipEvent(event, generation, false);
+          if (generation !== this.#generation || cache !== this.#cache) return;
+          if (repaired) {
+            cursor = this.#syncCursor ?? event.workspaceSequence;
+            repairedMembership = true;
+            break;
+          }
+          continue;
+        }
         await cache.applyEvent(event);
       }
+      if (repairedMembership) continue;
       await cache.advanceCursor(result.response.nextCursor);
       await this.#client.acknowledgeWorkspaceEvent(result.response.nextCursor);
       this.#syncCursor = result.response.nextCursor;
@@ -1687,8 +1754,20 @@ export class WorkspaceRuntime {
     event: ProductRealtimeEvent,
     generation: number,
     resyncRequest: number | null,
+    realtimeEpoch: number,
   ): Promise<void> {
-    if (generation !== this.#generation || this.#cache === null) return;
+    const acceptedMembershipRepair =
+      event.type === "channel.membership_changed" && this.#acceptedMembershipRepairs.has(event.id);
+    // Ordinary frames still belong to the socket epoch that delivered them. Membership repairs
+    // recorded by the listener are obligations of this renderer generation, even when an earlier
+    // repair restarted realtime before their queued turn arrived.
+    if (
+      generation !== this.#generation ||
+      (realtimeEpoch !== this.#realtimeEpoch && !acceptedMembershipRepair) ||
+      this.#cache === null
+    ) {
+      return;
+    }
     if (event.type === "system.connected") {
       await this.#cache.advanceCursor(event.workspaceSequence);
       await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
@@ -1819,20 +1898,182 @@ export class WorkspaceRuntime {
     const loaded = await cache.load();
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
+    this.#realtimeEpoch += 1;
     await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
+  }
+
+  async #repairMembershipEvent(
+    event: Extract<WorkspaceEvent, { type: "channel.membership_changed" }>,
+    generation: number,
+    restartRealtime: boolean,
+  ): Promise<boolean> {
+    const cache = this.#cache;
+    if (cache === null) return false;
+    this.#membershipRepairPending = true;
+    this.#membershipEpoch += 1;
+    this.#clearRetryTimer();
+    this.#clearReadTargets();
+    this.#beginMembershipBarrier(event);
+
+    // Begin shutdown immediately, but do not await it until the marker and purge have committed.
+    // The converted result also prevents an early rejection from becoming unhandled while storage
+    // work is still establishing the privacy boundary.
+    const shutdown = this.#client.stopWorkspaceRealtime().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await cache.stageMembershipRepair(event);
+    await cache.applyEvent(event);
+    const purged = await cache.load();
+    if (generation === this.#generation && cache === this.#cache) {
+      this.#publishMembershipCache(purged, event.conversationId);
+    }
+    const repairedMembership = purged.repairMarker !== null;
+
+    const shutdownError = await shutdown;
+    if (shutdownError !== null) throw shutdownError;
+    if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
+
+    if (repairedMembership) {
+      await this.#refreshSnapshot(generation);
+      if (generation !== this.#generation || cache !== this.#cache) return true;
+      const repaired = await cache.load();
+      if (repaired.repairMarker !== null) {
+        throw new Error("Membership repair did not clear its durable marker");
+      }
+    }
+
+    const candidateCursor = this.#syncCursor ?? event.workspaceSequence;
+    // A snapshot or mutation response may have advanced the local cursor beyond another accepted
+    // repair. Cap this acknowledgement so a crash leaves that later event available for replay.
+    const crossesAcceptedRepair = [...this.#acceptedMembershipRepairs].some(
+      ([eventId, workspaceSequence]) =>
+        eventId !== event.id && compareSequence(workspaceSequence, candidateCursor) <= 0,
+    );
+    await this.#client.acknowledgeWorkspaceEvent(
+      crossesAcceptedRepair ? event.workspaceSequence : candidateCursor,
+    );
+    this.#acceptedMembershipRepairs.delete(event.id);
+    if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
+    if (restartRealtime) await this.#restartRealtime(generation);
+    if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
+    this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
+    if (!this.#membershipRepairPending) void this.#flushOutbox(generation);
+    return repairedMembership;
+  }
+
+  #publishMembershipCache(state: CachedWorkspaceState, conversationId: string): void {
+    const visibleConversationIds = new Set(
+      state.bootstrap?.conversations.map((summary) => summary.conversation.id) ?? [],
+    );
+    const selectedConversationId =
+      this.#state.selectedConversationId !== null &&
+      visibleConversationIds.has(this.#state.selectedConversationId)
+        ? this.#state.selectedConversationId
+        : state.bootstrap === null
+          ? null
+          : firstConversation(state.bootstrap);
+    const visibleMessageIds = new Set(state.messages.map((message) => message.id));
+    for (const [rootId] of this.#threadCursors) {
+      if (!visibleMessageIds.has(rootId)) this.#threadCursors.delete(rootId);
+    }
+    this.#historyCursors.delete(conversationId);
+    this.#setState({
+      bootstrap: state.bootstrap,
+      messages: state.messages,
+      threadSummaries: this.#state.threadSummaries.filter((summary) =>
+        visibleMessageIds.has(summary.threadRootId),
+      ),
+      reactions: state.reactions,
+      tasks: state.tasks,
+      outbox: state.outbox,
+      selectedConversationId,
+      focusedMessageId:
+        selectedConversationId === this.#state.selectedConversationId
+          ? this.#state.focusedMessageId
+          : null,
+      selectedThreadRootId:
+        this.#state.selectedThreadRootId !== null &&
+        visibleMessageIds.has(this.#state.selectedThreadRootId)
+          ? this.#state.selectedThreadRootId
+          : null,
+      focusedThreadMessageId:
+        this.#state.focusedThreadMessageId !== null &&
+        visibleMessageIds.has(this.#state.focusedThreadMessageId)
+          ? this.#state.focusedThreadMessageId
+          : null,
+      stale: true,
+    });
+  }
+
+  #beginMembershipBarrier(
+    event: Extract<WorkspaceEvent, { type: "channel.membership_changed" }>,
+  ): void {
+    const snapshot = this.#state.bootstrap;
+    if (
+      event.payload.action !== "removed" ||
+      event.payload.memberId !== snapshot?.currentUser.user.id
+    ) {
+      return;
+    }
+    const conversationId = event.conversationId;
+    const messages = this.#state.messages.filter(
+      (message) => message.conversationId !== conversationId,
+    );
+    const messageIds = new Set(messages.map((message) => message.id));
+    const bootstrap = {
+      ...snapshot,
+      conversations: snapshot.conversations.filter(
+        (summary) => summary.conversation.id !== conversationId,
+      ),
+    };
+    const selectedConversationId =
+      this.#state.selectedConversationId === conversationId
+        ? firstConversation(bootstrap)
+        : this.#state.selectedConversationId;
+    this.#historyCursors.delete(conversationId);
+    for (const [rootId] of this.#threadCursors) {
+      if (!messageIds.has(rootId)) this.#threadCursors.delete(rootId);
+    }
+    this.#setState({
+      bootstrap,
+      messages,
+      threadSummaries: this.#state.threadSummaries.filter((summary) =>
+        messageIds.has(summary.threadRootId),
+      ),
+      reactions: this.#state.reactions.filter((reaction) => messageIds.has(reaction.messageId)),
+      tasks: this.#state.tasks.filter((task) => task.conversationId !== conversationId),
+      outbox: this.#state.outbox.filter((item) => item.operation.conversationId !== conversationId),
+      selectedConversationId,
+      focusedMessageId:
+        selectedConversationId === this.#state.selectedConversationId
+          ? this.#state.focusedMessageId
+          : null,
+      selectedThreadRootId:
+        this.#state.selectedThreadRootId !== null &&
+        messageIds.has(this.#state.selectedThreadRootId)
+          ? this.#state.selectedThreadRootId
+          : null,
+      focusedThreadMessageId:
+        this.#state.focusedThreadMessageId !== null &&
+        messageIds.has(this.#state.focusedThreadMessageId)
+          ? this.#state.focusedThreadMessageId
+          : null,
+      stale: true,
+    });
   }
 
   async #applyWorkspaceEvent(event: WorkspaceEvent, generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null) return;
+    if (event.type === "channel.membership_changed") {
+      await this.#repairMembershipEvent(event, generation, true);
+      return;
+    }
     const applied = await cache.applyEvent(event);
     await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
     if (!applied) return;
     this.#syncCursor = event.workspaceSequence;
-    if (event.type === "channel.membership_changed") {
-      await this.#refreshSnapshot(generation);
-      return;
-    }
     if (event.type === "member.updated") {
       // Announces THAT the directory changed, never what it now is. Re-read it instead of
       // projecting the payload, or disabling a member would re-assert it as a mention target.
@@ -1912,11 +2153,19 @@ export class WorkspaceRuntime {
 
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
-    if (this.#flushing || cache === null || generation !== this.#generation) return;
+    if (
+      this.#flushing ||
+      this.#membershipRepairPending ||
+      cache === null ||
+      generation !== this.#generation
+    ) {
+      return;
+    }
     this.#flushing = true;
     this.#clearRetryTimer();
     try {
       for (;;) {
+        if (this.#membershipRepairPending) return;
         const next = nextDeliverable(this.#state.outbox, Date.now());
         if (next === undefined) {
           this.#scheduleNextRetry(this.#state.outbox, generation);
@@ -1930,13 +2179,15 @@ export class WorkspaceRuntime {
           nextAttemptAt: null,
           failureReason: null,
         });
+        if (generation !== this.#generation || this.#membershipRepairPending) return;
         const result = await this.#client.sendConversationMessage(next.operation);
-        if (generation !== this.#generation) return;
+        if (generation !== this.#generation || this.#membershipRepairPending) return;
         if (result.status === "accepted") {
           // The send response's cursor is a whole-workspace sequence, so a peer event still in
           // flight can be below it. Record the message durably but keep this client's cursor at
           // what it has actually applied, and never acknowledge the send cursor to the server.
           await cache.upsertAcknowledgedMessage(result.response.message, this.#syncCursor ?? "0");
+          if (generation !== this.#generation || this.#membershipRepairPending) return;
           this.#acceptMessage(result.response.message, id);
           continue;
         }

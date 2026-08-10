@@ -291,4 +291,120 @@ describe("PersistentWorkspaceCache", () => {
     expect(indexes).toContain("conversationSequence");
     expect(reactionIndexes).toContain("messageId");
   });
+
+  it("upgrades version 4 reactions with ownership without losing related cached data", async () => {
+    const upgradeScope = {
+      userId: "10000000-0000-4000-8000-000000000011",
+      workspaceId: WORKSPACE_ID,
+    };
+    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const legacy = new Dexie(name);
+    legacy.version(4).stores({
+      metadata: "&id",
+      workspaces: "&id",
+      members: "&id,updatedAt",
+      conversations: "&id,kind,updatedAt",
+      messages: "&id,&clientMessageId,conversationId,createdAt,conversationSequence",
+      reactions: "&id,messageId,userId,createdAt",
+      tasks: "&id,conversationId,assigneeId,status,rank,updatedAt",
+      outbox: "&clientMessageId,conversationId,createdAt,status,nextAttemptAt",
+      events: "&id,workspaceSequence",
+    });
+    await legacy.open();
+    const orphanedReaction = {
+      ...reaction,
+      id: "10000000-0000-4000-8000-000000000012",
+      messageId: "10000000-0000-4000-8000-000000000013",
+    };
+    const crypto = new FakeCrypto();
+    const encrypted = await crypto.encryptCacheRecords({
+      items: [
+        {
+          store: "message",
+          recordId: message.id,
+          schemaVersion: 1,
+          plaintext: JSON.stringify(message),
+        },
+        {
+          store: "reaction",
+          recordId: reaction.id,
+          schemaVersion: 1,
+          plaintext: JSON.stringify(reaction),
+        },
+        {
+          store: "reaction",
+          recordId: orphanedReaction.id,
+          schemaVersion: 1,
+          plaintext: JSON.stringify(orphanedReaction),
+        },
+      ],
+    });
+    const encryptedValue = (store: string, recordId: string) => {
+      const item = encrypted.items.find(
+        (candidate) => candidate.store === store && candidate.recordId === recordId,
+      );
+      if (item === undefined) throw new Error("Missing encrypted test row");
+      return item.value;
+    };
+    await legacy.table("metadata").put({
+      id: "state",
+      ...upgradeScope,
+      syncCursor: "12",
+      lastSyncedAt: NOW,
+    });
+    await legacy.table("messages").put({
+      id: message.id,
+      clientMessageId: message.clientMessageId,
+      conversationId: message.conversationId,
+      conversationSequence: message.conversationSequence,
+      createdAt: message.createdAt,
+      value: encryptedValue("message", message.id),
+    });
+    await legacy.table("reactions").bulkPut(
+      [reaction, orphanedReaction].map((item) => ({
+        id: item.id,
+        messageId: item.messageId,
+        userId: item.userId,
+        createdAt: item.createdAt,
+        value: encryptedValue("reaction", item.id),
+      })),
+    );
+    legacy.close();
+
+    const upgradedCache = new PersistentWorkspaceCache({ crypto, scope: upgradeScope });
+    const state = await upgradedCache.load();
+    expect(state.messages).toEqual([message]);
+    expect(state.reactions).toEqual([reaction, orphanedReaction]);
+
+    const upgraded = new Dexie(name);
+    await upgraded.open();
+    expect(upgraded.table("reactions").schema.indexes.map((index) => index.name)).toContain(
+      "conversationId",
+    );
+    expect(await upgraded.table("reactions").get(reaction.id)).toMatchObject({
+      id: reaction.id,
+      conversationId: CONVERSATION_ID,
+    });
+    expect(await upgraded.table("reactions").get(orphanedReaction.id)).toMatchObject({
+      id: orphanedReaction.id,
+      conversationId: "__unknown__",
+    });
+    upgraded.close();
+
+    const selfRemovedEvent: WorkspaceEvent = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000014",
+      type: "channel.membership_changed",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "13",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { memberId: upgradeScope.userId, action: "removed" },
+    };
+    await upgradedCache.applyEvent(selfRemovedEvent);
+    expect((await upgradedCache.load()).reactions).toEqual([]);
+  });
 });
