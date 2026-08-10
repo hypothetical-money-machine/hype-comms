@@ -33,7 +33,10 @@ import {
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
+  Menu,
+  MenuItem,
   nativeTheme,
   net,
   protocol,
@@ -59,6 +62,7 @@ import {
   processAuthCallback,
   type AuthCallbackOutcome,
 } from "./auth-callback";
+import { installCheckForUpdatesMenuItem } from "./application-menu";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
 import { CompactModeController } from "./compact-mode-controller";
@@ -95,6 +99,13 @@ import {
 import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
+import {
+  dialogForWindowRestoreFailure,
+  isCheckForUpdatesEnabled,
+  runUserInitiatedUpdateCheck,
+  shouldParentUpdateCheckDialog,
+  type UpdateCheckDialog,
+} from "./user-update-check";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 const WINDOW_MIN_HEIGHT = 640;
 const WINDOW_MIN_WIDTH = 960;
@@ -163,6 +174,7 @@ let realtimeState: RealtimeConnectionState = "offline";
 let updateController: UpdateController | null = null;
 let themeController: ThemeController | null = null;
 let stopThemeSubscription: (() => void) | null = null;
+let userUpdateCheckInFlight = false;
 let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
 
@@ -890,21 +902,37 @@ async function createMainWindow(): Promise<BrowserWindow> {
   applyCompactModeWindowBounds(window, compactModeEnabled);
   blockNavigation(window.webContents);
 
-  if (shouldShowDesktopWindow(headlessDesktopConfiguration)) {
-    window.once("ready-to-show", () => {
-      window.show();
-    });
-  }
-  window.webContents.once("did-finish-load", () => {
-    rendererReady = true;
-    flushPendingRendererEvents();
-  });
-  window.on("closed", () => {
-    rendererReady = false;
-    mainWindow = null;
-  });
+  try {
+    blockNavigation(window.webContents);
 
-  await loadRenderer(window);
+    if (shouldShowDesktopWindow(headlessDesktopConfiguration)) {
+      window.once("ready-to-show", () => {
+        window.show();
+      });
+    }
+    window.webContents.once("did-finish-load", () => {
+      rendererReady = true;
+      flushPendingRendererEvents();
+    });
+    window.on("closed", () => {
+      rendererReady = false;
+      mainWindow = null;
+    });
+
+    // loadRenderer can reject after the BrowserWindow exists; clear the half-built window so
+    // callers do not treat it as a usable main window (hidden parent for sheets, false restore).
+    await loadRenderer(window);
+  } catch (error) {
+    rendererReady = false;
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+    if (!window.isDestroyed()) {
+      window.destroy();
+    }
+    throw error;
+  }
+
   return window;
 }
 
@@ -918,6 +946,69 @@ function focusMainWindow(): void {
   }
   mainWindow.show();
   mainWindow.focus();
+}
+
+async function showOrRecreateMainWindow(): Promise<void> {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    await createMainWindow();
+  } else {
+    focusMainWindow();
+  }
+}
+
+async function handleCheckForUpdatesMenuClick(): Promise<void> {
+  const controller = updateController;
+  // One check and one dialog at a time: repeated clicks while a check or its dialog is pending
+  // would queue stacked message-box sheets on macOS.
+  if (controller === null || userUpdateCheckInFlight) {
+    return;
+  }
+  userUpdateCheckInFlight = true;
+
+  try {
+    // Update feedback flows through the renderer, and macOS keeps the app and menu alive with no
+    // windows, so the window has to be back before the check runs. Fail closed if it cannot: a
+    // successful check that lands in available/downloading/ready would otherwise be silent.
+    try {
+      await showOrRecreateMainWindow();
+    } catch (error) {
+      reportMainProcessError("Failed to show the main window for an update check", error);
+      // Always unparented: a partially constructed mainWindow (show: false, load failed) would
+      // attach this as an invisible macOS sheet and still count as "restored" later.
+      await showUpdateCheckDialog(dialogForWindowRestoreFailure(), { parentToMainWindow: false });
+      return;
+    }
+
+    const content = await runUserInitiatedUpdateCheck({
+      checkNow: () => controller.checkNow(),
+      readState: () => controller.state,
+      subscribe: (listener) => controller.subscribe(listener),
+      appVersion: app.getVersion(),
+    });
+    if (content === null) {
+      return;
+    }
+
+    await showUpdateCheckDialog(content);
+  } finally {
+    userUpdateCheckInFlight = false;
+  }
+}
+
+async function showUpdateCheckDialog(
+  content: UpdateCheckDialog,
+  options: { readonly parentToMainWindow?: boolean } = {},
+): Promise<void> {
+  const messageBoxOptions = {
+    type: content.type,
+    message: content.message,
+    detail: content.detail,
+  };
+  if (shouldParentUpdateCheckDialog(mainWindow, options) && mainWindow !== null) {
+    await dialog.showMessageBox(mainWindow, messageBoxOptions);
+  } else {
+    await dialog.showMessageBox(messageBoxOptions);
+  }
 }
 
 async function drainPendingAuthCallbacks(): Promise<void> {
@@ -1050,6 +1141,26 @@ if (!hasSingleInstanceLock) {
           !app.isPackaged || process.platform !== "darwin" || hasMacDeveloperIdSignature(),
       });
       updateController.subscribe(deliverUpdateState);
+      const applicationMenu = Menu.getApplicationMenu();
+      const checkForUpdatesItem = new MenuItem({
+        label: "Check for Updates…",
+        enabled: isCheckForUpdatesEnabled(updateController.state),
+        click: () => {
+          void handleCheckForUpdatesMenuClick().catch((error: unknown) => {
+            console.error("Check for Updates failed", error);
+          });
+        },
+      });
+      updateController.subscribe((state) => {
+        checkForUpdatesItem.enabled = isCheckForUpdatesEnabled(state);
+      });
+      if (installCheckForUpdatesMenuItem(applicationMenu, checkForUpdatesItem, process.platform)) {
+        Menu.setApplicationMenu(applicationMenu);
+      } else {
+        console.warn(
+          "The Check for Updates menu item could not be installed; the default menu shape changed",
+        );
+      }
 
       registerIpcHandlers();
 
@@ -1092,13 +1203,9 @@ if (!hasSingleInstanceLock) {
       await drainPendingAuthCallbacks();
 
       app.on("activate", () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
-          void createMainWindow().catch((error: unknown) => {
-            reportMainProcessError("Failed to recreate the main window", error);
-          });
-        } else {
-          focusMainWindow();
-        }
+        void showOrRecreateMainWindow().catch((error: unknown) => {
+          reportMainProcessError("Failed to recreate the main window", error);
+        });
       });
     })
     .catch((error: unknown) => {
