@@ -1,4 +1,4 @@
-import { channelSlugFromName, type ChannelAccess } from "@hmm-chat/contracts";
+import { channelSlugFromName, type ChannelAccess, type ChannelMode } from "@hmm-chat/contracts";
 import {
   useCallback,
   useEffect,
@@ -13,11 +13,13 @@ import { createPortal } from "react-dom";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface ChannelCreatePopoverProps {
+  readonly canCreateAnnouncements?: boolean;
   readonly onCreate: (
     name: string,
     slug: string,
     topic: string | null,
     access: ChannelAccess,
+    channelMode: ChannelMode,
   ) => Promise<void>;
   readonly onOpenChange?: (open: boolean) => void;
 }
@@ -40,11 +42,16 @@ const ANCHOR_GAP = 10;
 const POPOVER_WIDTH = 320;
 const ARROW_MARGIN = 18;
 
-export function ChannelCreatePopover({ onCreate, onOpenChange }: ChannelCreatePopoverProps) {
+export function ChannelCreatePopover({
+  canCreateAnnouncements = false,
+  onCreate,
+  onOpenChange,
+}: ChannelCreatePopoverProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [access, setAccess] = useState<ChannelAccess>("workspace");
+  const [channelMode, setChannelMode] = useState<ChannelMode>("chat");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [position, setPosition] = useState<PopoverPosition | null>(null);
@@ -61,6 +68,7 @@ export function ChannelCreatePopover({ onCreate, onOpenChange }: ChannelCreatePo
     setName("");
     setTopic("");
     setAccess("workspace");
+    setChannelMode("chat");
     setError("");
     setPosition(null);
     restoreFocus.current = true;
@@ -149,7 +157,13 @@ export function ChannelCreatePopover({ onCreate, onOpenChange }: ChannelCreatePo
     setCreating(true);
     setError("");
     try {
-      await onCreate(displayName, slug, topic.trim() === "" ? null : topic.trim(), access);
+      await onCreate(
+        displayName,
+        slug,
+        topic.trim() === "" ? null : topic.trim(),
+        access,
+        channelMode,
+      );
       creatingRef.current = false;
       setCreating(false);
       dismiss();
@@ -196,105 +210,145 @@ export function ChannelCreatePopover({ onCreate, onOpenChange }: ChannelCreatePo
             style={style}
             onSubmit={(event) => void submit(event)}
           >
-            <header>
-              <div>
-                <h2 id="channel-create-title">Create a channel</h2>
-                <p>Choose who can find and read this channel.</p>
-              </div>
-              <button
-                className="channel-create-close"
-                type="button"
-                aria-label="Close channel creation"
+            <div className="channel-create-scroll">
+              <header>
+                <div>
+                  <h2 id="channel-create-title">Create a channel</h2>
+                  <p>Choose who can find and read this channel.</p>
+                </div>
+                <button
+                  className="channel-create-close"
+                  type="button"
+                  aria-label="Close channel creation"
+                  disabled={creating}
+                  onClick={dismiss}
+                >
+                  ×
+                </button>
+              </header>
+
+              <label htmlFor="channel-name">Channel name</label>
+              <input
+                id="channel-name"
+                ref={input}
+                value={name}
+                maxLength={100}
+                autoComplete="off"
+                placeholder="e.g. Launch Planning"
+                aria-invalid={error === "" ? undefined : true}
+                aria-describedby="channel-create-details"
                 disabled={creating}
-                onClick={dismiss}
-              >
-                ×
-              </button>
-            </header>
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setError("");
+                }}
+              />
+              <div className="channel-create-details" id="channel-create-details">
+                <span>{name.length} / 100</span>
+                <code className={slug === "" ? "empty" : ""}>#{slug || "channel-name"}</code>
+              </div>
+              {name.trim() !== "" && slug === "" && (
+                <p className="channel-create-guidance">
+                  Add a Unicode letter or number; symbols and emoji alone cannot form a channel.
+                </p>
+              )}
 
-            <label htmlFor="channel-name">Channel name</label>
-            <input
-              id="channel-name"
-              ref={input}
-              value={name}
-              maxLength={100}
-              autoComplete="off"
-              placeholder="e.g. Launch Planning"
-              aria-invalid={error === "" ? undefined : true}
-              aria-describedby="channel-create-details"
-              disabled={creating}
-              onChange={(event) => {
-                setName(event.target.value);
-                setError("");
-              }}
-            />
-            <div className="channel-create-details" id="channel-create-details">
-              <span>{name.length} / 100</span>
-              <code className={slug === "" ? "empty" : ""}>#{slug || "channel-name"}</code>
-            </div>
-            {name.trim() !== "" && slug === "" && (
-              <p className="channel-create-guidance">
-                Add a Unicode letter or number; symbols and emoji alone cannot form a channel.
+              <label className="channel-topic-label" htmlFor="channel-topic">
+                Topic <span>Optional</span>
+              </label>
+              <textarea
+                id="channel-topic"
+                value={topic}
+                maxLength={250}
+                rows={3}
+                placeholder="What is this channel for?"
+                disabled={creating}
+                onChange={(event) => setTopic(event.target.value)}
+              />
+              <div className="channel-topic-details">{topic.length} / 250</div>
+
+              {canCreateAnnouncements && (
+                <fieldset className="channel-type-options">
+                  <legend>Channel type</legend>
+                  <label>
+                    <input
+                      type="radio"
+                      name="channel-type"
+                      value="chat"
+                      checked={channelMode === "chat"}
+                      disabled={creating}
+                      onChange={() => setChannelMode("chat")}
+                    />
+                    <span>
+                      <strong>Discussion</strong>
+                      <small>Members can post messages and use Tasks.</small>
+                    </span>
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="channel-type"
+                      value="announcement"
+                      checked={channelMode === "announcement"}
+                      disabled={creating}
+                      onChange={() => setChannelMode("announcement")}
+                    />
+                    <span>
+                      <strong>Announcement</strong>
+                      <small>Owners post bulletins; members reply in threads and react.</small>
+                    </span>
+                  </label>
+                </fieldset>
+              )}
+
+              <fieldset className="channel-access-options">
+                <legend>Who has access?</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="channel-access"
+                    value="workspace"
+                    checked={access === "workspace"}
+                    disabled={creating}
+                    onChange={() => setAccess("workspace")}
+                  />
+                  <span>
+                    <strong>Everyone</strong>
+                    <small>
+                      {channelMode === "announcement"
+                        ? "All workspace members can read, reply, and react."
+                        : "All workspace members can read and send."}
+                    </small>
+                  </span>
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="channel-access"
+                    value="members"
+                    checked={access === "members"}
+                    disabled={creating}
+                    onChange={() => setAccess("members")}
+                  />
+                  <span>
+                    <strong>Invited members</strong>
+                    <small>Only people added by a channel owner.</small>
+                  </span>
+                </label>
+              </fieldset>
+
+              <p className="channel-create-error" role="alert">
+                {error}
               </p>
-            )}
-
-            <label className="channel-topic-label" htmlFor="channel-topic">
-              Topic <span>Optional</span>
-            </label>
-            <textarea
-              id="channel-topic"
-              value={topic}
-              maxLength={250}
-              rows={3}
-              placeholder="What is this channel for?"
-              disabled={creating}
-              onChange={(event) => setTopic(event.target.value)}
-            />
-            <div className="channel-topic-details">{topic.length} / 250</div>
-
-            <fieldset className="channel-access-options">
-              <legend>Who has access?</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="channel-access"
-                  value="workspace"
-                  checked={access === "workspace"}
-                  disabled={creating}
-                  onChange={() => setAccess("workspace")}
-                />
-                <span>
-                  <strong>Everyone</strong>
-                  <small>All workspace members can read and send.</small>
-                </span>
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="channel-access"
-                  value="members"
-                  checked={access === "members"}
-                  disabled={creating}
-                  onChange={() => setAccess("members")}
-                />
-                <span>
-                  <strong>Invited members</strong>
-                  <small>Only people added by a channel owner.</small>
-                </span>
-              </label>
-            </fieldset>
-
-            <p className="channel-create-error" role="alert">
-              {error}
-            </p>
-            <footer>
-              <button type="button" disabled={creating} onClick={dismiss}>
-                Cancel
-              </button>
-              <button type="submit" disabled={creating || name.trim() === "" || slug === ""}>
-                {creating ? "Creating…" : "Create"}
-              </button>
-            </footer>
+              <footer>
+                <button type="button" disabled={creating} onClick={dismiss}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={creating || name.trim() === "" || slug === ""}>
+                  {creating ? "Creating…" : "Create"}
+                </button>
+              </footer>
+            </div>
           </form>,
           document.body,
         )}

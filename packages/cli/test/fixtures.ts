@@ -47,6 +47,7 @@ export function channelSummary(): ConversationSummary {
       slug: "launch-planning",
       topic: "Ship it",
       access: "workspace",
+      channelMode: "chat",
       isArchived: false,
       createdBy: USER_ID,
       createdAt: TIMESTAMP,
@@ -81,6 +82,7 @@ export function bootstrap(): WorkspaceBootstrapResponse {
       channels: true,
       directMessages: true,
       mentions: true,
+      announcementChannels: false,
     },
   };
 }

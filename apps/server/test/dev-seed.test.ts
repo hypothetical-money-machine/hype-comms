@@ -84,15 +84,22 @@ describeWithPostgres("development demo seed", () => {
       messages: string;
       events: string;
       magic_links: string;
-    }>(`
+      announcement_channels_available: boolean;
+    }>(
+      `
       SELECT
         (SELECT count(*) FROM users)::text AS users,
         (SELECT count(*) FROM workspace_memberships)::text AS memberships,
         (SELECT count(*) FROM conversations)::text AS conversations,
         (SELECT count(*) FROM messages)::text AS messages,
         (SELECT count(*) FROM sync_events)::text AS events,
-        (SELECT count(*) FROM magic_link_tokens)::text AS magic_links
-    `);
+        (SELECT count(*) FROM magic_link_tokens)::text AS magic_links,
+        (SELECT announcement_channels_available
+           FROM workspaces
+          WHERE id = $1) AS announcement_channels_available
+    `,
+      [first.workspaceId],
+    );
     expect(counts.rows[0]).toEqual({
       users: "2",
       memberships: "2",
@@ -100,6 +107,7 @@ describeWithPostgres("development demo seed", () => {
       messages: "8",
       events: eventCountAfterFirst.rows[0]?.count,
       magic_links: "4",
+      announcement_channels_available: false,
     });
   });
 });

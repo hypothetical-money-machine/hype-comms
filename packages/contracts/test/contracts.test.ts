@@ -240,7 +240,41 @@ describe("entity contracts", () => {
         createdAt: NOW,
         updatedAt: NOW,
       }),
-    ).toMatchObject({ kind: "channel" });
+    ).toMatchObject({ kind: "channel", channelMode: "chat" });
+
+    expect(
+      conversationSchema.parse({
+        id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        kind: "channel",
+        name: "announcements",
+        slug: "announcements",
+        topic: null,
+        access: "workspace",
+        channelMode: "announcement",
+        isArchived: false,
+        createdBy: USER_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toMatchObject({ kind: "channel", channelMode: "announcement" });
+
+    expect(() =>
+      conversationSchema.parse({
+        id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        kind: "direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        channelMode: "announcement",
+        isArchived: false,
+        createdBy: USER_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toThrow();
 
     expect(
       messageSchema.parse({

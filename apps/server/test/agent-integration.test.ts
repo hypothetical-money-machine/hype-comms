@@ -150,13 +150,20 @@ describeWithPostgres("agent identity and owner administration", () => {
     await adminPool.end();
   });
 
-  async function appWithWorkspace(agentProvisioningEnabled = true) {
+  async function appWithWorkspace(
+    options: {
+      readonly repository?: WorkspaceRepository;
+      readonly agentProvisioningEnabled?: boolean;
+    } = {},
+  ) {
+    const repository = options.repository ?? workspaceRepository;
+    const agentProvisioningEnabled = options.agentProvisioningEnabled ?? true;
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
       cookieSecure: false,
       identity: { service: identityService, agentProvisioningEnabled },
       workspace: {
-        repository: workspaceRepository,
+        repository,
         realtimeHub: new RealtimeEventHub(pool),
       },
     });
@@ -192,7 +199,7 @@ describeWithPostgres("agent identity and owner administration", () => {
   }
 
   it("refuses agent provisioning while the previous server remains a rollback target", async () => {
-    const app = await appWithWorkspace(false);
+    const app = await appWithWorkspace({ agentProvisioningEnabled: false });
     const response = await app.inject({
       method: "POST",
       url: "/v1/agents",
@@ -732,6 +739,91 @@ describeWithPostgres("agent identity and owner administration", () => {
       }),
     ]);
     expect(forbiddenWrites.map(({ statusCode }) => statusCode)).toEqual([403, 403, 403, 403, 403]);
+  });
+
+  it("allows an agent to reply to a bulletin but never publish an announcement root", async () => {
+    const app = await appWithWorkspace({
+      repository: new WorkspaceRepository(pool, { announcementChannelsEnabled: true }),
+    });
+    const agent = await createAgent(app);
+    const messages = await createToken(app, agent.user.id, "Messages", ["messages:write"]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/channels",
+      headers: {
+        cookie: `hmm_session=${ownerSessionToken}`,
+        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+      },
+      payload: {
+        name: "Announcements",
+        slug: "announcements",
+        topic: null,
+        access: "workspace",
+        channelMode: "announcement",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const conversationId = conversationMutationResponseSchema.parse(created.json()).conversation
+      .conversation.id;
+    const bulletinClientMessageId = randomUUID();
+    const bulletin = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers: {
+        cookie: `hmm_session=${ownerSessionToken}`,
+        "idempotency-key": bulletinClientMessageId,
+        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+      },
+      payload: {
+        threadRootId: null,
+        body: "Owner bulletin",
+        bodyFormat: "hmm_markdown_v1",
+        clientMessageId: bulletinClientMessageId,
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    });
+    expect(bulletin.statusCode).toBe(201);
+    const root = sendMessageResponseSchema.parse(bulletin.json()).message;
+
+    const forbiddenClientMessageId = randomUUID();
+    const forbidden = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers: {
+        authorization: `Bearer ${messages.token}`,
+        "idempotency-key": forbiddenClientMessageId,
+      },
+      payload: {
+        threadRootId: null,
+        body: "Agent root",
+        bodyFormat: "hmm_markdown_v1",
+        clientMessageId: forbiddenClientMessageId,
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const replyClientMessageId = randomUUID();
+    const reply = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers: {
+        authorization: `Bearer ${messages.token}`,
+        "idempotency-key": replyClientMessageId,
+      },
+      payload: {
+        threadRootId: root.id,
+        body: "Agent reply",
+        bodyFormat: "hmm_markdown_v1",
+        clientMessageId: replyClientMessageId,
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    });
+    expect(reply.statusCode).toBe(201);
+    expect(sendMessageResponseSchema.parse(reply.json()).message.threadRootId).toBe(root.id);
   });
 
   it("preserves agent-authored messages after disablement and counts agents against capacity", async () => {

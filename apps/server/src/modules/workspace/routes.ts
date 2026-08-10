@@ -1,4 +1,5 @@
 import {
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
@@ -24,6 +25,12 @@ import {
   taskNumberSchema,
   updateTaskRequestSchema,
   upsertChannelMemberRequestSchema,
+} from "@hmm-chat/contracts";
+import type {
+  ConversationMutationResponse,
+  ConversationSummary,
+  ListConversationsResponse,
+  WorkspaceBootstrapResponse,
 } from "@hmm-chat/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
@@ -115,12 +122,45 @@ function capabilities(value: string | string[] | undefined): readonly string[] {
   return parsed.data;
 }
 
+function withoutChannelMode(summary: ConversationSummary) {
+  const conversation: Partial<ConversationSummary["conversation"]> = { ...summary.conversation };
+  delete conversation.channelMode;
+  return { ...summary, conversation };
+}
+
+function projectBootstrap(response: WorkspaceBootstrapResponse, capable: boolean) {
+  if (capable) return response;
+  const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
+    ...response.featureFlags,
+  };
+  delete featureFlags.announcementChannels;
+  return {
+    ...response,
+    conversations: response.conversations.map(withoutChannelMode),
+    featureFlags,
+  };
+}
+
+function projectConversationList(response: ListConversationsResponse, capable: boolean) {
+  if (capable) return response;
+  return { ...response, conversations: response.conversations.map(withoutChannelMode) };
+}
+
+function projectConversationMutation(response: ConversationMutationResponse, capable: boolean) {
+  if (capable || response.conversation === undefined) return response;
+  return { ...response, conversation: withoutChannelMode(response.conversation) };
+}
+
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (app, options) => {
   const { identityService, botService, repository } = options;
   app.get("/bootstrap", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    return repository.bootstrap(identity);
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    return projectBootstrap(
+      await repository.bootstrap(identity),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+    );
   });
 
   app.get("/members", async (request) => {
@@ -134,7 +174,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const query = listConversationsQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
-    return repository.listConversations(identity, query.data.after, query.data.limit);
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    return projectConversationList(
+      await repository.listConversations(identity, query.data.after, query.data.limit),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+    );
   });
 
   app.post("/channels", async (request, reply) => {
@@ -142,15 +186,16 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "conversations:write");
     const result = createChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
-    return reply
-      .code(201)
-      .send(
-        await repository.createChannel(
-          identity,
-          result.data,
-          optionalIdempotencyKey(request.headers["idempotency-key"]),
-        ),
-      );
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const capable = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
+    const created = await repository.createChannel(
+      identity,
+      result.data,
+      optionalIdempotencyKey(request.headers["idempotency-key"]),
+      capable,
+      request.id,
+    );
+    return reply.code(201).send(projectConversationMutation(created, capable));
   });
 
   app.patch("/channels/:id", async (request) => {
@@ -159,7 +204,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const result = archiveChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel update");
-    return repository.archiveChannel(identity, id);
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    return projectConversationMutation(
+      await repository.archiveChannel(identity, id),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+    );
   });
 
   app.get("/channels/:id/members", async (request) => {
@@ -192,7 +241,15 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
     }
-    return reply.code(201).send(await repository.createDirectConversation(identity, result.data));
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    return reply
+      .code(201)
+      .send(
+        projectConversationMutation(
+          await repository.createDirectConversation(identity, result.data),
+          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        ),
+      );
   });
 
   app.get("/conversations/:id/messages", async (request) => {
@@ -344,7 +401,18 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (typeof idempotencyKey !== "string" || idempotencyKey !== body.data.clientMessageId) {
       throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
     }
-    return reply.code(201).send(await repository.sendMessage(identity, id, body.data));
+    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    return reply
+      .code(201)
+      .send(
+        await repository.sendMessage(
+          identity,
+          id,
+          body.data,
+          request.id,
+          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        ),
+      );
   });
 
   app.post("/reactions/query", async (request) => {
@@ -391,6 +459,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(REACTION_EVENTS_CAPABILITY),
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
       supported.includes(TASK_EVENTS_CAPABILITY),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
     );
   });
 
@@ -403,6 +472,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(REACTION_EVENTS_CAPABILITY),
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
       supported.includes(TASK_EVENTS_CAPABILITY),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
     );
   });
 };

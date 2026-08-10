@@ -74,7 +74,12 @@ async function main(): Promise<void> {
         selfServiceMagicLink: config.emailDelivery !== "manual",
         agentProvisioningEnabled: config.agentProvisioningEnabled,
       };
-      const repository = new WorkspaceRepository(databasePool);
+      const repository = new WorkspaceRepository(databasePool, {
+        announcementChannelsEnabled: config.announcementChannelsEnabled,
+        onAnnouncementAudit: (record) => {
+          process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
+        },
+      });
       const realtimeHub = new RealtimeEventHub(databasePool);
       await realtimeHub.start();
       startedRealtimeHub = realtimeHub;

@@ -1,3 +1,22 @@
+import type { ChannelAccess, ChannelMode } from "@hmm-chat/contracts";
+
+export function ChannelIcon({
+  access,
+  channelMode,
+}: {
+  readonly access: ChannelAccess | null;
+  readonly channelMode: ChannelMode | null;
+}) {
+  return (
+    <>
+      <span className="conversation-type-icon channel-icon" aria-hidden="true">
+        {channelMode === "announcement" ? "📣" : access === "members" ? "🔒" : "#"}
+      </span>
+      {channelMode === "announcement" && <span className="sr-only">Announcement channel: </span>}
+    </>
+  );
+}
+
 export function DirectMessageIcon({ className = "" }: { readonly className?: string }) {
   const classes = ["conversation-type-icon", "direct-message-avatar", className]
     .filter((value) => value !== "")

@@ -1,15 +1,17 @@
-import type { ConversationKind } from "@hmm-chat/contracts";
+import type { ChannelMode, ConversationKind } from "@hmm-chat/contracts";
 
 export function ConversationEmptyState({
   conversationName,
   kind,
   personal,
   archived,
+  channelMode,
 }: {
   readonly conversationName: string | null;
   readonly kind: ConversationKind | null;
   readonly personal: boolean;
   readonly archived: boolean;
+  readonly channelMode?: ChannelMode | null;
 }) {
   let title = "Choose a conversation";
   let description = "Select a channel or direct message from the sidebar.";
@@ -17,6 +19,9 @@ export function ConversationEmptyState({
   if (conversationName !== null && archived) {
     title = `No messages in ${conversationName}`;
     description = "This archived channel is read-only.";
+  } else if (conversationName !== null && channelMode === "announcement") {
+    title = `Welcome to ${conversationName}`;
+    description = "Bulletins will appear here. Members can reply in threads and react.";
   } else if (conversationName !== null && kind === "channel") {
     title = `Welcome to ${conversationName}`;
     description = `This is the beginning of ${conversationName}.`;
@@ -49,6 +54,19 @@ export function ArchivedConversationNotice({ thread = false }: { readonly thread
           ? "Replies are unavailable in archived channels."
           : "Messages are available to read, but new messages cannot be sent."}
       </span>
+    </div>
+  );
+}
+
+export function AnnouncementPostingNotice() {
+  return (
+    <div
+      className="announcement-posting-notice"
+      role="note"
+      aria-label="Announcement posting restricted"
+    >
+      <strong>Only workspace owners can post bulletins</strong>
+      <span>You can reply to a bulletin in its thread or add a reaction.</span>
     </div>
   );
 }

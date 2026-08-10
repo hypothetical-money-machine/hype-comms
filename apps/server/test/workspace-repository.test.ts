@@ -18,7 +18,10 @@ import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
-import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import {
+  type AnnouncementAuditRecord,
+  WorkspaceRepository,
+} from "../src/modules/workspace/repository.js";
 
 const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -475,6 +478,482 @@ describeWithPostgres("WorkspaceRepository", () => {
           }),
         }),
       }),
+    );
+  });
+
+  it("enforces announcement publishing while preserving threads, reactions, and replay", async () => {
+    const audits: AnnouncementAuditRecord[] = [];
+    repository = new WorkspaceRepository(pool, {
+      announcementChannelsEnabled: true,
+      onAnnouncementAudit: (record) => audits.push(record),
+    });
+    const created = await repository.createChannel(
+      owner,
+      {
+        name: "Company News",
+        slug: "company-news",
+        topic: "Important updates",
+        access: "workspace",
+        channelMode: "announcement",
+      },
+      undefined,
+      true,
+    );
+    const announcementId = created.conversation.conversation.id;
+    expect(created.conversation.conversation.channelMode).toBe("announcement");
+    const legacySync = await repository.sync(member, "0", 100);
+    const capableSync = await repository.sync(member, "0", 100, false, false, false, true);
+    const legacyCreated = legacySync.events.find(
+      (event) => event.type === "channel.created" && event.conversationId === announcementId,
+    );
+    const capableCreated = capableSync.events.find(
+      (event) => event.type === "channel.created" && event.conversationId === announcementId,
+    );
+    expect(legacyCreated?.payload).toEqual(
+      expect.objectContaining({
+        conversation: expect.not.objectContaining({ channelMode: expect.anything() }),
+      }),
+    );
+    expect(capableCreated?.payload).toEqual(
+      expect.objectContaining({
+        conversation: expect.objectContaining({ channelMode: "announcement" }),
+      }),
+    );
+
+    await expect(
+      repository.createChannel(
+        member,
+        {
+          name: "Unauthorized News",
+          slug: "unauthorized-news",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
+        },
+        undefined,
+        true,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    await expect(
+      repository.sendMessage(member, announcementId, {
+        ...message(randomUUID(), "member root"),
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+
+    await expect(
+      repository.sendMessage(owner, announcementId, {
+        ...message(randomUUID(), "legacy owner root"),
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+      message: "A compatible client is required to post bulletins",
+    } satisfies Partial<ApiError>);
+
+    const request = { ...message(randomUUID(), "owner bulletin"), mentionedUserIds: [] };
+    const bulletin = await repository.sendMessage(owner, announcementId, request, undefined, true);
+    const reply = await repository.sendMessage(member, announcementId, {
+      ...message(randomUUID(), "member reply"),
+      threadRootId: bulletin.message.id,
+      mentionedUserIds: [],
+    });
+    expect(reply.message.threadRootId).toBe(bulletin.message.id);
+    await expect(repository.addReaction(member, bulletin.message.id, "🎉")).resolves.toMatchObject({
+      reaction: { messageId: bulletin.message.id, userId: memberId },
+    });
+    await expect(repository.addReaction(member, reply.message.id, "👍")).resolves.toMatchObject({
+      reaction: { messageId: reply.message.id, userId: memberId },
+    });
+    await expect(repository.removeReaction(member, bulletin.message.id, "🎉")).resolves.toEqual(
+      expect.objectContaining({ removed: true }),
+    );
+    await expect(repository.removeReaction(member, reply.message.id, "👍")).resolves.toEqual(
+      expect.objectContaining({ removed: true }),
+    );
+
+    await expect(
+      repository.listConversationTasks(member, announcementId, undefined, 50),
+    ).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+      message: "Tasks are not available in this channel",
+    } satisfies Partial<ApiError>);
+    await expect(
+      repository.createTask(member, announcementId, taskInput("Not allowed"), randomUUID()),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query(`UPDATE conversations SET channel_mode = 'chat' WHERE id = $1`, [announcementId]),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    await pool.query(
+      `UPDATE workspace_memberships SET status = 'revoked' WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, ownerId],
+    );
+    await expect(repository.sendMessage(owner, announcementId, request)).rejects.toMatchObject({
+      statusCode: 401,
+      code: "UNAUTHORIZED",
+    } satisfies Partial<ApiError>);
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: "channel.create",
+          outcome: "accepted",
+          actorUserId: ownerId,
+          workspaceId,
+          conversationId: announcementId,
+        }),
+        expect.objectContaining({
+          operation: "channel.create",
+          outcome: "rejected",
+          actorUserId: memberId,
+          workspaceId,
+          reason: "not_authorized",
+        }),
+        expect.objectContaining({
+          operation: "bulletin.publish",
+          outcome: "accepted",
+          actorUserId: ownerId,
+          workspaceId,
+          conversationId: announcementId,
+        }),
+        expect.objectContaining({
+          operation: "bulletin.publish",
+          outcome: "rejected",
+          actorUserId: memberId,
+          workspaceId,
+          conversationId: announcementId,
+          reason: "not_authorized",
+        }),
+        expect.objectContaining({
+          operation: "bulletin.publish",
+          outcome: "rejected",
+          actorUserId: ownerId,
+          workspaceId,
+          conversationId: announcementId,
+          reason: "capability_required",
+        }),
+      ]),
+    );
+    expect(audits.every((audit) => !("body" in audit))).toBe(true);
+  });
+
+  it("rejects every task access path and hides legacy task rows in announcements", async () => {
+    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    const created = await repository.createChannel(
+      owner,
+      {
+        name: "Taskless News",
+        slug: "taskless-news",
+        topic: null,
+        access: "workspace",
+        channelMode: "announcement",
+      },
+      undefined,
+      true,
+    );
+    const announcementId = created.conversation.conversation.id;
+    const legacyTaskId = randomUUID();
+    await pool.query("ALTER TABLE tasks DISABLE TRIGGER tasks_reject_announcement_channel");
+    try {
+      await pool.query(
+        `INSERT INTO tasks
+           (id, workspace_id, conversation_id, number, title, status, priority, assignee_id,
+            rank, created_by)
+         VALUES ($1, $2, $3, 1, 'Legacy announcement task', 'todo', 'none', $4, 1024, $5)`,
+        [legacyTaskId, workspaceId, announcementId, memberId, ownerId],
+      );
+    } finally {
+      await pool.query("ALTER TABLE tasks ENABLE TRIGGER tasks_reject_announcement_channel");
+    }
+    const taskless = { statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>;
+    await expect(
+      repository.listConversationTasks(member, announcementId, undefined, 50),
+    ).rejects.toMatchObject(taskless);
+    await expect(
+      repository.listChannelTasks(member, "taskless-news", undefined, 50),
+    ).rejects.toMatchObject(taskless);
+    await expect(repository.getTask(member, legacyTaskId)).rejects.toMatchObject(taskless);
+    await expect(
+      repository.getChannelTaskByNumber(member, "taskless-news", 1),
+    ).rejects.toMatchObject(taskless);
+    await expect(
+      repository.createTask(member, announcementId, taskInput("No task"), randomUUID()),
+    ).rejects.toMatchObject(taskless);
+    await expect(
+      repository.createChannelTask(
+        member,
+        "taskless-news",
+        taskInput("No bot-style task"),
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject(taskless);
+    await expect(
+      repository.updateTask(
+        member,
+        legacyTaskId,
+        {
+          expectedVersion: 1,
+          title: "Still forbidden",
+          description: null,
+          priority: "none",
+          assigneeId: memberId,
+          dueOn: null,
+        },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject(taskless);
+    await expect(
+      repository.moveTask(
+        member,
+        legacyTaskId,
+        { expectedVersion: 1, status: "in_progress", beforeTaskId: null },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject(taskless);
+    await expect(repository.listMyTasks(member, undefined, 50)).resolves.toEqual({
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+  });
+
+  it("serializes announcement sends behind archive, private removal, and owner demotion", async () => {
+    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    const observe = <T>(promise: Promise<T>) => {
+      let settled = false;
+      const outcome = promise
+        .then(
+          (value) => ({ status: "fulfilled", value }) as const,
+          (error: unknown) => ({ status: "rejected", error }) as const,
+        )
+        .finally(() => {
+          settled = true;
+        });
+      return { outcome, isSettled: () => settled };
+    };
+    const expectBlocked = async (isSettled: () => boolean) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(isSettled()).toBe(false);
+    };
+    const createAnnouncement = async (slug: string, access: "workspace" | "members") =>
+      (
+        await repository.createChannel(
+          owner,
+          {
+            name: slug,
+            slug,
+            topic: null,
+            access,
+            channelMode: "announcement",
+          },
+          undefined,
+          true,
+        )
+      ).conversation.conversation.id;
+
+    const privateAnnouncementId = await createAnnouncement("private-news", "members");
+    await repository.upsertChannelMember(owner, privateAnnouncementId, memberId, {
+      role: "member",
+    });
+    const privateRoot = await repository.sendMessage(
+      owner,
+      privateAnnouncementId,
+      {
+        ...message(randomUUID(), "Private bulletin"),
+        mentionedUserIds: [],
+      },
+      undefined,
+      true,
+    );
+    const removal = await pool.connect();
+    try {
+      await removal.query("BEGIN");
+      await removal.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [workspaceId]);
+      await removal.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [
+        privateAnnouncementId,
+      ]);
+      await removal.query(
+        `UPDATE conversation_memberships
+            SET left_at = clock_timestamp(), updated_at = clock_timestamp()
+          WHERE conversation_id = $1 AND user_id = $2`,
+        [privateAnnouncementId, memberId],
+      );
+      const attempt = observe(
+        repository.sendMessage(member, privateAnnouncementId, {
+          ...message(randomUUID(), "Reply racing removal"),
+          threadRootId: privateRoot.message.id,
+          mentionedUserIds: [],
+        }),
+      );
+      await expectBlocked(attempt.isSettled);
+      await removal.query("COMMIT");
+      const result = await attempt.outcome;
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") {
+        expect(result.error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+      }
+    } finally {
+      await removal.query("ROLLBACK");
+      removal.release();
+    }
+
+    const archivedAnnouncementId = await createAnnouncement("archive-news", "workspace");
+    const archive = await pool.connect();
+    try {
+      await archive.query("BEGIN");
+      await archive.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [workspaceId]);
+      await archive.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [
+        archivedAnnouncementId,
+      ]);
+      await archive.query(
+        "UPDATE conversations SET is_archived = true, updated_at = clock_timestamp() WHERE id = $1",
+        [archivedAnnouncementId],
+      );
+      const attempt = observe(
+        repository.sendMessage(
+          owner,
+          archivedAnnouncementId,
+          {
+            ...message(randomUUID(), "Bulletin racing archive"),
+            mentionedUserIds: [],
+          },
+          undefined,
+          true,
+        ),
+      );
+      await expectBlocked(attempt.isSettled);
+      await archive.query("COMMIT");
+      const result = await attempt.outcome;
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") {
+        expect(result.error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+      }
+    } finally {
+      await archive.query("ROLLBACK");
+      archive.release();
+    }
+
+    const demotedAnnouncementId = await createAnnouncement("demotion-news", "workspace");
+    const demotion = await pool.connect();
+    try {
+      await demotion.query("BEGIN");
+      await demotion.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [workspaceId]);
+      await demotion.query(
+        `UPDATE workspace_memberships
+            SET role = 'member', updated_at = clock_timestamp()
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, ownerId],
+      );
+      const attempt = observe(
+        repository.sendMessage(
+          owner,
+          demotedAnnouncementId,
+          {
+            ...message(randomUUID(), "Bulletin racing demotion"),
+            mentionedUserIds: [],
+          },
+          undefined,
+          true,
+        ),
+      );
+      await expectBlocked(attempt.isSettled);
+      await demotion.query("COMMIT");
+      const result = await attempt.outcome;
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") {
+        expect(result.error).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+      }
+    } finally {
+      await demotion.query("ROLLBACK");
+      demotion.release();
+    }
+  });
+
+  it("keeps pre-cutover events legacy-shaped and makes availability one-way across nodes", async () => {
+    expect(new WorkspaceRepository(pool).announcementChannelsEnabled).toBe(false);
+    const rolloutRepository = new WorkspaceRepository(pool, {
+      announcementChannelsEnabled: false,
+    });
+    expect((await rolloutRepository.bootstrap(owner)).featureFlags.announcementChannels).toBe(
+      false,
+    );
+    await expect(
+      rolloutRepository.createChannel(
+        owner,
+        {
+          name: "Disabled Announcement",
+          slug: "disabled-announcement",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
+        },
+        undefined,
+        true,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+
+    const compatibleChat = await rolloutRepository.createChannel(owner, {
+      name: "Compatible Chat",
+      slug: "compatible-chat",
+      topic: null,
+      access: "workspace",
+    });
+    const legacyStored = await pool.query<{
+      payload: { conversation?: Record<string, unknown> };
+    }>(
+      `SELECT payload
+         FROM sync_events
+        WHERE conversation_id = $1 AND event_type = 'channel.created'`,
+      [compatibleChat.conversation.conversation.id],
+    );
+    expect(legacyStored.rows[0]?.payload.conversation).not.toHaveProperty("channelMode");
+
+    const enabledRepository = new WorkspaceRepository(pool, {
+      announcementChannelsEnabled: true,
+    });
+    expect((await enabledRepository.bootstrap(owner)).featureFlags.announcementChannels).toBe(true);
+    await expect(
+      enabledRepository.createChannel(
+        owner,
+        {
+          name: "Incapable Announcement",
+          slug: "incapable-announcement",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
+        },
+        undefined,
+        false,
+      ),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+
+    const announcement = await enabledRepository.createChannel(
+      owner,
+      {
+        name: "Cutover News",
+        slug: "cutover-news",
+        topic: null,
+        access: "workspace",
+        channelMode: "announcement",
+      },
+      undefined,
+      true,
+    );
+    expect((await rolloutRepository.bootstrap(owner)).featureFlags.announcementChannels).toBe(true);
+    await rolloutRepository.archiveChannel(owner, announcement.conversation.conversation.id);
+    const canonicalArchive = await pool.query<{
+      payload: { conversation?: Record<string, unknown> };
+    }>(
+      `SELECT payload
+         FROM sync_events
+        WHERE conversation_id = $1 AND event_type = 'channel.archived'`,
+      [announcement.conversation.conversation.id],
+    );
+    expect(canonicalArchive.rows[0]?.payload.conversation).toHaveProperty(
+      "channelMode",
+      "announcement",
     );
   });
 
@@ -1462,10 +1941,11 @@ describeWithPostgres("WorkspaceRepository", () => {
       reactionEvents: false,
       readStateEvents: false,
       taskEvents: false,
+      announcementChannels: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -1474,6 +1954,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       reactionEvents: true,
       readStateEvents: true,
       taskEvents: true,
+      announcementChannels: true,
     });
   });
 

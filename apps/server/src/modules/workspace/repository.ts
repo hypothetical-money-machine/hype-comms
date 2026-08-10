@@ -114,6 +114,7 @@ interface WorkspaceRow extends QueryResultRow {
   created_at: Date | string;
   updated_at: Date | string;
   last_event_sequence: string;
+  announcement_channels_available: boolean;
 }
 
 interface UserRow extends QueryResultRow {
@@ -134,6 +135,7 @@ interface ConversationRow extends QueryResultRow {
   slug: string | null;
   topic: string | null;
   channel_access: "workspace" | "members" | null;
+  channel_mode: "chat" | "announcement" | null;
   is_archived: boolean;
   created_by: string | null;
   dm_user_low_id: string | null;
@@ -183,6 +185,8 @@ interface MessageAuthorizationRow extends QueryResultRow {
 
 interface WorkspaceMembershipAuthorizationRow extends QueryResultRow {
   workspace_active: boolean;
+  role: "owner" | "member";
+  kind: "human" | "agent";
 }
 
 interface SearchMessageRow extends MessageRow {
@@ -259,6 +263,7 @@ interface TicketRow extends QueryResultRow {
   reaction_events: boolean;
   read_state_events: boolean;
   task_events: boolean;
+  announcement_channels: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -291,6 +296,10 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
+  /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
+  readonly announcementChannelsEnabled?: boolean;
+  /** Structured operational record; message bodies are deliberately never included. */
+  readonly onAnnouncementAudit?: (record: AnnouncementAuditRecord) => void;
   /** Test seam for holding the message-delivery conversation lock. */
   readonly afterConversationLocked?: () => Promise<void>;
   /** Test seam for holding message delivery after its authorization locks and reads. */
@@ -301,6 +310,16 @@ export interface WorkspaceRepositoryHooks {
   readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
 }
 
+export interface AnnouncementAuditRecord {
+  readonly operation: "channel.create" | "bulletin.publish";
+  readonly outcome: "accepted" | "rejected";
+  readonly actorUserId: string;
+  readonly workspaceId: string;
+  readonly conversationId?: string | undefined;
+  readonly correlationId?: string | undefined;
+  readonly reason?: string | undefined;
+}
+
 export type ConsumedRealtimeTicket = RealtimePrincipal;
 
 export interface WorkspacePrincipal {
@@ -309,6 +328,7 @@ export interface WorkspacePrincipal {
   readonly reactionEvents?: boolean;
   readonly readStateEvents?: boolean;
   readonly taskEvents?: boolean;
+  readonly announcementChannels?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -355,6 +375,7 @@ function mapConversation(row: ConversationRow): Conversation {
     slug: row.slug,
     topic: row.topic,
     access: row.channel_access,
+    channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
     isArchived: row.is_archived,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
@@ -732,11 +753,25 @@ export class WorkspaceRepository {
     private readonly hooks: WorkspaceRepositoryHooks = {},
   ) {}
 
+  get announcementChannelsEnabled(): boolean {
+    return this.hooks.announcementChannelsEnabled ?? false;
+  }
+
   async bootstrap(identity: AuthenticatedIdentity): Promise<WorkspaceBootstrapResponse> {
+    if (this.announcementChannelsEnabled) {
+      await this.pool.query(
+        `UPDATE workspaces
+            SET announcement_channels_available = true
+          WHERE id = $1
+            AND announcement_channels_available = false`,
+        [identity.currentUser.workspaceId],
+      );
+    }
     return this.#transaction(
       async (client) => {
         const workspaceResult = await client.query<WorkspaceRow>(
-          `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence
+          `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence,
+                  announcement_channels_available
            FROM workspaces
           WHERE id = $1`,
           [identity.currentUser.workspaceId],
@@ -765,6 +800,7 @@ export class WorkspaceRepository {
             channels: true,
             directMessages: true,
             mentions: true,
+            announcementChannels: workspace.announcement_channels_available,
           },
         });
       },
@@ -806,14 +842,41 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     input: CreateChannelRequest,
     idempotencyKey?: string,
+    announcementCapability = false,
+    correlationId?: string,
   ): Promise<ConversationMutationResponse> {
-    return this.#transaction(async (client) => {
+    let acceptedAnnouncementId: string | undefined;
+    const response = await this.#transaction(async (client) => {
       const create = async (): Promise<ConversationMutationResponse> => {
+        const channelMode = input.channelMode ?? "chat";
+        const principal = await this.#requireActivePrincipal(client, identity);
+        if (channelMode === "announcement") {
+          const announcementChannelsAvailable = await this.#announcementChannelsAvailable(
+            client,
+            identity.currentUser.workspaceId,
+          );
+          const allowed =
+            announcementChannelsAvailable &&
+            announcementCapability &&
+            principal.kind === "human" &&
+            principal.role === "owner";
+          if (!allowed) {
+            this.#auditAnnouncement({
+              operation: "channel.create",
+              outcome: "rejected",
+              actorUserId: identity.currentUser.user.id,
+              workspaceId: identity.currentUser.workspaceId,
+              correlationId,
+              reason: "not_authorized",
+            });
+            throw new ApiError(403, "FORBIDDEN", "Only workspace owners can create announcements");
+          }
+        }
         const created = await client
           .query<ConversationRow>(
             `INSERT INTO conversations
-           (id, workspace_id, kind, name, slug, topic, channel_access, created_by)
-         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7)
+           (id, workspace_id, kind, name, slug, topic, channel_access, channel_mode, created_by)
+         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7, $8)
          RETURNING *`,
             [
               randomUUID(),
@@ -822,6 +885,7 @@ export class WorkspaceRepository {
               input.slug,
               input.topic,
               input.access,
+              channelMode,
               identity.currentUser.user.id,
             ],
           )
@@ -851,6 +915,9 @@ export class WorkspaceRepository {
           },
           audienceUserIds,
         });
+        if (channelMode === "announcement") {
+          acceptedAnnouncementId = row.id;
+        }
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, row),
           syncCursor: event.workspaceSequence,
@@ -870,6 +937,17 @@ export class WorkspaceRepository {
         create,
       );
     });
+    if (acceptedAnnouncementId !== undefined) {
+      this.#auditAnnouncement({
+        operation: "channel.create",
+        outcome: "accepted",
+        actorUserId: identity.currentUser.user.id,
+        workspaceId: identity.currentUser.workspaceId,
+        conversationId: acceptedAnnouncementId,
+        correlationId,
+      });
+    }
+    return response;
   }
 
   async listChannelMembers(
@@ -1039,9 +1117,6 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
   ): Promise<ConversationMutationResponse> {
-    if (identity.currentUser.role !== "owner") {
-      throw new ApiError(403, "FORBIDDEN", "Only the workspace owner can archive channels");
-    }
     return this.#transaction(async (client) => {
       const locked = await client.query<ConversationRow>(
         `SELECT *
@@ -1059,6 +1134,10 @@ export class WorkspaceRepository {
         throw new ApiError(404, "NOT_FOUND", "Channel not found or cannot be archived");
       }
       await this.hooks.afterArchiveConversationLocked?.();
+      const principal = await this.#requireActivePrincipal(client, identity);
+      if (principal.kind !== "human" || principal.role !== "owner") {
+        throw new ApiError(403, "FORBIDDEN", "Only the workspace owner can archive channels");
+      }
       if (current.is_archived) {
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, current),
@@ -1297,6 +1376,7 @@ export class WorkspaceRepository {
     const emoji = this.#reactionEmoji(input);
     return this.#transaction(async (client) => {
       const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
+      await this.#requireActivePrincipal(client, identity);
       const existing = await client.query<ReactionRow>(
         `SELECT *
            FROM message_reactions
@@ -1370,6 +1450,7 @@ export class WorkspaceRepository {
     const emoji = this.#reactionEmoji(input);
     return this.#transaction(async (client) => {
       const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
+      await this.#requireActivePrincipal(client, identity);
       const removed = await client.query<ReactionRow>(
         `DELETE FROM message_reactions
           WHERE message_id = $1
@@ -1530,6 +1611,7 @@ export class WorkspaceRepository {
             AND conversation.workspace_id = task.workspace_id
           WHERE task.workspace_id = $1
             AND conversation.is_archived = false
+            AND conversation.channel_mode IS DISTINCT FROM 'announcement'
             AND ${conversationVisibilitySql("conversation", "$2")}
             AND (
               task.assignee_id = $2
@@ -1589,6 +1671,7 @@ export class WorkspaceRepository {
         channelSlug,
         false,
       );
+      this.#requireTaskConversation(identity, conversation);
       const result = await client.query<TaskRow>(
         `SELECT task.*
            FROM tasks AS task
@@ -1648,6 +1731,13 @@ export class WorkspaceRepository {
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        row.conversation_id,
+        false,
+      );
+      this.#requireTaskConversation(identity, conversation);
       return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
     } finally {
       client.release();
@@ -1667,6 +1757,7 @@ export class WorkspaceRepository {
         channelSlug,
         false,
       );
+      this.#requireTaskConversation(identity, conversation);
       const result = await client.query<TaskRow>(
         `SELECT task.*
            FROM tasks AS task
@@ -1972,12 +2063,15 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
     input: SendConversationMessageRequest,
+    correlationId?: string,
+    announcementCapability = false,
   ): Promise<SendMessageResponse> {
     if (input.attachmentIds.length > 0) {
       throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
     }
     const fingerprint = fingerprintMessage(conversationId, input);
-    return this.#transaction(async (client) => {
+    let bulletinAccepted = false;
+    const response = await this.#transaction(async (client) => {
       // Global lock order for delivery and revocation is: per-message idempotency advisory lock,
       // conversation row, sender workspace-membership row, domain rows, then workspace sequence.
       // Archive and channel-membership mutations start with the same conversation row; identity
@@ -2005,7 +2099,9 @@ export class WorkspaceRepository {
       // share lock also prevents an active membership from being revoked before delivery commits.
       const workspaceAuthorization = await client.query<WorkspaceMembershipAuthorizationRow>(
         `SELECT membership.status = 'active'
-                  AND actor.kind IN ('human', 'agent') AS workspace_active
+                  AND actor.kind IN ('human', 'agent') AS workspace_active,
+                membership.role,
+                actor.kind
            FROM workspace_memberships AS membership
            JOIN users AS actor ON actor.id = membership.user_id
           WHERE membership.workspace_id = $1
@@ -2013,7 +2109,8 @@ export class WorkspaceRepository {
           FOR SHARE OF membership`,
         [identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
-      if (!workspaceAuthorization.rows[0]?.workspace_active) {
+      const principal = workspaceAuthorization.rows[0];
+      if (!principal?.workspace_active) {
         throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
       }
 
@@ -2070,6 +2167,32 @@ export class WorkspaceRepository {
       }
       if (access.is_archived) {
         throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+      }
+      if (conversation.channel_mode === "announcement" && input.threadRootId === null) {
+        if (principal.kind !== "human" || principal.role !== "owner") {
+          this.#auditAnnouncement({
+            operation: "bulletin.publish",
+            outcome: "rejected",
+            actorUserId: identity.currentUser.user.id,
+            workspaceId: identity.currentUser.workspaceId,
+            conversationId,
+            correlationId,
+            reason: "not_authorized",
+          });
+          throw new ApiError(403, "FORBIDDEN", "Only workspace owners can post bulletins");
+        }
+        if (!announcementCapability) {
+          this.#auditAnnouncement({
+            operation: "bulletin.publish",
+            outcome: "rejected",
+            actorUserId: identity.currentUser.user.id,
+            workspaceId: identity.currentUser.workspaceId,
+            conversationId,
+            correlationId,
+            reason: "capability_required",
+          });
+          throw new ApiError(403, "FORBIDDEN", "A compatible client is required to post bulletins");
+        }
       }
       if (input.threadRootId !== null) {
         const root = await client.query<{ id: string } & QueryResultRow>(
@@ -2160,8 +2283,22 @@ export class WorkspaceRepository {
           JSON.stringify(response),
         ],
       );
+      if (conversation.channel_mode === "announcement" && input.threadRootId === null) {
+        bulletinAccepted = true;
+      }
       return response;
     });
+    if (bulletinAccepted) {
+      this.#auditAnnouncement({
+        operation: "bulletin.publish",
+        outcome: "accepted",
+        actorUserId: identity.currentUser.user.id,
+        workspaceId: identity.currentUser.workspaceId,
+        conversationId,
+        correlationId,
+      });
+    }
+    return response;
   }
 
   async advanceReadCursor(
@@ -2253,6 +2390,7 @@ export class WorkspaceRepository {
     reactionEvents = false,
     readStateEvents = false,
     taskEvents = false,
+    announcementChannels = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -2261,6 +2399,7 @@ export class WorkspaceRepository {
         reactionEvents,
         readStateEvents,
         taskEvents,
+        announcementChannels,
       },
       after,
       limit,
@@ -2341,7 +2480,7 @@ export class WorkspaceRepository {
       );
       const scanned = rows.rows.slice(0, limit);
       const nextCursor = scanned.at(-1)?.workspace_sequence ?? after;
-      return syncResponseSchema.parse({
+      const response = syncResponseSchema.parse({
         events: scanned
           .filter((row) => row.visible)
           .map((row) => this.#mapEvent(row, principal.readStateEvents ?? false)),
@@ -2349,6 +2488,11 @@ export class WorkspaceRepository {
         highWaterCursor,
         hasMore: rows.rows.length > limit,
       });
+      if (principal.announcementChannels ?? false) return response;
+      return {
+        ...response,
+        events: response.events.map((event) => this.#legacyAnnouncementEvent(event)),
+      } as SyncResponse;
     } finally {
       client.release();
     }
@@ -2359,6 +2503,7 @@ export class WorkspaceRepository {
     reactionEvents = false,
     readStateEvents = false,
     taskEvents = false,
+    announcementChannels = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -2371,8 +2516,8 @@ export class WorkspaceRepository {
     await this.pool.query(
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
-          reaction_events, read_state_events, task_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          reaction_events, read_state_events, task_events, announcement_channels)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -2384,6 +2529,7 @@ export class WorkspaceRepository {
         reactionEvents,
         readStateEvents,
         taskEvents,
+        announcementChannels,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -2407,7 +2553,8 @@ export class WorkspaceRepository {
                    ticket.agent_token_id,
                    ticket.reaction_events,
                    ticket.read_state_events,
-                   ticket.task_events
+                   ticket.task_events,
+                   ticket.announcement_channels
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -2415,7 +2562,8 @@ export class WorkspaceRepository {
               ticket.agent_token_id,
               ticket.reaction_events,
               ticket.read_state_events,
-              ticket.task_events
+              ticket.task_events,
+              ticket.announcement_channels
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -2465,6 +2613,7 @@ export class WorkspaceRepository {
         reactionEvents: row.reaction_events,
         readStateEvents: row.read_state_events,
         taskEvents: row.task_events,
+        announcementChannels: row.announcement_channels,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -2476,6 +2625,7 @@ export class WorkspaceRepository {
         reactionEvents: row.reaction_events,
         readStateEvents: row.read_state_events,
         taskEvents: row.task_events,
+        announcementChannels: row.announcement_channels,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -2738,6 +2888,9 @@ export class WorkspaceRepository {
     identity: AuthenticatedTaskIdentity,
     conversation: ConversationRow,
   ): void {
+    if (conversation.kind === "channel" && conversation.channel_mode === "announcement") {
+      throw new ApiError(404, "NOT_FOUND", "Tasks are not available in this channel");
+    }
     if (conversation.kind === "channel") return;
     if (
       identity.principalKind === "human" &&
@@ -2844,6 +2997,44 @@ export class WorkspaceRepository {
     return row;
   }
 
+  async #requireActivePrincipal(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+  ): Promise<{ readonly role: "owner" | "member"; readonly kind: "human" | "agent" }> {
+    const result = await client.query<
+      { role: "owner" | "member"; kind: "human" | "agent" } & QueryResultRow
+    >(
+      `SELECT membership.role, user_account.kind
+         FROM workspace_memberships AS membership
+         JOIN users AS user_account ON user_account.id = membership.user_id
+        WHERE membership.workspace_id = $1
+          AND membership.user_id = $2
+          AND membership.status = 'active'
+          AND user_account.kind IN ('human', 'agent')
+        FOR UPDATE OF membership`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id],
+    );
+    const principal = result.rows[0];
+    if (principal === undefined) {
+      throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    }
+    // Existing membership mutations take the membership row before the workspace sequence row.
+    // This matches delivery and identity revocation, preventing a membership/workspace inversion.
+    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
+      identity.currentUser.workspaceId,
+    ]);
+    return principal;
+  }
+
+  #auditAnnouncement(record: AnnouncementAuditRecord): void {
+    try {
+      this.hooks.onAnnouncementAudit?.(record);
+    } catch {
+      // Audit delivery must not turn an otherwise valid or intentionally rejected request into a
+      // different API outcome. The production hook is synchronous structured logging.
+    }
+  }
+
   async #visibleChannelIdBySlug(
     identity: AuthenticatedTaskIdentity,
     channelSlug: string,
@@ -2899,6 +3090,7 @@ export class WorkspaceRepository {
       true,
       true,
     );
+    await this.#requireActivePrincipal(client, identity);
     if (conversation.kind !== "channel" || conversation.channel_access !== "members") {
       throw new ApiError(404, "NOT_FOUND", "Managed channel not found");
     }
@@ -3189,6 +3381,10 @@ export class WorkspaceRepository {
       entityVersion: input.entityVersion,
       payload: input.payload,
       audienceUserIds: input.audienceUserIds,
+      stripChannelMode: !(await this.#announcementChannelsAvailable(
+        client,
+        identity.currentUser.workspaceId,
+      )),
     });
   }
 
@@ -3214,7 +3410,35 @@ export class WorkspaceRepository {
       entityVersion: input.entityVersion,
       payload: input.payload,
       audienceUserIds: input.audienceUserIds,
+      stripChannelMode: !(await this.#announcementChannelsAvailable(
+        client,
+        identity.currentUser.workspaceId,
+      )),
     });
+  }
+
+  async #announcementChannelsAvailable(client: PoolClient, workspaceId: string): Promise<boolean> {
+    if (this.announcementChannelsEnabled) {
+      await client.query(
+        `UPDATE workspaces
+            SET announcement_channels_available = true
+          WHERE id = $1
+            AND announcement_channels_available = false`,
+        [workspaceId],
+      );
+    }
+    const result = await client.query<
+      { announcement_channels_available: boolean } & QueryResultRow
+    >(
+      `SELECT announcement_channels_available
+         FROM workspaces
+        WHERE id = $1
+        FOR UPDATE`,
+      [workspaceId],
+    );
+    const workspace = result.rows[0];
+    if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    return workspace.announcement_channels_available;
   }
 
   async #nextWorkspaceSequence(client: PoolClient, workspaceId: string): Promise<string> {
@@ -3254,6 +3478,22 @@ export class WorkspaceRepository {
       ...event,
       payload: { readCursor: event.payload.readCursor },
     };
+  }
+
+  #legacyAnnouncementEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (
+      event.type !== "channel.created" &&
+      event.type !== "channel.archived" &&
+      event.type !== "direct_conversation.created"
+    ) {
+      return event;
+    }
+    const conversation: Partial<Conversation> = { ...event.payload.conversation };
+    delete conversation.channelMode;
+    return {
+      ...event,
+      payload: { ...event.payload, conversation },
+    } as unknown as WorkspaceEvent;
   }
 
   async #transaction<T>(

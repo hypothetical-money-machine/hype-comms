@@ -1,4 +1,9 @@
-import { THREADS_CAPABILITY, type BotScope, type CurrentUser } from "@hmm-chat/contracts";
+import {
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  THREADS_CAPABILITY,
+  type BotScope,
+  type CurrentUser,
+} from "@hmm-chat/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
@@ -78,7 +83,67 @@ class FakeBotService {
 }
 
 class FakeWorkspaceRepository {
-  readonly createChannel = vi.fn(async () => ({}));
+  readonly bootstrap = vi.fn(async () => ({
+    currentUser,
+    workspace: {
+      id: workspaceId,
+      name: "Hype Comms",
+      slug: "hype-comms",
+      createdBy: userId,
+      createdAt: now,
+      updatedAt: now,
+    },
+    members: [currentUser.user],
+    conversations: [
+      {
+        conversation: {
+          id: conversationId,
+          workspaceId,
+          kind: "channel",
+          name: "Company News",
+          slug: "company-news",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
+          isArchived: false,
+          createdBy: userId,
+          createdAt: now,
+          updatedAt: now,
+        },
+        participantIds: [userId],
+        membershipRole: null,
+        lastMessage: null,
+        unreadCount: 0,
+        mentionCount: 0,
+        readCursor: null,
+      },
+    ],
+    conversationsNextCursor: null,
+    conversationsHasMore: false,
+    syncCursor: "0",
+    featureFlags: {
+      channels: true,
+      directMessages: true,
+      mentions: true,
+      announcementChannels: true,
+    },
+  }));
+  readonly listConversations = vi.fn(async () => {
+    const bootstrap = await this.bootstrap();
+    return { conversations: bootstrap.conversations, nextCursor: null, hasMore: false };
+  });
+  readonly createChannel = vi.fn(async () => ({
+    conversation: (await this.bootstrap()).conversations[0],
+    syncCursor: "1",
+  }));
+  readonly archiveChannel = vi.fn(async () => ({
+    conversation: (await this.bootstrap()).conversations[0],
+    syncCursor: "2",
+  }));
+  readonly createDirectConversation = vi.fn(async () => ({
+    conversation: (await this.bootstrap()).conversations[0],
+    syncCursor: "3",
+  }));
   readonly history = vi.fn(async () => ({
     messages: [
       {
@@ -230,6 +295,78 @@ async function reactionApp(repository: FakeWorkspaceRepository, botService?: Bot
 }
 
 describe("event capability routes", () => {
+  it("projects announcement bootstrap fields only for capable clients", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const legacy = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap",
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+    const capable = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap",
+      headers: {
+        cookie: `hmm_session=${sessionToken}`,
+        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+      },
+    });
+
+    expect(legacy.statusCode).toBe(200);
+    expect(legacy.json().featureFlags).not.toHaveProperty("announcementChannels");
+    expect(legacy.json().conversations[0].conversation).not.toHaveProperty("channelMode");
+    expect(capable.statusCode).toBe(200);
+    expect(capable.json().featureFlags.announcementChannels).toBe(true);
+    expect(capable.json().conversations[0].conversation.channelMode).toBe("announcement");
+  });
+
+  it("strips channel mode from every legacy conversation response surface", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const legacyHeaders = { cookie: `hmm_session=${sessionToken}` };
+    const capableHeaders = {
+      ...legacyHeaders,
+      "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+    };
+    const requests = [
+      { method: "GET", url: "/v1/conversations?limit=50" },
+      {
+        method: "POST",
+        url: "/v1/channels",
+        payload: {
+          name: "Company News",
+          slug: "company-news",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
+        },
+      },
+      {
+        method: "PATCH",
+        url: `/v1/channels/${conversationId}`,
+        payload: { isArchived: true },
+      },
+      {
+        method: "POST",
+        url: "/v1/direct-conversations",
+        payload: { memberId: userId },
+      },
+    ] as const;
+
+    for (const request of requests) {
+      const legacy = await app.inject({ ...request, headers: legacyHeaders });
+      const capable = await app.inject({ ...request, headers: capableHeaders });
+      expect(legacy.statusCode).toBeLessThan(300);
+      expect(capable.statusCode).toBeLessThan(300);
+      const legacySummary =
+        request.method === "GET" ? legacy.json().conversations[0] : legacy.json().conversation;
+      const capableSummary =
+        request.method === "GET" ? capable.json().conversations[0] : capable.json().conversation;
+      expect(legacySummary.conversation).not.toHaveProperty("channelMode");
+      expect(capableSummary.conversation.channelMode).toBe("announcement");
+    }
+  });
+
   it("negotiates event payloads independently for sync and realtime", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
@@ -254,12 +391,14 @@ describe("event capability routes", () => {
       true,
       true,
       true,
+      false,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       true,
       true,
       true,
+      false,
     );
   });
 
@@ -284,6 +423,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
       false,
@@ -713,6 +853,7 @@ describe("message thread routes", () => {
       cookie: `hmm_session=${sessionToken}`,
       "content-type": "application/json",
       "idempotency-key": replyId,
+      "x-hmm-chat-capabilities": `${THREADS_CAPABILITY},${ANNOUNCEMENT_CHANNELS_CAPABILITY}`,
     };
 
     const thread = await app.inject({
@@ -746,6 +887,8 @@ describe("message thread routes", () => {
       expect.objectContaining({ currentUser }),
       conversationId,
       expect.objectContaining({ clientMessageId: replyId, threadRootId: messageId }),
+      "req-2",
+      true,
     );
   });
 
@@ -799,6 +942,8 @@ describe("channel mutation routes", () => {
       expect.objectContaining({ currentUser }),
       payload,
       messageId,
+      false,
+      "req-1",
     );
     expect(malformed.statusCode).toBe(400);
     expect(repository.createChannel).toHaveBeenNthCalledWith(
@@ -806,6 +951,8 @@ describe("channel mutation routes", () => {
       expect.objectContaining({ currentUser }),
       { ...payload, slug: "legacy-channel" },
       undefined,
+      false,
+      "req-2",
     );
     expect(repository.createChannel).toHaveBeenCalledTimes(2);
   });

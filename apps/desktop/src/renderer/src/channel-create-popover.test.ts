@@ -79,7 +79,13 @@ describe("ChannelCreatePopover", () => {
     fireEvent.submit(screen.getByRole("dialog"));
 
     await waitFor(() =>
-      expect(onCreate).toHaveBeenCalledWith("Équipe Produit", "équipe-produit", null, "workspace"),
+      expect(onCreate).toHaveBeenCalledWith(
+        "Équipe Produit",
+        "équipe-produit",
+        null,
+        "workspace",
+        "chat",
+      ),
     );
     expect(trigger.hasAttribute("disabled")).toBe(true);
     expect(
@@ -127,7 +133,7 @@ describe("ChannelCreatePopover", () => {
     fireEvent.submit(screen.getByRole("dialog"));
 
     await waitFor(() =>
-      expect(onCreate).toHaveBeenCalledWith("Leadership", "leadership", null, "members"),
+      expect(onCreate).toHaveBeenCalledWith("Leadership", "leadership", null, "members", "chat"),
     );
   });
 
@@ -145,6 +151,34 @@ describe("ChannelCreatePopover", () => {
         "product-feedback",
         "Share customer themes and research.",
         "workspace",
+        "chat",
+      ),
+    );
+  });
+
+  it("offers announcement mode only when enabled and submits it explicitly", async () => {
+    const onCreate = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    render(
+      createElement(ChannelCreatePopover, {
+        canCreateAnnouncements: true,
+        onCreate,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Channel name" }), {
+      target: { value: "Company News" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /announcement/i }));
+    expect(screen.getByText(/owners post bulletins/i)).toBeTruthy();
+    fireEvent.submit(screen.getByRole("dialog"));
+
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(
+        "Company News",
+        "company-news",
+        null,
+        "workspace",
+        "announcement",
       ),
     );
   });

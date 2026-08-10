@@ -33,6 +33,10 @@ const rawConfigSchema = z
       .max(80)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
       .default("hmm-chat"),
+    announcementChannelsEnabled: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
   })
   .strict();
 
@@ -63,6 +67,8 @@ export interface ServerConfig {
   readonly port: number;
   readonly logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   readonly shutdownTimeoutMs: number;
+  /** Requests the one-way cluster cutover after every server and realtime worker is compatible. */
+  readonly announcementChannelsEnabled: boolean;
   /** Enables the private Prometheus endpoint when configured. */
   readonly metricsToken?: string;
   readonly allowedOrigins: readonly string[];
@@ -133,6 +139,7 @@ export function loadConfig(
     ownerEmail: env.HMM_OWNER_EMAIL,
     workspaceName: env.HMM_WORKSPACE_NAME,
     workspaceSlug: env.HMM_WORKSPACE_SLUG,
+    announcementChannelsEnabled: env.HMM_ANNOUNCEMENT_CHANNELS_ENABLED,
   });
 
   if (!result.success) {
@@ -218,6 +225,7 @@ export function loadConfig(
     port: result.data.port,
     logLevel: result.data.logLevel,
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
+    announcementChannelsEnabled: result.data.announcementChannelsEnabled,
     ...(result.data.metricsToken === undefined ? {} : { metricsToken: result.data.metricsToken }),
     allowedOrigins: [...new Set(originsResult.data)],
     publicApiUrl: publicApiResult.data,

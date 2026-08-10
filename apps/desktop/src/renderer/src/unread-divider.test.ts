@@ -39,6 +39,7 @@ function summary(unreadCount: number, lastReadSequence: string | null): Conversa
       slug: "general",
       topic: null,
       access: "workspace",
+      channelMode: "chat",
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
+import type { ChannelMode } from "@hmm-chat/contracts";
 import { DirectMessageIcon } from "./conversation-indicators";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
@@ -10,6 +11,7 @@ export interface SwitcherConversation {
   readonly name: string;
   readonly kind: "channel" | "direct_message" | "group_direct_message";
   readonly isArchived: boolean;
+  readonly channelMode?: ChannelMode | null;
 }
 
 interface ConversationSwitcherProps {
@@ -194,7 +196,7 @@ export function ConversationSwitcher({
                             className="quick-switcher-icon conversation-type-icon channel-icon"
                             aria-hidden="true"
                           >
-                            #
+                            {conversation.channelMode === "announcement" ? "📣" : "#"}
                           </span>
                         ) : (
                           <DirectMessageIcon className="quick-switcher-icon" />
@@ -206,7 +208,9 @@ export function ConversationSwitcher({
                           {conversation.isArchived
                             ? "Archived channel"
                             : conversation.kind === "channel"
-                              ? "Channel"
+                              ? conversation.channelMode === "announcement"
+                                ? "Announcement channel"
+                                : "Channel"
                               : "Direct message"}
                         </small>
                         {conversation.id === selectedConversationId && (

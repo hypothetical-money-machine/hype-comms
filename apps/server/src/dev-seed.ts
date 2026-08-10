@@ -380,7 +380,9 @@ export async function seedDevelopmentDemo(
     throw new Error("Demo identities were not created");
   }
 
-  const workspaceRepository = new WorkspaceRepository(pool);
+  const workspaceRepository = new WorkspaceRepository(pool, {
+    announcementChannelsEnabled: config.announcementChannelsEnabled,
+  });
   const conversationIds = new Map<DemoMessageFixture["conversation"], EntityId>();
   const generalId = await findConversationId(pool, workspace.id, "general");
   if (generalId === null) throw new Error("Demo workspace has no #general channel");

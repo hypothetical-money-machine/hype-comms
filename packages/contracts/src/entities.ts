@@ -76,6 +76,7 @@ export const invitationSchema = z
 
 export const conversationKindSchema = z.enum(["channel", "direct_message", "group_direct_message"]);
 export const channelAccessSchema = z.enum(["workspace", "members"]);
+export const channelModeSchema = z.enum(["chat", "announcement"]);
 
 export const conversationSchema = z
   .object({
@@ -89,11 +90,38 @@ export const conversationSchema = z
     // renderer meaning as a legacy workspace-visible channel; current servers always send the
     // explicit access mode.
     access: channelAccessSchema.nullable().default(null),
+    // Missing on pre-announcement server responses and encrypted cache records. New clients
+    // normalize a legacy channel to chat while keeping the field null for direct conversations.
+    channelMode: channelModeSchema.nullable().optional(),
     isArchived: z.boolean(),
     createdBy: entityIdSchema.nullable(),
     ...timestampsShape,
   })
-  .strict();
+  .strict()
+  .superRefine((conversation, context) => {
+    if (conversation.kind === "channel" && conversation.channelMode === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["channelMode"],
+        message: "Channel mode cannot be null for a channel",
+      });
+    }
+    if (
+      conversation.kind !== "channel" &&
+      conversation.channelMode !== undefined &&
+      conversation.channelMode !== null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["channelMode"],
+        message: "Channel mode is only valid for channels",
+      });
+    }
+  })
+  .transform((conversation) => ({
+    ...conversation,
+    channelMode: conversation.kind === "channel" ? (conversation.channelMode ?? "chat") : null,
+  }));
 
 export const conversationMembershipRoleSchema = z.enum(["owner", "member"]);
 
@@ -207,6 +235,7 @@ export type InvitationStatus = z.infer<typeof invitationStatusSchema>;
 export type Invitation = z.infer<typeof invitationSchema>;
 export type ConversationKind = z.infer<typeof conversationKindSchema>;
 export type ChannelAccess = z.infer<typeof channelAccessSchema>;
+export type ChannelMode = z.infer<typeof channelModeSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
 export type ConversationMembershipRole = z.infer<typeof conversationMembershipRoleSchema>;
 export type ConversationMembership = z.infer<typeof conversationMembershipSchema>;

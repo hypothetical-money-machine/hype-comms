@@ -5,6 +5,7 @@ import {
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type ChannelAccess,
+  type ChannelMode,
   type ChatSessionState,
   type ConversationSummary,
   type Message,
@@ -471,6 +472,11 @@ export class WorkspaceRuntime {
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#eventQueue = Promise.resolve();
+    // A session restart can reuse the same privileged main process. Stop any socket created by
+    // the previous renderer generation before a capable bootstrap replaces a legacy projection;
+    // otherwise a legacy-projected event could advance the cached cursor during that rebuild.
+    await this.#client.stopWorkspaceRealtime();
+    if (generation !== this.#generation) return;
     this.#unsubscribeEvent = this.#client.onWorkspaceEvent((event) => {
       const realtimeEpoch = this.#realtimeEpoch;
       if (event.type === "channel.membership_changed") {
@@ -692,12 +698,18 @@ export class WorkspaceRuntime {
     if (this.#membershipRepairPending) {
       throw new Error("Membership repair must complete before sending messages");
     }
-    if (
-      !this.#state.bootstrap?.conversations.some(
-        (summary) => summary.conversation.id === conversationId,
-      )
-    ) {
+    const summary = this.#state.bootstrap?.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (summary === undefined) {
       throw new Error("This conversation is no longer available");
+    }
+    if (
+      threadRootId === null &&
+      summary.conversation.channelMode === "announcement" &&
+      this.#state.bootstrap?.currentUser.role !== "owner"
+    ) {
+      throw new Error("Only workspace owners can post bulletins");
     }
     const clientMessageId = crypto.randomUUID();
     const operation = sendMessageOperationSchema.parse({
@@ -1218,6 +1230,7 @@ export class WorkspaceRuntime {
     slug: string,
     topic: string | null,
     access: ChannelAccess,
+    channelMode: ChannelMode = "chat",
   ): Promise<void> {
     const generation = this.#generation;
     const cache = this.#cache;
@@ -1229,6 +1242,7 @@ export class WorkspaceRuntime {
       slug,
       topic,
       access,
+      ...(channelMode === "announcement" ? { channelMode } : {}),
       idempotencyKey: crypto.randomUUID(),
     });
     if (generation !== this.#generation || cache !== this.#cache) return;
@@ -1385,7 +1399,8 @@ export class WorkspaceRuntime {
 
   conversationName(summary: ConversationSummary): string {
     if (summary.conversation.kind === "channel") {
-      return `# ${summary.conversation.name ?? summary.conversation.slug ?? "channel"}`;
+      const icon = summary.conversation.channelMode === "announcement" ? "📣" : "#";
+      return `${icon} ${summary.conversation.name ?? summary.conversation.slug ?? "channel"}`;
     }
     const otherId = summary.participantIds.find(
       (id) => id !== this.#state.bootstrap?.currentUser.user.id,

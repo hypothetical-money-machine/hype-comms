@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ArchivedConversationNotice, ConversationEmptyState } from "./conversation-states";
+import { AnnouncementPostingNotice } from "./conversation-states";
 
 afterEach(cleanup);
 
@@ -49,6 +50,28 @@ describe("ConversationEmptyState", () => {
 
     expect(screen.getByRole("heading").textContent).toBe("No messages in # History");
     expect(screen.getByText("This archived channel is read-only.")).toBeTruthy();
+  });
+
+  it("explains announcement participation without suggesting a root post", () => {
+    render(
+      createElement(ConversationEmptyState, {
+        conversationName: "📣 Company News",
+        kind: "channel",
+        channelMode: "announcement",
+        personal: false,
+        archived: false,
+      }),
+    );
+    expect(screen.getByText(/members can reply in threads and react/i)).toBeTruthy();
+  });
+});
+
+describe("AnnouncementPostingNotice", () => {
+  it("keeps member participation available through threads and reactions", () => {
+    render(createElement(AnnouncementPostingNotice));
+    expect(
+      screen.getByRole("note", { name: "Announcement posting restricted" }).textContent,
+    ).toContain("reply to a bulletin in its thread or add a reaction");
   });
 });
 

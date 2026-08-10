@@ -78,6 +78,7 @@ function channelSummary(id: string, name: string, slug: string): ConversationSum
       slug,
       topic: null,
       access: "workspace",
+      channelMode: "chat",
       isArchived: false,
       createdBy: MORGAN_ID,
       createdAt: NOW,
@@ -104,6 +105,7 @@ const directSummary: ConversationSummary = {
     slug: null,
     topic: null,
     access: null,
+    channelMode: null,
     isArchived: false,
     createdBy: MORGAN_ID,
     createdAt: NOW,
@@ -139,7 +141,12 @@ const snapshot: WorkspaceSnapshot = {
   members: [morgan, alice],
   conversations: [directSummary, zebraSummary, alphaSummary],
   syncCursor: "0",
-  featureFlags: { channels: true, directMessages: true, mentions: true },
+  featureFlags: {
+    channels: true,
+    directMessages: true,
+    mentions: true,
+    announcementChannels: false,
+  },
 };
 
 function historyMessage(id: string, clientMessageId: string, sequence: string): Message {

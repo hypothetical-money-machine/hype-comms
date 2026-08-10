@@ -64,10 +64,17 @@ interface WorkspaceIdRow extends QueryResultRow {
 interface ChannelRow extends QueryResultRow {
   readonly id: unknown;
   readonly slug: unknown;
+  readonly channel_mode: unknown;
 }
 
 const workspaceIdRowSchema = z.object({ workspace_id: entityIdSchema }).strict();
-const channelRowSchema = z.object({ id: entityIdSchema, slug: channelSlugSchema }).strict();
+const channelRowSchema = z
+  .object({
+    id: entityIdSchema,
+    slug: channelSlugSchema,
+    channel_mode: z.enum(["chat", "announcement"]),
+  })
+  .strict();
 const botAuthenticationRowSchema = z
   .object({
     credential_id: entityIdSchema,
@@ -486,7 +493,7 @@ export class BotService {
     channelSlugs: readonly string[],
   ): Promise<readonly z.infer<typeof channelRowSchema>[]> {
     const result = await client.query<ChannelRow>(
-      `SELECT id, slug
+      `SELECT id, slug, channel_mode
          FROM conversations
         WHERE workspace_id = $1
           AND kind = 'channel'
@@ -499,6 +506,9 @@ export class BotService {
     const missing = channelSlugs.find((slug) => !found.has(slug));
     if (missing !== undefined) {
       throw new ApiError(404, "NOT_FOUND", `Channel #${missing} was not found`);
+    }
+    if (channels.some((channel) => channel.channel_mode === "announcement")) {
+      throw new ApiError(404, "NOT_FOUND", "Bots are not available in announcement channels");
     }
     return channels;
   }

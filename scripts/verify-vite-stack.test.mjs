@@ -47,7 +47,10 @@ test("rejects duplicate Vite installations", () => {
 
   assert.throws(
     () => validateViteStackLockfile(lockfile),
-    /Expected one Vite 8\.1\.5 installation.*7\.3\.6/u,
+    new RegExp(
+      `Expected one Vite ${EXPECTED_VITE_VERSION.replaceAll(".", "\\.")} installation.*7\\.3\\.6`,
+      "u",
+    ),
   );
 });
 

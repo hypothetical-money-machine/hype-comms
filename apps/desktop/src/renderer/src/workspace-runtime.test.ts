@@ -146,6 +146,7 @@ function channel(id: string, slug: string): ConversationSummary {
       slug,
       topic: null,
       access: "workspace",
+      channelMode: "chat",
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,
@@ -179,7 +180,12 @@ function bootstrapAt(
     conversationsNextCursor: null,
     conversationsHasMore: false,
     syncCursor,
-    featureFlags: { channels: true, directMessages: true, mentions: true },
+    featureFlags: {
+      channels: true,
+      directMessages: true,
+      mentions: true,
+      announcementChannels: false,
+    },
     ...overrides,
   };
 }
@@ -1062,6 +1068,38 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("replaces a legacy channel mode before syncing or restarting realtime", async () => {
+    const cached = bootstrapAt("8");
+    const announcement = channel(CONVERSATION_ID, "company-news");
+    const capable = bootstrapAt("10", {
+      conversations: [
+        {
+          ...announcement,
+          conversation: { ...announcement.conversation, channelMode: "announcement" },
+        },
+      ],
+      featureFlags: {
+        channels: true,
+        directMessages: true,
+        mentions: true,
+        announcementChannels: true,
+      },
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(cached, []);
+    const api = new FakeDesktopApi(capable);
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.stopRequests).toBe(1);
+    expect(runtime.state.bootstrap?.conversations[0]?.conversation.channelMode).toBe(
+      "announcement",
+    );
+    expect(api.syncedFrom).toEqual(["10"]);
+    expect(api.startedCursors).toEqual(["10"]);
+  });
+
   it("advances read state only when the renderer exposes a visible message", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
@@ -1627,7 +1665,7 @@ describe("WorkspaceRuntime", () => {
     api.emitWorkspaceEvent(resyncRequired);
     await settle(() => api.startedCursors.length === 2, "realtime restart after resync");
 
-    expect(api.stopRequests).toBe(1);
+    expect(api.stopRequests).toBe(2);
     expect(api.startedCursors).toEqual(["5", "40"]);
     expect(api.bootstrapRequests).toBe(2);
     expect(cache.cursor).toBe("40");
@@ -1658,7 +1696,7 @@ describe("WorkspaceRuntime", () => {
       await settle(() => api.bootstrapRequests === 3, "stalled older resync retry");
       api.emitWorkspaceEvent(resyncRequired);
       olderRetry.resolve(bootstrapAt("40"));
-      await settle(() => api.stopRequests === 2, "newer resync demand");
+      await settle(() => api.stopRequests === 3, "newer resync demand");
 
       expect(api.startedCursors).toEqual(["5"]);
       expect(runtime.state.stale).toBe(true);
@@ -1692,7 +1730,7 @@ describe("WorkspaceRuntime", () => {
 
       // The resync stops the rejected socket immediately, but its cache recovery stays queued
       // behind the timer retry instead of starting a second repair pass.
-      expect(api.stopRequests).toBe(1);
+      expect(api.stopRequests).toBe(2);
       expect(api.bootstrapRequests).toBe(1);
       expect(api.startedCursors).toEqual(["10"]);
       expect(runtime.state.stale).toBe(true);

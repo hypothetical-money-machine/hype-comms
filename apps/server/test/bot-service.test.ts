@@ -279,6 +279,49 @@ describeWithPostgres("BotService", () => {
     await expect(service.authenticate(rotated.token)).resolves.toBeNull();
   });
 
+  it("rejects announcement channels before creating or extending a bot", async () => {
+    const announcementId = randomUUID();
+    await pool.query(
+      `INSERT INTO conversations
+         (id, workspace_id, kind, name, slug, channel_access, channel_mode, created_by)
+       VALUES ($1, $2, 'channel', 'Announcements', 'announcements', 'workspace',
+               'announcement', $3)`,
+      [announcementId, workspaceId, ownerId],
+    );
+
+    await expect(
+      service.createBot(ownerId, {
+        username: "announcement-bot",
+        displayName: "Announcement Bot",
+        channelSlugs: ["announcements"],
+        scopes: ["tasks:read"],
+        expiresAt,
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query("SELECT 1 FROM users WHERE username = 'announcement-bot'"),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    const issued = await service.createBot(ownerId, {
+      username: "release-bot",
+      displayName: "Release Bot",
+      channelSlugs: ["general"],
+      scopes: ["tasks:read"],
+      expiresAt,
+    });
+    await expect(
+      service.grantChannels(ownerId, issued.bot.username, ["announcements"]),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query(
+        `SELECT 1
+           FROM bot_channel_grants
+          WHERE bot_user_id = $1 AND conversation_id = $2`,
+        [issued.bot.id, announcementId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
   it("rejects expired, non-owner, and over-capacity bot provisioning", async () => {
     await expect(
       service.createBot(memberId, {

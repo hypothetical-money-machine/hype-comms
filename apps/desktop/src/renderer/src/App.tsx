@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormE
 
 import type {
   ChannelAccess,
+  ChannelMode,
   ChatSessionState,
   Message,
   Reaction,
@@ -19,8 +20,12 @@ import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { ConversationHealth } from "./conversation-health";
-import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
-import { ArchivedConversationNotice, ConversationEmptyState } from "./conversation-states";
+import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
+import {
+  AnnouncementPostingNotice,
+  ArchivedConversationNotice,
+  ConversationEmptyState,
+} from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
@@ -537,8 +542,11 @@ export function App({ client, theme, compactMode }: AppProps) {
     selectedSummary?.conversation.kind === "direct_message" &&
     selectedSummary.participantIds.length === 1 &&
     selectedSummary.participantIds[0] === bootstrap?.currentUser.user.id;
+  const selectedIsAnnouncement = selectedSummary?.conversation.channelMode === "announcement";
   const tasksAvailable =
-    selectedSummary?.conversation.kind === "channel" || selectedIsPersonal === true;
+    (selectedSummary?.conversation.kind === "channel" && !selectedIsAnnouncement) ||
+    selectedIsPersonal === true;
+  const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
     (message) => message.conversationId === runtimeState.selectedConversationId,
   );
@@ -951,8 +959,9 @@ export function App({ client, theme, compactMode }: AppProps) {
       slug: string,
       topic: string | null,
       access: ChannelAccess,
+      channelMode: ChannelMode,
     ): Promise<void> => {
-      await runtime.createChannel(name, slug, topic, access);
+      await runtime.createChannel(name, slug, topic, access, channelMode);
     },
     [runtime],
   );
@@ -1107,6 +1116,7 @@ export function App({ client, theme, compactMode }: AppProps) {
             name: runtime.conversationName(summary),
             kind: summary.conversation.kind,
             isArchived: summary.conversation.isArchived,
+            channelMode: summary.conversation.channelMode,
           }))}
           selectedConversationId={runtimeState.selectedConversationId}
           platform={client.platform}
@@ -1133,6 +1143,10 @@ export function App({ client, theme, compactMode }: AppProps) {
           <div className="nav-heading">
             <span>Channels</span>
             <ChannelCreatePopover
+              canCreateAnnouncements={
+                bootstrap.featureFlags.announcementChannels &&
+                bootstrap.currentUser.role === "owner"
+              }
               onCreate={createChannel}
               onOpenChange={chrome.onPopoverOpenChange}
             />
@@ -1152,9 +1166,10 @@ export function App({ client, theme, compactMode }: AppProps) {
                 className="conversation-label conversation-label-channel"
                 title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
               >
-                <span className="conversation-type-icon channel-icon" aria-hidden="true">
-                  {summary.conversation.access === "members" ? "🔒" : "#"}
-                </span>
+                <ChannelIcon
+                  access={summary.conversation.access}
+                  channelMode={summary.conversation.channelMode}
+                />
                 <span className="conversation-label-text">
                   {summary.conversation.name}
                   {summary.conversation.isArchived ? " (archived)" : ""}
@@ -1244,6 +1259,11 @@ export function App({ client, theme, compactMode }: AppProps) {
                   {selectedSummary.conversation.topic}
                 </p>
               )}
+            {selectedIsAnnouncement && (
+              <p className="announcement-participation">
+                Workspace owners post bulletins. Members can reply in threads and react.
+              </p>
+            )}
             <ConversationHealth
               connection={runtimeState.connection}
               stale={runtimeState.stale}
@@ -1371,6 +1391,7 @@ export function App({ client, theme, compactMode }: AppProps) {
                   kind={selectedSummary?.conversation.kind ?? null}
                   personal={selectedIsPersonal === true}
                   archived={selectedSummary?.conversation.isArchived ?? false}
+                  channelMode={selectedSummary?.conversation.channelMode ?? null}
                 />
               ) : (
                 messages.map((message, index) => (
@@ -1464,6 +1485,8 @@ export function App({ client, theme, compactMode }: AppProps) {
 
             {selectedSummary?.conversation.isArchived === true ? (
               <ArchivedConversationNotice />
+            ) : selectedIsAnnouncement && !canPublishBulletins ? (
+              <AnnouncementPostingNotice />
             ) : (
               <MessageComposer
                 conversationName={
@@ -1472,6 +1495,9 @@ export function App({ client, theme, compactMode }: AppProps) {
                 draft={draft}
                 disabled={selectedSummary === undefined}
                 error={composerError}
+                inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
+                placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
+                submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 onDraftChange={setDraft}
                 onSubmit={send}
               />

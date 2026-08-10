@@ -100,6 +100,7 @@ describeWithPostgres("runMigrations", () => {
           "0012_task_actor_attribution.sql",
           "0013_agents.sql",
           "0015_device_session_token_history.sql",
+          "0016_announcement_channels.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -123,6 +124,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0012_task_actor_attribution.sql" },
         { filename: "0013_agents.sql" },
         { filename: "0015_device_session_token_history.sql" },
+        { filename: "0016_announcement_channels.sql" },
       ]);
 
       const userId = randomUUID();
@@ -366,6 +368,95 @@ describeWithPostgres("runMigrations", () => {
         [taskId],
       );
       expect(actor.rows).toEqual([{ updated_by: userId }]);
+    });
+  });
+
+  it("enforces announcement channel modes and tasklessness for old and new writers", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const ownerId = randomUUID();
+      const memberId = randomUUID();
+      const [directUserLowId, directUserHighId] = [ownerId, memberId].sort();
+      const workspaceId = randomUUID();
+      const chatId = randomUUID();
+      const announcementId = randomUUID();
+      const directId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'mode-owner@example.test', 'mode-owner', 'Mode Owner'),
+                ($2, 'mode-member@example.test', 'mode-member', 'Mode Member')`,
+        [ownerId, memberId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Channel modes', 'channel-modes', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active'), ($1, $3, 'member', 'active')`,
+        [workspaceId, ownerId, memberId],
+      );
+
+      // These two inserts intentionally use the old-server column list.
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by)
+         VALUES ($1, $2, 'channel', 'Chat', 'chat', 'workspace', $3)`,
+        [chatId, workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
+         VALUES ($1, $2, 'direct_message', $3, $4, $5)`,
+        [directId, workspaceId, directUserLowId, directUserHighId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, channel_mode, created_by)
+         VALUES ($1, $2, 'channel', 'Announcements', 'announcements', 'workspace',
+                 'announcement', $3)`,
+        [announcementId, workspaceId, ownerId],
+      );
+
+      await expect(
+        pool.query<{ id: string; channel_mode: string | null }>(
+          `SELECT id, channel_mode
+             FROM conversations
+            WHERE id = ANY($1::uuid[])
+            ORDER BY id`,
+          [[chatId, announcementId, directId]],
+        ),
+      ).resolves.toMatchObject({
+        rows: expect.arrayContaining([
+          { id: chatId, channel_mode: "chat" },
+          { id: announcementId, channel_mode: "announcement" },
+          { id: directId, channel_mode: null },
+        ]),
+      });
+      await expect(
+        pool.query(`UPDATE conversations SET channel_mode = 'chat' WHERE id = $1`, [
+          announcementId,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO tasks
+             (id, workspace_id, conversation_id, number, title, status, priority, rank, created_by)
+           VALUES ($1, $2, $3, 1, 'Forbidden task', 'todo', 'none', 1024, $4)`,
+          [randomUUID(), workspaceId, announcementId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      const taskId = randomUUID();
+      await pool.query(
+        `INSERT INTO tasks
+           (id, workspace_id, conversation_id, number, title, status, priority, rank, created_by)
+         VALUES ($1, $2, $3, 1, 'Chat task', 'todo', 'none', 1024, $4)`,
+        [taskId, workspaceId, chatId, ownerId],
+      );
+      await expect(
+        pool.query(`UPDATE tasks SET conversation_id = $1 WHERE id = $2`, [announcementId, taskId]),
+      ).rejects.toMatchObject({ code: "23514" });
     });
   });
 

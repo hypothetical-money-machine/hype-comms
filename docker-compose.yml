@@ -27,6 +27,7 @@ services:
       # The desktop client's renderer origins, not the API hostname. The websocket route
       # rejects any Origin not listed here.
       HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
+      HMM_ANNOUNCEMENT_CHANNELS_ENABLED: ${HMM_ANNOUNCEMENT_CHANNELS_ENABLED:-false}
       HMM_DATABASE_URL: ${HMM_DATABASE_URL:?set HMM_DATABASE_URL in .env}
       HMM_DATABASE_POOL_SIZE: ${HMM_DATABASE_POOL_SIZE:-10}
       HMM_EMAIL_DELIVERY: ${HMM_EMAIL_DELIVERY:-manual}

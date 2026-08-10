@@ -1,4 +1,5 @@
 import {
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
@@ -66,6 +67,7 @@ const CLIENT_CAPABILITIES = [
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -177,7 +179,10 @@ export class WorkspaceTransport {
   }
 
   async bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
-    const response = await this.session.fetch(this.#url("/v1/bootstrap").href, { method: "GET" });
+    const response = await this.session.fetch(this.#url("/v1/bootstrap").href, {
+      method: "GET",
+      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+    });
     return humanWorkspaceBootstrapResponseSchema.parse(
       withLegacyBootstrapPagination(await this.#payload(response)),
     );
@@ -194,16 +199,25 @@ export class WorkspaceTransport {
     const url = this.#url("/v1/conversations");
     if (input.after !== undefined) url.searchParams.set("after", input.after);
     url.searchParams.set("limit", String(input.limit ?? CONVERSATION_PAGE_DEFAULT_LIMIT));
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.session.fetch(url.href, {
+      method: "GET",
+      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+    });
     return listConversationsResponseSchema.parse(await this.#payload(response));
   }
 
   async createChannel(input: CreateChannelOperation): Promise<ConversationMutationResponse> {
     const { idempotencyKey, ...request } = input;
+    const { channelMode, ...legacyRequest } = request;
+    const body = channelMode === "announcement" ? request : legacyRequest;
     const response = await this.#fetchIdempotentMutation(this.#url("/v1/channels").href, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-      body: JSON.stringify(request),
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+        "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+      },
+      body: JSON.stringify(body),
     });
     return conversationMutationResponseSchema.parse(await this.#payload(response));
   }
@@ -216,7 +230,10 @@ export class WorkspaceTransport {
       this.#url(`/v1/channels/${encodeURIComponent(conversationId)}`).href,
       {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+        },
         body: JSON.stringify(input),
       },
     );
@@ -267,7 +284,10 @@ export class WorkspaceTransport {
   ): Promise<ConversationMutationResponse> {
     const response = await this.session.fetch(this.#url("/v1/direct-conversations").href, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+      },
       body: JSON.stringify(input),
     });
     return conversationMutationResponseSchema.parse(await this.#payload(response));

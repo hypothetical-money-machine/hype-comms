@@ -4,11 +4,29 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
+import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
 
 afterEach(cleanup);
 
 describe("conversation indicators", () => {
+  it("includes announcement type in a channel button's accessible name", () => {
+    render(
+      createElement(
+        "button",
+        null,
+        createElement(ChannelIcon, { access: "workspace", channelMode: "announcement" }),
+        createElement("span", null, "Company News"),
+        createElement(ConversationBadge, { unreadCount: 2, mentionCount: 0 }),
+      ),
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Announcement channel: Company News 2 unread messages",
+      }),
+    ).toBeTruthy();
+  });
+
   it("uses a neutral decorative avatar for direct messages", () => {
     const { container } = render(createElement(DirectMessageIcon));
 

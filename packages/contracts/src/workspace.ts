@@ -9,6 +9,7 @@ import {
 import { channelSlugSchema } from "./channel-slug.js";
 import {
   channelAccessSchema,
+  channelModeSchema,
   conversationMembershipRoleSchema,
   conversationSchema,
   messageSchema,
@@ -37,6 +38,7 @@ export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
 export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
 export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
+export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -83,6 +85,8 @@ export const workspaceBootstrapResponseSchema = z
         channels: z.literal(true),
         directMessages: z.literal(true),
         mentions: z.literal(true),
+        // Defaults keep bootstrap responses and encrypted caches from older servers readable.
+        announcementChannels: z.boolean().default(false),
       })
       .strict(),
   })
@@ -147,6 +151,9 @@ export const createChannelRequestSchema = z
     topic: z.string().trim().max(250).nullable(),
     // Old clients created only workspace-visible channels and omitted this field.
     access: channelAccessSchema.default("workspace"),
+    // Discussion channels omit this on the wire so a new desktop can still talk to an older,
+    // strict server. The server treats omission as chat.
+    channelMode: channelModeSchema.optional(),
   })
   .strict();
 

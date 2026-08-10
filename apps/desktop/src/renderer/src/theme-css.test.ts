@@ -172,4 +172,14 @@ describe("renderer theme CSS", () => {
     expect(signInShellRule?.groups?.body).toContain("align-items: safe center");
     expect(signInShellRule?.groups?.body).toContain("overflow-y: auto");
   });
+
+  it("keeps the expanded channel form reachable at the minimum window height", () => {
+    const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
+    const popoverRule = /\.channel-create-popover\s*\{(?<body>[^}]*)\}/u.exec(styles);
+    const scrollRule = /\.channel-create-scroll\s*\{(?<body>[^}]*)\}/u.exec(styles);
+
+    expect(popoverRule?.groups?.body).toContain("max-height: calc(100dvh - 16px)");
+    expect(scrollRule?.groups?.body).toContain("max-height: calc(100dvh - 16px)");
+    expect(scrollRule?.groups?.body).toContain("overflow-y: auto");
+  });
 });

@@ -314,11 +314,19 @@ button:disabled {
 .channel-create-popover {
   position: fixed;
   z-index: 20;
-  padding: 18px;
+  max-height: calc(100dvh - 16px);
   border: 1px solid var(--theme-border-strong);
   border-radius: 12px;
   background: var(--theme-surface-elevated);
   box-shadow: var(--theme-shadow-popover);
+}
+
+.channel-create-scroll {
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px;
+  border-radius: inherit;
 }
 
 .channel-create-popover::before {
@@ -458,7 +466,8 @@ button:disabled {
   text-align: right;
 }
 
-.channel-access-options {
+.channel-access-options,
+.channel-type-options {
   display: grid;
   gap: 8px;
   margin: 14px 0 0;
@@ -466,14 +475,16 @@ button:disabled {
   border: 0;
 }
 
-.channel-access-options legend {
+.channel-access-options legend,
+.channel-type-options legend {
   margin-bottom: 7px;
   color: var(--theme-text-secondary);
   font-size: 12px;
   font-weight: 650;
 }
 
-.channel-create-popover .channel-access-options label {
+.channel-create-popover .channel-access-options label,
+.channel-create-popover .channel-type-options label {
   display: flex;
   align-items: flex-start;
   gap: 9px;
@@ -484,18 +495,21 @@ button:disabled {
   cursor: pointer;
 }
 
-.channel-create-popover .channel-access-options input {
+.channel-create-popover .channel-access-options input,
+.channel-create-popover .channel-type-options input {
   width: auto;
   margin: 2px 0 0;
   accent-color: var(--theme-border-accent);
 }
 
-.channel-access-options span {
+.channel-access-options span,
+.channel-type-options span {
   display: grid;
   gap: 2px;
 }
 
-.channel-access-options small {
+.channel-access-options small,
+.channel-type-options small {
   color: var(--theme-text-subtle);
   font-size: 10px;
   font-weight: 400;
@@ -692,6 +706,12 @@ button:disabled {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-header .announcement-participation {
+  margin-top: 4px;
+  color: var(--theme-text-secondary);
+  font-weight: 600;
 }
 
 .conversation-health {
@@ -2532,7 +2552,8 @@ button:disabled {
   font-size: 12px;
 }
 
-.archived-conversation-notice {
+.archived-conversation-notice,
+.announcement-posting-notice {
   display: flex;
   min-height: 74px;
   flex-direction: column;
@@ -2544,12 +2565,14 @@ button:disabled {
   color: var(--theme-text-muted);
 }
 
-.archived-conversation-notice strong {
+.archived-conversation-notice strong,
+.announcement-posting-notice strong {
   color: var(--theme-text-secondary);
   font-size: 12px;
 }
 
-.archived-conversation-notice span {
+.archived-conversation-notice span,
+.announcement-posting-notice span {
   font-size: 11px;
 }
 

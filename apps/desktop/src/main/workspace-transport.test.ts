@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
@@ -25,6 +26,7 @@ const CLIENT_CAPABILITIES = [
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
+  ANNOUNCEMENT_CHANNELS_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -70,6 +72,7 @@ const BOOTSTRAP_RESPONSE = {
         slug: "general",
         topic: null,
         access: "workspace",
+        channelMode: "chat",
         isArchived: false,
         createdBy: "10000000-0000-4000-8000-000000000001",
         createdAt: NOW,
@@ -86,7 +89,12 @@ const BOOTSTRAP_RESPONSE = {
   conversationsNextCursor: null,
   conversationsHasMore: false,
   syncCursor: "42",
-  featureFlags: { channels: true, directMessages: true, mentions: true },
+  featureFlags: {
+    channels: true,
+    directMessages: true,
+    mentions: true,
+    announcementChannels: false,
+  },
 } as const;
 
 const SEND_OPERATION: SendMessageOperation = {
@@ -216,7 +224,25 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
 describe("WorkspaceTransport bootstrap compatibility", () => {
   it("treats a pre-pagination bootstrap response as one complete conversation page", async () => {
     // A pre-pagination server omitted both conversation-page fields entirely.
-    const legacyBootstrap: Record<string, unknown> = { ...BOOTSTRAP_RESPONSE };
+    const legacyFeatureFlags: {
+      -readonly [
+        Key in keyof typeof BOOTSTRAP_RESPONSE.featureFlags
+      ]?: (typeof BOOTSTRAP_RESPONSE.featureFlags)[Key];
+    } = {
+      ...BOOTSTRAP_RESPONSE.featureFlags,
+    };
+    delete legacyFeatureFlags.announcementChannels;
+    const legacyConversation: {
+      -readonly [
+        Key in keyof (typeof BOOTSTRAP_RESPONSE.conversations)[number]["conversation"]
+      ]?: (typeof BOOTSTRAP_RESPONSE.conversations)[number]["conversation"][Key];
+    } = { ...BOOTSTRAP_RESPONSE.conversations[0].conversation };
+    delete legacyConversation.channelMode;
+    const legacyBootstrap: Record<string, unknown> = {
+      ...BOOTSTRAP_RESPONSE,
+      featureFlags: legacyFeatureFlags,
+      conversations: [{ ...BOOTSTRAP_RESPONSE.conversations[0], conversation: legacyConversation }],
+    };
     delete legacyBootstrap.conversationsNextCursor;
     delete legacyBootstrap.conversationsHasMore;
     const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
@@ -614,6 +640,40 @@ describe("WorkspaceTransport conversations", () => {
           slug: "alpha-team",
           topic: null,
           access: "workspace",
+        }),
+      },
+    ]);
+  });
+
+  it("advertises announcement support and sends the mode only for announcement creates", async () => {
+    const requests: Array<{ readonly capability: string | null; readonly body: string | null }> =
+      [];
+    const { transport } = createTransport(async (_url, init) => {
+      requests.push({
+        capability: new Headers(init.headers).get("x-hmm-chat-capabilities"),
+        body: typeof init.body === "string" ? init.body : null,
+      });
+      return jsonResponse({ conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" });
+    });
+
+    await transport.createChannel({
+      name: "Company News",
+      slug: "company-news",
+      topic: null,
+      access: "workspace",
+      channelMode: "announcement",
+      idempotencyKey: CLIENT_MESSAGE_ID,
+    });
+
+    expect(requests).toEqual([
+      {
+        capability: CLIENT_CAPABILITIES,
+        body: JSON.stringify({
+          name: "Company News",
+          slug: "company-news",
+          topic: null,
+          access: "workspace",
+          channelMode: "announcement",
         }),
       },
     ]);
