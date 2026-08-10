@@ -15,19 +15,96 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
 }
 
 describe("MainWindowRecreationCoordinator", () => {
-  it("coalesces concurrent recreation behind the same in-flight load", async () => {
+  it("coalesces calls behind one trailing recreation", async () => {
     const pending = deferred();
-    const operation = vi.fn(() => pending.promise);
+    const firstOperation = vi.fn(() => pending.promise);
+    const secondOperation = vi.fn();
+    const coalescedOperation = vi.fn();
     const coordinator = new MainWindowRecreationCoordinator();
 
-    const first = coordinator.run(operation);
-    const second = coordinator.run(operation);
-    expect(second).toBe(first);
+    const first = coordinator.run(firstOperation);
+    const second = coordinator.run(secondOperation);
+    const coalesced = coordinator.run(coalescedOperation);
+    expect(second).not.toBe(first);
+    expect(coalesced).toBe(second);
     await Promise.resolve();
-    expect(operation).toHaveBeenCalledOnce();
+    expect(firstOperation).toHaveBeenCalledOnce();
+    expect(secondOperation).not.toHaveBeenCalled();
+    expect(coalescedOperation).not.toHaveBeenCalled();
 
     pending.resolve();
     await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+    expect(secondOperation).toHaveBeenCalledOnce();
+    expect(coalescedOperation).not.toHaveBeenCalled();
+  });
+
+  it("keeps at most one trailing check while each recreation is in flight", async () => {
+    const firstPending = deferred();
+    const trailingPending = deferred();
+    const firstOperation = vi.fn(() => firstPending.promise);
+    const trailingOperation = vi.fn(() => trailingPending.promise);
+    const coordinator = new MainWindowRecreationCoordinator();
+
+    const first = coordinator.run(firstOperation);
+    const trailing = coordinator.run(trailingOperation);
+    expect(coordinator.run(vi.fn())).toBe(trailing);
+
+    firstPending.resolve();
+    await expect(first).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(trailingOperation).toHaveBeenCalledOnce();
+
+    const nextTrailingOperation = vi.fn();
+    const nextTrailing = coordinator.run(nextTrailingOperation);
+    expect(coordinator.run(vi.fn())).toBe(nextTrailing);
+    expect(nextTrailingOperation).not.toHaveBeenCalled();
+
+    trailingPending.resolve();
+    await expect(trailing).resolves.toBeUndefined();
+    await expect(nextTrailing).resolves.toBeUndefined();
+    expect(nextTrailingOperation).toHaveBeenCalledOnce();
+  });
+
+  it("does not drop a later window-health recheck when state changes in flight", async () => {
+    const pending = deferred();
+    const coordinator = new MainWindowRecreationCoordinator();
+    let windowState: "healthy" | "destroyed" | "recreated" = "healthy";
+    const firstOperation = vi.fn(async () => {
+      expect(windowState).toBe("healthy");
+      await pending.promise;
+    });
+    const secondOperation = vi.fn(() => {
+      if (windowState === "destroyed") windowState = "recreated";
+    });
+
+    const first = coordinator.run(firstOperation);
+    await Promise.resolve();
+    windowState = "destroyed";
+    const second = coordinator.run(secondOperation);
+
+    pending.resolve();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+    expect(secondOperation).toHaveBeenCalledOnce();
+    expect(windowState).toBe("recreated");
+  });
+
+  it("runs a queued recreation after an earlier attempt fails", async () => {
+    const pending = deferred();
+    const coordinator = new MainWindowRecreationCoordinator();
+    const failure = new Error("load failed");
+    const first = coordinator.run(async () => {
+      await pending.promise;
+      throw failure;
+    });
+    const retry = vi.fn();
+    const second = coordinator.run(retry);
+
+    pending.resolve();
+    await expect(first).rejects.toBe(failure);
+    await expect(second).resolves.toBeUndefined();
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it("clears a failed recreation so a later activation can retry", async () => {

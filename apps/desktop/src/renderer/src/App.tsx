@@ -517,33 +517,52 @@ export function App({ client, theme, compactMode }: AppProps) {
     return () => document.removeEventListener("keydown", onShortcut);
   }, [client, compactMode]);
 
-  const applySession = useCallback(
-    (next: ChatSessionState) => {
+  const startWorkspaceSession = useCallback(
+    async (
+      next: SignedInSession,
+      options: {
+        readonly resetLocalCache?: boolean;
+      } = {},
+    ): Promise<void> => {
       const bindingGeneration = ++notificationBindingGeneration.current;
-      setSession(next);
-      if (next.status === "signed-in" && next.method === "email") {
-        // ChatSession can replace one signed-in identity directly with another. Retire the old
-        // notification generation before the new workspace bootstrap starts, otherwise an action
-        // already pushed for the previous identity could navigate its cached data during this
-        // potentially long startup interval.
+      // Every workspace restart is a renderer-readiness boundary, even when user/workspace ids do
+      // not change. Retire actions and detach the old activity tail before any asynchronous cache
+      // or bootstrap work; NotificationSessionRuntime keeps the revision itself monotonic.
+      notificationSession?.invalidate();
+      setNotificationContext(null);
+
+      try {
+        if (options.resetLocalCache === true) {
+          await runtime.resetLocalCache();
+          if (bindingGeneration !== notificationBindingGeneration.current) return;
+        }
+        await runtime.start(next);
+        if (bindingGeneration !== notificationBindingGeneration.current) return;
+
+        // WorkspaceRuntime reports bootstrap failures in its state instead of rejecting start(),
+        // so an inactive result is expected on the first attempt and Retry binds again here.
+        const context = (await notificationSession?.bind(next.userId, next.workspaceId)) ?? null;
+        if (bindingGeneration === notificationBindingGeneration.current) {
+          setNotificationContext(context);
+        }
+      } catch {
+        if (bindingGeneration !== notificationBindingGeneration.current) return;
         notificationSession?.invalidate();
         setNotificationContext(null);
-        void (async () => {
-          await runtime.start(next);
-          if (bindingGeneration !== notificationBindingGeneration.current) return;
-          const context = (await notificationSession?.bind(next.userId, next.workspaceId)) ?? null;
-          if (bindingGeneration === notificationBindingGeneration.current) {
-            setNotificationContext(context);
-          }
-        })().catch(() => {
-          if (bindingGeneration === notificationBindingGeneration.current) {
-            notificationSession?.invalidate();
-            setNotificationContext(null);
-          }
-        });
+      }
+    },
+    [notificationSession, runtime],
+  );
+
+  const applySession = useCallback(
+    (next: ChatSessionState) => {
+      setSession(next);
+      if (next.status === "signed-in" && next.method === "email") {
+        void startWorkspaceSession(next);
         return;
       }
 
+      notificationBindingGeneration.current += 1;
       notificationSession?.invalidate();
       setNotificationContext(null);
       if (next.status === "signed-out") {
@@ -556,7 +575,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         void runtime.stop();
       }
     },
-    [notificationSession, resetDrafts, runtime],
+    [notificationSession, resetDrafts, runtime, startWorkspaceSession],
   );
 
   const retrySession = useCallback(async (): Promise<void> => {
@@ -1084,10 +1103,8 @@ export function App({ client, theme, compactMode }: AppProps) {
     [runtime],
   );
 
-  const rebuildLocalCache = async (signedIn: SignedInSession): Promise<void> => {
-    await runtime.resetLocalCache();
-    await runtime.start(signedIn);
-  };
+  const rebuildLocalCache = (signedIn: SignedInSession): Promise<void> =>
+    startWorkspaceSession(signedIn, { resetLocalCache: true });
 
   const signOut = async (): Promise<void> => {
     if (
@@ -1152,7 +1169,7 @@ export function App({ client, theme, compactMode }: AppProps) {
           </p>
           {runtimeState.error !== null && (
             <div className="message-actions">
-              <button type="button" onClick={() => void runtime.start(session)}>
+              <button type="button" onClick={() => void startWorkspaceSession(session)}>
                 Retry
               </button>
               <button type="button" onClick={() => void rebuildLocalCache(session)}>
@@ -1360,7 +1377,7 @@ export function App({ client, theme, compactMode }: AppProps) {
               stale={runtimeState.stale}
               cacheMode={runtimeState.cacheMode}
               notice={workspaceNotice}
-              onRetry={() => void runtime.start(session)}
+              onRetry={() => void startWorkspaceSession(session)}
               onResetCache={() => void rebuildLocalCache(session)}
             />
           </div>

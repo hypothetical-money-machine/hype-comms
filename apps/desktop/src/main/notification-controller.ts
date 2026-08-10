@@ -328,6 +328,11 @@ export class NotificationController {
       this.#renderer?.webContentsId === webContentsId &&
       this.#renderer.rendererSessionGeneration === rendererSessionGeneration
     ) {
+      // A same-renderer bind starts a new workspace delivery interval, so its prior visibility
+      // snapshot is no longer authoritative. Preserve the monotonic revision fence and completed
+      // action-ready handshake: delayed old reports remain rejected, while the renderer resumes
+      // with its next lifetime-monotonic revision.
+      this.#activity = null;
       return {
         version: 1,
         status: "active",

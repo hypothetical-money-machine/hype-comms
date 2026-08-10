@@ -1,24 +1,53 @@
 export class MainWindowRecreationCoordinator {
   #inFlight: Promise<void> | null = null;
+  #trailing: {
+    readonly operation: () => void | Promise<void>;
+    readonly promise: Promise<void>;
+    readonly resolve: () => void;
+    readonly reject: (reason: unknown) => void;
+  } | null = null;
 
   run(operation: () => void | Promise<void>): Promise<void> {
     const current = this.#inFlight;
-    if (current !== null) return current;
+    if (current === null) return this.#start(operation);
 
-    // Install the shared promise before invoking the operation. A synchronous window factory can
-    // publish a half-loaded window before its first await, and a concurrent caller must still wait
-    // for that same load rather than treating the half-built window as ready.
+    // One later health check is enough to observe every state change that occurred while the
+    // current operation was pending. Activations and notification clicks beyond that share the
+    // same trailing check instead of retaining an unbounded promise-and-closure chain.
+    if (this.#trailing !== null) return this.#trailing.promise;
+
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<void>((promiseResolve, promiseReject) => {
+      resolve = promiseResolve;
+      reject = promiseReject;
+    });
+    this.#trailing = { operation, promise, resolve, reject };
+    return promise;
+  }
+
+  #start(operation: () => void | Promise<void>): Promise<void> {
+    // Install the promise before invoking the operation. A synchronous window factory can publish
+    // a half-loaded window before its first await, and a concurrent caller must not treat that
+    // window as ready.
     const next = Promise.resolve().then(operation);
     this.#inFlight = next;
     void next.then(
-      () => {
-        if (this.#inFlight === next) this.#inFlight = null;
-      },
-      () => {
-        if (this.#inFlight === next) this.#inFlight = null;
-      },
+      () => this.#settled(next),
+      () => this.#settled(next),
     );
     return next;
+  }
+
+  #settled(settled: Promise<void>): void {
+    if (this.#inFlight !== settled) return;
+    this.#inFlight = null;
+    const trailing = this.#trailing;
+    if (trailing === null) return;
+
+    this.#trailing = null;
+    const next = this.#start(trailing.operation);
+    void next.then(trailing.resolve, trailing.reject);
   }
 }
 

@@ -3,8 +3,9 @@
 Status: Milestone 0 contract accepted. The Milestone 1 DM/verified-mention slice and Milestone 2
 preference/capability surfaces are implemented behind a default-off build flag, but their exit
 gates are not yet complete. The isolated DM capture/click proof and renderer settings evidence now
-pass. Participated-thread notifications (Milestone 3) and packaged
-cross-platform evidence (Milestone 4) remain unimplemented. [architecture.md](architecture.md) and
+pass, including recovery from a failed initial workspace bootstrap. Participated-thread
+notifications (Milestone 3) and packaged cross-platform evidence (Milestone 4) remain
+unimplemented. [architecture.md](architecture.md) and
 [ADR 0002](adr/0002-native-notification-boundary.md) are the implementation and security contract.
 This roadmap sequences the remaining proof and rollout work and does not override those documents.
 
@@ -451,6 +452,14 @@ capture, opaque-ID activation through production main/preload IPC, and exact mes
 Its renderer evidence is [notification click-through](screenshots/native-notification-click-through.png)
 and [notification settings](screenshots/native-notification-settings.png). This is headless capture
 evidence, not an operating-system toast or installed-platform Milestone 4 result.
+
+A fault-injected two-client proof also rejects the first workspace bootstrap, shows the
+[actionable unavailable state](screenshots/native-notification-bootstrap-retry-before.png), and
+uses the visible Retry control to recover. The automatically restored notification binding then
+captures a fresh DM and completes opaque-ID activation to the
+[exact highlighted target](screenshots/native-notification-bootstrap-retry-recovered.png). The
+recovering client observes exactly one failed and one forwarded bootstrap before the second client
+starts; no manual context bind is used.
 
 Deterministic assertions must also cover:
 

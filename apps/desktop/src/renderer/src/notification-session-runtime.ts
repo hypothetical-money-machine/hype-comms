@@ -110,7 +110,9 @@ export class NotificationSessionRuntime {
   }
 
   get context(): NotificationContext | null {
-    return this.#context;
+    // Only an established renderer-ready binding is eligible for the idempotent bind path below.
+    // The context stays private while the initial action drain is still being accepted.
+    return this.#draining ? null : this.#context;
   }
 
   start(): void {
@@ -126,9 +128,20 @@ export class NotificationSessionRuntime {
   }
 
   async bind(userId: string, workspaceId: string): Promise<NotificationContext | null> {
+    const currentContext = this.context;
+    if (
+      currentContext?.status === "active" &&
+      currentContext.userId === userId &&
+      currentContext.workspaceId === workspaceId
+    ) {
+      // Re-entering the same signed-in scope is not a new renderer epoch. In particular, keep the
+      // activity revision and its serialized tail: old queued IPC requests carry these unchanged
+      // generations and must not be allowed to overtake a reset revision counter.
+      return currentContext;
+    }
+
     const bindingGeneration = ++this.#bindingGeneration;
     this.#context = null;
-    this.#activityRevision = 0;
     this.#activityTail = Promise.resolve();
     this.#actionTail = Promise.resolve();
     this.#queuedActionKeys = new Set();
@@ -186,7 +199,6 @@ export class NotificationSessionRuntime {
   invalidate(): void {
     this.#bindingGeneration += 1;
     this.#context = null;
-    this.#activityRevision = 0;
     this.#activityTail = Promise.resolve();
     this.#actionTail = Promise.resolve();
     this.#queuedActionKeys = new Set();
@@ -197,15 +209,20 @@ export class NotificationSessionRuntime {
   report(view: NotificationActivityView): Promise<void> {
     const context = this.#context;
     if (context === null) return Promise.resolve();
+    const bindingGeneration = this.#bindingGeneration;
     const revision = ++this.#activityRevision;
     const request = {
       ...readyFromContext(context),
       revision,
       view,
     };
-    const report = this.#activityTail.then(() =>
-      this.#transport.reportNotificationActivity(request),
-    );
+    const report = this.#activityTail.then(() => {
+      // Invalidation detaches the new binding from this serialized tail. A report that was queued
+      // behind older work must not cross that boundary later and replace the new binding's fresh
+      // visibility snapshot. Its revision stays consumed so revisions remain lifetime-monotonic.
+      if (!this.#isCurrentBinding(context, bindingGeneration)) return;
+      return this.#transport.reportNotificationActivity(request);
+    });
     this.#activityTail = report.catch(() => undefined);
     return report;
   }

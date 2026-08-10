@@ -182,4 +182,12 @@ describe("renderer theme CSS", () => {
     expect(scrollRule?.groups?.body).toContain("max-height: calc(100dvh - 16px)");
     expect(scrollRule?.groups?.body).toContain("overflow-y: auto");
   });
+
+  it("keeps transparent message actions legible inside the sign-in card", () => {
+    const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
+    const messageActionsButtonRule = /\.message-actions button\s*\{(?<body>[^}]*)\}/u.exec(styles);
+
+    expect(messageActionsButtonRule?.groups?.body).toContain("background: transparent");
+    expect(messageActionsButtonRule?.groups?.body).toContain("color: var(--theme-text-strong)");
+  });
 });

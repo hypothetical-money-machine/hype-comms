@@ -1844,6 +1844,7 @@ button:disabled {
   border: 1px solid var(--theme-border-strong);
   border-radius: 5px;
   background: transparent;
+  color: var(--theme-text-strong);
   cursor: pointer;
 }
 

@@ -65,6 +65,8 @@ class FakeTransport implements NotificationTransport {
   readonly activityResults: Promise<void>[] = [];
   readonly acknowledgements: NotificationActionAcknowledgement[] = [];
   readonly acknowledgementResults: (Error | Promise<void>)[] = [];
+  contextRequests = 0;
+  drainRequests = 0;
   onAcknowledgement: ((acknowledgement: NotificationActionAcknowledgement) => void) | null = null;
   contextResult: Promise<NotificationContext> | NotificationContext = context;
   drainResult: Promise<NotificationActionDrainResponse> | NotificationActionDrainResponse = {
@@ -77,6 +79,7 @@ class FakeTransport implements NotificationTransport {
   };
 
   async getNotificationContext(): Promise<NotificationContext> {
+    this.contextRequests += 1;
     return this.contextResult;
   }
 
@@ -86,6 +89,7 @@ class FakeTransport implements NotificationTransport {
   }
 
   async drainNotificationActions(): Promise<NotificationActionDrainResponse> {
+    this.drainRequests += 1;
     return this.drainResult;
   }
 
@@ -354,6 +358,43 @@ describe("NotificationSessionRuntime", () => {
     ]);
   });
 
+  it("re-drains an in-flight action after invalidation without acknowledging the old handler", async () => {
+    const transport = new FakeTransport();
+    const target = action(MESSAGE_ID);
+    transport.drainResult = { ...READY, actions: [target] };
+    const oldHandling = deferred<void>();
+    const opened: NotificationAction[] = [];
+    let handlingAttempts = 0;
+    const handler: NotificationActionHandler = {
+      async handleNotificationAction(value): Promise<void> {
+        handlingAttempts += 1;
+        if (handlingAttempts === 1) {
+          await oldHandling.promise;
+          return;
+        }
+        opened.push(value);
+      },
+    };
+    const runtime = new NotificationSessionRuntime(transport, handler);
+    runtime.start();
+    await runtime.bind(USER_ID, WORKSPACE_ID);
+    await settle();
+    expect(handlingAttempts).toBe(1);
+    expect(transport.acknowledgements).toEqual([]);
+
+    runtime.invalidate();
+    await runtime.bind(USER_ID, WORKSPACE_ID);
+    await settle();
+    expect(handlingAttempts).toBe(2);
+    expect(opened).toEqual([target]);
+    expect(transport.acknowledgements).toEqual([{ ...READY, action: target }]);
+
+    oldHandling.resolve();
+    await settle();
+    expect(opened).toEqual([target]);
+    expect(transport.acknowledgements).toEqual([{ ...READY, action: target }]);
+  });
+
   it("discards a context response retired by session replacement", async () => {
     const transport = new FakeTransport();
     const pending = deferred<NotificationContext>();
@@ -412,7 +453,39 @@ describe("NotificationSessionRuntime", () => {
     });
   });
 
-  it("does not let a deferred old activity report block a replacement binding", async () => {
+  it("keeps a same-scope repeat bind in the existing activity epoch", async () => {
+    const transport = new FakeTransport();
+    const firstReport = deferred<void>();
+    transport.activityResults.push(firstReport.promise);
+    const runtime = new NotificationSessionRuntime(transport, new FakeHandler());
+    runtime.start();
+    await runtime.bind(USER_ID, WORKSPACE_ID);
+
+    const reportingFirst = runtime.report({ pane: "none" });
+    await settle();
+    expect(transport.activity.map((value) => value.revision)).toEqual([1]);
+
+    await expect(runtime.bind(USER_ID, WORKSPACE_ID)).resolves.toBe(context);
+    expect(transport.contextRequests).toBe(1);
+    expect(transport.drainRequests).toBe(1);
+
+    const reportingSecond = runtime.report({
+      pane: "tasks",
+      conversationId: CONVERSATION_ID,
+    });
+    await settle();
+    expect(transport.activity.map((value) => value.revision)).toEqual([1]);
+
+    firstReport.resolve();
+    await Promise.all([reportingFirst, reportingSecond]);
+    expect(transport.activity.map((value) => value.revision)).toEqual([1, 2]);
+    expect(transport.activity[1]?.view).toEqual({
+      pane: "tasks",
+      conversationId: CONVERSATION_ID,
+    });
+  });
+
+  it("keeps revisions monotonic and drops queued activity from a retired binding", async () => {
     const transport = new FakeTransport();
     const oldReport = deferred<void>();
     transport.activityResults.push(oldReport.promise);
@@ -423,12 +496,17 @@ describe("NotificationSessionRuntime", () => {
     const reportingOld = runtime.report({ pane: "none" });
     await settle();
     expect(transport.activity).toHaveLength(1);
+    const reportingQueuedOld = runtime.report({
+      pane: "chat",
+      conversationId: CONVERSATION_ID,
+      timelineAtLiveTail: true,
+      thread: null,
+    });
     runtime.invalidate();
 
     const replacementContext = {
       ...context,
       sessionGeneration: context.sessionGeneration + 1,
-      rendererSessionGeneration: context.rendererSessionGeneration + 1,
     } as const;
     transport.contextResult = replacementContext;
     transport.drainResult = {
@@ -440,14 +518,24 @@ describe("NotificationSessionRuntime", () => {
       actions: [],
     };
     await runtime.bind(USER_ID, WORKSPACE_ID);
+    expect(transport.contextRequests).toBe(2);
+    expect(transport.drainRequests).toBe(2);
     await expect(
       runtime.report({ pane: "tasks", conversationId: CONVERSATION_ID }),
     ).resolves.toBeUndefined();
     expect(transport.activity).toHaveLength(2);
-    expect(transport.activity[1]?.revision).toBe(1);
+    expect(transport.activity[1]?.revision).toBe(3);
+    expect(transport.activity[1]?.sessionGeneration).toBe(replacementContext.sessionGeneration);
+    expect(transport.activity[1]?.rendererSessionGeneration).toBe(
+      context.rendererSessionGeneration,
+    );
 
     oldReport.resolve();
-    await expect(reportingOld).resolves.toBeUndefined();
+    await expect(Promise.all([reportingOld, reportingQueuedOld])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(transport.activity.map((activity) => activity.revision)).toEqual([1, 3]);
   });
 
   it("rejects mismatched context scope and tears down its push listener", async () => {

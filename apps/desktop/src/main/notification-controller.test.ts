@@ -577,8 +577,17 @@ describe("NotificationController freshness and policy integration", () => {
     expect(harness.controller.updateActivity(42, liveTail)).toBe(false);
     expect(harness.controller.updateActivity(99, { ...liveTail, revision: 2 })).toBe(false);
 
-    const visible = harness.controller.handleEvent(
+    const cleared = harness.controller.handleEvent(
       messageEvent({ eventNumber: 20, sequence: 6, mentionedUserIds: [USER_ID] }),
+    );
+    expect(cleared).toMatchObject({
+      policy: { decision: "eligible", reason: "verified_mention" },
+    });
+    expect(presenter.attempts).toBe(1);
+
+    expect(harness.controller.updateActivity(42, { ...liveTail, revision: 2 })).toBe(true);
+    const visible = harness.controller.handleEvent(
+      messageEvent({ eventNumber: 21, sequence: 7, mentionedUserIds: [USER_ID] }),
     );
     expect(visible).toMatchObject({
       policy: { decision: "suppressed", reason: "visible_at_live_tail" },
@@ -587,23 +596,74 @@ describe("NotificationController freshness and policy integration", () => {
     expect(
       harness.controller.updateActivity(42, {
         ...liveTail,
-        revision: 2,
+        revision: 3,
         view: { pane: "tasks", conversationId: CONVERSATION_ID },
       }),
     ).toBe(true);
     harness.controller.handleEvent(
-      messageEvent({ eventNumber: 21, sequence: 7, mentionedUserIds: [USER_ID] }),
+      messageEvent({ eventNumber: 22, sequence: 8, mentionedUserIds: [USER_ID] }),
     );
-    expect(presenter.attempts).toBe(1);
+    expect(presenter.attempts).toBe(2);
 
     harness.windowState.focused = true;
     const focused = harness.controller.handleEvent(
-      messageEvent({ eventNumber: 22, sequence: 8, mentionedUserIds: [USER_ID] }),
+      messageEvent({ eventNumber: 23, sequence: 9, mentionedUserIds: [USER_ID] }),
     );
     expect(focused).toMatchObject({
       policy: { decision: "suppressed", reason: "window_focused" },
     });
     harness.controller.invalidateRenderer(42);
+  });
+
+  it("clears same-renderer visibility without lowering its activity revision or readiness", () => {
+    const harness = createHarness({
+      conversations: [conversationSummary({ kind: "channel", name: "engineering" })],
+    });
+    const presenter = harness.presenter as FakePresenter;
+    arm(harness.controller);
+    harness.controller.bindRenderer(42, 3);
+    harness.controller.rendererReadyAndDrain(42, rendererRequest());
+
+    const liveTail: NotificationActivityUpdate = {
+      version: 1,
+      sessionGeneration: 1,
+      rendererSessionGeneration: 3,
+      revision: 19,
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      view: {
+        pane: "chat",
+        conversationId: CONVERSATION_ID,
+        timelineAtLiveTail: true,
+        thread: null,
+      },
+    };
+    expect(harness.controller.updateActivity(42, liveTail)).toBe(true);
+
+    harness.controller.bindRenderer(42, 3);
+    expect(harness.controller.diagnostics.rendererReady).toBe(true);
+    const betweenBindings = harness.controller.handleEvent(
+      messageEvent({ eventNumber: 23, sequence: 6, mentionedUserIds: [USER_ID] }),
+    );
+    expect(betweenBindings).toMatchObject({
+      policy: { decision: "eligible", reason: "verified_mention" },
+    });
+    expect(presenter.attempts).toBe(1);
+
+    expect(harness.controller.updateActivity(42, liveTail)).toBe(false);
+    expect(
+      harness.controller.updateActivity(42, {
+        ...liveTail,
+        revision: 20,
+      }),
+    ).toBe(true);
+    const freshLiveTail = harness.controller.handleEvent(
+      messageEvent({ eventNumber: 24, sequence: 7, mentionedUserIds: [USER_ID] }),
+    );
+    expect(freshLiveTail).toMatchObject({
+      policy: { decision: "suppressed", reason: "visible_at_live_tail" },
+    });
+    expect(presenter.attempts).toBe(1);
   });
 
   it("consumes presenter failures once and resumes only after explicit capability recovery", () => {
