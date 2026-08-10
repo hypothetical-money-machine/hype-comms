@@ -36,8 +36,10 @@ import {
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   type CachedWorkspaceState,
+  type MembershipRepairMarker,
   type OutboxItem,
   type OutboxStatus,
+  type OutboxUpdateExpectation,
   type WorkspaceCache,
 } from "./workspace-cache";
 
@@ -385,7 +387,9 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
-  #flushing = false;
+  /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
+  #outboxFlushOwner: ProjectionGuard | null = null;
+  #outboxFlushRequested = false;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -579,9 +583,17 @@ export class WorkspaceRuntime {
     // and that reset has to know which member's database it is allowed to delete.
     try {
       const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
-      this.#cache = this.#createCache(cryptoStatus);
-      const cached = await this.#cache.load();
-      if (generation !== this.#generation) return;
+      if (generation !== this.#generation || scope !== this.#scope) return;
+      if (
+        cryptoStatus.scope.userId !== scope.userId ||
+        cryptoStatus.scope.workspaceId !== scope.workspaceId
+      ) {
+        throw new Error("The encrypted cache scope did not match the signed-in session");
+      }
+      const cache = this.#createCache(cryptoStatus);
+      this.#cache = cache;
+      const cached = await cache.load();
+      if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
@@ -601,34 +613,12 @@ export class WorkspaceRuntime {
 
       const replicaAvailable = cached.bootstrap !== null;
       if (cached.repairMarker !== null) {
-        // A prior run already purged revoked data but crashed before its authoritative replacement
-        // committed. Drain a finite HTTP-sync high-water from the encrypted replica cursor without
-        // mutating or acknowledging it. The marker remains the crash-safe privacy barrier until a
-        // later, complete snapshot at or beyond that high-water replaces the cache atomically.
-        const repairedCache = this.#cache;
-        if (repairedCache === null) return;
-        const preflight = await this.#drainMembershipRepairGap(
+        await this.#recoverDurableMembershipMarker(
           generation,
+          cache,
+          cached.repairMarker,
           cached.syncCursor ?? "0",
         );
-        if (generation !== this.#generation || repairedCache !== this.#cache) return;
-        if (preflight.status === "blocked") {
-          this.#setState({ busy: false, stale: true });
-          return;
-        }
-        const repaired = await this.#refreshSnapshot(generation, preflight.minimumCursor);
-        if (!repaired || generation !== this.#generation || repairedCache !== this.#cache) return;
-        const repairedState = await repairedCache.load();
-        if (generation !== this.#generation || repairedCache !== this.#cache) return;
-        if (repairedState.repairMarker !== null) {
-          throw new Error("Membership repair did not clear its durable marker");
-        }
-        this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
-        this.#syncCursor = repairedState.syncCursor;
-        this.#publishMembershipCache(repairedState, cached.repairMarker.conversationId);
-        // The snapshot is now the durable UI representation of the drained gap. Only the final
-        // catch-up below may advance and acknowledge beyond it before realtime attaches.
-        await this.#completeStartupAfterSnapshot(generation);
         return;
       }
 
@@ -1032,6 +1022,10 @@ export class WorkspaceRuntime {
       !this.#membershipRepairPending &&
       (conversationId === undefined || this.#isConversationAuthorized(conversationId))
     );
+  }
+
+  #isOutboxFlushOwnerCurrent(owner: ProjectionGuard, conversationId?: string): boolean {
+    return this.#outboxFlushOwner === owner && this.#isProjectionCurrent(owner, conversationId);
   }
 
   #rotateProjectionBarrier(): void {
@@ -1446,12 +1440,22 @@ export class WorkspaceRuntime {
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
-    await this.#patchOutbox(clientMessageId, {
-      status: "pending",
-      attemptCount: 0,
-      nextAttemptAt: null,
-      failureReason: null,
-    });
+    const current = this.#state.outbox.find(
+      (item) => item.operation.message.clientMessageId === clientMessageId,
+    );
+    if (current === undefined) return;
+    await this.#patchOutbox(
+      clientMessageId,
+      {
+        status: "pending",
+        attemptCount: 0,
+        nextAttemptAt: null,
+        failureReason: null,
+      },
+      undefined,
+      undefined,
+      { status: current.status, attemptCount: current.attemptCount },
+    );
     void this.#flushOutbox(this.#generation);
   }
 
@@ -1601,7 +1605,20 @@ export class WorkspaceRuntime {
   }
 
   async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
-    return this.#client.getChannelMembers(conversationId);
+    const cache = this.#cache;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
+    const response = await this.#client.getChannelMembers(conversationId);
+    if (
+      !this.#isProjectionCurrent(projection, conversationId) ||
+      response.conversationId !== conversationId
+    ) {
+      throw new Error("This conversation is no longer available");
+    }
+    return response;
   }
 
   async upsertChannelMember(
@@ -2208,7 +2225,7 @@ export class WorkspaceRuntime {
     // is the refreshed directory rather than the stale cached one. Also the retry site for a
     // realtime refetch that failed earlier.
     if (this.#membersDirty) await this.#refreshMembers(generation);
-    await this.#reloadCache();
+    if (!(await this.#reloadCache(generation, cache))) return;
     this.#syncRecoveryPending = false;
     // A directory read that failed leaves the client genuinely stale, so the flush must not claim
     // otherwise just because the event page drained. A resync remains stale until realtime has
@@ -2227,7 +2244,9 @@ export class WorkspaceRuntime {
     generation: number,
     startCursor: string,
   ): Promise<
-    { readonly status: "ready"; readonly minimumCursor?: string } | { readonly status: "blocked" }
+    | { readonly status: "ready"; readonly minimumCursor?: string }
+    | { readonly status: "retryable"; readonly retryAfterMs: number | null }
+    | { readonly status: "blocked" }
   > {
     let cursor = startCursor;
     let targetHighWater: string | null = null;
@@ -2243,7 +2262,7 @@ export class WorkspaceRuntime {
       }
       if (result.status === "retryable") {
         this.#setState({ stale: true });
-        return { status: "blocked" };
+        return { status: "retryable", retryAfterMs: result.retryAfterMs };
       }
       if (result.status === "reset_required") {
         // The server has explicitly declared this cursor unrecoverable. One authoritative snapshot
@@ -2424,6 +2443,51 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || this.#cache === null) return;
     await this.#refreshSnapshot(generation);
     if (generation !== this.#generation || this.#cache === null) return;
+    await this.#completeStartupAfterSnapshot(generation);
+  }
+
+  /**
+   * Completes the crash-recovery path for a durable membership marker. A retryable preflight keeps
+   * the marker intact and resumes this exact continuation; the ordinary sync retry cannot run while
+   * the marker blocks event application.
+   */
+  async #recoverDurableMembershipMarker(
+    generation: number,
+    cache: WorkspaceCache,
+    marker: MembershipRepairMarker,
+    startCursor: string,
+  ): Promise<void> {
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    const preflight = await this.#drainMembershipRepairGap(generation, startCursor);
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    if (preflight.status === "retryable") {
+      this.#setState({ busy: false, stale: true });
+      this.#scheduleMembershipMarkerRetry(
+        generation,
+        cache,
+        marker,
+        startCursor,
+        preflight.retryAfterMs,
+      );
+      return;
+    }
+    if (preflight.status === "blocked") {
+      this.#syncAttempt = 0;
+      this.#setState({ busy: false, stale: true });
+      return;
+    }
+    const repaired = await this.#refreshSnapshot(generation, preflight.minimumCursor);
+    if (!repaired || generation !== this.#generation || cache !== this.#cache) return;
+    const repairedState = await cache.load();
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    if (repairedState.repairMarker !== null) {
+      throw new Error("Membership repair did not clear its durable marker");
+    }
+    this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
+    this.#syncCursor = repairedState.syncCursor;
+    this.#publishMembershipCache(repairedState, marker.conversationId);
+    // The snapshot is now the durable UI representation of the drained gap. Only the final
+    // catch-up below may advance and acknowledge beyond it before realtime attaches.
     await this.#completeStartupAfterSnapshot(generation);
   }
 
@@ -2729,37 +2793,53 @@ export class WorkspaceRuntime {
 
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
-    if (
-      this.#flushing ||
-      this.#membershipRepairPending ||
-      cache === null ||
-      generation !== this.#generation
-    ) {
+    if (this.#membershipRepairPending || cache === null || generation !== this.#generation) {
       return;
     }
-    this.#flushing = true;
+    const owner = this.#captureProjection(cache);
+    if (
+      this.#outboxFlushOwner?.signal === owner.signal &&
+      this.#outboxFlushOwner.cache === owner.cache &&
+      this.#outboxFlushOwner.generation === owner.generation
+    ) {
+      // Do not race the current projection's worker. Its `finally` block will observe this request
+      // even when it arrived after that worker found no deliverable item.
+      this.#outboxFlushRequested = true;
+      return;
+    }
+    // A generation change or membership barrier rotates the projection signal. The replacement
+    // worker must not wait for an old request that can remain hung indefinitely.
+    this.#outboxFlushOwner = owner;
+    this.#outboxFlushRequested = false;
     this.#clearRetryTimer();
     try {
       for (;;) {
-        if (this.#membershipRepairPending) return;
+        if (!this.#isOutboxFlushOwnerCurrent(owner)) return;
         const next = nextDeliverable(this.#state.outbox, Date.now());
         if (next === undefined) {
           this.#scheduleNextRetry(this.#state.outbox, generation);
           break;
         }
         const id = next.operation.message.clientMessageId;
-        const projection = this.#captureProjection(cache);
-        if (!this.#isProjectionCurrent(projection, next.operation.conversationId)) return;
+        if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
         const attempt = next.attemptCount + 1;
-        await this.#patchOutbox(id, {
-          status: "sending",
-          attemptCount: attempt,
-          nextAttemptAt: null,
-          failureReason: null,
-        });
-        if (!this.#isProjectionCurrent(projection, next.operation.conversationId)) return;
+        const patched = await this.#patchOutbox(
+          id,
+          {
+            status: "sending",
+            attemptCount: attempt,
+            nextAttemptAt: null,
+            failureReason: null,
+          },
+          owner,
+          next.operation.conversationId,
+          { status: next.status, attemptCount: next.attemptCount },
+        );
+        if (!patched || !this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) {
+          return;
+        }
         const result = await this.#client.sendConversationMessage(next.operation);
-        if (!this.#isProjectionCurrent(projection, next.operation.conversationId)) return;
+        if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
         // A membership repair can finish while this request is still in flight. Its authoritative
         // snapshot removes revoked sends from both the cache and this projection; a late response
         // no longer owns anything and must not reinsert its message after the barrier has cleared.
@@ -2774,9 +2854,9 @@ export class WorkspaceRuntime {
             result.response.message,
             id,
             this.#syncCursor ?? "0",
-            projection.signal,
+            owner.signal,
           );
-          if (!this.#isProjectionCurrent(projection, next.operation.conversationId)) return;
+          if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
           if (!persisted) {
             if (this.#state.outbox.some((item) => item.operation.message.clientMessageId === id)) {
               return;
@@ -2794,36 +2874,69 @@ export class WorkspaceRuntime {
           continue;
         }
         if (result.status === "authentication_required") {
-          await this.#patchOutbox(id, {
-            status: "paused_auth",
-            attemptCount: attempt,
-            nextAttemptAt: null,
-            failureReason: "Sign in to retry",
-          });
+          const paused = await this.#patchOutbox(
+            id,
+            {
+              status: "paused_auth",
+              attemptCount: attempt,
+              nextAttemptAt: null,
+              failureReason: "Sign in to retry",
+            },
+            owner,
+            next.operation.conversationId,
+            { status: "sending", attemptCount: attempt },
+          );
+          if (!paused) return;
           break;
         }
         if (result.status === "permanent") {
-          await this.#patchOutbox(id, {
-            status: "permanent_failure",
-            attemptCount: attempt,
-            nextAttemptAt: null,
-            failureReason: result.reason,
-          });
+          const failed = await this.#patchOutbox(
+            id,
+            {
+              status: "permanent_failure",
+              attemptCount: attempt,
+              nextAttemptAt: null,
+              failureReason: result.reason,
+            },
+            owner,
+            next.operation.conversationId,
+            { status: "sending", attemptCount: attempt },
+          );
+          if (!failed) return;
           continue;
         }
         const delay = result.retryAfterMs ?? retryDelay(attempt);
-        await this.#patchOutbox(id, {
-          status: "retry_wait",
-          attemptCount: attempt,
-          nextAttemptAt: new Date(Date.now() + delay).toISOString(),
-          failureReason: result.reason,
-        });
+        const waiting = await this.#patchOutbox(
+          id,
+          {
+            status: "retry_wait",
+            attemptCount: attempt,
+            nextAttemptAt: new Date(Date.now() + delay).toISOString(),
+            failureReason: result.reason,
+          },
+          owner,
+          next.operation.conversationId,
+          { status: "sending", attemptCount: attempt },
+        );
+        if (!waiting) return;
         // Without rearming here the message waits for a manual retry or a restart forever.
         this.#scheduleNextRetry(this.#state.outbox, generation);
         break;
       }
     } finally {
-      this.#flushing = false;
+      if (this.#outboxFlushOwner === owner) {
+        const rerun = this.#outboxFlushRequested;
+        this.#outboxFlushOwner = null;
+        this.#outboxFlushRequested = false;
+        if (
+          rerun &&
+          generation === this.#generation &&
+          cache === this.#cache &&
+          !this.#membershipRepairPending
+        ) {
+          void this.#flushOutbox(generation);
+        }
+      }
     }
   }
 
@@ -2853,19 +2966,40 @@ export class WorkspaceRuntime {
     );
   }
 
-  async #patchOutbox(clientMessageId: string, update: OutboxUpdate): Promise<void> {
-    await this.#cache?.updateOutbox(clientMessageId, update);
+  async #patchOutbox(
+    clientMessageId: string,
+    update: OutboxUpdate,
+    owner?: ProjectionGuard,
+    conversationId?: string,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    const cache = owner?.cache ?? this.#cache;
+    if (
+      cache === null ||
+      (owner !== undefined && !this.#isOutboxFlushOwnerCurrent(owner, conversationId))
+    ) {
+      return false;
+    }
+    const committed = await cache.updateOutbox(clientMessageId, update, owner?.signal, expected);
+    if (!committed) return false;
+    if (owner !== undefined && !this.#isOutboxFlushOwnerCurrent(owner, conversationId)) {
+      return false;
+    }
     this.#setState({
       outbox: this.#state.outbox.map((item) =>
         item.operation.message.clientMessageId === clientMessageId ? { ...item, ...update } : item,
       ),
     });
+    return true;
   }
 
-  async #reloadCache(): Promise<void> {
-    const cache = this.#cache;
-    if (cache === null) return;
+  async #reloadCache(generation: number, cache: WorkspaceCache): Promise<boolean> {
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
+      return false;
     const loaded = await cache.load();
+    if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
+      return false;
     let threadSummaries = this.#state.threadSummaries;
     const knownMessageIds = new Set(this.#state.messages.map((message) => message.id));
     for (const message of loaded.messages) {
@@ -2887,6 +3021,38 @@ export class WorkspaceRuntime {
       tasks: loaded.tasks,
       outbox: loaded.outbox,
     });
+    return true;
+  }
+
+  #scheduleMembershipMarkerRetry(
+    generation: number,
+    cache: WorkspaceCache,
+    marker: MembershipRepairMarker,
+    startCursor: string,
+    retryAfterMs: number | null,
+  ): void {
+    this.#clearSyncRetryTimer();
+    this.#syncAttempt += 1;
+    const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
+    this.#syncRetryTimer = setTimeout(() => {
+      this.#syncRetryTimer = null;
+      void this.#serializeRecovery(async () => {
+        if (generation !== this.#generation || cache !== this.#cache || this.#syncAttempt === 0) {
+          return;
+        }
+        this.#setState({ busy: true });
+        await this.#recoverDurableMembershipMarker(generation, cache, marker, startCursor);
+      }).catch((error: unknown) => {
+        if (generation === this.#generation && cache === this.#cache) {
+          this.#syncAttempt = 0;
+          this.#setState({
+            busy: false,
+            stale: true,
+            error: errorMessage(error, "Could not initialize the workspace"),
+          });
+        }
+      });
+    }, delay);
   }
 
   #scheduleSyncRetry(generation: number, retryAfterMs: number | null): void {

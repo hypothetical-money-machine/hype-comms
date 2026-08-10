@@ -192,6 +192,64 @@ describe("PersistentWorkspaceCache", () => {
     expect(recovered.syncCursor).toBe("1");
   });
 
+  it("rejects aborted or stale outbox status transitions atomically", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, []);
+    await cache.enqueue(operation);
+    const sending = {
+      status: "sending" as const,
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: null,
+    };
+
+    const retired = new AbortController();
+    retired.abort();
+    await expect(
+      cache.updateOutbox(CLIENT_MESSAGE_ID, sending, retired.signal, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      cache.updateOutbox(CLIENT_MESSAGE_ID, sending, undefined, {
+        status: "sending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    expect((await cache.load()).outbox[0]).toMatchObject({ status: "pending", attemptCount: 0 });
+
+    await expect(
+      cache.updateOutbox(CLIENT_MESSAGE_ID, sending, undefined, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(true);
+
+    const restarted = new PersistentWorkspaceCache({ crypto, scope });
+    const recovered = (await restarted.load()).outbox[0];
+    expect(recovered).toMatchObject({ status: "pending", attemptCount: 1 });
+    if (recovered === undefined) throw new Error("Expected the interrupted outbox item");
+    await expect(
+      restarted.updateOutbox(
+        CLIENT_MESSAGE_ID,
+        {
+          status: "retry_wait",
+          attemptCount: 1,
+          nextAttemptAt: NOW,
+          failureReason: "network",
+        },
+        undefined,
+        { status: recovered.status, attemptCount: recovered.attemptCount },
+      ),
+    ).resolves.toBe(true);
+    expect((await restarted.load()).outbox[0]).toMatchObject({
+      status: "retry_wait",
+      attemptCount: 1,
+    });
+  });
+
   it("restores encrypted reactions without exposing the emoji in IndexedDB indexes", async () => {
     const crypto = new FakeCrypto();
     const first = new PersistentWorkspaceCache({ crypto, scope });

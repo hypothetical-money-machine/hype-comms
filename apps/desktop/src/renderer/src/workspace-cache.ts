@@ -52,6 +52,11 @@ export interface OutboxItem {
   readonly failureReason: string | null;
 }
 
+export interface OutboxUpdateExpectation {
+  readonly status: OutboxStatus;
+  readonly attemptCount: number;
+}
+
 export interface MembershipRepairMarker {
   readonly kind: "membership";
   readonly eventId: string;
@@ -163,7 +168,9 @@ export interface WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void>;
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean>;
   removeOutbox(clientMessageId: string): Promise<void>;
   clearServerStatePreservingOutbox(): Promise<void>;
   clearAll(): Promise<void>;
@@ -256,6 +263,19 @@ interface OutboxRow {
 interface EventRow {
   readonly id: string;
   readonly workspaceSequence: string;
+}
+
+function matchesOutboxExpectation(
+  current: Pick<OutboxItem, "status" | "attemptCount">,
+  expected: OutboxUpdateExpectation | undefined,
+): boolean {
+  if (expected === undefined) return true;
+  // A process restart deliberately projects an interrupted durable `sending` row as `pending`.
+  // Treat that one recovery representation as equivalent while still comparing its attempt.
+  const statusMatches =
+    current.status === expected.status ||
+    (current.status === "sending" && expected.status === "pending");
+  return statusMatches && current.attemptCount === expected.attemptCount;
 }
 
 class WorkspaceCacheDatabase extends Dexie {
@@ -1482,8 +1502,26 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void> {
-    await this.#database.outbox.update(clientMessageId, update);
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const id = entityIdSchema.parse(clientMessageId);
+    try {
+      return await this.#database.transaction("rw", this.#database.outbox, async () => {
+        signal?.throwIfAborted();
+        const current = await this.#database.outbox.get(id);
+        if (current === undefined || !matchesOutboxExpectation(current, expected)) return false;
+        await this.#database.outbox.update(id, update);
+        // Throwing inside the transaction rolls the status write back when a projection is retired
+        // while IndexedDB is still completing the update.
+        signal?.throwIfAborted();
+        return true;
+      });
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {
@@ -2109,9 +2147,18 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void> {
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const current = this.#outbox.get(clientMessageId);
-    if (current !== undefined) this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (current === undefined || !matchesOutboxExpectation(current, expected)) return false;
+    this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (signal?.aborted) {
+      this.#outbox.set(clientMessageId, current);
+      return false;
+    }
+    return true;
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {

@@ -494,6 +494,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
   #repairMarker: MembershipRepairMarker | null = null;
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
+  readonly loadBarriers: Promise<void>[] = [];
+  readonly outboxUpdateBarriers: Promise<void>[] = [];
+  outboxUpdateAttempts = 0;
   acknowledgedMessageAttempts = 0;
   upsertFailure: Error | null = null;
 
@@ -504,6 +507,8 @@ class FakeWorkspaceCache implements WorkspaceCache {
   async load(): Promise<CachedWorkspaceState> {
     this.loadCount += 1;
     this.operations.push("load");
+    const barrier = this.loadBarriers.shift();
+    if (barrier !== undefined) await barrier;
     return {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
@@ -810,10 +815,27 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async updateOutbox(...args: Parameters<WorkspaceCache["updateOutbox"]>): Promise<void> {
-    const [clientMessageId, update] = args;
+  async updateOutbox(...args: Parameters<WorkspaceCache["updateOutbox"]>): Promise<boolean> {
+    const [clientMessageId, update, signal, expected] = args;
+    if (signal?.aborted) return false;
+    this.outboxUpdateAttempts += 1;
+    const barrier = this.outboxUpdateBarriers.shift();
+    if (barrier !== undefined) await barrier;
+    if (signal?.aborted) return false;
     const current = this.#outbox.get(clientMessageId);
-    if (current !== undefined) this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (current === undefined) return false;
+    const expectedStatusMatches =
+      expected === undefined ||
+      current.status === expected.status ||
+      (current.status === "sending" && expected.status === "pending");
+    if (
+      !expectedStatusMatches ||
+      (expected !== undefined && current.attemptCount !== expected.attemptCount)
+    ) {
+      return false;
+    }
+    this.#outbox.set(clientMessageId, { ...current, ...update });
+    return true;
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {
@@ -851,6 +873,7 @@ class FakeDesktopApi implements DesktopApi {
     scope,
     reason: "credential_store_unavailable",
   };
+  readonly cryptoStatusResults: (CacheCryptoStatus | Promise<CacheCryptoStatus>)[] = [];
   bootstrapRequests = 0;
   stopRequests = 0;
   readonly stopResults: Promise<void>[] = [];
@@ -907,8 +930,10 @@ class FakeDesktopApi implements DesktopApi {
   readonly messageByIdResults: (MessageByIdResponse | Promise<MessageByIdResponse>)[] = [];
   readonly messageByIdRequests: string[] = [];
   messageByIdFailures = 0;
-  readonly searchResults: MessageSearchResponse[] = [];
+  readonly searchResults: (MessageSearchResponse | Promise<MessageSearchResponse>)[] = [];
   readonly searchRequests: MessageSearchQuery[] = [];
+  readonly channelMemberResults: (ChannelMembersResponse | Promise<ChannelMembersResponse>)[] = [];
+  readonly channelMemberRequests: string[] = [];
   readonly conversationTaskResults: (TaskListResponse | Promise<TaskListResponse>)[] = [];
   readonly myTaskResults: (TaskListResponse | Promise<TaskListResponse>)[] = [];
   readonly conversationTaskRequests: string[] = [];
@@ -1022,7 +1047,8 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async initializeCacheCrypto(): Promise<CacheCryptoStatus> {
-    return this.cryptoStatus;
+    const queued = this.cryptoStatusResults.shift();
+    return queued === undefined ? this.cryptoStatus : await queued;
   }
 
   async encryptCacheRecords(): Promise<CacheEncryptBatchResponse> {
@@ -1141,7 +1167,7 @@ class FakeDesktopApi implements DesktopApi {
     this.searchRequests.push(input);
     const response = this.searchResults.shift();
     if (response === undefined) throw new Error("The test queued no search result");
-    return response;
+    return await response;
   }
 
   async listConversationTasks(
@@ -1211,8 +1237,11 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not archive channels");
   }
 
-  async getChannelMembers(): Promise<ChannelMembersResponse> {
-    throw new Error("The runtime test does not list channel members");
+  async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
+    this.channelMemberRequests.push(conversationId);
+    const response = this.channelMemberResults.shift();
+    if (response === undefined) throw new Error("The test queued no channel members result");
+    return await response;
   }
 
   async upsertChannelMember(): Promise<ChannelMembershipMutationResponse> {
@@ -1969,6 +1998,47 @@ describe("WorkspaceRuntime", () => {
     expect(durable.syncCursor).toBe("11");
     expect(durable.repairMarker?.workspaceSequence).toBe("11");
     expect(runtime.state).toMatchObject({ busy: false, stale: true, error });
+    await runtime.stop();
+  });
+
+  it("automatically resumes a retryable durable-marker preflight", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = await cacheWithDurableMembershipMarker();
+      const api = new FakeDesktopApi(bootstrapAt("14"));
+      api.syncResults.push(
+        { status: "retryable", reason: "server", retryAfterMs: 1_000 },
+        {
+          status: "accepted",
+          response: {
+            events: [],
+            nextCursor: "14",
+            highWaterCursor: "14",
+            hasMore: false,
+          },
+        },
+      );
+      const runtime = runtimeWith(api, cache);
+
+      await runtime.start(session);
+      expect(api.syncedFrom).toEqual(["11"]);
+      expect((await cache.load()).repairMarker?.workspaceSequence).toBe("11");
+      expect(api.startedCursors).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.syncedFrom).toEqual(["11"]);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle(() => api.startedCursors.length === 1, "durable marker retry recovery");
+
+      expect(api.syncedFrom).toEqual(["11", "11", "14"]);
+      expect(api.acknowledged).toEqual(["14"]);
+      expect(api.startedCursors).toEqual(["14"]);
+      expect((await cache.load()).repairMarker).toBeNull();
+      expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
+      await runtime.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds an expired marker cursor to one preflight before snapshot recovery", async () => {
@@ -3057,6 +3127,71 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
   });
 
+  it("does not let delayed old-scope cache initialization replace the current cache", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const delayedCrypto = deferred<CacheCryptoStatus>();
+    api.cryptoStatusResults.push(delayedCrypto.promise, {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    });
+    const firstCache = new FakeWorkspaceCache();
+    const replacementCache = new FakeWorkspaceCache();
+    const runtime = new WorkspaceRuntime(api, {
+      createCache: (status) =>
+        status.scope.userId === OTHER_USER_ID ? replacementCache : firstCache,
+    });
+
+    const firstStart = runtime.start(session);
+    api.bootstrap = otherBootstrapAt("20");
+    await runtime.start(otherSession);
+
+    delayedCrypto.resolve({
+      mode: "memory_only",
+      scope,
+      reason: "credential_store_unavailable",
+    });
+    await firstStart;
+
+    expect(firstCache.loadCount).toBe(0);
+    expect(replacementCache.loadCount).toBeGreaterThan(0);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+  });
+
+  it("does not publish a delayed old-cache reload after a replacement scope starts", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const firstCache = new FakeWorkspaceCache();
+    await firstCache.replaceSnapshot(bootstrapAt("10"), [ownMessage]);
+    const delayedReload = deferred<void>();
+    firstCache.loadBarriers.push(Promise.resolve(), Promise.resolve(), delayedReload.promise);
+    const replacementCache = new FakeWorkspaceCache();
+    const runtime = new WorkspaceRuntime(api, {
+      createCache: (status) =>
+        status.scope.userId === OTHER_USER_ID ? replacementCache : firstCache,
+    });
+
+    const firstStart = runtime.start(session);
+    await settle(() => firstCache.loadCount === 3, "old cache reload");
+
+    api.cryptoStatus = {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    };
+    api.bootstrap = otherBootstrapAt("20");
+    await runtime.start(otherSession);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+
+    delayedReload.resolve();
+    await firstStart;
+    await drain();
+
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+    expect(runtime.state.messages).toEqual([]);
+  });
+
   it("keeps a server-created channel selected when its cache write fails", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -3100,6 +3235,154 @@ describe("WorkspaceRuntime", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("lets a replacement generation flush while the retired send remains hung", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const hungSend = deferred<SendAttemptResult>();
+    api.sendResults.push(hungSend.promise, {
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
+    await settle(() => api.sent.length === 1, "retired generation send");
+
+    const restarted = runtime.start(session);
+    await settle(() => api.sent.length === 2, "replacement generation send");
+    await restarted;
+
+    expect(api.sent[0]?.message.clientMessageId).toBe(api.sent[1]?.message.clientMessageId);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(runtime.state.messages.map((message) => message.id)).toContain(OWN_MESSAGE_ID);
+
+    hungSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    await drain();
+
+    expect(api.sent).toHaveLength(2);
+    expect(runtime.state.messages.filter((message) => message.id === OWN_MESSAGE_ID)).toHaveLength(
+      1,
+    );
+  });
+
+  it("does not let a retired flush adopt the replacement while a status patch is delayed", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "random"),
+        ],
+      }),
+    );
+    const delayedPermanentPatch = deferred<void>();
+    const replacementSend = deferred<SendAttemptResult>();
+    const secondMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-000000000085",
+      clientMessageId: "20000000-0000-4000-8000-000000000086",
+      conversationId: SECOND_CONVERSATION_ID,
+      conversationSequence: "1",
+    };
+    api.sendResults.push({ status: "permanent", reason: "validation" }, replacementSend.promise, {
+      status: "accepted",
+      response: { message: secondMessage, syncCursor: "12" },
+    });
+    const cache = new FakeWorkspaceCache();
+    cache.outboxUpdateBarriers.push(Promise.resolve(), delayedPermanentPatch.promise);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Old owner", []);
+    await settle(() => cache.outboxUpdateAttempts === 2, "delayed permanent status patch");
+    expect(api.sent).toHaveLength(1);
+    const retiredClientMessageId = api.sent[0]?.message.clientMessageId;
+    if (retiredClientMessageId === undefined) throw new Error("Expected the retired send");
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "Current owner", []);
+
+    const restarted = runtime.start(session);
+    await settle(() => api.sent.length === 2, "replacement send while old patch is delayed");
+
+    delayedPermanentPatch.resolve();
+    await drain();
+    expect(api.sent).toHaveLength(2);
+    expect(
+      (await cache.load()).outbox.find(
+        (item) => item.operation.message.clientMessageId === retiredClientMessageId,
+      ),
+    ).toMatchObject({ status: "sending", attemptCount: 2 });
+
+    replacementSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    await settle(() => api.sent.length === 3, "replacement owner second conversation send");
+    await restarted;
+
+    expect(api.sent[2]?.conversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(runtime.state.outbox).toEqual([]);
+    expect((await cache.load()).outbox).toEqual([]);
+  });
+
+  it("supersedes a hung send after membership repair preserves its conversation", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const hungSend = deferred<SendAttemptResult>();
+    api.sendResults.push(hungSend.promise, {
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "12" },
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Preserved across repair", []);
+    await settle(() => api.sent.length === 1, "pre-repair send");
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000080",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "membership repair acknowledgement");
+    await settle(() => api.sent.length === 2, "post-repair send owner");
+    await settle(() => runtime.state.outbox.length === 0, "post-repair send reconciliation");
+
+    expect(api.sent[0]?.message.clientMessageId).toBe(api.sent[1]?.message.clientMessageId);
+    expect(runtime.state.outbox).toEqual([]);
+
+    hungSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "12" },
+    });
+    await drain();
+
+    expect(api.sent).toHaveLength(2);
+    expect((await cache.load()).outbox).toEqual([]);
+    expect(runtime.state.messages.filter((message) => message.id === OWN_MESSAGE_ID)).toHaveLength(
+      1,
+    );
   });
 
   it("applies a realtime event without reloading the whole decrypted cache", async () => {
@@ -3146,6 +3429,94 @@ describe("WorkspaceRuntime", () => {
 
     runtime.selectConversation(CONVERSATION_ID);
     expect(runtime.state.focusedMessageId).toBeNull();
+  });
+
+  it("drops a search response released after its conversation is revoked", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const privateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000081",
+      clientMessageId: "20000000-0000-4000-8000-000000000082",
+      conversationId: SECOND_CONVERSATION_ID,
+      body: "Must not escape a completed membership repair",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const delayedSearch = deferred<MessageSearchResponse>();
+    api.searchResults.push(delayedSearch.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const searching = runtime.searchMessages("private result");
+    await settle(() => api.searchRequests.length === 1, "delayed search request");
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000083",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "search membership repair");
+
+    delayedSearch.resolve({ results: [{ message: privateMessage }], nextCursor: null });
+    await expect(searching).resolves.toEqual({ results: [], nextCursor: null });
+  });
+
+  it("drops a channel-members response released after its conversation is revoked", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const delayedMembers = deferred<ChannelMembersResponse>();
+    api.channelMemberResults.push(delayedMembers.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const listing = runtime.getChannelMembers(SECOND_CONVERSATION_ID);
+    await settle(() => api.channelMemberRequests.length === 1, "delayed channel members request");
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000084",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "members membership repair");
+
+    delayedMembers.resolve({
+      conversationId: SECOND_CONVERSATION_ID,
+      access: "members",
+      members: [{ user, role: "owner", joinedAt: NOW }],
+      canManage: true,
+    });
+    await expect(listing).rejects.toThrow("This conversation is no longer available");
   });
 
   it("reauthorizes and opens an exact notification message in the main timeline", async () => {

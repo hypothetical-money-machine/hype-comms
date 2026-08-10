@@ -728,6 +728,59 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     ]);
   });
 
+  it("updates an outbox status only for the current attempt and projection", async () => {
+    const cache = create();
+    const clientMessageId = queuedAlphaMessage.message.clientMessageId;
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const sending = {
+      status: "sending" as const,
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: null,
+    };
+
+    const retired = new AbortController();
+    retired.abort();
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, retired.signal, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, undefined, {
+        status: "sending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, undefined, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      cache.updateOutbox(
+        clientMessageId,
+        {
+          status: "retry_wait",
+          attemptCount: 1,
+          nextAttemptAt: NOW,
+          failureReason: "network",
+        },
+        undefined,
+        { status: "sending", attemptCount: 1 },
+      ),
+    ).resolves.toBe(true);
+
+    expect((await cache.load()).outbox[0]).toMatchObject({
+      status: "retry_wait",
+      attemptCount: 1,
+      failureReason: "network",
+    });
+  });
+
   it("accepts a send response only while its outbox row and conversation are authorized", async () => {
     const cache = create();
     const acknowledged: Message = {
@@ -922,6 +975,51 @@ describe("PersistentWorkspaceCache durability", () => {
 
     expect(commitChecks).toBe(2);
     expect((await cache.load()).messages).toEqual([]);
+  });
+
+  it("rolls back an outbox status when its owner aborts at transaction commit", async () => {
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const baseSignal = new AbortController().signal;
+    let commitChecks = 0;
+    let aborted = false;
+    const signal = new Proxy(baseSignal, {
+      get(target, property) {
+        if (property === "aborted") return aborted;
+        if (property === "throwIfAborted") {
+          return () => {
+            commitChecks += 1;
+            if (commitChecks === 2) {
+              aborted = true;
+              throw new DOMException("Outbox owner retired", "AbortError");
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(
+      cache.updateOutbox(
+        queuedAlphaMessage.message.clientMessageId,
+        {
+          status: "sending",
+          attemptCount: 1,
+          nextAttemptAt: null,
+          failureReason: null,
+        },
+        signal,
+        { status: "pending", attemptCount: 0 },
+      ),
+    ).resolves.toBe(false);
+
+    expect(commitChecks).toBe(2);
+    expect((await cache.load()).outbox[0]).toMatchObject({
+      status: "pending",
+      attemptCount: 0,
+    });
   });
 
   it("keeps a completed self-removal purge durable across reopen", async () => {
