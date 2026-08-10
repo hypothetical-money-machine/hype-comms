@@ -49,6 +49,11 @@ interface IdentityRoutesOptions {
    * reveals nothing about who is a member.
    */
   readonly selfServiceMagicLink?: boolean;
+  /**
+   * Creating an agent persists `users.kind = 'agent'`, which the previous server release cannot
+   * parse. Production enables this only after that release is no longer a rollback target.
+   */
+  readonly agentProvisioningEnabled?: boolean;
 }
 
 function sessionCookie(
@@ -188,7 +193,7 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
 
 export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app,
-  { service, cookieSecure, selfServiceMagicLink = true },
+  { service, cookieSecure, selfServiceMagicLink = true, agentProvisioningEnabled = true },
 ) => {
   app.post("/auth/magic-link", async (request, reply) => {
     if (!selfServiceMagicLink) {
@@ -311,6 +316,13 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
 
   app.post("/agents", async (request, reply) => {
     const identity = await requireHumanIdentity(request, service);
+    if (!agentProvisioningEnabled) {
+      throw new ApiError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Agent provisioning is disabled during the server rollback window",
+      );
+    }
     const input = createAgentRequestSchema.safeParse(request.body);
     if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent");
     const agent = await service.createAgent(identity.currentUser.user.id, input.data);

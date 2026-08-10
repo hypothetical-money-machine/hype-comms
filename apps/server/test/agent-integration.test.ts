@@ -150,11 +150,11 @@ describeWithPostgres("agent identity and owner administration", () => {
     await adminPool.end();
   });
 
-  async function appWithWorkspace() {
+  async function appWithWorkspace(agentProvisioningEnabled = true) {
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
       cookieSecure: false,
-      identity: { service: identityService },
+      identity: { service: identityService, agentProvisioningEnabled },
       workspace: {
         repository: workspaceRepository,
         realtimeHub: new RealtimeEventHub(pool),
@@ -190,6 +190,21 @@ describeWithPostgres("agent identity and owner administration", () => {
     expect(response.statusCode).toBe(201);
     return createAgentTokenResponseSchema.parse(response.json());
   }
+
+  it("refuses agent provisioning while the previous server remains a rollback target", async () => {
+    const app = await appWithWorkspace(false);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      payload: { username: "hermes", displayName: "Hermes" },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("SERVICE_UNAVAILABLE");
+    expect((await pool.query("SELECT user_id FROM agents")).rows).toEqual([]);
+    expect((await pool.query("SELECT id FROM users WHERE kind = 'agent'")).rows).toEqual([]);
+  });
 
   it("creates, lists, authenticates, and disables a non-email agent without leaking token hashes", async () => {
     const app = await appWithWorkspace();

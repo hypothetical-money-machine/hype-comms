@@ -31,6 +31,7 @@ async function main(): Promise<void> {
         readonly service: IdentityService;
         readonly botService: BotService;
         readonly selfServiceMagicLink: boolean;
+        readonly agentProvisioningEnabled: boolean;
       }
     | undefined;
   let workspace:
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
         service,
         botService: new BotService(databasePool),
         selfServiceMagicLink: config.emailDelivery !== "manual",
+        agentProvisioningEnabled: config.agentProvisioningEnabled,
       };
       const repository = new WorkspaceRepository(databasePool);
       const realtimeHub = new RealtimeEventHub(databasePool);

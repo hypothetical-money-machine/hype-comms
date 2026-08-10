@@ -31,6 +31,8 @@ export interface BuildAppOptions {
     readonly botService?: BotService;
     /** False when links are issued by an administrator, which disables self-service requests. */
     readonly selfServiceMagicLink?: boolean;
+    /** False while the previous server remains a supported production rollback target. */
+    readonly agentProvisioningEnabled?: boolean;
   };
   readonly workspace?: {
     readonly repository: WorkspaceRepository;
@@ -128,6 +130,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           service: options.identity.service,
           cookieSecure: options.cookieSecure ?? true,
           selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
+          agentProvisioningEnabled: options.identity.agentProvisioningEnabled ?? true,
         });
       }
       if (options.identity !== undefined && options.workspace !== undefined) {

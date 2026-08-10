@@ -23,6 +23,7 @@ const rawConfigSchema = z
     smtpUrl: optionalString(z.url()),
     emailFrom: optionalString(z.string().min(1)),
     emailDelivery: z.enum(["smtp", "console", "manual"]).optional(),
+    agentProvisioningEnabled: z.enum(["true", "false"]).optional(),
     ownerEmail: optionalString(emailSchema),
     workspaceName: z.string().trim().min(1).max(120).default("Hype Comms"),
     workspaceSlug: z
@@ -92,6 +93,11 @@ export interface ServerConfig {
    * silently dropped.
    */
   readonly emailDelivery: "smtp" | "console" | "manual";
+  /**
+   * Agent rows use a user kind that the previous server release cannot parse. Production keeps
+   * provisioning off by default until that release is outside the rollback window.
+   */
+  readonly agentProvisioningEnabled: boolean;
   readonly owner?: {
     readonly email: Email;
     readonly workspaceName: string;
@@ -122,6 +128,7 @@ export function loadConfig(
     databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
     smtpUrl: env.HMM_SMTP_URL,
     emailDelivery: env.HMM_EMAIL_DELIVERY,
+    agentProvisioningEnabled: env.HMM_AGENT_PROVISIONING_ENABLED,
     emailFrom: env.HMM_EMAIL_FROM,
     ownerEmail: env.HMM_OWNER_EMAIL,
     workspaceName: env.HMM_WORKSPACE_NAME,
@@ -223,6 +230,10 @@ export function loadConfig(
       ? {}
       : { smtp: { url: result.data.smtpUrl, from: result.data.emailFrom } }),
     emailDelivery,
+    agentProvisioningEnabled:
+      result.data.agentProvisioningEnabled === undefined
+        ? result.data.nodeEnv !== "production"
+        : result.data.agentProvisioningEnabled === "true",
     ...(result.data.ownerEmail === undefined
       ? {}
       : {

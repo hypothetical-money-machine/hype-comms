@@ -55,6 +55,12 @@ Before promoting a server change:
 Attach the successful Woodpecker pipeline URL to the release record so the installed Woodpecker
 version's service, dependency, and concurrency behavior is proven rather than inferred from YAML.
 
+Agent identity rollout requires an expand/enable sequence because the previous server cannot parse
+the new persisted user kind. Deploy this migration with `HMM_AGENT_PROVISIONING_ENABLED=false`
+(the production default). After the new server is healthy and the previous image has left the
+supported rollback window, set the variable to `true` and redeploy before provisioning the first
+agent. Do not re-enable rollback to the previous image after an agent has been created.
+
 ## Backup and restore gate
 
 The application repository cannot verify cluster backup configuration. Before calling the pilot

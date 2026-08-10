@@ -10,6 +10,7 @@ describe("loadConfig", () => {
       allowedOrigins: ["http://127.0.0.1:5173"],
       publicApiUrl: "http://127.0.0.1:3000",
       cookieSecure: false,
+      agentProvisioningEnabled: true,
     });
   });
 
@@ -24,7 +25,20 @@ describe("loadConfig", () => {
       allowedOrigins: ["app://bundle"],
       publicApiUrl: "https://chat-api.example.invalid",
       cookieSecure: true,
+      agentProvisioningEnabled: false,
     });
+  });
+
+  it("allows production to explicitly enable agent provisioning", () => {
+    expect(
+      loadConfig({
+        NODE_ENV: "production",
+        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
+        HMM_EMAIL_DELIVERY: "manual",
+        HMM_AGENT_PROVISIONING_ENABLED: "true",
+      }),
+    ).toMatchObject({ agentProvisioningEnabled: true });
+    expect(() => loadConfig({ HMM_AGENT_PROVISIONING_ENABLED: "yes" })).toThrow(ConfigError);
   });
 
   it("rejects malformed ports and origins", () => {
