@@ -7,13 +7,36 @@ interface ConversationHealthProps {
   readonly notice: string | null;
   readonly onRetry: () => void;
   readonly onResetCache: () => void;
+  readonly onCheckForUpdates: () => Promise<void>;
 }
 
 const connectionLabels: Readonly<Record<Exclude<RealtimeConnectionState, "live">, string>> = {
   connecting: "Connecting…",
   reconnecting: "Reconnecting…",
   offline: "Offline",
+  incompatible: "Live updates paused",
 };
+
+export function RealtimeIncompatibleNotice({
+  onCheckForUpdates,
+}: {
+  readonly onCheckForUpdates: () => Promise<void>;
+}) {
+  return (
+    <div className="realtime-incompatible" role="alert">
+      <div>
+        <strong>Desktop update may be required</strong>
+        <span>
+          Live updates are paused because the stream reported a state this version cannot safely
+          apply. Your saved position is safe.
+        </span>
+      </div>
+      <button className="quiet-button" type="button" onClick={() => void onCheckForUpdates()}>
+        Check for updates
+      </button>
+    </div>
+  );
+}
 
 export function ConversationHealth({
   connection,
@@ -22,6 +45,7 @@ export function ConversationHealth({
   notice,
   onRetry,
   onResetCache,
+  onCheckForUpdates,
 }: ConversationHealthProps) {
   const connectionLabel = connection === "live" ? null : connectionLabels[connection];
   const warnings = [
@@ -42,6 +66,9 @@ export function ConversationHealth({
         >
           {connectionLabel}
         </span>
+      )}
+      {connection === "incompatible" && (
+        <RealtimeIncompatibleNotice onCheckForUpdates={onCheckForUpdates} />
       )}
       {warnings.length > 0 && (
         <div

@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
 
-import { productRealtimeEventSchema, type ProductRealtimeEvent } from "@hmm-chat/contracts";
+import {
+  productRealtimeEventSchema,
+  realtimeEventEnvelopeSchema,
+  type ProductRealtimeEvent,
+  type RealtimeAcknowledgement,
+  type RealtimeConnectionState,
+  type RealtimeSessionScope,
+  type RealtimeTicketResponse,
+  type ScopedProductRealtimeEvent,
+} from "@hmm-chat/contracts";
 import WebSocket, { type RawData } from "ws";
 
 import { reportMainProcessError } from "./main-process-log";
@@ -17,15 +26,37 @@ export const WORKSPACE_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
 export const WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT = 1_024;
 export const WORKSPACE_REALTIME_PENDING_REPLAY_BYTE_LIMIT = 4 * 1_024 * 1_024;
 
-export type RealtimeConnectionState = "connecting" | "live" | "offline" | "reconnecting";
+export type { RealtimeConnectionState };
 
-export interface WorkspaceRealtimeScope {
-  readonly userId: string;
-  readonly workspaceId: string;
+export type WorkspaceRealtimeScope = Pick<RealtimeSessionScope, "userId" | "workspaceId">;
+
+export type RealtimeDropReason =
+  | "invalid-envelope"
+  | "late-ticket"
+  | "renderer-delivery"
+  | "stale-activation"
+  | "stale-control"
+  | "stale-socket"
+  | "stale-timer"
+  | "unsupported-event"
+  | "wrong-user"
+  | "wrong-workspace";
+
+export interface RealtimeSession {
+  readonly activeScope: RealtimeSessionScope | null;
+  prepare(input: {
+    readonly after: string;
+    readonly userId: string;
+    readonly workspaceId: string;
+  }): RealtimeSessionScope;
+  activate(scope: RealtimeSessionScope): boolean;
+  acknowledge(input: RealtimeAcknowledgement): void;
+  stop(scope?: RealtimeSessionScope): void;
 }
 
 interface ActiveConnection {
   readonly epoch: number;
+  readonly scope: RealtimeSessionScope;
   readonly socket: WebSocket;
   readonly pendingReplay: ProductRealtimeEvent[];
   pendingReplayBytes: number;
@@ -60,12 +91,14 @@ export class WorkspaceRealtime {
   readonly #apiOrigin: string;
   readonly #rendererOrigin: string;
   readonly #transport: Pick<WorkspaceTransport, "ticket">;
-  readonly #onEvent: (event: ProductRealtimeEvent) => boolean;
+  readonly #onEvent: (frame: ScopedProductRealtimeEvent) => boolean;
   readonly #onWindowlessEvent: (event: ProductRealtimeEvent) => void;
   readonly #onState: (state: RealtimeConnectionState) => void;
+  readonly #onDrop: (reason: RealtimeDropReason) => void;
   readonly #createSocket: SocketFactory;
   #cursor = "0";
-  #scope: WorkspaceRealtimeScope | null = null;
+  #scope: RealtimeSessionScope | null = null;
+  #sessionEpoch = 0;
   #connection: ActiveConnection | null = null;
   #ticketEpoch: number | null = null;
   #timer: ReconnectTimer | null = null;
@@ -74,6 +107,7 @@ export class WorkspaceRealtime {
   #stopped = true;
   #rendererDeliveryReady = false;
   #windowless = false;
+  #incompatible = false;
   #pendingAuthoritativeRecovery: PendingAuthoritativeRecovery | null = null;
 
   constructor(options: {
@@ -81,10 +115,11 @@ export class WorkspaceRealtime {
     readonly rendererOrigin: string;
     readonly transport: Pick<WorkspaceTransport, "ticket">;
     /** Returns whether the event crossed into the currently subscribed renderer. */
-    readonly onEvent: (event: ProductRealtimeEvent) => boolean;
+    readonly onEvent: (frame: ScopedProductRealtimeEvent) => boolean;
     /** Observes an event without attempting renderer delivery or durable acknowledgement. */
-    readonly onWindowlessEvent: (event: ProductRealtimeEvent) => void;
+    readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
     readonly onState: (state: RealtimeConnectionState) => void;
+    readonly onDrop?: (reason: RealtimeDropReason) => void;
     /** Test seam. Production always uses the `ws` implementation. */
     readonly createSocket?: SocketFactory;
   }) {
@@ -92,51 +127,102 @@ export class WorkspaceRealtime {
     this.#rendererOrigin = options.rendererOrigin;
     this.#transport = options.transport;
     this.#onEvent = options.onEvent;
-    this.#onWindowlessEvent = options.onWindowlessEvent;
+    this.#onWindowlessEvent = options.onWindowlessEvent ?? (() => undefined);
     this.#onState = options.onState;
+    this.#onDrop =
+      options.onDrop ??
+      ((reason) => reportMainProcessError(`Dropped a realtime artifact (${reason})`));
     this.#createSocket =
       options.createSocket ?? ((url, socketOptions) => new WebSocket(url, socketOptions));
   }
 
-  start(after: string, expectedScope: WorkspaceRealtimeScope): boolean {
-    // The renderer invokes start only after installing its workspace-event subscriber and
-    // completing HTTP catch-up. This is the explicit readiness handshake used to redeliver a
-    // body-free recovery control that could not cross a crashed or reloading renderer boundary.
-    const wasWindowless = this.#windowless;
+  get activeScope(): RealtimeSessionScope | null {
+    return this.#scope;
+  }
+
+  prepare(input: {
+    readonly after: string;
+    readonly userId: string;
+    readonly workspaceId: string;
+  }): RealtimeSessionScope {
+    const recovery = this.#pendingAuthoritativeRecovery;
+    const preserveRecovery =
+      recovery !== null &&
+      recovery.scope.userId === input.userId &&
+      recovery.scope.workspaceId === input.workspaceId &&
+      BigInt(input.after) <= BigInt(recovery.cursor);
+    this.#retireTransport(!preserveRecovery, false);
+    if (this.#sessionEpoch >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Realtime session epoch is exhausted");
+    }
+    const scope = Object.freeze({
+      userId: input.userId,
+      workspaceId: input.workspaceId,
+      epoch: ++this.#sessionEpoch,
+    });
+    this.#scope = scope;
+    this.#cursor = input.after;
+    this.#stopped = true;
+    this.#windowless = false;
+    this.#rendererDeliveryReady = false;
+    this.#incompatible = false;
+    return scope;
+  }
+
+  activate(candidate: RealtimeSessionScope): boolean {
+    const scope = this.#scope;
+    if (scope === null || !sameRealtimeScope(scope, candidate)) {
+      this.#onDrop("stale-activation");
+      return false;
+    }
+    if (!this.#stopped) return true;
     this.#windowless = false;
     this.#rendererDeliveryReady = true;
+    if (this.#pendingAuthoritativeRecovery !== null) {
+      return this.#deliverPendingAuthoritativeRecovery();
+    }
+    this.#beginEpoch(this.#cursor, scope);
+    return true;
+  }
+
+  /** Compatibility entrypoint for the pre-epoch window lifecycle. */
+  start(after: string, expectedScope: WorkspaceRealtimeScope): boolean {
+    const current = this.#scope;
     const recovery = this.#pendingAuthoritativeRecovery;
-    if (recovery !== null) {
-      if (this.#sameScope(recovery.scope, expectedScope)) {
-        if (BigInt(after) > BigInt(recovery.cursor)) {
-          // A newer durable renderer cursor proves the authoritative HTTP recovery completed. Only
-          // that explicit progress consumes the latch and permits a new socket; reconnecting from
-          // the cursor that overflowed would deterministically overflow again.
-          this.#pendingAuthoritativeRecovery = null;
-          this.#beginEpoch(after, expectedScope);
-          return true;
-        }
-        return this.#deliverPendingAuthoritativeRecovery();
+    if (recovery !== null && this.#sameScope(recovery.scope, expectedScope)) {
+      if (BigInt(after) > BigInt(recovery.cursor)) {
+        this.#pendingAuthoritativeRecovery = null;
+      } else {
+        const scope =
+          current ??
+          this.prepare({
+            after,
+            userId: expectedScope.userId,
+            workspaceId: expectedScope.workspaceId,
+          });
+        this.#rendererDeliveryReady = true;
+        this.#windowless = false;
+        return this.activate(scope);
       }
-      // Starting another signed-in scope is a definitive replacement. Its renderer must never
-      // receive a control event retained for the previous user or workspace.
-      this.#pendingAuthoritativeRecovery = null;
     }
 
-    if (!this.#stopped && this.#scope !== null && this.#sameScope(this.#scope, expectedScope)) {
-      if (wasWindowless) {
-        // Windowless delivery observes events for native attention only. It never advances the
-        // renderer-owned cursor, so restart from the durable cursor supplied after HTTP catch-up.
-        // Replaying a frame that raced that catch-up is safe and avoids an unobservable UI gap.
-        this.#beginEpoch(after, expectedScope);
-        return true;
+    if (current !== null && this.#sameScope(current, expectedScope) && !this.#stopped) {
+      if (this.#windowless) {
+        this.#rendererDeliveryReady = true;
+        this.#windowless = false;
+        this.#beginEpoch(after, current);
+      } else {
+        this.acknowledge(after);
       }
-      this.acknowledge(after);
       return true;
     }
 
-    this.#beginEpoch(after, expectedScope);
-    return true;
+    const scope = this.prepare({
+      after,
+      userId: expectedScope.userId,
+      workspaceId: expectedScope.workspaceId,
+    });
+    return this.activate(scope);
   }
 
   /** Invalidates delivery readiness without treating a renderer reload as a signed-out scope. */
@@ -164,14 +250,35 @@ export class WorkspaceRealtime {
       return;
     }
 
-    this.#beginEpoch(this.#cursor, expectedScope);
+    const scope =
+      this.#scope ??
+      this.prepare({
+        after: this.#cursor,
+        userId: expectedScope.userId,
+        workspaceId: expectedScope.workspaceId,
+      });
+    this.#beginEpoch(this.#cursor, scope);
   }
 
-  acknowledge(cursor: string): void {
-    if (BigInt(cursor) > BigInt(this.#cursor)) this.#cursor = cursor;
+  acknowledge(input: RealtimeAcknowledgement | string): void {
+    if (typeof input !== "string") {
+      if (this.#scope === null || !sameRealtimeScope(this.#scope, input.scope)) {
+        this.#onDrop("stale-control");
+        return;
+      }
+      input = input.cursor;
+    }
+    if (BigInt(input) > BigInt(this.#cursor)) this.#cursor = input;
   }
 
-  stop(): void {
+  stop(candidate?: RealtimeSessionScope): void {
+    if (
+      candidate !== undefined &&
+      (this.#scope === null || !sameRealtimeScope(this.#scope, candidate))
+    ) {
+      this.#onDrop("stale-control");
+      return;
+    }
     this.#stopTransport(false);
   }
 
@@ -181,8 +288,13 @@ export class WorkspaceRealtime {
   }
 
   #stopTransport(clearRecovery: boolean): void {
+    this.#retireTransport(clearRecovery, true);
+  }
+
+  #retireTransport(clearRecovery: boolean, announceOffline: boolean): void {
     this.#epoch += 1;
     this.#stopped = true;
+    this.#incompatible = false;
     this.#scope = null;
     this.#rendererDeliveryReady = false;
     this.#windowless = false;
@@ -194,15 +306,16 @@ export class WorkspaceRealtime {
     this.#connection = null;
     if (connection !== null) this.#closeSocket(connection.socket);
 
-    this.#deliverState("offline");
+    if (announceOffline) this.#deliverState("offline");
   }
 
-  #beginEpoch(after: string, expectedScope: WorkspaceRealtimeScope): void {
+  #beginEpoch(after: string, expectedScope: RealtimeSessionScope): void {
     this.#epoch += 1;
     const epoch = this.#epoch;
     this.#stopped = false;
+    this.#incompatible = false;
     this.#cursor = after;
-    this.#scope = { ...expectedScope };
+    this.#scope = expectedScope;
     this.#ticketEpoch = null;
     this.#delayMs = INITIAL_RECONNECT_DELAY_MS;
     this.#clearReconnectTimer();
@@ -221,18 +334,24 @@ export class WorkspaceRealtime {
     }
 
     this.#ticketEpoch = epoch;
-    let ticket: Awaited<ReturnType<WorkspaceTransport["ticket"]>>;
+    let ticket: RealtimeTicketResponse;
     try {
       ticket = await this.#transport.ticket();
     } catch (error) {
-      if (!this.#ownsTicketRequest(epoch)) return;
+      if (!this.#ownsTicketRequest(epoch)) {
+        this.#onDrop("late-ticket");
+        return;
+      }
       this.#ticketEpoch = null;
       reportMainProcessError("Could not obtain a realtime ticket", error);
       this.#scheduleReconnect(epoch);
       return;
     }
 
-    if (!this.#ownsTicketRequest(epoch)) return;
+    if (!this.#ownsTicketRequest(epoch)) {
+      this.#onDrop("late-ticket");
+      return;
+    }
     this.#ticketEpoch = null;
 
     const url = new URL("/v1/realtime", this.#apiOrigin);
@@ -253,13 +372,16 @@ export class WorkspaceRealtime {
       return;
     }
 
-    if (!this.#isCurrentEpoch(epoch) || this.#connection !== null) {
+    const scope = this.#scope;
+    if (!this.#isCurrentEpoch(epoch) || scope === null || this.#connection !== null) {
+      this.#onDrop("stale-socket");
       this.#closeSocket(socket);
       return;
     }
 
     const connection: ActiveConnection = {
       epoch,
+      scope,
       socket,
       pendingReplay: [],
       pendingReplayBytes: 0,
@@ -287,7 +409,10 @@ export class WorkspaceRealtime {
   }
 
   #handleMessage(connection: ActiveConnection, data: RawData): void {
-    if (!this.#isActiveConnection(connection)) return;
+    if (!this.#isActiveConnection(connection)) {
+      this.#onDrop("stale-socket");
+      return;
+    }
 
     const serialized = data.toString();
     const frameBytes = Buffer.byteLength(serialized);
@@ -304,9 +429,27 @@ export class WorkspaceRealtime {
       return;
     }
 
-    const parsed = productRealtimeEventSchema.safeParse(input);
-    if (!parsed.success || !this.#matchesExpectedScope(parsed.data)) {
+    const envelope = realtimeEventEnvelopeSchema.safeParse(input);
+    if (!envelope.success) {
       this.#rejectInvalidEvent(connection);
+      return;
+    }
+    if (envelope.data.workspaceId !== connection.scope.workspaceId) {
+      this.#failIncompatible(connection, "wrong-workspace");
+      return;
+    }
+    const parsed = productRealtimeEventSchema.safeParse(input);
+    if (!parsed.success) {
+      // A structurally valid event from a newer server is optional to this client. It remains in
+      // the durable stream for a future version, but does not make this socket unusable.
+      this.#onDrop("unsupported-event");
+      return;
+    }
+    if (
+      parsed.data.type === "system.connected" &&
+      parsed.data.payload.userId !== connection.scope.userId
+    ) {
+      this.#failIncompatible(connection, "wrong-user");
       return;
     }
 
@@ -371,7 +514,10 @@ export class WorkspaceRealtime {
     }
 
     try {
-      if (!this.#rendererDeliveryReady || !this.#onEvent(event)) {
+      if (
+        !this.#rendererDeliveryReady ||
+        !this.#onEvent({ scope: connection.scope, event })
+      ) {
         // No durable renderer acknowledgement can follow a frame that did not cross the current
         // subscribed renderer boundary. Pause instead of reconnecting: the next explicit renderer
         // start follows HTTP catch-up and supplies the replica's durable cursor.
@@ -387,17 +533,27 @@ export class WorkspaceRealtime {
     }
   }
 
-  #matchesExpectedScope(event: ProductRealtimeEvent): boolean {
-    const scope = this.#scope;
-    if (scope === null || event.workspaceId !== scope.workspaceId) return false;
-    return event.type !== "system.connected" || event.payload.userId === scope.userId;
-  }
-
   #rejectInvalidEvent(connection: ActiveConnection): void {
     if (!this.#isActiveConnection(connection)) return;
     // Never include the rejected frame in logs: it can contain message or identity data.
+    this.#onDrop("invalid-envelope");
     reportMainProcessError("Rejected an invalid realtime event");
     this.#retireConnection(connection, true, INVALID_EVENT_CLOSE_CODE, INVALID_EVENT_CLOSE_REASON);
+  }
+
+  #failIncompatible(
+    connection: ActiveConnection,
+    reason: Extract<RealtimeDropReason, "wrong-user" | "wrong-workspace" | "invalid-envelope">,
+  ): void {
+    if (!this.#isActiveConnection(connection)) {
+      this.#onDrop("stale-socket");
+      return;
+    }
+    this.#onDrop(reason);
+    this.#incompatible = true;
+    this.#connection = null;
+    this.#closeSocket(connection.socket, INVALID_EVENT_CLOSE_CODE, "Incompatible realtime event");
+    this.#deliverState("incompatible");
   }
 
   #requireAuthoritativeRecovery(connection: ActiveConnection, occurredAt: string): void {
@@ -475,7 +631,8 @@ export class WorkspaceRealtime {
     if (recovery === null) return true;
     if (!this.#rendererDeliveryReady) return false;
     try {
-      if (!this.#onEvent(recovery.event)) {
+      const scope = this.#scope;
+      if (scope === null || !this.#onEvent({ scope, event: recovery.event })) {
         this.#rendererDeliveryReady = false;
         return false;
       }
@@ -567,14 +724,27 @@ export class WorkspaceRealtime {
   }
 
   #isCurrentEpoch(epoch: number): boolean {
-    return !this.#stopped && this.#epoch === epoch;
+    return !this.#stopped && !this.#incompatible && this.#epoch === epoch;
   }
 
   #isActiveConnection(connection: ActiveConnection): boolean {
-    return this.#connection === connection && this.#isCurrentEpoch(connection.epoch);
+    return (
+      this.#connection === connection &&
+      this.#scope !== null &&
+      sameRealtimeScope(this.#scope, connection.scope) &&
+      this.#isCurrentEpoch(connection.epoch)
+    );
   }
 
   #sameScope(left: WorkspaceRealtimeScope, right: WorkspaceRealtimeScope): boolean {
     return left.userId === right.userId && left.workspaceId === right.workspaceId;
   }
+}
+
+function sameRealtimeScope(left: RealtimeSessionScope, right: RealtimeSessionScope): boolean {
+  return (
+    left.epoch === right.epoch &&
+    left.userId === right.userId &&
+    left.workspaceId === right.workspaceId
+  );
 }

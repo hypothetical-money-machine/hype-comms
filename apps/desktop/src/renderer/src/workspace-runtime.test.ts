@@ -31,8 +31,10 @@ import type {
   ProductRealtimeEvent,
   Reaction,
   ReactionEmoji,
+  RealtimeAcknowledgement,
   RemoveReactionResponse,
   RealtimeConnectionState,
+  RealtimeSessionScope,
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
@@ -46,6 +48,7 @@ import type {
   HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
   WorkspaceEvent,
+  ScopedProductRealtimeEvent,
 } from "@hmm-chat/contracts";
 
 import type {
@@ -950,17 +953,22 @@ class FakeDesktopApi implements DesktopApi {
     readonly conversationId: string;
     readonly lastReadMessageId: string;
   }[] = [];
-  readonly #eventListeners = new Set<(event: ProductRealtimeEvent) => void>();
+  readonly #eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
   readonly #notificationListeners = new Set<(action: NotificationAction) => void>();
+  #preparedRealtimeScope: RealtimeSessionScope | null = null;
+  #activeRealtimeScope: RealtimeSessionScope | null = null;
+  #nextRealtimeEpoch = 0;
 
   constructor(bootstrap: HumanWorkspaceBootstrapResponse) {
     this.bootstrap = bootstrap;
   }
 
   emitWorkspaceEvent(event: ProductRealtimeEvent): void {
-    for (const listener of this.#eventListeners) listener(event);
+    const scope = this.#activeRealtimeScope;
+    if (scope === null) return;
+    for (const listener of this.#eventListeners) listener({ scope, event });
   }
 
   emitRealtimeState(state: RealtimeConnectionState): void {
@@ -1297,21 +1305,39 @@ class FakeDesktopApi implements DesktopApi {
     });
   }
 
-  async startWorkspaceRealtime(after: string): Promise<void> {
+  async startWorkspaceRealtime(after: string): Promise<RealtimeSessionScope> {
     this.startedCursors.push(after);
+    const scope = Object.freeze({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      epoch: ++this.#nextRealtimeEpoch,
+    });
+    this.#preparedRealtimeScope = scope;
+    return scope;
+  }
+
+  async activateWorkspaceRealtime(scope: RealtimeSessionScope): Promise<void> {
+    if (this.#preparedRealtimeScope?.epoch !== scope.epoch) {
+      throw new Error("The fake realtime scope was superseded");
+    }
+    this.#activeRealtimeScope = scope;
     // The real server reports the connection live once its first flush drains and sends the resync
     // demand from a later flush on that same socket, then closes it, so the client sees both.
-    if (this.connectedOnStart) this.emitWorkspaceEvent(connectedAt(after));
+    if (this.connectedOnStart) this.emitWorkspaceEvent(connectedAt(this.startedCursors.at(-1) ?? "0"));
     if (this.resyncOnStart) this.emitWorkspaceEvent(resyncRequired);
   }
 
-  async stopWorkspaceRealtime(): Promise<void> {
+  async stopWorkspaceRealtime(scope?: RealtimeSessionScope): Promise<void> {
     this.stopRequests += 1;
+    if (scope === undefined || this.#activeRealtimeScope?.epoch === scope.epoch) {
+      this.#activeRealtimeScope = null;
+      this.#preparedRealtimeScope = null;
+    }
     await this.stopResults.shift();
   }
 
-  async acknowledgeWorkspaceEvent(cursor: string): Promise<void> {
-    this.acknowledged.push(cursor);
+  async acknowledgeWorkspaceEvent(input: RealtimeAcknowledgement): Promise<void> {
+    this.acknowledged.push(input.cursor);
   }
 
   async getRealtimeState(): Promise<RealtimeConnectionState> {
@@ -1323,7 +1349,7 @@ class FakeDesktopApi implements DesktopApi {
     return () => this.#connectionListeners.delete(listener);
   }
 
-  onWorkspaceEvent(listener: (event: ProductRealtimeEvent) => void): () => void {
+  onWorkspaceEvent(listener: (frame: ScopedProductRealtimeEvent) => void): () => void {
     this.#eventListeners.add(listener);
     return () => this.#eventListeners.delete(listener);
   }

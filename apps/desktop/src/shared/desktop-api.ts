@@ -37,8 +37,10 @@ import type {
   NotificationState,
   ReactionEmoji,
   RemoveReactionResponse,
-  ProductRealtimeEvent,
+  RealtimeAcknowledgement,
   RealtimeConnectionState,
+  RealtimeSessionScope,
+  ScopedProductRealtimeEvent,
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
@@ -209,12 +211,15 @@ export interface DesktopApi
     lastReadMessageId: string,
   ) => Promise<AdvanceReadCursorResponse>;
   readonly syncWorkspace: (after: string) => Promise<SyncAttemptResult>;
-  readonly startWorkspaceRealtime: (after: string) => Promise<void>;
-  readonly stopWorkspaceRealtime: () => Promise<void>;
-  readonly acknowledgeWorkspaceEvent: (cursor: string) => Promise<void>;
+  /** Prepares and returns a scope without opening a socket. */
+  readonly startWorkspaceRealtime: (after: string) => Promise<RealtimeSessionScope>;
+  /** Opens the socket only after the renderer has installed the prepared scope. */
+  readonly activateWorkspaceRealtime: (scope: RealtimeSessionScope) => Promise<void>;
+  readonly stopWorkspaceRealtime: (scope?: RealtimeSessionScope) => Promise<void>;
+  readonly acknowledgeWorkspaceEvent: (input: RealtimeAcknowledgement) => Promise<void>;
   readonly getRealtimeState: () => Promise<RealtimeConnectionState>;
   readonly onRealtimeStateChanged: (
     listener: (state: RealtimeConnectionState) => void,
   ) => () => void;
-  readonly onWorkspaceEvent: (listener: (event: ProductRealtimeEvent) => void) => () => void;
+  readonly onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => () => void;
 }

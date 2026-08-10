@@ -35,6 +35,8 @@ import {
   notificationContextSchema,
   notificationPreferenceSchema,
   notificationStateSchema,
+  realtimeAcknowledgementSchema,
+  realtimeSessionScopeSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -47,6 +49,7 @@ import {
   type NotificationContext,
   type NotificationState,
   type ProductRealtimeEvent,
+  type ScopedProductRealtimeEvent,
   type ThemeState,
   type UpdateState,
 } from "@hmm-chat/contracts";
@@ -397,9 +400,9 @@ function evaluateWorkspaceNotification(event: ProductRealtimeEvent): void {
   }
 }
 
-function deliverWorkspaceEvent(event: ProductRealtimeEvent): boolean {
-  evaluateWorkspaceNotification(event);
-  return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, event);
+function deliverWorkspaceEvent(frame: ScopedProductRealtimeEvent): boolean {
+  evaluateWorkspaceNotification(frame.event);
+  return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, frame);
 }
 
 function observeWindowlessWorkspaceEvent(event: ProductRealtimeEvent): void {
@@ -1275,19 +1278,32 @@ function registerIpcHandlers(): void {
     if (state?.status !== "signed-in" || state.method !== "email") {
       throw new Error("A signed-in member session is required for realtime");
     }
-    const accepted = workspaceRealtime?.start(sequenceSchema.parse(after), {
+    if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
+    return workspaceRealtime.prepare({
+      after: sequenceSchema.parse(after),
       userId: state.userId,
       workspaceId: state.workspaceId,
     });
-    if (accepted === false) {
-      throw new Error("Workspace realtime recovery delivery is waiting for a ready renderer");
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeActivate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeActivate, (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime activation sender");
+    if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
+    const scope = realtimeSessionScopeSchema.parse(value);
+    if (!workspaceRealtime.activate(scope)) {
+      throw new Error("The realtime scope was superseded before activation");
     }
     macWindowlessRealtimeActive = false;
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStop);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStop, (event) => {
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStop, (event, value: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime stop sender");
+    if (value !== undefined) {
+      workspaceRealtime?.stop(realtimeSessionScopeSchema.parse(value));
+      return;
+    }
     if (macWindowlessRealtimeActive) {
       const state = chatSession?.state;
       if (state?.status === "signed-in" && state.method === "email") {
@@ -1303,9 +1319,9 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge, (event, cursor: unknown) => {
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge, (event, value: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime acknowledgement sender");
-    workspaceRealtime?.acknowledge(sequenceSchema.parse(cursor));
+    workspaceRealtime?.acknowledge(realtimeAcknowledgementSchema.parse(value));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.realtimeStateGet);
