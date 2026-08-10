@@ -749,6 +749,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    const authorizedConversationIds = new Set(
+      parsed.conversations.map((summary) => summary.conversation.id),
+    );
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
     const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
     const parsedTasks = tasks.map((task) => taskSchema.parse(task));
@@ -777,6 +780,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.messages,
         this.#database.reactions,
         this.#database.tasks,
+        this.#database.outbox,
         this.#database.events,
       ],
       async () => {
@@ -789,12 +793,16 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         ) {
           throw new Error("Authoritative snapshot predates the membership repair marker");
         }
+        const revokedOutboxIds = (await this.#database.outbox.toArray())
+          .filter((row) => !authorizedConversationIds.has(row.conversationId))
+          .map((row) => row.clientMessageId);
         await Promise.all([
           this.#database.workspaces.clear(),
           this.#database.conversations.clear(),
           this.#database.messages.clear(),
           this.#database.reactions.clear(),
           this.#database.tasks.clear(),
+          this.#database.outbox.bulkDelete(revokedOutboxIds),
           this.#database.events.clear(),
         ]);
         await this.#database.workspaces.put({
@@ -1518,6 +1526,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    const authorizedConversationIds = new Set(
+      parsed.conversations.map((summary) => summary.conversation.id),
+    );
+    const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
+    const parsedTasks = tasks.map((task) => taskSchema.parse(task));
+    const conversationIds = new Map(
+      parsedMessages.map((message) => [message.id, message.conversationId] as const),
+    );
     signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
@@ -1529,23 +1546,19 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#currentUserId = parsed.currentUser.user.id;
     this.#members = parsed.members;
     this.#messages.clear();
-    for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
+    for (const message of parsedMessages) this.#messages.set(message.id, message);
     this.#reactions.clear();
     this.#reactionConversationIds.clear();
-    const conversationIds = new Map(
-      messages.map((message) => [message.id, message.conversationId] as const),
-    );
-    for (const reaction of reactions) {
-      const parsedReaction = reactionSchema.parse(reaction);
-      const conversationId = conversationIds.get(parsedReaction.messageId);
+    for (const reaction of parsedReactions) {
+      const conversationId = conversationIds.get(reaction.messageId);
       if (conversationId === undefined) continue;
-      this.#reactions.set(parsedReaction.id, parsedReaction);
-      this.#reactionConversationIds.set(parsedReaction.id, conversationId);
+      this.#reactions.set(reaction.id, reaction);
+      this.#reactionConversationIds.set(reaction.id, conversationId);
     }
     this.#tasks.clear();
-    for (const task of tasks) {
-      const parsedTask = taskSchema.parse(task);
-      this.#tasks.set(parsedTask.id, parsedTask);
+    for (const task of parsedTasks) this.#tasks.set(task.id, task);
+    for (const [id, item] of this.#outbox) {
+      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
     }
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();

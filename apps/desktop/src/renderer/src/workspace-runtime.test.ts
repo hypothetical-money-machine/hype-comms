@@ -518,6 +518,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
     const [snapshot, messages, reactions = [], tasks = [], signal] = args;
+    const authorizedConversationIds = new Set(
+      snapshot.conversations.map((summary) => summary.conversation.id),
+    );
     signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
@@ -533,6 +536,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
     for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     this.#tasks.clear();
     for (const task of tasks) this.#tasks.set(task.id, task);
+    for (const [id, item] of this.#outbox) {
+      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
+    }
     this.#syncCursor = snapshot.syncCursor;
     this.#repairMarker = null;
   }
@@ -3333,8 +3339,21 @@ describe("WorkspaceRuntime", () => {
       nextCursor: null,
     });
     const cache = new FakeWorkspaceCache();
+    const queuedSecondRemovalId = "20000000-0000-4000-8000-000000000059";
+    await cache.enqueue(
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    );
+    await cache.updateOutbox(queuedSecondRemovalId, {
+      status: "permanent_failure",
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: "offline",
+    });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
+    expect(runtime.state.outbox.map((item) => item.operation.conversationId)).toContain(
+      thirdConversationId,
+    );
 
     const staleFirstRefresh = deferred<HumanWorkspaceBootstrapResponse>();
     api.bootstrapResults.push(
@@ -3363,6 +3382,10 @@ describe("WorkspaceRuntime", () => {
     );
     expect(runtime.state.messages).not.toContainEqual(secondMessage);
     expect((await cache.load()).messages).toContainEqual(secondMessage);
+    expect(runtime.state.outbox).toEqual([]);
+    expect((await cache.load()).outbox.map((item) => item.operation.conversationId)).toContain(
+      thirdConversationId,
+    );
 
     staleFirstRefresh.resolve(
       bootstrapAt("11", {
@@ -3384,7 +3407,10 @@ describe("WorkspaceRuntime", () => {
       CONVERSATION_ID,
     ]);
     expect(durable.messages).toEqual([]);
+    expect(durable.outbox).toEqual([]);
     expect(runtime.state.messages).toEqual([]);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(api.sent).toEqual([]);
     expect(runtime.state.error).toBeNull();
   });
 

@@ -321,6 +321,19 @@ const queuedAlphaMessage: SendMessageOperation = {
   },
 };
 
+const queuedDirectMessage: SendMessageOperation = {
+  conversationId: DIRECT_ID,
+  idempotencyKey: "10000000-0000-4000-8000-000000000070",
+  message: {
+    threadRootId: null,
+    body: "Must survive an unrelated membership repair",
+    bodyFormat: "hmm_markdown_v1",
+    clientMessageId: "10000000-0000-4000-8000-000000000070",
+    mentionedUserIds: [],
+    attachmentIds: [],
+  },
+};
+
 /** One more than `workspaceSnapshotSchema.members`'s `.max(25)` — the list that bricks `load()`. */
 const overCapacityMembers: readonly User[] = Array.from({ length: 26 }, (_unused, index) => {
   const suffix = String(index).padStart(2, "0");
@@ -691,6 +704,28 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       conversationId: ALPHA_ID,
       selfRemoval: false,
     });
+  });
+
+  it("prunes only outbox rows outside an authoritative conversation catalog", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    await cache.enqueue(queuedDirectMessage, "2026-07-24T12:00:01.000Z");
+
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: snapshot.conversations.filter(
+          (summary) => summary.conversation.id !== ALPHA_ID,
+        ),
+        syncCursor: "12",
+      },
+      [],
+    );
+
+    expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([
+      queuedDirectMessage,
+    ]);
   });
 
   it("leaves an existing snapshot unchanged when its replacement generation is aborted", async () => {
