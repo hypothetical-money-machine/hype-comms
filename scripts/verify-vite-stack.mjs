@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import semver from "semver";
 
-export const EXPECTED_VITE_VERSION = "8.1.5";
+export const EXPECTED_VITE_VERSION = "8.2.1";
 
 const vitePackagePathPattern = /(?:^|\/)node_modules\/vite$/u;
 
