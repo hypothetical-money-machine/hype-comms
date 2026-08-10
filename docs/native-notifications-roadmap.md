@@ -1,15 +1,16 @@
 # Native notifications roadmap
 
-Status: Milestone 0 contract accepted. The Milestone 1 DM/verified-mention slice and Milestone 2
-preference/capability surfaces are implemented behind a default-off build flag, but their exit
-gates are not yet complete. The isolated DM capture/click proof and renderer settings evidence now
-pass, including recovery from a failed initial workspace bootstrap. Participated-thread
-notifications (Milestone 3) and packaged cross-platform evidence (Milestone 4) remain
-unimplemented. [architecture.md](architecture.md) and
-[ADR 0002](adr/0002-native-notification-boundary.md) are the implementation and security contract.
-This roadmap sequences the remaining proof and rollout work and does not override those documents.
+Status: implementation Milestones 0 through 3 are complete behind default-off build and device
+settings. Deterministic suites cover the DM, verified-mention, and participated-thread reasons;
+replica-first macOS window recreation; strict click-through; preferences; and headless capture.
+Milestone 4 remains open: no installed operating-system notification evidence exists, and neither
+the build nor device default may flip before the complete external host matrix passes.
+[architecture.md](architecture.md) and [ADR 0002](adr/0002-native-notification-boundary.md) are the
+implementation and security contract. This roadmap sequences the remaining proof and rollout work
+and does not override those documents.
 
-Tracking issue: [#42](https://github.com/hype-comms/hmm-chat/issues/42).
+Tracking issue: [#42](https://github.com/hype-comms/hmm-chat/issues/42) remains open
+for Milestone 4 evidence and the eventual default decision.
 
 ## Outcome
 
@@ -38,7 +39,7 @@ count, mention count, sync cursor, or encrypted replica.
 
 ## Current position
 
-The default-off DM/verified-mention implementation now includes:
+The default-off notification implementation now includes:
 
 - generation- and scope-safe realtime delivery, fail-closed invalid-frame handling, and
   membership-revocation repair before durable renderer acknowledgement;
@@ -49,9 +50,15 @@ The default-off DM/verified-mention implementation now includes:
   schemas with sender and byte-bound checks in main and preload;
 - device-local atomic preferences, separate support and OS-permission state, and renderer settings;
 - exact, scope-bound `open-message` navigation with authorized by-ID hydration and a
-  renderer-initiated ready/drain handshake plus exact post-navigation acknowledgement; and
+  renderer-initiated ready/drain handshake plus exact post-navigation acknowledgement;
 - an unpackaged headless capture presenter that records only an opaque capture ID and eligibility
-  reason, then exercises the normal click path through a headless-only activation bridge.
+  reason, then exercises the normal click path through a headless-only activation bridge;
+- a capability-gated, recipient-specific participated-thread reason frozen by the server and
+  consumed after verified-mention and direct-message precedence;
+- macOS windowless notification observation separated from renderer delivery, followed by
+  replica-first HTTP catch-up and a fresh realtime epoch when a window is recreated; and
+- Windows AppUserModelID configuration matching the packaged application ID before the first
+  `BrowserWindow` is created.
 
 This is not a user rollout or a completed roadmap item. `HMM_NATIVE_NOTIFICATIONS_ENABLED` is a
 build-time switch: unset or `0` compiles presentation off and `1` includes the controller. Even in
@@ -59,11 +66,15 @@ an enabled build, the persisted device preference defaults to disabled and body 
 off. Ordinary demos clear the switch; the isolated headless demo pins it on and selects capture,
 never the Electron native presenter.
 
-Closing the last macOS window still stops realtime until the windowless catch-up contract is
-proven; Windows and Linux retain last-window quit behavior. Participated-thread eligibility still
-needs a capability-gated recipient-specific server reason. Remaining multi-client scenarios,
-installed native interaction, and the full packaged platform matrix must pass before pilot/default
-rollout. Tracking issue #42 therefore remains open.
+In a flag-enabled macOS build, closing the last window keeps only notification observation alive;
+it does not deliver or buffer renderer events or advance the renderer-owned cursor. A recreated
+renderer catches up from its encrypted replica cursor before an authoritative snapshot, final HTTP
+sync, and a new realtime epoch. Default-off macOS builds retain the conservative realtime-stop
+fallback. Windows and Linux retain last-window stop-and-quit behavior.
+
+The remaining gate is installed native behavior across current and previous supported macOS on
+arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and
+Debian packages. Existing package smoke and headless screenshots do not satisfy that gate.
 
 ## Product policy
 
@@ -78,7 +89,7 @@ override reason precedence.
 | --- | --- |
 | Incoming message in a direct conversation | Notify |
 | Incoming message that explicitly mentions the signed-in user | Notify |
-| Reply to a thread the user started or previously replied to | Milestone 3 |
+| Reply carrying the server's recipient-specific participated-thread reason | Notify |
 | Ordinary channel message without a verified mention | Do not notify |
 | Reaction, task, membership, read-cursor, or system event | Do not notify |
 | Message authored by the signed-in user | Suppress |
@@ -131,15 +142,23 @@ This deliberately favors calm, duplicate-free behavior over alerting for a messa
 during a disconnect. A later catch-up summary may cover that gap, but replaying one toast per event
 is not an acceptable fallback.
 
-Keeping realtime alive without a renderer on macOS requires an explicit transport contract.
-Notification progress may let main continue consuming the current connection, but it cannot
-acknowledge durable UI work. On window creation, renderer sync must restart from the encrypted
-replica cursor, complete HTTP catch-up, and then attach to realtime. The ADR and integration tests
-must prove that this mode cannot skip UI history or turn notification progress into a durable
-acknowledgement. Until that gate passes, closing the last macOS window must stop realtime rather
-than silently drop events.
+The implemented flag-enabled macOS transport keeps a distinct notification-observer path alive
+without a renderer. It never emits renderer IPC, buffers no UI frames, and cannot advance or
+acknowledge the renderer-owned durable cursor. Window creation does not make `did-finish-load` a
+delivery boundary. The renderer first completes `/sync` from the encrypted replica cursor, commits
+the authoritative snapshot, completes final HTTP catch-up, and then opens a new realtime epoch from
+that durable cursor. A retryable catch-up attaches no realtime connection until it succeeds.
 
-The current fallback also bounds replay held before `system.connected` to 1,024 events and 4 MiB.
+A windowless `system.resync_required` closes and latches body-free recovery rather than reconnecting
+forever from a cursor the server rejected. The recreated renderer receives that control, performs
+authoritative recovery, and only a strictly newer durable cursor consumes the latch and restarts
+once. The deterministic [main transport](../apps/desktop/src/main/workspace-realtime.test.ts) and
+[renderer recovery](../apps/desktop/src/renderer/src/workspace-runtime.test.ts) suites prove that
+windowless observation cannot become UI acknowledgement or cross into a recreated-but-not-ready
+renderer. Default-off macOS builds retain last-window realtime stop; Windows and Linux retain
+last-window stop-and-quit behavior.
+
+The transport also bounds replay held before `system.connected` to 1,024 events and 4 MiB.
 Overflow closes the socket, drops the message-bearing buffer, and retains only a scope-bound,
 body-free recovery control. A subscribed renderer receives that control through its explicit
 realtime-start handshake; the socket remains stopped until authoritative HTTP recovery supplies a
@@ -153,7 +172,7 @@ claiming the event was applied.
 - Notifications are device-local and enabled only when the operating system supports them.
 - Message-body preview is off by default. The notification shows bounded author and conversation
   labels only.
-- A later explicit device setting may enable a body preview sourced from the canonical event; raw
+- A separate explicit device setting may enable a body preview sourced from the canonical event; raw
   renderer-provided body text must not become a generic main-process notification capability.
 - Notification bodies, message bodies, author labels, conversation labels, and target IDs must not
   be written to production logs or metrics.
@@ -230,7 +249,7 @@ The boundary has these responsibilities:
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| Server/contracts | Message authorization, verified mention IDs, durable audience, future thread reason | Device focus or OS notification state |
+| Server/contracts | Message authorization, verified mention IDs, durable audience, capability-gated recipient thread reason | Device focus or OS notification state |
 | Main realtime session | Strict frame validation, current user/workspace/generation, freshness boundary | Renderer read state or claiming notification handling is UI commit |
 | Main notification | Pure policy, labels, ephemeral watermark, settings, focus/headless guard, presenter, queue | Parsing body text for mentions or exposing generic title/body IPC |
 | Preload | Strict action/activity schemas, bounded ready/drain/ack bridge | Native presentation or persistent notification state |
@@ -244,7 +263,7 @@ recoverable disconnects and invalid-frame reconnects. Clear the whole scope only
 sign-out, user/workspace replacement, and shutdown. A conversation-membership removal immediately
 closes and purges that conversation's notifications and actions, blocks new ones, and stays blocked
 until an authoritative catalog refresh confirms access. Thread participation does not belong in
-this local cache; the server must eventually send a recipient-specific reason.
+this local cache; the server freezes and sends the capability-gated recipient-specific reason.
 
 Notification evaluation and native presentation are outside the renderer sync acknowledgement
 critical path. Failure, denial, or delay in the notification controller must never reject event
@@ -256,9 +275,9 @@ whether it is eligible, suppressed, unsupported, denied, or fails during present
 controller advances its own watermark after the policy decision and presentation attempt, never as
 a retry signal and never as a renderer acknowledgement.
 
-Every new IPC payload gets a strict Zod schema, a size bound, trusted-sender validation where the
-renderer invokes main, and tests in main and preload. The existing handwritten action validator
-should be replaced rather than extended.
+Every notification IPC payload has a strict Zod schema, a size bound, trusted-sender validation
+where the renderer invokes main, and tests in main and preload. The former handwritten action
+validator has been replaced rather than extended.
 
 ### Resource and lifecycle bounds
 
@@ -283,7 +302,12 @@ should be replaced rather than extended.
 
 ## Delivery roadmap
 
+Implementation Milestones 0 through 3 are complete and retained below as the accepted delivery
+record. Milestone 4 is open and is the only remaining notification rollout/default gate.
+
 ### Milestone 0: lock the contract
+
+Status: complete.
 
 Goal: remove policy ambiguity before native side effects exist.
 
@@ -294,17 +318,21 @@ Deliverables:
 - record the main/renderer split, windowless realtime contract, live-event freshness boundary,
   privacy default, and action scope in an ADR;
 - define strict notification activity, state, preference, and action schemas;
-- stop realtime on last-window close until the macOS windowless catch-up contract is proven;
+- retain last-window realtime stop until the macOS windowless catch-up contract is proven, then
+  allow only the separated observer path in explicit flag-enabled builds;
 - define the exact focused/visible rule using renderer activity context plus authoritative
   `BrowserWindow` state;
 - write the pure eligibility-policy test table before integration; and
-- define separate device preference, native support, and OS permission fields after a small
-  packaged capability spike on macOS, Windows, Linux AppImage, and the Ubuntu Debian package.
+- define separate device preference, native support, and OS permission fields. Electron 43 exposes
+  portable native-support detection but no portable permission query, so permission can remain
+  `unknown`; installed denial behavior is observed only where the host exposes it in Milestone 4.
 
-Exit gate: all behavior in the Product policy section maps to an unambiguous test case, and no
-schema exposes a generic title/body/action notification primitive to the renderer.
+Completed exit evidence: all behavior in the Product policy section maps to an unambiguous test
+case, and no schema exposes a generic title/body/action notification primitive to the renderer.
 
 ### Milestone 1: direct-message and mention vertical slice
+
+Status: complete behind the default-off build and device settings.
 
 Goal: implement and prove the smallest complete attention loop on the prerequisite session and
 sync boundaries.
@@ -339,17 +367,19 @@ Deliverables:
 - default to metadata-only notification content.
 
 The Milestone 1 implementation remains behind the default-off build switch described in
-[operations.md](operations.md). Milestone 2's durable preference and capability surfaces are now
-present, but the feature cannot enter a packaged pilot until both milestones' deterministic and
-interaction exit gates pass. The device preference stays disabled by default even in an opted-in
-build.
+[operations.md](operations.md). Its deterministic and headless interaction gates pass, including
+replica-first macOS window recreation. The device preference stays disabled by default even in an
+opted-in build, and installed native behavior remains a Milestone 4 gate.
 
-Exit gate: two clients prove DM and mention display, every suppression path, no replay storm after
-disconnect/reconnect, no UI history loss across a macOS windowless interval, last-window shutdown
-on Windows/Linux, exact click-through, sign-out action invalidation, and no real OS toast from
-headless automation.
+Completed evidence: the isolated two-client headless flow proves DM/mention capture and exact
+click-through without a real OS toast. Deterministic policy, main, and renderer suites prove every
+suppression path, reconnect replay quieting, no UI history loss across a macOS windowless interval,
+Windows/Linux last-window shutdown, and sign-out action invalidation.
 
 ### Milestone 2: preferences and operating-system state
+
+Status: complete behind the same defaults; installed permission behavior remains Milestone 4
+evidence rather than a portable deterministic signal.
 
 Goal: make the feature respectful and diagnosable without building a general settings system.
 
@@ -363,16 +393,20 @@ Deliverables:
 - add a compact renderer setting with clear copy for OS-managed denial and do-not-disturb behavior;
 - never repeatedly prompt or retry after denial or presenter failure.
 
-Exit gate: relaunch preserves preferences, unsupported/denied behavior is stable, preview content
-cannot appear without explicit opt-in, and the settings UI has actual screenshot evidence.
+Completed deterministic exit evidence: relaunch preserves preferences, unsupported/denied state is
+stable, preview content cannot appear without explicit opt-in, and the settings UI has screenshot
+evidence. Installed denial behavior remains part of Milestone 4 where it is observable.
 
 ### Milestone 3: participated-thread replies
 
+Status: complete behind the same default-off build and device settings.
+
 Goal: add the architecture's third high-signal reason without guessing from a partial local cache.
 
-Prerequisite: choose a canonical, rolling-compatible way to tell the current recipient that a
-thread reply is notification-eligible. The current event contains the thread root but not the
-recipient's participation state.
+The implemented rolling-compatible contract stores recipient eligibility outside the shared event
+JSON, freezes it when the reply commits, and projects the optional
+`recipientNotificationReason: "participated_thread_reply"` field only for a client that negotiated
+`participated-thread-notifications-v1`. Legacy clients receive the strict legacy shape.
 
 Deliverables:
 
@@ -388,10 +422,21 @@ Deliverables:
 - deduplicate a reply that also qualifies as a DM or mention; and
 - route clicks to the thread and exact reply.
 
-Exit gate: cold-cache and cross-device tests agree on participation, removed members receive
-nothing, previous/current clients remain compatible, and replay remains quiet.
+Completed deterministic evidence: cold-cache and recipient-audience tests agree on participation,
+removed members receive nothing, previous/current clients remain compatible, and replay remains
+quiet.
+
+Evidence: the [strict wire-contract tests](../packages/contracts/test/contracts.test.ts),
+[server recipient-freeze and revocation tests](../apps/server/test/workspace-repository.test.ts),
+[capability route tests](../apps/server/test/workspace-routes.test.ts),
+[desktop policy tests](../apps/desktop/src/main/notification-policy.test.ts), and
+[controller exact-reply tests](../apps/desktop/src/main/notification-controller.test.ts) cover the
+Milestone 3 boundary without local participation inference.
 
 ### Milestone 4: packaged rollout gate for each slice
+
+Status: open. No installed operating-system toast/click evidence exists in this repository today,
+and existing CI does not run the required installed native matrix.
 
 Goal: prove the native behavior on the artifacts people actually install.
 
@@ -417,6 +462,22 @@ Exit gate: the feature-integration and native-E2E rows in `docs/architecture.md`
 notifications, and the normal release gate contains no notification-specific waiver.
 
 ## Verification matrix
+
+Milestones 0 through 3 are covered by the
+[pure policy](../apps/desktop/src/main/notification-policy.test.ts),
+[main controller](../apps/desktop/src/main/notification-controller.test.ts),
+[main realtime](../apps/desktop/src/main/workspace-realtime.test.ts),
+[renderer replica/realtime](../apps/desktop/src/renderer/src/workspace-runtime.test.ts),
+[IPC contract](../packages/contracts/test/contracts.test.ts),
+[Windows identity](../apps/desktop/src/main/application-identity.test.ts), and
+[headless interaction](../scripts/demo-headless-smoke.test.mjs) suites. The checked-in
+[click-through](screenshots/native-notification-click-through.png),
+[settings](screenshots/native-notification-settings.png), and
+[bootstrap recovery](screenshots/native-notification-bootstrap-retry-recovered.png),
+[participated-thread reply](screenshots/native-notification-participated-thread-reply.png), and
+[mention precedence](screenshots/native-notification-participated-thread-mention-precedence.png)
+captures are renderer/headless evidence only. The packaged-native and OS-toast rows below remain
+open.
 
 | Layer | Required evidence |
 | --- | --- |
@@ -461,7 +522,7 @@ captures a fresh DM and completes opaque-ID activation to the
 recovering client observes exactly one failed and one forwarded bootstrap before the second client
 starts; no manual context bind is used.
 
-Deterministic assertions must also cover:
+The deterministic suites also cover:
 
 - selected-but-scrolled-away versus live-tail-visible messages, Chat versus Tasks, and the thread
   pane versus the main timeline;
@@ -483,9 +544,10 @@ Deterministic assertions must also cover:
 
 - Keep the feature device-local; the initial DM/mention slice adds no database migration, push
   token, hosted worker, or server-side delivery queue.
-- Do not enable native presentation until every Milestone 0 prerequisite is present on `main`.
-- Introduce the enabled preference before turning presentation on by default. The terminal rollout
-  change may flip the default only after packaged gates pass.
+- Every Milestone 0 prerequisite is present in the implementation, but keep ordinary presentation
+  compiled off until Milestone 4 passes.
+- The enabled preference is present and still defaults disabled. The terminal rollout change may
+  flip build or device defaults only after the installed packaged gates pass.
 - A rollback disables native presentation while preserving existing unread, mention, sync, cache,
   and outbox state. It must not require a server rollback.
 - Treat presenter errors as local capability failures. They do not reconnect realtime, replay
@@ -509,16 +571,14 @@ native presenter or generic IPC.
 
 ## Completion gates
 
-The initial DM/mention slice may enter a packaged pilot only when Milestones 0 through 2 and their
-deterministic tests pass. It remains default-off until the applicable Milestone 4 platform evidence
-passes.
+The implementation may now enter explicit installed native-evidence runs because Milestones 0
+through 3 and their deterministic tests pass. Ordinary builds and the device preference remain
+default-off until the applicable Milestone 4 platform evidence passes.
 
-The `ROADMAP.md` native-notifications item is complete only when:
+The contract, DM/mention/thread behavior, privacy defaults, scope invalidation, replay suppression,
+and replica-first windowless recovery are implemented and proven deterministically. The
+`ROADMAP.md` native-notifications item remains incomplete until:
 
-- the contract and ADR are current;
-- DM and verified-mention behaviors pass every deterministic layer above;
-- participated-thread replies pass Milestone 3;
-- privacy-safe defaults, scope invalidation, and replay suppression are proven;
 - actual packaged interaction and screenshot evidence exists;
 - `npm run check`, `npm run test:db`, relevant package verification, and native smoke lanes pass;
 - `ROADMAP.md`, `docs/architecture.md`, operations/release notes, and issue references agree; and

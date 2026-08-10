@@ -37,20 +37,18 @@ replica cursor, sync cursor, read cursor, unread count, or mention count. Presen
 consumed as one notification attempt and cannot reject event application, reconnect realtime, or
 cause replay for notification's sake.
 
-The controller/presenter integration must remain default-off unless main has all of these
-prerequisites:
+The controller/presenter integration required all of these prerequisites before it could exist:
 
 - generation- and scope-safe realtime delivery;
 - fail-closed handling for malformed or unknown realtime frames;
 - membership-removal purge and authoritative repair before durable acknowledgement; and
-- a proven windowless catch-up contract. Until the last item passes integration tests, closing the
-  last macOS window stops realtime. Windows and Linux retain their existing last-window quit
-  behavior.
+- a proven windowless catch-up contract that cannot advance or bypass the renderer's durable
+  replica cursor.
 
-The current implementation satisfies the first three prerequisites and uses the prescribed
-last-window stop fallback for the fourth. That permits explicit evidence builds, not default
-rollout; the build and device defaults remain off until the deterministic and installed-platform
-gates in the roadmap pass.
+The implementation now satisfies all four prerequisites, and Milestones 0 through 3 have
+deterministic coverage. This does not prove native operating-system behavior. Ordinary builds still
+compile presentation off and the device preference still defaults disabled until installed
+Milestone 4 evidence passes on the complete supported host matrix.
 
 ### Freshness, scope, and deduplication
 
@@ -89,14 +87,17 @@ content-free suppression reason. It cannot mutate a cursor or invoke Electron.
 For the initial slice, an otherwise eligible message uses the first matching reason:
 
 1. the signed-in user ID occurs in the server-verified `mentionedUserIds`;
-2. the authorized conversation is `direct_message`.
+2. the authorized conversation is `direct_message`;
+3. the event contains the server-frozen `participated_thread_reply` recipient reason.
 
 A message satisfying both rules produces one verified-mention notification. Human-, bot-, and
 agent-authored messages follow identical rules. A null author, the signed-in user's own message,
 an ordinary channel message, and the reserved `group_direct_message` kind are quiet. Mention-like
-body text is never parsed. Participated-thread replies remain deferred until a capability-gated
-server event supplies a recipient-specific reason; main must not infer participation from a
-partially hydrated replica.
+body text is never parsed. The server computes the participated-thread reason from the root author
+and prior repliers at commit time, excludes the reply author, intersects the result with the
+authorized event audience, and omits the field for clients that did not negotiate
+`participated-thread-notifications-v1`. Main never infers participation from a partially hydrated
+replica.
 
 Scope mismatch, stale generation, replay/catch-up delivery, a disarmed or stale connection,
 duplicate delivery, blocked or unknown conversation metadata, focus, current visibility, disabled
@@ -160,8 +161,32 @@ separate explicit opt-in. Native support is `supported` or `unsupported`; OS per
 Native notification code is also guarded at build time. `HMM_NATIVE_NOTIFICATIONS_ENABLED` accepts
 only `0` or `1`; unset and `0` compile presentation off, report unsupported capability, and do not
 construct a notification controller or presenter. `1` includes the controller for explicit
-development, headless, or packaged-pilot evidence, but does not override the persisted device
-preference. Changing the environment after a build cannot enable that artifact.
+development, headless, or packaged native-evidence builds, but does not override the persisted
+device preference. Changing the environment after a build cannot enable that artifact.
+
+### Windowless macOS transport and replica-first recovery
+
+On macOS, an explicitly enabled build enters windowless observation when its last window closes.
+The current authenticated connection may continue to feed a distinct `onWindowlessEvent` callback,
+but that callback can only evaluate notifications. It never sends `workspace:event` IPC, buffers UI
+frames, advances the realtime cursor, or acknowledges renderer work. Notification observation
+failure is outside transport health. Ordinary default-off builds retain the conservative
+last-window realtime stop; Windows and Linux retain last-window stop and quit behavior.
+
+`did-finish-load` does not reopen renderer delivery. A recreated renderer first reads its encrypted
+replica cursor, completes `/sync` from that cursor, builds and atomically commits the authoritative
+snapshot, completes the final HTTP sync pass, and only then calls `startWorkspaceRealtime` to open a
+new epoch from the resulting durable cursor. Starting that epoch closes the windowless socket; no
+windowless event is replayed from an in-memory UI buffer. A retryable initial catch-up likewise
+attaches no realtime socket until recovery succeeds.
+
+If a windowless socket receives `system.resync_required`, main retains only that scoped, body-free
+recovery control and stops. Socket close cannot reconnect from the rejected cursor. The recreated
+renderer receives the control, performs authoritative HTTP recovery, and only a strictly newer
+durable cursor consumes the latch and opens one replacement connection. These boundaries are
+covered by the deterministic
+[main transport tests](../../apps/desktop/src/main/workspace-realtime.test.ts) and
+[renderer replica-recovery tests](../../apps/desktop/src/renderer/src/workspace-runtime.test.ts).
 
 ### Exact click actions and lifecycle
 
@@ -194,6 +219,13 @@ activate that ID only while its in-memory callback remains live; the artifact is
 store and contains no notification labels, target IDs, or body. Packaged and ordinary renderer
 sessions cannot invoke the activation bridge.
 
+On Windows, main calls `app.setAppUserModelId` with Electron Builder's exact
+`com.hypotheticalmoneymachine.hmmchat` application ID before constructing the first
+`BrowserWindow`. A deterministic
+[identity test](../../apps/desktop/src/main/application-identity.test.ts) prevents the source and
+package identity from drifting. Installed NSIS attribution and click handling still require the
+Milestone 4 Windows evidence run.
+
 ## Consequences
 
 - Default builds can carry policy, schemas, settings, and controller code without constructing an
@@ -203,8 +235,8 @@ sessions cannot invoke the activation bridge.
   renderer always resumes from its encrypted replica cursor and performs normal HTTP catch-up.
 - Exact click-through requires a separately authorized by-ID message hydration contract rather
   than reinterpreting the former channel-only action.
-- Thread participation requires server and rolling-client capability work before it can become a
-  third reason.
+- Participated-thread eligibility is recipient-specific and capability-gated at the server; it is
+  never reconstructed from local thread state.
 - Ordinary tests and headless demos use fake/capture presenters and cannot depend on a developer's
   OS permission or emit a real toast. Installed-artifact evidence across the supported native
   matrix remains a release gate.

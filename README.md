@@ -281,6 +281,14 @@ cross-built and fuse-verified on those same ARM64 hosts and no x64 machine exerc
 publishing. The pilot serves this from a self-hosted S3-compatible storage instance on the example-project cluster; any
 S3-compatible endpoint works, and the bucket is addressed by path.
 
+Ordinary development, package, and release builds compile native notification presentation off.
+Implementation Milestones 0 through 3—DMs, verified mentions, capability-gated participated-thread
+replies, preferences, exact click-through, and replica-first macOS window recreation—are complete
+behind default-off build and device settings. No installed native notification evidence exists yet.
+The defaults remain off until the full macOS, Windows, and Ubuntu Milestone 4 matrix in the
+[native-notifications roadmap](docs/native-notifications-roadmap.md) passes; package smoke alone is
+not display or click evidence.
+
 The endpoint, bucket, and region are not secret and are repository **variables**:
 
 - `GARAGE_S3_ENDPOINT`
@@ -398,7 +406,8 @@ harmless but not free, and is worth collapsing if CI minutes or feedback latency
 The current build serves one invited workspace of at most 25 active members. It covers
 workspace-visible and members-only channels, 1:1 DMs, paginated text history, authorized
 message search, mentions, reactions, unread state, ordered reconnect sync, date-separated
-timelines, scoped agent identities, and restart-safe sends. Threads, attachments,
-notifications, signed releases, and hosted operations are upcoming work. Product direction
-and delivery status are tracked in
+timelines, one-level threads, scoped agent identities, and restart-safe sends. The repository also
+contains native-notification Milestones 0 through 3 behind default-off build and device settings;
+installed notification proof and any default flip remain open alongside attachments, complete
+release signing, and hosted operations. Product direction and delivery status are tracked in
 [Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).

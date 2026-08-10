@@ -38,6 +38,10 @@ The implementation contract and security boundaries live in
   never silently discarded.
 - Structured request logs, liveness/readiness probes, and an optional authenticated Prometheus
   endpoint for HTTP, realtime-connection, and PostgreSQL-pool health.
+- Native-notification Milestones 0 through 3 behind default-off build and device settings: direct
+  messages, verified mentions, capability-gated participated-thread replies, exact scoped
+  click-through, stable preferences/capability state, and replica-first macOS window recreation are
+  covered deterministically.
 
 Deliberate current constraints: one workspace, at most 25 active members, immutable
 messages, desktop only. Each is enforced in code and gets lifted on purpose, not by
@@ -60,9 +64,10 @@ Roughly in order:
 - Structured mention completion on the existing verified mention model.
 - File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
   authorized filename search.
-- Finish the [native notifications](docs/native-notifications-roadmap.md) rollout: the
-  DM/verified-mention slice and preferences are implemented behind a default-off build flag, while
-  participated-thread eligibility and packaged cross-platform evidence remain open.
+- Finish the [native notifications](docs/native-notifications-roadmap.md) rollout by collecting
+  installed Milestone 4 display/click/lifecycle evidence on current and previous supported macOS
+  arm64/x64, Windows 11 x64/ARM64, and Ubuntu 24.04 x64/ARM64 AppImage and Debian installs. Keep
+  ordinary build and device defaults off until that external matrix passes.
 - Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
   an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
   and notarization plus the cross-platform update feed are already running.

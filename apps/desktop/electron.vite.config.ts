@@ -32,8 +32,8 @@ const rendererContentSecurityPolicy = (isDevelopment: boolean): Plugin => ({
 
 export default defineConfig(({ command }) => {
   const isDevelopment = command === "serve";
-  // Native presentation stays compiled off unless an explicit development/test or pilot build
-  // opts in. The terminal rollout may change this default only after packaged native evidence.
+  // Native presentation stays compiled off unless an explicit development/test or native-evidence
+  // build opts in. The terminal rollout may change this default only after packaged native proof.
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
     process.env.HMM_NATIVE_NOTIFICATIONS_ENABLED,
   );
