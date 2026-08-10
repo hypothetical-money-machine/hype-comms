@@ -82,7 +82,7 @@ jobs:
       - name: Run the complete PostgreSQL suite
         env:
           HMM_TEST_DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
-        run: npm test --workspace @hmm-chat/server
+        run: npm run test:postgres
 
       - name: Stop isolated PostgreSQL
         if: always()

@@ -3,6 +3,9 @@ when:
     branch: main
   - event: manual
 
+concurrency:
+  limit: 1
+
 variables:
   app: &app hmm-chat
   registry: &registry registry.example.invalid
@@ -11,12 +14,22 @@ variables:
   deploy_branch: &deploy_branch main
   target_cluster: &target_cluster production-cluster
 
+services:
+  - name: postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hmm
+      POSTGRES_PASSWORD: hmm-test-password
+      POSTGRES_DB: hmm_chat_test
+      POSTGRES_INITDB_ARGS: --locale-provider=icu --icu-locale=und-x-icu
+
 steps:
   - name: check
     image: node:24.18.0-bookworm
     commands:
       - npm ci
       - npm run check
+      - HMM_TEST_DATABASE_URL=postgres://hmm:hmm-test-password@postgres:5432/hmm_chat_test npm run test:postgres
 
   - name: build-push
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
@@ -46,6 +59,13 @@ steps:
           --destination=$${REGISTRY}/$${PROJECT}/$${APP}:latest \
           --cache=true \
           --cache-repo=$${REGISTRY}/$${PROJECT}/cache
+    depends_on:
+      - check
+    when:
+      - event: push
+        branch: main
+      - event: manual
+        branch: main
 
   - name: promote-gitops
     image: alpine/git:2.45.2
@@ -77,3 +97,10 @@ steps:
         fi
       - 'git commit -m "promote($${APP}): $${TARGET_CLUSTER} $${CI_COMMIT_SHA}"'
       - git push origin HEAD:$${DEPLOY_BRANCH}
+    depends_on:
+      - build-push
+    when:
+      - event: push
+        branch: main
+      - event: manual
+        branch: main

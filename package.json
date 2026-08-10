@@ -48,6 +48,7 @@
     "test:scripts": "node --test scripts/*.test.mjs",
     "test:hermes-plugin": "node scripts/test-hermes-plugin.mjs",
     "test:db": "scripts/test-database.sh",
+    "test:postgres": "node scripts/test-postgres.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",

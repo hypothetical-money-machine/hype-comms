@@ -7,7 +7,8 @@ in `docs/architecture.md` is a hosted target, not the current topology.
 
 - GitHub pull requests run native desktop package smoke. The `CI` workflow also runs the complete
   source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
-- A push to `main` runs `.woodpecker.yml`: source checks, an immutable-SHA server image build into
+- A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
+  PostgreSQL 16 service, an immutable-SHA server image build into
   `registry.example.invalid/example-project/hmm-chat`, then a GitOps image promotion in
   `hype-comms/deployment-repository` for the `production-cluster` cluster.
 - A `v*` tag on `main` must exactly match `apps/desktop/package.json`. Native release jobs package
@@ -16,6 +17,11 @@ in `docs/architecture.md` is a hosted target, not the current topology.
 - Kubernetes manifests, ingress/TLS, database lifecycle, secret injection, Argo CD health, backup
   scheduling, and production rollback are owned by `deployment-repository`. A release review must link
   evidence from that repository rather than assuming these controls from application code.
+
+The Woodpecker build depends on the database-backed check, promotion depends on that exact image
+build, and workflow concurrency is one. Overlapping `main` runs therefore cannot promote an older
+SHA after a newer one. Local `npm run test:db` and GitHub CI invoke the same guarded entrypoint; it
+refuses missing URLs and databases whose names are not explicitly test-only.
 
 ## Service checks and metrics
 
@@ -38,13 +44,16 @@ broader SLO/alert set in `docs/architecture.md` remains future work until those 
 
 Before promoting a server change:
 
-1. Require `npm run check`, the complete PostgreSQL check, and relevant native package lanes.
+1. Require `npm run check`, `npm run test:postgres`, and relevant native package lanes.
 2. Confirm the new image is addressed by commit SHA and the GitOps commit changes only Hype Comms.
 3. Confirm migrations are backward-compatible with the currently deployed server and immediately
    previous desktop version.
 4. Watch Argo CD health, `/readyz`, 5xx rate, PostgreSQL pool waiters, and realtime reconnects.
 5. Roll back the image through GitOps if application health regresses. Never reverse an applied SQL
    migration; forward-fix it unless the migration was explicitly proven reversible.
+
+Attach the successful Woodpecker pipeline URL to the release record so the installed Woodpecker
+version's service, dependency, and concurrency behavior is proven rather than inferred from YAML.
 
 ## Backup and restore gate
 

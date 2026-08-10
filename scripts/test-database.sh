@@ -92,9 +92,9 @@ if [[ "$database_ready" != "true" ]]; then
   exit 1
 fi
 
-echo "==> running server tests on Docker-assigned port $HOST_PORT"
+echo "==> running the guarded PostgreSQL suite on Docker-assigned port $HOST_PORT"
 HMM_TEST_DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${HOST_PORT}/${POSTGRES_DATABASE}" \
-  npm test --workspace @hmm-chat/server -- "$@"
+  npm run test:postgres -- "$@"
 
 # Reached only when the suite ran to completion; `set -e` exits earlier on failure.
 completed=1
