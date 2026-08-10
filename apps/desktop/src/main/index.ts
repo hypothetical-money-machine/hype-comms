@@ -3,6 +3,14 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
+  NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
+  NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
+  NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
+  NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
+  NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
+  NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
+  NOTIFICATION_STATE_IPC_MAX_BYTES,
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
@@ -18,6 +26,15 @@ import {
   messageReactionTargetSchema,
   messageSearchQuerySchema,
   moveTaskOperationSchema,
+  notificationActionDrainRequestSchema,
+  notificationActionDrainResponseSchema,
+  notificationActionAcknowledgementSchema,
+  notificationActivityUpdateSchema,
+  notificationCaptureActivationRequestSchema,
+  notificationCaptureActivationResponseSchema,
+  notificationContextSchema,
+  notificationPreferenceSchema,
+  notificationStateSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -26,6 +43,9 @@ import {
   updateTaskOperationSchema,
   upsertChannelMemberOperationSchema,
   type ChatSessionState,
+  type HumanWorkspaceBootstrapResponse,
+  type NotificationContext,
+  type NotificationState,
   type ProductRealtimeEvent,
   type ThemeState,
   type UpdateState,
@@ -39,6 +59,7 @@ import {
   MenuItem,
   nativeTheme,
   net,
+  Notification,
   protocol,
   safeStorage,
   screen,
@@ -51,11 +72,7 @@ import { autoUpdater } from "electron-updater";
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
-import type {
-  NotificationAction,
-  RealtimeConnectionState,
-  ServerStatus,
-} from "../shared/desktop-api";
+import type { RealtimeConnectionState, ServerStatus } from "../shared/desktop-api";
 import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
 import {
   parseAuthCallbackToken,
@@ -82,10 +99,34 @@ import {
   shouldFocusDesktopWindow,
   shouldShowDesktopWindow,
 } from "./headless-mode";
+import {
+  HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV,
+  openHeadlessNotificationCaptureArtifact,
+  type HeadlessNotificationCaptureArtifact,
+} from "./headless-notification-capture";
 import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
+import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
+import { NotificationController } from "./notification-controller";
+import { NotificationPreferenceStore } from "./notification-preference-store";
+import {
+  NotificationProjectionRepairCoordinator,
+  type NotificationProjectionRepairFailure,
+} from "./notification-projection-repair";
+import {
+  CaptureNotificationPresenter,
+  ElectronNotificationCapabilitySource,
+  ElectronNotificationPresenter,
+  NoopNotificationPresenter,
+  type NotificationPresenter,
+} from "./notification-presenter";
+import {
+  NotificationSettingsController,
+  type NotificationCapabilitySource,
+} from "./notification-settings-controller";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
+import { handleLastWindowClosed } from "./window-lifecycle";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -132,9 +173,10 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null;
 let rendererReady = false;
+let rendererSessionGeneration = 0;
+const mainWindowRecreationCoordinator = new MainWindowRecreationCoordinator();
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
-const pendingNotificationActions: NotificationAction[] = [];
 const pendingAuthCallbackUrls: string[] = [];
 let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
@@ -177,6 +219,59 @@ let stopThemeSubscription: (() => void) | null = null;
 let userUpdateCheckInFlight = false;
 let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
+let notificationSettingsController: NotificationSettingsController | null = null;
+let stopNotificationSettingsSubscription: (() => void) | null = null;
+let notificationController: NotificationController | null = null;
+let notificationProjectionRepairCoordinator: NotificationProjectionRepairCoordinator | null = null;
+let captureNotificationPresenter: CaptureNotificationPresenter | null = null;
+let headlessNotificationCaptureArtifact: HeadlessNotificationCaptureArtifact | null = null;
+let notificationSessionGeneration = 0;
+let notificationScope: {
+  readonly sessionGeneration: number;
+  readonly userId: string;
+  readonly workspaceId: string;
+} | null = null;
+let notificationActiveGeneration: number | null = null;
+
+function createNotificationCapabilitySource(): NotificationCapabilitySource {
+  if (!__HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__) {
+    return {
+      read: () => ({ nativeSupport: "unsupported", osPermission: "unknown" }),
+    };
+  }
+  if (headlessDesktopConfiguration !== null) {
+    return {
+      read: () => ({ nativeSupport: "supported", osPermission: "unknown" }),
+    };
+  }
+  return new ElectronNotificationCapabilitySource(Notification);
+}
+
+function createNotificationPresenter(): NotificationPresenter {
+  if (headlessDesktopConfiguration === null) {
+    return new ElectronNotificationPresenter(Notification);
+  }
+
+  const artifactDirectory = process.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]?.trim() ?? "";
+  if (artifactDirectory === "") return new NoopNotificationPresenter();
+  headlessNotificationCaptureArtifact = openHeadlessNotificationCaptureArtifact({
+    env: process.env,
+    isPackaged: app.isPackaged,
+    profile: developmentProfile,
+  });
+  if (headlessNotificationCaptureArtifact === null) {
+    return new NoopNotificationPresenter();
+  }
+  const artifact = headlessNotificationCaptureArtifact;
+  captureNotificationPresenter = new CaptureNotificationPresenter({
+    onRecord: (record) => {
+      if (!artifact.append(record)) {
+        throw new Error("Headless notification capture capacity reached");
+      }
+    },
+  });
+  return captureNotificationPresenter;
+}
 
 function createUpdateSource(): UpdateSource {
   return {
@@ -233,35 +328,229 @@ function hasMacDeveloperIdSignature(): boolean {
 }
 
 function sendToRenderer(channel: string, payload: unknown): boolean {
-  if (mainWindow === null || mainWindow.isDestroyed() || !rendererReady) {
+  const window = mainWindow;
+  if (
+    window === null ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed() ||
+    window.webContents.isCrashed() ||
+    !rendererReady
+  ) {
     return false;
   }
 
-  mainWindow.webContents.send(channel, payload);
-  return true;
-}
-
-// Native notification wiring can call this once notification creation is added.
-export function deliverNotificationAction(action: NotificationAction): void {
-  if (!sendToRenderer(DESKTOP_CHANNELS.notificationAction, action)) {
-    pendingNotificationActions.push(action);
+  try {
+    window.webContents.send(channel, payload);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function deliverWorkspaceEvent(event: ProductRealtimeEvent): void {
-  sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, event);
+interface IpcPayloadSchema<T> {
+  readonly parse: (value: unknown) => T;
+}
+
+function parseBoundedNotificationIpc<T>(
+  schema: IpcPayloadSchema<T>,
+  value: unknown,
+  maximumBytes: number,
+): T {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error("Notification IPC payload is not JSON-serializable");
+  }
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > maximumBytes) {
+    throw new Error("Notification IPC payload exceeds its byte limit");
+  }
+  return schema.parse(value);
+}
+
+function inactiveNotificationContext(): NotificationContext {
+  return notificationContextSchema.parse({
+    version: 1,
+    status: "inactive",
+    sessionGeneration: null,
+    rendererSessionGeneration: Math.max(1, rendererSessionGeneration),
+    userId: null,
+    workspaceId: null,
+  });
+}
+
+function deliverWorkspaceEvent(event: ProductRealtimeEvent): boolean {
+  try {
+    notificationController?.handleEvent(event, {
+      ...(notificationScope === null
+        ? {}
+        : { sessionGeneration: notificationScope.sessionGeneration }),
+      ...(event.type === "system.connected" ? { connectionId: event.payload.connectionId } : {}),
+    });
+  } catch {
+    // Notification bookkeeping is deliberately outside durable renderer delivery. Never include
+    // the canonical event or thrown value here because either may contain private message data.
+    reportMainProcessError("Native notification evaluation failed");
+  }
+  return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, event);
 }
 
 function deliverRealtimeState(state: RealtimeConnectionState): void {
   realtimeState = state;
+  try {
+    notificationController?.setRealtimeState(state);
+  } catch {
+    reportMainProcessError("Native notification realtime transition failed");
+  }
   sendToRenderer(DESKTOP_CHANNELS.realtimeStateChanged, state);
 }
 
-function deliverSessionState(state: ChatSessionState): void {
-  sendToRenderer(DESKTOP_CHANNELS.sessionChanged, state);
-  if (state.status === "signed-out") {
-    workspaceRealtime?.stop();
+function transitionNotificationSession(state: ChatSessionState): void {
+  if (state.status === "signed-in" && state.method === "email") {
+    if (
+      notificationScope?.userId === state.userId &&
+      notificationScope.workspaceId === state.workspaceId
+    ) {
+      return;
+    }
+    notificationController?.markReplacing();
+    if (notificationSessionGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Notification session generation is exhausted");
+    }
+    notificationSessionGeneration += 1;
+    notificationScope = {
+      sessionGeneration: notificationSessionGeneration,
+      userId: state.userId,
+      workspaceId: state.workspaceId,
+    };
+    notificationActiveGeneration = null;
+    return;
   }
+
+  notificationScope = null;
+  notificationActiveGeneration = null;
+  if (state.status === "signed-out") {
+    notificationController?.signOut();
+  } else {
+    notificationController?.markReplacing();
+  }
+}
+
+function sessionStateMatchesNotificationScope(
+  state: ChatSessionState,
+  scope: NonNullable<typeof notificationScope> | null,
+): boolean {
+  return (
+    scope !== null &&
+    state.status === "signed-in" &&
+    state.method === "email" &&
+    state.userId === scope.userId &&
+    state.workspaceId === scope.workspaceId
+  );
+}
+
+function beginSessionReplacement(): void {
+  workspaceRealtime?.resetSession();
+  notificationScope = null;
+  notificationActiveGeneration = null;
+  notificationController?.markReplacing();
+}
+
+function isCurrentNotificationScope(scope: NonNullable<typeof notificationScope>): boolean {
+  const state = chatSession?.state;
+  return (
+    notificationScope?.sessionGeneration === scope.sessionGeneration &&
+    notificationScope.userId === scope.userId &&
+    notificationScope.workspaceId === scope.workspaceId &&
+    state?.status === "signed-in" &&
+    state.method === "email" &&
+    state.userId === scope.userId &&
+    state.workspaceId === scope.workspaceId
+  );
+}
+
+function currentNotificationRepairScope(): NonNullable<typeof notificationScope> | null {
+  const scope = notificationScope;
+  return scope !== null && isCurrentNotificationScope(scope) ? { ...scope } : null;
+}
+
+function reportNotificationProjectionRepairFailure(
+  failure: NotificationProjectionRepairFailure,
+): void {
+  if (failure === "members") {
+    reportMainProcessError("Native notification member projection repair failed");
+    return;
+  }
+  if (failure === "conversation_limit") {
+    reportMainProcessError("Native notification conversation projection exceeds its limit");
+    return;
+  }
+  reportMainProcessError("Native notification conversation projection repair failed");
+}
+
+function projectNotificationBootstrap(
+  scope: NonNullable<typeof notificationScope>,
+  bootstrap: HumanWorkspaceBootstrapResponse,
+): void {
+  const controller = notificationController;
+  if (
+    controller === null ||
+    !isCurrentNotificationScope(scope) ||
+    bootstrap.currentUser.user.id !== scope.userId ||
+    bootstrap.workspace.id !== scope.workspaceId
+  ) {
+    return;
+  }
+  try {
+    const firstActivation = notificationActiveGeneration !== scope.sessionGeneration;
+    if (firstActivation) {
+      // Realtime is stopped before a new scope can bootstrap, so this first response safely seeds
+      // the session baseline and member labels.
+      controller.startSession({
+        ...scope,
+        bootstrapCursor: bootstrap.syncCursor,
+      });
+      controller.replaceMembers(bootstrap.members);
+      notificationActiveGeneration = scope.sessionGeneration;
+    } else {
+      // A same-generation bootstrap can race a newer ordered realtime invalidation. It is useful
+      // evidence that a renderer/window resumed, but its member payload must not directly overwrite
+      // main's projection; force a fresh coordinator read that starts after this response instead.
+      controller.invalidateMemberProjection();
+    }
+    const repairCoordinator = notificationProjectionRepairCoordinator;
+    if (repairCoordinator === null) {
+      controller.disableConversationProjection();
+    } else {
+      void repairCoordinator.seedConversationCatalog({
+        conversations: bootstrap.conversations,
+        nextCursor: bootstrap.conversationsNextCursor,
+        hasMore: bootstrap.conversationsHasMore,
+      });
+    }
+  } catch {
+    notificationActiveGeneration = null;
+    reportMainProcessError("Native notification bootstrap projection failed");
+  }
+}
+
+function deliverSessionState(state: ChatSessionState): void {
+  if (!sessionStateMatchesNotificationScope(state, notificationScope)) {
+    workspaceRealtime?.resetSession();
+  }
+  try {
+    transitionNotificationSession(state);
+  } catch {
+    notificationScope = null;
+    notificationActiveGeneration = null;
+    notificationController?.signOut();
+    reportMainProcessError("Native notification session transition failed");
+  }
+  sendToRenderer(DESKTOP_CHANNELS.sessionChanged, state);
+}
+
+function deliverNotificationState(state: NotificationState): void {
+  sendToRenderer(DESKTOP_CHANNELS.notificationStateChanged, state);
 }
 
 function deliverUpdateState(state: UpdateState): void {
@@ -323,11 +612,8 @@ function flushPendingRendererEvents(): void {
   if (compactModeController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, compactModeController.enabled);
   }
-  while (pendingNotificationActions.length > 0) {
-    const action = pendingNotificationActions.shift();
-    if (action !== undefined) {
-      sendToRenderer(DESKTOP_CHANNELS.notificationAction, action);
-    }
+  if (notificationSettingsController !== null) {
+    sendToRenderer(DESKTOP_CHANNELS.notificationStateChanged, notificationSettingsController.state);
   }
 }
 
@@ -550,7 +836,155 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted sign-out IPC sender");
     }
+    beginSessionReplacement();
     return (await chatSession?.signOut()) ?? { status: "signed-out" };
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationContext);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationContext, (event): NotificationContext => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-context IPC sender");
+    }
+    const controller = notificationController;
+    const scope = notificationScope;
+    if (
+      controller === null ||
+      scope === null ||
+      notificationActiveGeneration !== scope.sessionGeneration
+    ) {
+      return parseBoundedNotificationIpc(
+        notificationContextSchema,
+        inactiveNotificationContext(),
+        NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
+      );
+    }
+    return parseBoundedNotificationIpc(
+      notificationContextSchema,
+      controller.bindRenderer(event.sender.id, rendererSessionGeneration),
+      NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActivityUpdate);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationActivityUpdate, (event, input: unknown): void => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-activity IPC sender");
+    }
+    const controller = notificationController;
+    if (controller === null) throw new Error("Native notifications are unavailable");
+    const activity = parseBoundedNotificationIpc(
+      notificationActivityUpdateSchema,
+      input,
+      NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
+    );
+    if (!controller.updateActivity(event.sender.id, activity)) {
+      throw new Error("Notification activity does not match the active renderer");
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActionsDrain);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationActionsDrain, (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-action IPC sender");
+    }
+    const controller = notificationController;
+    if (controller === null) throw new Error("Native notifications are unavailable");
+    const request = parseBoundedNotificationIpc(
+      notificationActionDrainRequestSchema,
+      input,
+      NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
+    );
+    return parseBoundedNotificationIpc(
+      notificationActionDrainResponseSchema,
+      controller.rendererReadyAndDrain(event.sender.id, request),
+      NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActionAcknowledge);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationActionAcknowledge, (event, input: unknown): void => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-action acknowledgement IPC sender");
+    }
+    const controller = notificationController;
+    if (controller === null) throw new Error("Native notifications are unavailable");
+    const acknowledgement = parseBoundedNotificationIpc(
+      notificationActionAcknowledgementSchema,
+      input,
+      NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
+    );
+    controller.acknowledgeAction(event.sender.id, acknowledgement);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationState);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationState, (event): NotificationState => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted notification-state IPC sender");
+    if (notificationSettingsController === null) {
+      throw new Error("Notification settings are unavailable");
+    }
+    return parseBoundedNotificationIpc(
+      notificationStateSchema,
+      notificationSettingsController.state,
+      NOTIFICATION_STATE_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationPreferenceSet);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationPreferenceSet, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-preference IPC sender");
+    }
+    if (notificationSettingsController === null) {
+      throw new Error("Notification settings are unavailable");
+    }
+    const preference = parseBoundedNotificationIpc(
+      notificationPreferenceSchema,
+      input,
+      NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
+    );
+    return parseBoundedNotificationIpc(
+      notificationStateSchema,
+      await notificationSettingsController.setPreference(preference),
+      NOTIFICATION_STATE_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationCapabilityRefresh);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationCapabilityRefresh, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-capability IPC sender");
+    }
+    if (notificationSettingsController === null) {
+      throw new Error("Notification settings are unavailable");
+    }
+    return parseBoundedNotificationIpc(
+      notificationStateSchema,
+      await notificationSettingsController.refreshCapability(),
+      NOTIFICATION_STATE_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationCaptureActivate);
+  ipcMain.handle(DESKTOP_CHANNELS.notificationCaptureActivate, (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted notification-capture IPC sender");
+    }
+    if (headlessDesktopConfiguration === null || captureNotificationPresenter === null) {
+      throw new Error("Notification capture activation is unavailable");
+    }
+    const request = parseBoundedNotificationIpc(
+      notificationCaptureActivationRequestSchema,
+      input,
+      NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
+    );
+    return parseBoundedNotificationIpc(
+      notificationCaptureActivationResponseSchema,
+      {
+        version: 1,
+        activated: captureNotificationPresenter.activate(request.captureId),
+      },
+      NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
+    );
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRequestMagicLink);
@@ -608,7 +1042,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.workspaceBootstrap, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace bootstrap sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.bootstrap();
+    const scope = notificationScope;
+    const response = await workspaceTransport.bootstrap();
+    if (scope !== null) projectNotificationBootstrap(scope, response);
+    return response;
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMembersList);
@@ -642,6 +1079,13 @@ function registerIpcHandlers(): void {
       ...(typeof request.before === "string" ? { before: request.before } : {}),
       ...(typeof request.limit === "number" ? { limit: request.limit } : {}),
     });
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageGet);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageGet, async (event, id: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace message sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.messageById(entityIdSchema.parse(id));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSearch);
@@ -814,7 +1258,17 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStart);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStart, (event, after: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime start sender");
-    workspaceRealtime?.start(sequenceSchema.parse(after));
+    const state = chatSession?.state;
+    if (state?.status !== "signed-in" || state.method !== "email") {
+      throw new Error("A signed-in member session is required for realtime");
+    }
+    const accepted = workspaceRealtime?.start(sequenceSchema.parse(after), {
+      userId: state.userId,
+      workspaceId: state.workspaceId,
+    });
+    if (accepted === false) {
+      throw new Error("Workspace realtime recovery delivery is waiting for a ready renderer");
+    }
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStop);
@@ -899,34 +1353,56 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
   mainWindow = window;
   rendererReady = false;
+  rendererSessionGeneration += 1;
+  notificationController?.invalidateRenderer();
+  const webContentsId = window.webContents.id;
+  const lifecycle = new MainWindowLifecycle({
+    window,
+    webContentsId,
+    state: {
+      currentWindow: () => mainWindow,
+      setCurrentWindow: (nextWindow) => {
+        mainWindow = nextWindow;
+      },
+      setRendererReady: (ready) => {
+        rendererReady = ready;
+        if (!ready) workspaceRealtime?.rendererUnavailable();
+      },
+      advanceRendererSessionGeneration: () => {
+        rendererSessionGeneration += 1;
+      },
+      invalidateRendererBinding: (rendererWebContentsId) => {
+        notificationController?.invalidateRenderer(rendererWebContentsId);
+      },
+    },
+  });
   applyCompactModeWindowBounds(window, compactModeEnabled);
   blockNavigation(window.webContents);
 
   try {
-    blockNavigation(window.webContents);
-
     if (shouldShowDesktopWindow(headlessDesktopConfiguration)) {
       window.once("ready-to-show", () => {
-        window.show();
+        if (mainWindow === window) window.show();
       });
     }
-    window.webContents.once("did-finish-load", () => {
-      rendererReady = true;
-      flushPendingRendererEvents();
+    window.webContents.on("did-finish-load", () => {
+      lifecycle.rendererDidFinishLoad(flushPendingRendererEvents);
     });
+    window.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+      if (isInPlace || !isMainFrame) return;
+      lifecycle.invalidateRenderer();
+    });
+    window.webContents.on("render-process-gone", () => lifecycle.invalidateRenderer());
+    window.webContents.once("destroyed", () => lifecycle.invalidateRenderer());
     window.on("closed", () => {
-      rendererReady = false;
-      mainWindow = null;
+      lifecycle.windowClosed();
     });
 
     // loadRenderer can reject after the BrowserWindow exists; clear the half-built window so
     // callers do not treat it as a usable main window (hidden parent for sheets, false restore).
     await loadRenderer(window);
   } catch (error) {
-    rendererReady = false;
-    if (mainWindow === window) {
-      mainWindow = null;
-    }
+    lifecycle.loadFailed();
     if (!window.isDestroyed()) {
       window.destroy();
     }
@@ -949,11 +1425,20 @@ function focusMainWindow(): void {
 }
 
 async function showOrRecreateMainWindow(): Promise<void> {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    await createMainWindow();
-  } else {
+  await mainWindowRecreationCoordinator.run(async () => {
+    const window = mainWindow;
+    if (
+      window === null ||
+      window.isDestroyed() ||
+      window.webContents.isDestroyed() ||
+      window.webContents.isCrashed()
+    ) {
+      if (window !== null && !window.isDestroyed()) window.destroy();
+      await createMainWindow();
+      return;
+    }
     focusMainWindow();
-  }
+  });
 }
 
 async function handleCheckForUpdatesMenuClick(): Promise<void> {
@@ -1026,6 +1511,10 @@ async function drainPendingAuthCallbacks(): Promise<void> {
 
       const currentSession = chatSession;
       const outcome: AuthCallbackOutcome = await processAuthCallback(value, async (token) => {
+        // A later queued callback may run after an earlier one already established a new scope.
+        // Re-enter replacement immediately before every exchange so that scope cannot keep a
+        // socket alive across the credential mutation.
+        beginSessionReplacement();
         await currentSession.exchangeMagicLink(token);
       });
       if (outcome === "succeeded") {
@@ -1045,6 +1534,7 @@ function handleAuthCallback(value: string): boolean {
     return false;
   }
 
+  beginSessionReplacement();
   pendingAuthCallbackUrls.push(value);
   void drainPendingAuthCallbacks();
   return true;
@@ -1105,11 +1595,66 @@ if (!hasSingleInstanceLock) {
       compactModeController = new CompactModeController({
         persistence: new CompactModePreferenceStore({ userDataPath: app.getPath("userData") }),
       });
-      // Two independent preference files; reading them sequentially would serialize disk I/O
+      notificationSettingsController = new NotificationSettingsController({
+        persistence: new NotificationPreferenceStore({ userDataPath: app.getPath("userData") }),
+        capability: createNotificationCapabilitySource(),
+      });
+      // Independent preference files; reading them sequentially would serialize disk I/O
       // on the window-show critical path.
-      await Promise.all([themeController.initialize(), compactModeController.initialize()]);
+      await Promise.all([
+        themeController.initialize(),
+        compactModeController.initialize(),
+        notificationSettingsController.initialize(),
+      ]);
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
+      stopNotificationSettingsSubscription =
+        notificationSettingsController.subscribe(deliverNotificationState);
+
+      if (__HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__) {
+        notificationController = new NotificationController({
+          presenter: createNotificationPresenter(),
+          settings: notificationSettingsController,
+          headless: headlessDesktopConfiguration !== null,
+          getWindowState: () => {
+            const window = mainWindow;
+            return window === null || window.isDestroyed()
+              ? null
+              : {
+                  focused: window.isFocused(),
+                  shown: window.isVisible(),
+                  minimized: window.isMinimized(),
+                };
+          },
+          onNotificationClick: () => {
+            void showOrRecreateMainWindow()
+              .then(() => {
+                notificationController?.deliverPendingToReadyRenderer();
+              })
+              .catch(() => {
+                // The action remains queued for a later authorized renderer-ready drain.
+                reportMainProcessError("Failed to restore the window for a notification action");
+              });
+          },
+          onActionReady: (webContentsId, action) => {
+            const window = mainWindow;
+            if (
+              window === null ||
+              window.isDestroyed() ||
+              window.webContents.id !== webContentsId
+            ) {
+              return false;
+            }
+            return sendToRenderer(DESKTOP_CHANNELS.notificationAction, action);
+          },
+          schedulePresentation: (operation) => {
+            setImmediate(operation);
+          },
+          onRepairRequested: (reason) => {
+            void notificationProjectionRepairCoordinator?.request(reason);
+          },
+        });
+      }
 
       chatSession = new ChatSession({
         apiOrigin: __HMM_CHAT_API_ORIGIN__,
@@ -1117,6 +1662,14 @@ if (!hasSingleInstanceLock) {
         request: (url, init) => net.fetch(url, init),
       });
       workspaceTransport = new WorkspaceTransport(__HMM_CHAT_API_ORIGIN__, chatSession);
+      if (notificationController !== null) {
+        notificationProjectionRepairCoordinator = new NotificationProjectionRepairCoordinator({
+          transport: workspaceTransport,
+          target: notificationController,
+          getScope: currentNotificationRepairScope,
+          onFailure: reportNotificationProjectionRepairFailure,
+        });
+      }
       workspaceRealtime = new WorkspaceRealtime({
         apiOrigin: __HMM_CHAT_API_ORIGIN__,
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
@@ -1214,13 +1767,27 @@ if (!hasSingleInstanceLock) {
     });
 
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") {
-      app.quit();
-    }
+    handleLastWindowClosed({
+      platform: process.platform,
+      stopRealtime: () => workspaceRealtime?.stop(),
+      quit: () => app.quit(),
+    });
   });
 
   app.on("before-quit", () => {
-    workspaceRealtime?.stop();
+    workspaceRealtime?.resetSession();
+    notificationScope = null;
+    notificationActiveGeneration = null;
+    notificationProjectionRepairCoordinator = null;
+    notificationController?.shutdown();
+    notificationController = null;
+    stopNotificationSettingsSubscription?.();
+    stopNotificationSettingsSubscription = null;
+    notificationSettingsController?.dispose();
+    notificationSettingsController = null;
+    headlessNotificationCaptureArtifact?.close();
+    headlessNotificationCaptureArtifact = null;
+    captureNotificationPresenter = null;
     updateController?.dispose();
     stopThemeSubscription?.();
     stopThemeSubscription = null;

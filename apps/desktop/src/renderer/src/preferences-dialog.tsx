@@ -7,9 +7,10 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import type { DesktopPlatform } from "../../shared/desktop-api";
+import type { DesktopPlatform, NotificationTransport } from "../../shared/desktop-api";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CompactModeToggle } from "./compact-mode-toggle";
+import { NotificationSettings } from "./notification-settings";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
@@ -18,6 +19,7 @@ interface PreferencesDialogProps {
   readonly open: boolean;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
   readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onClose: () => void;
@@ -31,6 +33,7 @@ export function PreferencesDialog({
   open,
   theme,
   compactMode,
+  notifications,
   platform,
   triggerRef,
   onClose,
@@ -116,6 +119,10 @@ export function PreferencesDialog({
         <section aria-labelledby="preferences-layout-title">
           <h3 id="preferences-layout-title">Layout</h3>
           <CompactModeToggle compactMode={compactMode} platform={platform} />
+        </section>
+        <section aria-labelledby="preferences-notifications-title">
+          <h3 id="preferences-notifications-title">Notifications</h3>
+          <NotificationSettings transport={notifications} />
         </section>
       </section>
     </div>,

@@ -5,6 +5,7 @@ import type {
   ChannelMode,
   ChatSessionState,
   Message,
+  NotificationContext,
   Reaction,
   ReactionEmoji,
   Task,
@@ -37,6 +38,11 @@ import {
   lastReadEligibleMessageId,
 } from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
+import { createNotificationActivityView } from "./notification-activity";
+import {
+  NotificationSessionRuntime,
+  notificationTransportFrom,
+} from "./notification-session-runtime";
 import { PreferencesDialog } from "./preferences-dialog";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -448,9 +454,25 @@ export function App({ client, theme, compactMode }: AppProps) {
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
+  const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
+  const notificationBindingGeneration = useRef(0);
+  const notificationTransport = useMemo(() => notificationTransportFrom(client), [client]);
+  const notificationSession = useMemo(() => {
+    if (notificationTransport === null) return null;
+    return new NotificationSessionRuntime(notificationTransport, {
+      handleNotificationAction: async (action, context) => {
+        const result = await runtime.handleNotificationAction(action, context);
+        if (result === "discarded") return;
+        setPaneView("chat");
+        setShowChannelMembers(false);
+        setShowPreferences(false);
+      },
+    });
+  }, [notificationTransport, runtime]);
   const messageList = useRef<HTMLDivElement>(null);
   const timelineConversationId = useRef<string | null>(null);
   const stickToTimelineBottom = useRef(true);
+  const [timelineAtLiveTail, setTimelineAtLiveTail] = useState(false);
   const readTrackingFrame = useRef<number | null>(null);
   const readTrackingConversationId = useRef<string | null>(null);
   const messageVisibilityMemory = useRef({
@@ -460,6 +482,7 @@ export function App({ client, theme, compactMode }: AppProps) {
   const threadList = useRef<HTMLDivElement>(null);
   const threadComposer = useRef<HTMLTextAreaElement>(null);
   const stickToThreadBottom = useRef(true);
+  const [threadAtLiveTail, setThreadAtLiveTail] = useState(false);
   const threadReadTrackingFrame = useRef<number | null>(null);
   const threadReadTrackingRootId = useRef<string | null>(null);
   const threadMessageVisibilityMemory = useRef({
@@ -477,6 +500,11 @@ export function App({ client, theme, compactMode }: AppProps) {
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
+    notificationSession?.start();
+    return () => notificationSession?.dispose();
+  }, [notificationSession]);
+
+  useEffect(() => {
     const onShortcut = (event: KeyboardEvent): void => {
       if (event.repeat) return;
       if (!isCompactModeShortcut(event, client.platform)) return;
@@ -491,10 +519,34 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   const applySession = useCallback(
     (next: ChatSessionState) => {
+      const bindingGeneration = ++notificationBindingGeneration.current;
       setSession(next);
       if (next.status === "signed-in" && next.method === "email") {
-        void runtime.start(next);
-      } else if (next.status === "signed-out") {
+        // ChatSession can replace one signed-in identity directly with another. Retire the old
+        // notification generation before the new workspace bootstrap starts, otherwise an action
+        // already pushed for the previous identity could navigate its cached data during this
+        // potentially long startup interval.
+        notificationSession?.invalidate();
+        setNotificationContext(null);
+        void (async () => {
+          await runtime.start(next);
+          if (bindingGeneration !== notificationBindingGeneration.current) return;
+          const context = (await notificationSession?.bind(next.userId, next.workspaceId)) ?? null;
+          if (bindingGeneration === notificationBindingGeneration.current) {
+            setNotificationContext(context);
+          }
+        })().catch(() => {
+          if (bindingGeneration === notificationBindingGeneration.current) {
+            notificationSession?.invalidate();
+            setNotificationContext(null);
+          }
+        });
+        return;
+      }
+
+      notificationSession?.invalidate();
+      setNotificationContext(null);
+      if (next.status === "signed-out") {
         resetDrafts();
         setThreadDrafts({});
         setEditingClientMessageId(null);
@@ -504,7 +556,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         void runtime.stop();
       }
     },
-    [resetDrafts, runtime],
+    [notificationSession, resetDrafts, runtime],
   );
 
   const retrySession = useCallback(async (): Promise<void> => {
@@ -526,9 +578,11 @@ export function App({ client, theme, compactMode }: AppProps) {
     return () => {
       active = false;
       unsubscribe();
+      notificationBindingGeneration.current += 1;
+      notificationSession?.invalidate();
       void runtime.stop();
     };
-  }, [applySession, client, runtime]);
+  }, [applySession, client, notificationSession, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
@@ -645,6 +699,8 @@ export function App({ client, theme, compactMode }: AppProps) {
   useEffect(() => {
     setShowChannelMembers(false);
     setPaneView("chat");
+    setTimelineAtLiveTail(false);
+    setThreadAtLiveTail(false);
   }, [runtimeState.selectedConversationId]);
 
   useEffect(() => {
@@ -707,7 +763,11 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   const handleTimelineScroll = useCallback((): void => {
     const list = messageList.current;
-    if (list !== null) stickToTimelineBottom.current = isTimelineAtBottom(list);
+    if (list !== null) {
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToTimelineBottom.current = atLiveTail;
+      setTimelineAtLiveTail(atLiveTail);
+    }
     scheduleReadTracking();
   }, [scheduleReadTracking]);
 
@@ -753,7 +813,11 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   const handleThreadScroll = useCallback((): void => {
     const list = threadList.current;
-    if (list !== null) stickToThreadBottom.current = isTimelineAtBottom(list);
+    if (list !== null) {
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToThreadBottom.current = atLiveTail;
+      setThreadAtLiveTail(atLiveTail);
+    }
     scheduleThreadReadTracking();
   }, [scheduleThreadReadTracking]);
 
@@ -797,6 +861,8 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   useEffect(() => setThreadComposerError(""), [selectedThreadRootId]);
 
+  useEffect(() => setThreadAtLiveTail(false), [selectedThreadRootId]);
+
   useEffect(() => {
     if (selectedThreadRootId !== null) return;
     threadReadTrackingRootId.current = null;
@@ -818,7 +884,9 @@ export function App({ client, theme, compactMode }: AppProps) {
     } else if (stickToTimelineBottom.current) {
       list.scrollTop = list.scrollHeight;
     }
-    stickToTimelineBottom.current = isTimelineAtBottom(list);
+    const atLiveTail = isTimelineAtBottom(list);
+    stickToTimelineBottom.current = atLiveTail;
+    setTimelineAtLiveTail(atLiveTail);
     scheduleReadTracking();
   }, [
     messages.length,
@@ -844,10 +912,33 @@ export function App({ client, theme, compactMode }: AppProps) {
     const list = threadList.current;
     if (list !== null && shouldScrollToLatest) {
       list.scrollTop = list.scrollHeight;
-      stickToThreadBottom.current = isTimelineAtBottom(list);
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToThreadBottom.current = atLiveTail;
+      setThreadAtLiveTail(atLiveTail);
     }
     scheduleThreadReadTracking();
   }, [scheduleThreadReadTracking, selectedThreadRootId, threadPending.length, threadReplies]);
+
+  useEffect(() => {
+    if (notificationSession === null || notificationContext?.status !== "active") return;
+    const conversationId = runtimeState.selectedConversationId;
+    const view = createNotificationActivityView({
+      pane: paneView,
+      conversationId,
+      timelineAtLiveTail,
+      threadRootId: selectedThreadRootId,
+      threadAtLiveTail,
+    });
+    void notificationSession.report(view).catch(() => undefined);
+  }, [
+    notificationContext,
+    notificationSession,
+    paneView,
+    runtimeState.selectedConversationId,
+    selectedThreadRootId,
+    threadAtLiveTail,
+    timelineAtLiveTail,
+  ]);
 
   useEffect(() => {
     const focusedMessageId = runtimeState.focusedMessageId;
@@ -1706,6 +1797,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         open={showPreferences}
         theme={theme}
         compactMode={compactMode}
+        notifications={notificationTransport ?? undefined}
         platform={client.platform}
         triggerRef={preferencesTrigger}
         onClose={() => setShowPreferences(false)}

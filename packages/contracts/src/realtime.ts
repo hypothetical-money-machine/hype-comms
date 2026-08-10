@@ -52,6 +52,7 @@ export const systemConnectedEventSchema = realtimeEventEnvelopeSchema.extend({
   type: z.literal("system.connected"),
   workspaceId: entityIdSchema,
   conversationId: z.null(),
+  conversationSequence: z.null(),
   payload: z
     .object({
       connectionId: entityIdSchema,

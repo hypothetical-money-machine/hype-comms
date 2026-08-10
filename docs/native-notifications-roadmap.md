@@ -1,8 +1,12 @@
 # Native notifications roadmap
 
-Status: draft execution plan. [architecture.md](architecture.md) remains the implementation
-and security contract. Policy choices introduced here are proposals for Milestone 0; they do not
-override that contract until the ADR and architecture update land.
+Status: Milestone 0 contract accepted. The Milestone 1 DM/verified-mention slice and Milestone 2
+preference/capability surfaces are implemented behind a default-off build flag, but their exit
+gates are not yet complete. The isolated DM capture/click proof and renderer settings evidence now
+pass. Participated-thread notifications (Milestone 3) and packaged
+cross-platform evidence (Milestone 4) remain unimplemented. [architecture.md](architecture.md) and
+[ADR 0002](adr/0002-native-notification-boundary.md) are the implementation and security contract.
+This roadmap sequences the remaining proof and rollout work and does not override those documents.
 
 Tracking issue: [#42](https://github.com/hype-comms/hmm-chat/issues/42).
 
@@ -33,34 +37,32 @@ count, mention count, sync cursor, or encrypted replica.
 
 ## Current position
 
-The necessary foundations already exist:
+The default-off DM/verified-mention implementation now includes:
 
-- `message.created` events carry a canonical message, its thread root, and the explicit user IDs
-  whose mentions the server verified;
-- Electron main owns authenticated realtime delivery and native operating-system capabilities;
-- the renderer's encrypted replica and acknowledgement cursor already provide durable UI catch-up
-  and deduplication;
-- conversation summaries and the member directory supply the conversation kind and display labels;
-  and
-- the desktop API already contains an unused notification-action path.
+- generation- and scope-safe realtime delivery, fail-closed invalid-frame handling, and
+  membership-revocation repair before durable renderer acknowledgement;
+- a main-process notification controller with the `system.connected` freshness boundary,
+  body-free metadata projection, bounded deduplication/action/native-handle state, and stable
+  local capability failure;
+- strict notification preference, state, activity, readiness, action, and headless-activation
+  schemas with sender and byte-bound checks in main and preload;
+- device-local atomic preferences, separate support and OS-permission state, and renderer settings;
+- exact, scope-bound `open-message` navigation with authorized by-ID hydration and a
+  renderer-initiated ready/drain handshake plus exact post-navigation acknowledgement; and
+- an unpackaged headless capture presenter that records only an opaque capture ID and eligibility
+  reason, then exercises the normal click path through a headless-only activation bridge.
 
-The remaining path is incomplete and unsafe to activate as-is:
+This is not a user rollout or a completed roadmap item. `HMM_NATIVE_NOTIFICATIONS_ENABLED` is a
+build-time switch: unset or `0` compiles presentation off and `1` includes the controller. Even in
+an enabled build, the persisted device preference defaults to disabled and body preview defaults
+off. Ordinary demos clear the switch; the isolated headless demo pins it on and selects capture,
+never the Electron native presenter.
 
-- [index.ts](../apps/desktop/src/main/index.ts) explicitly leaves native notification creation for
-  future work;
-- the current action is the stale `{ type: "open-channel", channelId }` shape even though DMs and
-  exact message/thread routing use conversation terminology;
-- the pending action queue is not bound to a user, workspace, or session generation;
-- main currently drains that queue at `did-finish-load`, before React has installed any production
-  subscriber, so an early click can be lost;
-- no production renderer code subscribes to notification actions; and
-- thread participation is not present in `message.created`, so a cold or partially hydrated client
-  cannot authoritatively infer every thread the current user follows.
-
-Notification integration requires generation-safe realtime, fail-closed invalid-event handling,
-membership-revocation repair, and narrow session, sync, replica, and conversation-controller
-boundaries to be on `main`. Contract and policy work can proceed before those prerequisites;
-native presentation cannot.
+Closing the last macOS window still stops realtime until the windowless catch-up contract is
+proven; Windows and Linux retain last-window quit behavior. Participated-thread eligibility still
+needs a capability-gated recipient-specific server reason. Remaining multi-client scenarios,
+installed native interaction, and the full packaged platform matrix must pass before pilot/default
+rollout. Tracking issue #42 therefore remains open.
 
 ## Product policy
 
@@ -136,6 +138,15 @@ must prove that this mode cannot skip UI history or turn notification progress i
 acknowledgement. Until that gate passes, closing the last macOS window must stop realtime rather
 than silently drop events.
 
+The current fallback also bounds replay held before `system.connected` to 1,024 events and 4 MiB.
+Overflow closes the socket, drops the message-bearing buffer, and retains only a scope-bound,
+body-free recovery control. A subscribed renderer receives that control through its explicit
+realtime-start handshake; the socket remains stopped until authoritative HTTP recovery supplies a
+strictly newer durable cursor. Failed delivery and an ordinary renderer stop retain the control,
+while sign-out, scope replacement, and shutdown purge it. An ordinary event that cannot cross the
+current renderer boundary pauses the transport for durable catch-up instead of reconnecting or
+claiming the event was applied.
+
 ### Privacy defaults
 
 - Notifications are device-local and enabled only when the operating system supports them.
@@ -182,9 +193,12 @@ reuse the existing search-result navigation behavior. Pending actions remain mem
 to the exact session generation, user, and workspace. They must not contain, log, or persist the
 message body.
 
-Action delivery needs an explicit renderer-ready handshake or renderer-initiated drain after the
-subscription and workspace session are ready. `did-finish-load` alone is not a sufficient readiness
-signal.
+Action delivery uses a renderer-initiated drain after the subscription and workspace session are
+ready. `did-finish-load` alone is not a sufficient readiness signal. Drain and push delivery are
+at-least-once: main retains each action until the exact sender, scope, session generation, and
+renderer generation acknowledge it after navigation handling. Renderer-side bounded deduplication
+retries a failed acknowledgement without repeating navigation; a crash or reload re-drains every
+unacknowledged action.
 
 Click guarantees last only for the originating process lifetime. Main retains each live Electron
 `Notification` object until click, close, failure, eviction, or shutdown, and closes every
@@ -218,7 +232,7 @@ The boundary has these responsibilities:
 | Server/contracts | Message authorization, verified mention IDs, durable audience, future thread reason | Device focus or OS notification state |
 | Main realtime session | Strict frame validation, current user/workspace/generation, freshness boundary | Renderer read state or claiming notification handling is UI commit |
 | Main notification | Pure policy, labels, ephemeral watermark, settings, focus/headless guard, presenter, queue | Parsing body text for mentions or exposing generic title/body IPC |
-| Preload | Strict action/activity schemas, bounded ready/drain bridge | Native presentation or persistent notification state |
+| Preload | Strict action/activity schemas, bounded ready/drain/ack bridge | Native presentation or persistent notification state |
 | Renderer session | Current pane/conversation/thread activity and durable replica synchronization | Electron `Notification`, OS permission APIs, or notification dedupe |
 | Conversation controller | Current-scope authorization, hydration, exact message/thread focus | Bypassing the replica or server authorization |
 
@@ -249,8 +263,13 @@ should be replaced rather than extended.
 
 - Keep one monotonic notification watermark and the most recent 1,024 event IDs for the signed-in
   scope. Evict event IDs oldest-first; never evict or lower the watermark.
-- Keep at most 32 clicked actions pending for a ready renderer. Drop the oldest on overflow and
-  record only a content-free diagnostic counter.
+- Before the user-bound `system.connected` handshake, buffer at most 1,024 validated replay events
+  and 4 MiB of serialized frames, with a 4 MiB per-frame cap. Overflow must discard the
+  message-bearing buffer, retain only a scope-bound body-free resync control, and wait for renderer
+  HTTP recovery to provide a newer durable cursor instead of reconnecting from the overflowing
+  cursor.
+- Keep at most 32 clicked actions pending, including delivered but unacknowledged actions. Drop the
+  oldest on overflow and record only a content-free diagnostic counter.
 - Keep at most 128 live native notification handles. Close and evict the oldest on overflow; remove
   a handle immediately on click, close, or failure.
 - Build the canonical label projection from bootstrap, all paginated conversation responses, the
@@ -297,8 +316,8 @@ Deliverables:
   only an ephemeral handled watermark plus a bounded canonical metadata projection built from
   authorized bootstrap, every conversation page, and directory responses;
 - replace the channel-only action and unscoped queue with a bounded, session-bound exact target;
-- replace eager `did-finish-load` action flushing with a renderer-ready handshake or pull-based
-  drain so early clicks cannot disappear before React subscribes;
+- replace eager `did-finish-load` action flushing with a renderer-ready pull and exact
+  acknowledgement so early clicks and renderer crashes cannot lose an action;
 - classify replay versus live events around `system.connected` in the main realtime generation;
 - disarm on connection transition, preserve the scope watermark, and re-arm only for the matching
   new `connectionId`;
@@ -318,8 +337,11 @@ Deliverables:
 - retain and clean up live native notification objects deterministically; and
 - default to metadata-only notification content.
 
-Milestone 1 remains behind a default-off development/test switch. It cannot be enabled for users
-until Milestone 2 provides durable preference and capability state.
+The Milestone 1 implementation remains behind the default-off build switch described in
+[operations.md](operations.md). Milestone 2's durable preference and capability surfaces are now
+present, but the feature cannot enter a packaged pilot until both milestones' deterministic and
+interaction exit gates pass. The device preference stays disabled by default even in an opted-in
+build.
 
 Exit gate: two clients prove DM and mention display, every suppression path, no replay storm after
 disconnect/reconnect, no UI history loss across a macOS windowless interval, last-window shutdown
@@ -399,7 +421,7 @@ notifications, and the normal release gate contains no notification-specific wai
 | --- | --- |
 | Pure policy | Eligibility, precedence, self/focus/live-tail suppression, scrolled-away behavior, live boundary, duplicates, settings |
 | Main controller | Baseline/watermark, fake presenter, exact capacity bounds, session invalidation, native lifecycle, content-safe errors |
-| IPC/preload | Strict schemas, unknown/oversized rejection, sender checks, ready/drain ordering, listener cleanup, frozen API |
+| IPC/preload | Strict schemas, unknown/oversized rejection, sender checks, ready/drain/ack ordering, listener cleanup, frozen API |
 | Renderer session/sync | Revisioned activity; macOS no-window catch-up; notification failure cannot advance or stall durable acknowledgement |
 | Renderer navigation | Channel, DM, root, and reply targets; authorized absent-cache hydration; revoked/missing fallback |
 | Two-client integration | DM, mention, replay/reconnect, macOS no-window catch-up, concurrent read, sign-out-before-click, agent-authored mention |
@@ -410,6 +432,25 @@ notifications, and the normal release gate contains no notification-specific wai
 Tests must never depend on a developer's real notification permission or emit real toasts during
 ordinary `npm run check` or the headless demo. Native presentation belongs only in explicit
 packaged smoke/E2E lanes.
+
+### Headless capture contract
+
+`npm run demo:headless` creates an unpackaged, isolated client profile, compiles the notification
+slice in, and supplies a private per-run artifact directory. Each client appends to
+`notifications-<profile>.jsonl` with mode `0600`. The file contains at most 1,024 JSONL records,
+and each record contains exactly `version`, an opaque `captureId`, and `reason`; it contains no
+user, workspace, conversation, message, author, label, or body data. The artifact is observation
+only and must not be edited to simulate a click. Headless automation passes the opaque ID through
+the strict `activateCapturedNotification` bridge, which activates only a still-live in-memory
+callback for that originating process. Unknown, expired, clicked, closed, or invalidated IDs do
+nothing. Packaged and non-headless clients cannot use this bridge, and headless mode never
+constructs the Electron native presenter.
+
+The current isolated two-client proof exercises a fresh incoming DM, exactly one body-free
+capture, opaque-ID activation through production main/preload IPC, and exact message highlighting.
+Its renderer evidence is [notification click-through](screenshots/native-notification-click-through.png)
+and [notification settings](screenshots/native-notification-settings.png). This is headless capture
+evidence, not an operating-system toast or installed-platform Milestone 4 result.
 
 Deterministic assertions must also cover:
 

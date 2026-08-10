@@ -8,6 +8,7 @@ export * from "./compact-mode.js";
 export * from "./entities.js";
 export * from "./http.js";
 export * from "./identity.js";
+export * from "./notifications.js";
 export * from "./realtime.js";
 export * from "./tasks.js";
 export * from "./theme.js";

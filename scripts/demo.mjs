@@ -278,6 +278,7 @@ async function main() {
               profile: "claire",
               callbackFile: claire.callbackFile,
               cdpPort: options.cdpBasePort,
+              artifactsDirectory: headlessManifest.artifactsDirectory,
             }),
     },
   );
@@ -298,6 +299,7 @@ async function main() {
               profile: "woots",
               callbackFile: woots.callbackFile,
               cdpPort: options.cdpBasePort + 1,
+              artifactsDirectory: headlessManifest.artifactsDirectory,
             }),
           },
         );

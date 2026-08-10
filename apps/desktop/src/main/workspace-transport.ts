@@ -15,6 +15,7 @@ import {
   listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
+  messageByIdResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
   messageSearchResponseSchema,
@@ -41,6 +42,7 @@ import {
   type ListMembersResponse,
   type ListMessageReactionsResponse,
   type MessageHistoryResponse,
+  type MessageByIdResponse,
   type MessageThreadRequest,
   type MessageThreadResponse,
   type MessageSearchQuery,
@@ -315,6 +317,14 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(request.limit));
     const response = await this.session.fetch(url.href, { method: "GET" });
     return messageThreadResponseSchema.parse(await this.#payload(response));
+  }
+
+  async messageById(messageId: string): Promise<MessageByIdResponse> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/messages/${encodeURIComponent(messageId)}`).href,
+      { method: "GET" },
+    );
+    return messageByIdResponseSchema.parse(await this.#payload(response));
   }
 
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {

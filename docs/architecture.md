@@ -229,6 +229,15 @@ domain events are:
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
+Before `system.connected` proves the ticket's exact user scope, desktop main buffers at most 1,024
+validated replay events and 4 MiB of serialized frames; each WebSocket frame is also capped at
+4 MiB. Overflow drops the message-bearing buffer, stops that connection generation without a
+same-cursor reconnect, and retains only a body-free, scope-bound resync control until renderer HTTP
+recovery supplies a newer durable cursor. A renderer navigation or crash similarly pauses event
+delivery at the last acknowledged cursor. Shared event schemas also verify canonical cross-field
+relations—such as message conversation/sequence/version and task workspace/conversation/version—
+for both WebSocket and HTTP sync before either path can reach the encrypted replica.
+
 Reaction, task, and read-state events are capability-gated for rolling compatibility. A client
 advertises `reaction-events-v1`, `task-events-v1`, and `read-state-events-v1` through
 `X-HMM-Chat-Capabilities` on both
@@ -285,15 +294,24 @@ temporary downloads are removed on logout and on the next startup. Offline full-
 and offline attachment uploads are deferred: queued sends contain text, mentions, and thread
 context only, and the UI requires connectivity before attaching a file.
 
+A full snapshot replacement authoritatively pages task boards for every visible channel and the
+signed-in person's self DM; peer and group DMs are not task targets and are never queried. The
+aggregate replacement is capped at 20,000 tasks. Inconsistent or cyclic pagination, duplicate task
+IDs, crossed workspace/conversation scope, or capacity overflow fails the entire replacement before
+its bootstrap high-water cursor is committed, so cached task state is never silently retained or
+partially advanced past.
+
 Startup and reconnect use this sequence:
 
 1. Render decrypted cache with an explicit stale/offline state while main restores a session.
-2. If there is no cursor, call bootstrap. Otherwise page `/sync` until its high-water cursor.
-3. Obtain a realtime ticket and connect with the last durably applied cursor; the server
+2. Build an authoritative snapshot from bootstrap plus every conversation, history, reaction,
+   and eligible task page, then commit it atomically at the bootstrap high-water cursor.
+3. Page `/sync` from that committed cursor until its current high-water cursor.
+4. Obtain a realtime ticket and connect with the last durably applied cursor; the server
    replays the connection gap.
-4. For each event, validate its version/audience, apply an idempotent entity upsert/delete and
+5. For each event, validate its version/audience, apply an idempotent entity upsert/delete and
    cursor advance in one IndexedDB transaction, then update visible state.
-5. Once membership/conversation state is current, flush the outbox FIFO within each
+6. Once membership/conversation state is current, flush the outbox FIFO within each
    conversation and with at most three conversations in flight.
 
 Duplicate event IDs are ignored, older entity versions cannot overwrite newer data, and a
@@ -390,12 +408,26 @@ shared focus treatment before it can be added to the built-in registry.
 - Search returns a body snippet with escaped highlights but no durable download URL. Empty,
   stop-word-only, and overly broad queries return a validated user error; queries are
   limited to 200 characters and 30 per minute per member.
-- Main issues native notifications only while the app is running and its window is not
-  focused. Notify for a new DM, a verified mention, or a reply to a thread the user started
-  or has replied to; suppress self-authored and currently visible messages. Notification
-  previews default off, showing only author/conversation. Clicking routes to the exact
-  conversation/thread and fetches it if absent from cache. Denied OS permission is a normal
-  settings state, not a retry loop. A fully quit desktop receives no push notification.
+- Native notifications follow the main/renderer, freshness, and action boundary in
+  [ADR 0002](adr/0002-native-notification-boundary.md). The DM/verified-mention controller and
+  preference surfaces are present but compiled off unless the build-time
+  `HMM_NATIVE_NOTIFICATIONS_ENABLED=1` switch is explicit; unset and `0` fail closed. The device
+  preference also defaults disabled. Notification bookkeeping is ephemeral and never advances or
+  delays the renderer replica, sync cursor, read cursor, unread count, or mention count.
+- Once enabled, main evaluates only a fresh `message.created` from the connection armed by its
+  validated `system.connected`. A verified mention takes precedence over an incoming DM; replay,
+  catch-up, duplicates, null/self authors, focus, an exact stream visible at its live tail, stale
+  scope, disabled/unsupported capability, and OS denial are quiet. Human, bot, and agent authors
+  follow the same policy. Group DMs and locally inferred thread participation are not eligible.
+- Notification content defaults to bounded author/conversation metadata, never message body text.
+  A body-free, scope-bound click action restores the exact conversation/message/thread only in its
+  originating process and current session generation. Main retains delivery until an exact
+  post-navigation renderer acknowledgement, so reloads re-drain safely without repeating handled
+  navigation. Denial or presenter failure is a stable local state, not a prompt/retry/reconnect
+  loop; a fully quit desktop receives no push. Headless
+  automation uses a body-free opaque-ID capture/activation path and never constructs a native
+  presenter. Participated-thread eligibility and installed cross-platform native evidence remain
+  rollout gates.
 
 ## Security, privacy, and operations
 

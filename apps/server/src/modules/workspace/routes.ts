@@ -280,6 +280,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return repository.thread(identity, id, query.data.before, query.data.limit);
   });
 
+  app.get("/messages/:id", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    const { id } = parameters(request.params);
+    return repository.messageById(identity, id);
+  });
+
   app.get("/search", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");

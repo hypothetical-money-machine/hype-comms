@@ -778,24 +778,129 @@ describe("transport contracts", () => {
   });
 
   it("validates the initial realtime handshake event", () => {
-    expect(
-      systemConnectedEventSchema.parse({
-        version: 1,
-        id: "10000000-0000-4000-8000-000000000005",
-        type: "system.connected",
-        occurredAt: NOW,
-        workspaceId: WORKSPACE_ID,
-        conversationId: null,
-        workspaceSequence: "42",
-        conversationSequence: null,
-        entityVersion: 1,
-        delivery: "at_least_once",
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000005",
+      type: "system.connected",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: null,
+      workspaceSequence: "42",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        connectionId: "10000000-0000-4000-8000-000000000006",
+        userId: USER_ID,
+      },
+    } as const;
+
+    expect(systemConnectedEventSchema.parse(event)).toMatchObject({ type: "system.connected" });
+    expect(() =>
+      systemConnectedEventSchema.parse({ ...event, conversationSequence: "1" }),
+    ).toThrow();
+  });
+
+  it("rejects conversation events whose canonical entity contradicts the envelope or type", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000005",
+      type: "channel.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "42",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: {
+        conversation: CONVERSATION_SUMMARY.conversation,
+        participantIds: [],
+      },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
         payload: {
-          connectionId: "10000000-0000-4000-8000-000000000006",
-          userId: USER_ID,
+          ...event.payload,
+          conversation: { ...event.payload.conversation, id: MESSAGE_ID },
         },
       }),
-    ).toMatchObject({ type: "system.connected" });
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          conversation: { ...event.payload.conversation, workspaceId: MESSAGE_ID },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          conversation: { ...event.payload.conversation, isArchived: true },
+        },
+      }),
+    ).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, type: "channel.archived" })).toThrow();
+    expect(
+      workspaceEventSchema.parse({
+        ...event,
+        type: "channel.archived",
+        payload: {
+          ...event.payload,
+          conversation: { ...event.payload.conversation, isArchived: true },
+        },
+      }),
+    ).toMatchObject({ type: "channel.archived" });
+    expect(() =>
+      workspaceEventSchema.parse({ ...event, type: "direct_conversation.created" }),
+    ).toThrow();
+  });
+
+  it("rejects message events whose canonical entity contradicts the envelope", () => {
+    const message = {
+      id: MESSAGE_ID,
+      conversationId: CONVERSATION_ID,
+      conversationSequence: "42",
+      version: 1,
+      clientMessageId: MESSAGE_ID,
+      authorId: USER_ID,
+      threadRootId: null,
+      body: "Envelope consistency",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    } as const;
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000005",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "43",
+      conversationSequence: "42",
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message, mentionedUserIds: [] },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    for (const candidate of [
+      { ...event, conversationId: MESSAGE_ID },
+      { ...event, conversationSequence: "41" },
+      { ...event, entityVersion: 2 },
+    ]) {
+      expect(() => workspaceEventSchema.parse(candidate)).toThrow();
+    }
   });
 
   it("validates reaction sync events with their target message sequence", () => {
@@ -923,6 +1028,15 @@ describe("transport contracts", () => {
         payload: { ...event.payload, unreadCount: 2 },
       }),
     ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          readCursor: { ...event.payload.readCursor, conversationId: MESSAGE_ID },
+        },
+      }),
+    ).toThrow();
   });
 
   it("validates versioned task events without a message sequence", () => {
@@ -945,6 +1059,9 @@ describe("transport contracts", () => {
       type: "task.created",
     });
     expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: "42" })).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, workspaceId: MESSAGE_ID })).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, conversationId: MESSAGE_ID })).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, entityVersion: 2 })).toThrow();
   });
 
   it("validates bounded client capability headers", () => {

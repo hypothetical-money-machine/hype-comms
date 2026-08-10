@@ -90,6 +90,7 @@ export interface WorkspaceCache {
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     tasks?: readonly Task[],
+    signal?: AbortSignal,
   ): Promise<void>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v1/members`.
@@ -104,6 +105,11 @@ export interface WorkspaceCache {
   upsertConversation(summary: ConversationSummary): Promise<void>;
   /** Durably closes the cache before a membership event can wait on network or shutdown work. */
   stageMembershipRepair(event: MembershipChangedEvent): Promise<boolean>;
+  /**
+   * Applies an event and advances the durable cursor. A membership change first stages its repair,
+   * purges revoked conversation state when applicable, and leaves the cache blocked until an
+   * authoritative snapshot clears the repair marker.
+   */
   applyEvent(event: WorkspaceEvent): Promise<boolean>;
   advanceCursor(syncCursor: string): Promise<void>;
   upsertHistory(messages: readonly Message[], reactions?: readonly Reaction[]): Promise<void>;
@@ -740,6 +746,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
+    signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
@@ -759,6 +766,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ...parsedReactions.map((reaction) => protectedRecord("reaction", reaction.id, reaction)),
       ...parsedTasks.map((task) => protectedRecord("task", task.id, task)),
     ]);
+    signal?.throwIfAborted();
     await this.#database.transaction(
       "rw",
       [
@@ -772,6 +780,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.events,
       ],
       async () => {
+        signal?.throwIfAborted();
         const metadata = await this.#database.metadata.get("state");
         const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
         if (
@@ -815,6 +824,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           lastSyncedAt: new Date().toISOString(),
           repairMarker: null,
         });
+        // Throwing inside the transaction rolls every store back when this cache generation was
+        // retired while its encrypted replacement was in progress.
+        signal?.throwIfAborted();
       },
     );
     await this.#evictMessages();
@@ -1503,8 +1515,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
+    signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
       compareSequence(parsed.syncCursor, this.#repairMarker.workspaceSequence) < 0

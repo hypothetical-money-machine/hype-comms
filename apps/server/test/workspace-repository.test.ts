@@ -1289,6 +1289,43 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
   });
 
+  it("hydrates an exact message only while the requester can access its conversation", async () => {
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Notification Targets",
+      slug: "notification-targets",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = privateChannel.conversation.conversation.id;
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "exact notification target"),
+      mentionedUserIds: [],
+    });
+
+    await expect(repository.messageById(owner, sent.message.id)).resolves.toEqual({
+      message: sent.message,
+    });
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    await expect(repository.messageById(member, sent.message.id)).resolves.toEqual({
+      message: sent.message,
+    });
+
+    await repository.removeChannelMember(owner, conversationId, memberId);
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.messageById(member, randomUUID())).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+  });
+
   it("keeps direct-message history and events private while advancing other cursors", async () => {
     const direct = await repository.createDirectConversation(owner, { memberId });
     const conversationId = direct.conversation.conversation.id;

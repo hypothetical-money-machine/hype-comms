@@ -205,6 +205,23 @@ class FakeWorkspaceRepository {
     replies: [],
     nextCursor: null,
   }));
+  readonly messageById = vi.fn(async () => ({
+    message: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 1,
+      clientMessageId: messageId,
+      authorId: userId,
+      threadRootId: null,
+      body: "Root",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
   readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
     message: {
       id: replyId,
@@ -797,6 +814,40 @@ describe("task routes", () => {
 });
 
 describe("message thread routes", () => {
+  it("loads one exact authorized message without exposing a search primitive", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/messages/${messageId}`,
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      message: expect.objectContaining({ id: messageId, conversationId }),
+    });
+    expect(repository.messageById).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+    );
+  });
+
+  it("rejects a malformed exact-message target before repository access", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/messages/not-a-uuid",
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.messageById).not.toHaveBeenCalled();
+  });
+
   it("gates thread summaries while accepting legacy and capable history clients", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);

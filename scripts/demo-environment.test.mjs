@@ -9,6 +9,7 @@ import {
   DEMO_COMPOSE_PROJECT,
   HEADLESS_DEMO_MANIFEST_KIND,
   HEADLESS_DEMO_MANIFEST_VERSION,
+  HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV,
   assertDemoCanReset,
   createHeadlessDemoManifest,
   createHeadlessDemoReadyRecord,
@@ -40,6 +41,8 @@ test("derives an isolated loopback database and never inherits the normal databa
       HMM_POSTGRES_PASSWORD: "demo p@ss",
       HMM_DATABASE_URL: "postgres://production.example/important",
       HMM_DESKTOP_HEADLESS: "1",
+      HMM_NATIVE_NOTIFICATIONS_ENABLED: "1",
+      [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: "/tmp/untrusted-capture-directory",
       ELECTRON_CLI_ARGS: "--remote-debugging-address=0.0.0.0",
       REMOTE_DEBUGGING_PORT: "9222",
       HMM_OWNER_EMAIL: "owner@example.com",
@@ -52,6 +55,8 @@ test("derives an isolated loopback database and never inherits the normal databa
   assert.equal(url.password, "demo%20p%40ss");
   assert.equal(result.env.HMM_OWNER_EMAIL, undefined);
   assert.equal(result.env.HMM_DESKTOP_HEADLESS, undefined);
+  assert.equal(result.env.HMM_NATIVE_NOTIFICATIONS_ENABLED, undefined);
+  assert.equal(result.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], undefined);
   assert.equal(result.env.ELECTRON_CLI_ARGS, undefined);
   assert.equal(result.env.REMOTE_DEBUGGING_PORT, undefined);
   assert.equal(result.paths.stateDirectory, path.join(root, ".dev-data", "demo"));
@@ -112,11 +117,14 @@ test("creates isolated headless artifacts and Electron launch configuration", as
       HMM_DATABASE_URL: "postgres://127.0.0.1/demo",
       ELECTRON_CLI_ARGS: "--unexpected-switch",
       REMOTE_DEBUGGING_PORT: "9999",
+      HMM_NATIVE_NOTIFICATIONS_ENABLED: "0",
+      [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: "/tmp/inherited-artifacts",
     },
     {
       profile: "claire",
       callbackFile: path.join(paths.callbackDirectory, "claire.callback"),
       cdpPort: 9410,
+      artifactsDirectory,
     },
   );
 
@@ -124,7 +132,9 @@ test("creates isolated headless artifacts and Electron launch configuration", as
   assert.equal((await stat(paths.artifactRootDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(artifactsDirectory)).mode & 0o777, 0o700);
   assert.equal(desktopEnvironment.HMM_DESKTOP_HEADLESS, "1");
+  assert.equal(desktopEnvironment.HMM_NATIVE_NOTIFICATIONS_ENABLED, "1");
   assert.equal(desktopEnvironment.HMM_DESKTOP_PROFILE, "claire");
+  assert.equal(desktopEnvironment[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], artifactsDirectory);
   assert.equal(desktopEnvironment.ELECTRON_CLI_ARGS, undefined);
   assert.equal(desktopEnvironment.REMOTE_DEBUGGING_PORT, undefined);
   assert.deepEqual(headlessElectronViteArguments(9410), [
@@ -136,6 +146,19 @@ test("creates isolated headless artifacts and Electron launch configuration", as
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=9411",
   ]);
+  assert.throws(
+    () =>
+      deriveHeadlessDesktopEnvironment(
+        {},
+        {
+          profile: "claire",
+          callbackFile: path.join(paths.callbackDirectory, "claire.callback"),
+          cdpPort: 9410,
+          artifactsDirectory: "relative/artifacts",
+        },
+      ),
+    /artifacts directory must be absolute/,
+  );
   await rm(root, { recursive: true, force: true });
 });
 

@@ -78,6 +78,33 @@ A successful backup job without a tested restore is not a completed durability c
 
 ## Desktop release gaps
 
+### Native notification pilot controls
+
+Native notifications are not enabled in ordinary development, package, or release builds.
+`HMM_NATIVE_NOTIFICATIONS_ENABLED` is read by Electron Vite at build time and accepts only `0` or
+`1`; unset and `0` compile the controller off, report native support as unsupported, and never
+construct a presenter. Use `HMM_NATIVE_NOTIFICATIONS_ENABLED=1` only for an explicit development,
+headless, or packaged-pilot evidence build. It does not turn notifications on for a device: the
+versioned main-process preference still defaults disabled, and message-body preview remains a
+separate default-off preference. The variable has no effect when set only at runtime for an
+already-built artifact.
+
+The ordinary interactive demo deliberately removes notification and headless automation variables.
+The headless demo instead pins the build flag to `1`, sets `HMM_DESKTOP_HEADLESS=1`, uses isolated
+profiles, and supplies `HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY` as a private absolute
+per-run directory. It never constructs Electron's native presenter. Eligible outcomes append only
+`version`, opaque `captureId`, and `reason` to mode-`0600`
+`notifications-<profile>.jsonl` files, capped at 1,024 records. Automation must activate a live
+capture through the headless-only strict bridge; editing the artifact cannot create an authorized
+action. Do not upload these private run artifacts even though their schema is content-free.
+
+This flag is the rollback boundary for the current slice: rebuild without the flag (or with `0`)
+to remove presentation while leaving server state, encrypted replicas, unread/mention state,
+outboxes, and device preference files untouched. Do not set a release default until the
+Milestone 1–2 deterministic gates and applicable installed-platform Milestone 4 evidence in
+[the native-notifications roadmap](native-notifications-roadmap.md) pass. Participated-thread
+notifications remain out of scope until Milestone 3 supplies a capability-gated server reason.
+
 macOS signing/notarization is configured. Windows Authenticode is blocked on procuring a Windows
 code-signing certificate and publisher identity; no matching repository secrets or variables exist
 today. Once procured, add protected certificate credentials, configure electron-builder with the

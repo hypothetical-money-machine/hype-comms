@@ -19,6 +19,7 @@ import {
   listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
+  messageByIdResponseSchema,
   messageSearchResponseSchema,
   messageSchema,
   messageThreadResponseSchema,
@@ -55,6 +56,7 @@ import {
   type ListMembersResponse,
   type Message,
   type MessageHistoryResponse,
+  type MessageByIdResponse,
   type MessageSearchResponse,
   type MessageThreadResponse,
   type MessageThreadSummary,
@@ -1324,6 +1326,28 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  async messageById(
+    identity: AuthenticatedIdentity,
+    messageId: string,
+  ): Promise<MessageByIdResponse> {
+    const result = await this.pool.query<MessageRow>(
+      `SELECT message.*
+         FROM messages AS message
+         JOIN conversations AS conversation ON conversation.id = message.conversation_id
+        WHERE message.id = $1
+          AND message.workspace_id = $2
+          AND conversation.workspace_id = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}`,
+      [messageId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+    );
+    const message = result.rows[0];
+    if (message === undefined) {
+      // Missing and unauthorized targets deliberately share one response.
+      throw new ApiError(404, "NOT_FOUND", "Message not found");
+    }
+    return messageByIdResponseSchema.parse({ message: mapMessage(message) });
   }
 
   async listMessageReactions(

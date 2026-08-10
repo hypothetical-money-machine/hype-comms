@@ -329,6 +329,13 @@ export const messageThreadResponseSchema = z
     }
   });
 
+/** One exact, currently authorized message used for body-free notification action hydration. */
+export const messageByIdResponseSchema = z
+  .object({
+    message: messageSchema,
+  })
+  .strict();
+
 export const listMessageReactionsRequestSchema = z
   .object({
     messageIds: z
@@ -485,17 +492,81 @@ export const memberUpdatedEventSchema = workspaceEventBaseSchema.extend({
     .strict(),
 });
 
-export const conversationUpdatedEventSchema = workspaceEventBaseSchema.extend({
-  type: z.enum(["channel.created", "channel.archived", "direct_conversation.created"]),
-  conversationId: entityIdSchema,
-  conversationSequence: z.null(),
-  payload: z
-    .object({
-      conversation: conversationSchema,
-      participantIds: z.array(entityIdSchema).max(25),
-    })
-    .strict(),
-});
+export const conversationUpdatedEventSchema = workspaceEventBaseSchema
+  .extend({
+    type: z.enum(["channel.created", "channel.archived", "direct_conversation.created"]),
+    conversationId: entityIdSchema,
+    conversationSequence: z.null(),
+    payload: z
+      .object({
+        conversation: conversationSchema,
+        participantIds: z.array(entityIdSchema).max(25),
+      })
+      .strict(),
+  })
+  .superRefine((event, context) => {
+    const conversation = event.payload.conversation;
+    if (conversation.id !== event.conversationId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "id"],
+        message: "Conversation ID must match the event conversation",
+      });
+    }
+    if (conversation.workspaceId !== event.workspaceId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "workspaceId"],
+        message: "Conversation workspace must match the event workspace",
+      });
+    }
+    if (event.type === "channel.created" && conversation.kind !== "channel") {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "kind"],
+        message: "A created channel event must contain a channel",
+      });
+    }
+    if (event.type === "channel.created" && conversation.isArchived) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "isArchived"],
+        message: "A created channel cannot already be archived",
+      });
+    }
+    if (event.type === "channel.archived" && conversation.kind !== "channel") {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "kind"],
+        message: "An archived channel event must contain a channel",
+      });
+    }
+    if (event.type === "channel.archived" && !conversation.isArchived) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "isArchived"],
+        message: "An archived channel event must contain an archived conversation",
+      });
+    }
+    if (
+      event.type === "direct_conversation.created" &&
+      conversation.kind !== "direct_message" &&
+      conversation.kind !== "group_direct_message"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "kind"],
+        message: "A direct-conversation event must contain a direct conversation",
+      });
+    }
+    if (event.type === "direct_conversation.created" && conversation.isArchived) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "conversation", "isArchived"],
+        message: "A created direct conversation cannot already be archived",
+      });
+    }
+  });
 
 export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.extend({
   type: z.literal("channel.membership_changed"),
@@ -509,21 +580,48 @@ export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.exte
     .strict(),
 });
 
-export const messageCreatedEventSchema = workspaceEventBaseSchema.extend({
-  type: z.literal("message.created"),
-  conversationId: entityIdSchema,
-  conversationSequence: sequenceSchema,
-  payload: z
-    .object({
-      message: messageSchema,
-      mentionedUserIds: z.array(entityIdSchema).max(50),
-    })
-    .strict(),
-});
+export const messageCreatedEventSchema = workspaceEventBaseSchema
+  .extend({
+    type: z.literal("message.created"),
+    conversationId: entityIdSchema,
+    conversationSequence: sequenceSchema,
+    payload: z
+      .object({
+        message: messageSchema,
+        mentionedUserIds: z.array(entityIdSchema).max(50),
+      })
+      .strict(),
+  })
+  .superRefine((event, context) => {
+    if (event.payload.message.conversationId !== event.conversationId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "message", "conversationId"],
+        message: "Message conversation must match the event conversation",
+      });
+    }
+    if (event.payload.message.conversationSequence !== event.conversationSequence) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "message", "conversationSequence"],
+        message: "Message sequence must match the event conversation sequence",
+      });
+    }
+    if (event.payload.message.version !== event.entityVersion) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "message", "version"],
+        message: "Message version must match the event entity version",
+      });
+    }
+  });
 
 const reactionChangedEventBaseSchema = workspaceEventBaseSchema.extend({
   conversationId: entityIdSchema,
   conversationSequence: sequenceSchema,
+  // Reaction payloads identify their target message, but intentionally do not duplicate that
+  // message's conversation identity. Requiring the non-null conversation envelope is therefore
+  // the complete consistency check available without widening the rolling wire shape.
   payload: z
     .object({
       reaction: reactionSchema,
@@ -539,28 +637,38 @@ export const reactionRemovedEventSchema = reactionChangedEventBaseSchema.extend(
   type: z.literal("reaction.removed"),
 });
 
-export const readCursorUpdatedEventSchema = workspaceEventBaseSchema.extend({
-  type: z.literal("read_cursor.updated"),
-  conversationId: entityIdSchema,
-  conversationSequence: z.null(),
-  payload: z
-    .object({
-      readCursor: readCursorSchema,
-      // Optional for retained events and clients predating capability negotiation. New capable
-      // clients receive both fields; the refinement prevents half-populated canonical state.
-      unreadCount: z.number().int().nonnegative().optional(),
-      mentionCount: z.number().int().nonnegative().optional(),
-    })
-    .strict()
-    .superRefine((value, context) => {
-      if ((value.unreadCount === undefined) !== (value.mentionCount === undefined)) {
-        context.addIssue({
-          code: "custom",
-          message: "Unread and mention counts must be provided together",
-        });
-      }
-    }),
-});
+export const readCursorUpdatedEventSchema = workspaceEventBaseSchema
+  .extend({
+    type: z.literal("read_cursor.updated"),
+    conversationId: entityIdSchema,
+    conversationSequence: z.null(),
+    payload: z
+      .object({
+        readCursor: readCursorSchema,
+        // Optional for retained events and clients predating capability negotiation. New capable
+        // clients receive both fields; the refinement prevents half-populated canonical state.
+        unreadCount: z.number().int().nonnegative().optional(),
+        mentionCount: z.number().int().nonnegative().optional(),
+      })
+      .strict()
+      .superRefine((value, context) => {
+        if ((value.unreadCount === undefined) !== (value.mentionCount === undefined)) {
+          context.addIssue({
+            code: "custom",
+            message: "Unread and mention counts must be provided together",
+          });
+        }
+      }),
+  })
+  .superRefine((event, context) => {
+    if (event.payload.readCursor.conversationId !== event.conversationId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "readCursor", "conversationId"],
+        message: "Read cursor conversation must match the event conversation",
+      });
+    }
+  });
 
 export const workspaceEventSchema = z.discriminatedUnion("type", [
   memberUpdatedEventSchema,
@@ -603,7 +711,10 @@ export const systemResyncRequiredEventSchema = workspaceEventBaseSchema.extend({
   conversationSequence: z.null(),
   payload: z
     .object({
-      reason: z.enum(["cursor_expired", "server_reset"]),
+      // `client_replay_overflow` is synthesized only across the same Electron main-to-renderer
+      // boundary. Servers never emit it, so this additive local recovery reason does not expose an
+      // older strict desktop to a new server-emitted value during a rolling release.
+      reason: z.enum(["cursor_expired", "server_reset", "client_replay_overflow"]),
     })
     .strict(),
 });
@@ -640,6 +751,7 @@ export type MessageThreadRequest = z.infer<typeof messageThreadRequestSchema>;
 export type MessageThreadSummary = z.infer<typeof messageThreadSummarySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;
 export type MessageThreadResponse = z.infer<typeof messageThreadResponseSchema>;
+export type MessageByIdResponse = z.infer<typeof messageByIdResponseSchema>;
 export type ListMessageReactionsRequest = z.infer<typeof listMessageReactionsRequestSchema>;
 export type ListMessageReactionsResponse = z.infer<typeof listMessageReactionsResponseSchema>;
 export type MessageReactionTarget = z.infer<typeof messageReactionTargetSchema>;

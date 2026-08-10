@@ -11,6 +11,7 @@ import {
   normalizeDevelopmentApiOrigin,
   normalizeProductionApiOrigin,
 } from "./src/shared/api-origin";
+import { resolveNativeNotificationRollout } from "./src/shared/native-notification-rollout";
 import {
   DEVELOPMENT_CONTENT_SECURITY_POLICY,
   PRODUCTION_CONTENT_SECURITY_POLICY,
@@ -31,6 +32,11 @@ const rendererContentSecurityPolicy = (isDevelopment: boolean): Plugin => ({
 
 export default defineConfig(({ command }) => {
   const isDevelopment = command === "serve";
+  // Native presentation stays compiled off unless an explicit development/test or pilot build
+  // opts in. The terminal rollout may change this default only after packaged native evidence.
+  const nativeNotificationsEnabled = resolveNativeNotificationRollout(
+    process.env.HMM_NATIVE_NOTIFICATIONS_ENABLED,
+  );
   const configuredApiOrigin =
     process.env.HMM_CHAT_API_ORIGIN ??
     (isDevelopment ? DEFAULT_DEVELOPMENT_API_ORIGIN : DEFAULT_PRODUCTION_API_ORIGIN);
@@ -49,6 +55,7 @@ export default defineConfig(({ command }) => {
     main: {
       define: {
         __HMM_CHAT_API_ORIGIN__: JSON.stringify(apiOrigin),
+        __HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
         __HMM_CHAT_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
       },
       build: {

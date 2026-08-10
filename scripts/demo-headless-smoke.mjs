@@ -13,6 +13,12 @@ export const DEFAULT_MANIFEST_RELATIVE_PATH = path.join(
   "headless-session.json",
 );
 export const DEFAULT_SMOKE_MESSAGE = "HMM headless automation smoke";
+export const HEADLESS_NOTIFICATION_CAPTURE_KEYS = ["captureId", "reason", "version"];
+export const HEADLESS_NOTIFICATION_CAPTURE_POLL_MS = 100;
+
+const NOTIFICATION_CAPTURE_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
+const MESSAGE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -133,6 +139,174 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
+function notificationArtifactPath(manifest, profile) {
+  return path.join(manifest.artifactsDirectory, `notifications-${profile}.jsonl`);
+}
+
+function notificationCaptureRecord(value) {
+  if (!isRecord(value)) throw new Error("Headless notification capture record must be an object");
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== HEADLESS_NOTIFICATION_CAPTURE_KEYS.length ||
+    !HEADLESS_NOTIFICATION_CAPTURE_KEYS.every((key, index) => keys[index] === key)
+  ) {
+    throw new Error("Headless notification capture record contains unexpected fields");
+  }
+  if (value.version !== 1) {
+    throw new Error("Headless notification capture record has an unsupported version");
+  }
+  if (
+    typeof value.captureId !== "string" ||
+    !NOTIFICATION_CAPTURE_ID_PATTERN.test(value.captureId)
+  ) {
+    throw new Error("Headless notification capture record has an invalid opaque ID");
+  }
+  if (value.reason !== "direct_message" && value.reason !== "verified_mention") {
+    throw new Error("Headless notification capture record has an invalid reason");
+  }
+  return {
+    version: 1,
+    captureId: value.captureId,
+    reason: value.reason,
+  };
+}
+
+/** Strictly parse the deliberately body- and target-free headless notification artifact. */
+export function parseHeadlessNotificationCaptureArtifact(contents, forbiddenValues = []) {
+  if (typeof contents !== "string") {
+    throw new Error("Headless notification capture artifact must be UTF-8 text");
+  }
+  for (const value of forbiddenValues) {
+    if (typeof value !== "string" || value === "") {
+      throw new Error("Headless notification capture forbidden values must be non-empty strings");
+    }
+    if (contents.includes(value)) {
+      throw new Error("Headless notification capture artifact leaked message or target data");
+    }
+  }
+  if (contents === "") return [];
+  if (!contents.endsWith("\n")) {
+    throw new Error("Headless notification capture artifact contains an incomplete record");
+  }
+  return contents
+    .slice(0, -1)
+    .split("\n")
+    .map((line) => {
+      try {
+        return notificationCaptureRecord(JSON.parse(line));
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new Error("Headless notification capture artifact is not valid JSON", {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    });
+}
+
+async function readNotificationCaptureArtifact(filePath, readArtifact) {
+  try {
+    return await readArtifact(filePath, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+/** Wait for exactly one new capture and re-read once to catch duplicate presentation. */
+export async function waitForNewHeadlessNotificationCapture({
+  filePath,
+  knownCaptureIds,
+  forbiddenValues,
+  timeoutMs,
+  readArtifact = readFile,
+  pause = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  now = Date.now,
+}) {
+  if (!(knownCaptureIds instanceof Set)) {
+    throw new Error("Known notification capture IDs must be a Set");
+  }
+  const deadline = now() + timeoutMs;
+  while (true) {
+    const contents = await readNotificationCaptureArtifact(filePath, readArtifact);
+    const records = parseHeadlessNotificationCaptureArtifact(contents, forbiddenValues);
+    const newRecords = records.filter((record) => !knownCaptureIds.has(record.captureId));
+    if (newRecords.length > 1) {
+      throw new Error("One message produced more than one headless notification capture");
+    }
+    if (newRecords.length === 1) {
+      await pause(HEADLESS_NOTIFICATION_CAPTURE_POLL_MS);
+      const settledContents = await readNotificationCaptureArtifact(filePath, readArtifact);
+      const settledRecords = parseHeadlessNotificationCaptureArtifact(
+        settledContents,
+        forbiddenValues,
+      );
+      const settledNewRecords = settledRecords.filter(
+        (record) => !knownCaptureIds.has(record.captureId),
+      );
+      if (settledNewRecords.length !== 1) {
+        throw new Error("One message must produce exactly one headless notification capture");
+      }
+      return settledNewRecords[0];
+    }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      throw new Error("Timed out waiting for the headless notification capture");
+    }
+    await pause(Math.min(HEADLESS_NOTIFICATION_CAPTURE_POLL_MS, remainingMs));
+  }
+}
+
+/** Enable the device-local, metadata-only preference through the real frozen preload API. */
+export async function enableHeadlessNotificationCapture(page) {
+  if (typeof page?.evaluate !== "function") {
+    throw new Error("A Playwright Page is required to enable headless notification capture");
+  }
+  const state = await page.evaluate(async () => {
+    if (globalThis.hmmChat.isHeadless !== true) {
+      throw new Error("Notification capture proof requires a headless desktop client");
+    }
+    if (typeof globalThis.hmmChat.setNotificationPreference !== "function") {
+      throw new Error("Notification preferences are unavailable");
+    }
+    return globalThis.hmmChat.setNotificationPreference({
+      version: 1,
+      devicePreference: "enabled",
+      contentPreviewPreference: "disabled",
+    });
+  });
+  if (
+    !isRecord(state) ||
+    state.devicePreference !== "enabled" ||
+    state.contentPreviewPreference !== "disabled" ||
+    state.nativeSupport !== "supported"
+  ) {
+    throw new Error("Headless notification capture did not enter metadata-only supported state");
+  }
+}
+
+async function messageIdForVisibleBody(page, message) {
+  const row = page
+    .getByText(message, { exact: true })
+    .locator("xpath=ancestor::*[@data-message-id][1]");
+  const messageId = await row.getAttribute("data-message-id");
+  if (messageId === null || !MESSAGE_ID_PATTERN.test(messageId)) {
+    throw new Error("The received smoke message has no canonical message target ID");
+  }
+  return messageId;
+}
+
+async function activateCapturedNotification(page, captureId) {
+  const activated = await page.evaluate(
+    async (opaqueId) => globalThis.hmmChat.activateCapturedNotification(opaqueId),
+    captureId,
+  );
+  if (activated !== true) {
+    throw new Error("The opaque headless notification capture could not be activated");
+  }
+}
+
 /** Select the known seeded direct-message conversation through the app's accessible switcher. */
 export async function selectDirectConversation(page, otherMemberName) {
   await page.getByRole("button", { name: /Jump to/u }).click();
@@ -192,6 +366,8 @@ export async function runHeadlessSmoke({
   timeoutMs = agentCapture.DEFAULT_TIMEOUT_MS,
   captureId = randomUUID(),
   capture = agentCapture,
+  readArtifact = readFile,
+  waitForNotificationCapture = waitForNewHeadlessNotificationCapture,
 }) {
   const normalizedManifest = parseHeadlessDemoManifest(manifest);
   const normalizedCaptureId = normalizeCaptureId(captureId);
@@ -206,6 +382,7 @@ export async function runHeadlessSmoke({
     normalizedManifest.artifactsDirectory,
     `smoke-${normalizedCaptureId}-claire.webm`,
   );
+  const notificationCapturePath = notificationArtifactPath(normalizedManifest, "woots");
   let claireConnection;
   let wootsConnection;
   let recording;
@@ -231,6 +408,11 @@ export async function runHeadlessSmoke({
       capture.waitForWorkspaceReady(wootsConnection.page, { timeoutMs }),
     ]);
     await assertHeadlessReadCursorIsBlocked(claireConnection.page);
+    await enableHeadlessNotificationCapture(wootsConnection.page);
+    const captureBaseline = parseHeadlessNotificationCaptureArtifact(
+      await readNotificationCaptureArtifact(notificationCapturePath, readArtifact),
+    );
+    const knownCaptureIds = new Set(captureBaseline.map((record) => record.captureId));
 
     recording = await capture.startWebmScreencast(claireConnection.page, videoPath, {
       size: capture.DEFAULT_CAPTURE_SIZE,
@@ -242,6 +424,28 @@ export async function runHeadlessSmoke({
     await wootsConnection.page
       .getByText(message, { exact: true })
       .waitFor({ state: "visible", timeout: timeoutMs });
+    const messageId = await messageIdForVisibleBody(wootsConnection.page, message);
+    const notificationCapture = await waitForNotificationCapture({
+      filePath: notificationCapturePath,
+      knownCaptureIds,
+      forbiddenValues: [message, messageId],
+      timeoutMs,
+      readArtifact,
+    });
+    if (notificationCapture.reason !== "direct_message") {
+      throw new Error("The incoming direct message produced the wrong notification reason");
+    }
+
+    // Leave the target so the activation must navigate back through the production action path.
+    await selectDirectConversation(wootsConnection.page, "General");
+    await activateCapturedNotification(wootsConnection.page, notificationCapture.captureId);
+    const highlightedMessage = wootsConnection.page.locator(
+      `[data-message-id="${messageId}"].search-target`,
+    );
+    await highlightedMessage.waitFor({ state: "visible", timeout: timeoutMs });
+    await highlightedMessage
+      .getByText(message, { exact: true })
+      .waitFor({ state: "visible", timeout: timeoutMs });
     await capture.capturePng(wootsConnection.page, screenshotPath);
 
     smokeResult = {
@@ -250,6 +454,7 @@ export async function runHeadlessSmoke({
       artifacts: {
         screenshotPath,
         videoPath,
+        notificationCapturePath,
       },
     };
   } catch (error) {

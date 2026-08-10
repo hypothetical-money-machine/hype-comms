@@ -693,6 +693,32 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
+  it("leaves an existing snapshot unchanged when its replacement generation is aborted", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await expect(
+      cache.replaceSnapshot(
+        { ...snapshot, conversations: [], syncCursor: "12" },
+        [],
+        [],
+        [],
+        abortController.signal,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("0");
+    expect(state.bootstrap?.conversations.map((item) => item.conversation.id)).toEqual([
+      ALPHA_ID,
+      ZEBRA_ID,
+      DIRECT_ID,
+    ]);
+    expect(state.messages).toEqual([messageSequence2]);
+  });
+
   it("does not discard a member replace that arrives before the first snapshot", async () => {
     // A cache that has never seen replaceSnapshot (or has just had clearServerStatePreservingOutbox
     // run) still has to accept a replaceMembers write rather than silently dropping it --
