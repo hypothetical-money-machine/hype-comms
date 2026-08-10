@@ -61,6 +61,7 @@ export class WorkspaceRealtime {
   readonly #rendererOrigin: string;
   readonly #transport: Pick<WorkspaceTransport, "ticket">;
   readonly #onEvent: (event: ProductRealtimeEvent) => boolean;
+  readonly #onWindowlessEvent: (event: ProductRealtimeEvent) => void;
   readonly #onState: (state: RealtimeConnectionState) => void;
   readonly #createSocket: SocketFactory;
   #cursor = "0";
@@ -72,6 +73,7 @@ export class WorkspaceRealtime {
   #epoch = 0;
   #stopped = true;
   #rendererDeliveryReady = false;
+  #windowless = false;
   #pendingAuthoritativeRecovery: PendingAuthoritativeRecovery | null = null;
 
   constructor(options: {
@@ -80,6 +82,8 @@ export class WorkspaceRealtime {
     readonly transport: Pick<WorkspaceTransport, "ticket">;
     /** Returns whether the event crossed into the currently subscribed renderer. */
     readonly onEvent: (event: ProductRealtimeEvent) => boolean;
+    /** Observes an event without attempting renderer delivery or durable acknowledgement. */
+    readonly onWindowlessEvent: (event: ProductRealtimeEvent) => void;
     readonly onState: (state: RealtimeConnectionState) => void;
     /** Test seam. Production always uses the `ws` implementation. */
     readonly createSocket?: SocketFactory;
@@ -88,6 +92,7 @@ export class WorkspaceRealtime {
     this.#rendererOrigin = options.rendererOrigin;
     this.#transport = options.transport;
     this.#onEvent = options.onEvent;
+    this.#onWindowlessEvent = options.onWindowlessEvent;
     this.#onState = options.onState;
     this.#createSocket =
       options.createSocket ?? ((url, socketOptions) => new WebSocket(url, socketOptions));
@@ -97,6 +102,8 @@ export class WorkspaceRealtime {
     // The renderer invokes start only after installing its workspace-event subscriber and
     // completing HTTP catch-up. This is the explicit readiness handshake used to redeliver a
     // body-free recovery control that could not cross a crashed or reloading renderer boundary.
+    const wasWindowless = this.#windowless;
+    this.#windowless = false;
     this.#rendererDeliveryReady = true;
     const recovery = this.#pendingAuthoritativeRecovery;
     if (recovery !== null) {
@@ -117,6 +124,13 @@ export class WorkspaceRealtime {
     }
 
     if (!this.#stopped && this.#scope !== null && this.#sameScope(this.#scope, expectedScope)) {
+      if (wasWindowless) {
+        // Windowless delivery observes events for native attention only. It never advances the
+        // renderer-owned cursor, so restart from the durable cursor supplied after HTTP catch-up.
+        // Replaying a frame that raced that catch-up is safe and avoids an unobservable UI gap.
+        this.#beginEpoch(after, expectedScope);
+        return true;
+      }
       this.acknowledge(after);
       return true;
     }
@@ -128,6 +142,29 @@ export class WorkspaceRealtime {
   /** Invalidates delivery readiness without treating a renderer reload as a signed-out scope. */
   rendererUnavailable(): void {
     this.#rendererDeliveryReady = false;
+  }
+
+  /**
+   * Keeps the current signed-in transport alive solely as a notification observer.
+   *
+   * Events are intentionally neither buffered for a future renderer nor treated as durable UI
+   * progress. A later renderer start must first complete HTTP catch-up and supplies the encrypted
+   * replica cursor from which this transport opens a fresh epoch.
+   */
+  enterWindowless(expectedScope: WorkspaceRealtimeScope): void {
+    this.#rendererDeliveryReady = false;
+    this.#windowless = true;
+
+    const recovery = this.#pendingAuthoritativeRecovery;
+    if (recovery !== null) {
+      if (this.#sameScope(recovery.scope, expectedScope)) return;
+      this.#pendingAuthoritativeRecovery = null;
+    }
+    if (!this.#stopped && this.#scope !== null && this.#sameScope(this.#scope, expectedScope)) {
+      return;
+    }
+
+    this.#beginEpoch(this.#cursor, expectedScope);
   }
 
   acknowledge(cursor: string): void {
@@ -148,6 +185,7 @@ export class WorkspaceRealtime {
     this.#stopped = true;
     this.#scope = null;
     this.#rendererDeliveryReady = false;
+    this.#windowless = false;
     if (clearRecovery) this.#pendingAuthoritativeRecovery = null;
     this.#ticketEpoch = null;
     this.#clearReconnectTimer();
@@ -273,6 +311,15 @@ export class WorkspaceRealtime {
     }
 
     const event = parsed.data;
+    if (this.#windowless && event.type === "system.resync_required") {
+      // A cursor-expired socket closes after this control. Observing it and reconnecting from the
+      // same renderer-owned cursor would spin forever while no renderer exists to rebuild state.
+      // Retain the validated body-free control and stop until renderer HTTP recovery proves a
+      // strictly newer durable cursor.
+      if (!this.#deliverEvent(connection, event)) return;
+      this.#retainWindowlessAuthoritativeRecovery(connection, event);
+      return;
+    }
     if (event.type === "system.connected") {
       if (connection.connectionId !== null) {
         this.#rejectInvalidEvent(connection);
@@ -312,6 +359,17 @@ export class WorkspaceRealtime {
   }
 
   #deliverEvent(connection: ActiveConnection, event: ProductRealtimeEvent): boolean {
+    if (this.#windowless) {
+      try {
+        this.#onWindowlessEvent(event);
+      } catch {
+        // Notification observation is outside transport health and durable acknowledgement. Keep
+        // this diagnostic body-free and continue consuming the current authenticated connection.
+        reportMainProcessError("Windowless workspace realtime observation failed");
+      }
+      return this.#isActiveConnection(connection);
+    }
+
     try {
       if (!this.#rendererDeliveryReady || !this.#onEvent(event)) {
         // No durable renderer acknowledgement can follow a frame that did not cross the current
@@ -387,6 +445,31 @@ export class WorkspaceRealtime {
     if (this.#stopped && this.#epoch === recoveryEpoch) this.#deliverState("offline");
   }
 
+  #retainWindowlessAuthoritativeRecovery(
+    connection: ActiveConnection,
+    event: Extract<ProductRealtimeEvent, { type: "system.resync_required" }>,
+  ): void {
+    if (!this.#isActiveConnection(connection) || this.#scope === null) return;
+    const scope = this.#scope;
+    const cursor = this.#cursor;
+
+    connection.pendingReplay.length = 0;
+    connection.pendingReplayBytes = 0;
+    this.#epoch += 1;
+    this.#stopped = true;
+    this.#scope = null;
+    this.#ticketEpoch = null;
+    this.#clearReconnectTimer();
+    this.#connection = null;
+    this.#closeSocket(connection.socket);
+    this.#pendingAuthoritativeRecovery = {
+      scope: { ...scope },
+      cursor,
+      event,
+    };
+    this.#deliverState("offline");
+  }
+
   #deliverPendingAuthoritativeRecovery(): boolean {
     const recovery = this.#pendingAuthoritativeRecovery;
     if (recovery === null) return true;
@@ -415,6 +498,7 @@ export class WorkspaceRealtime {
     this.#stopped = true;
     this.#scope = null;
     this.#rendererDeliveryReady = false;
+    this.#windowless = false;
     this.#ticketEpoch = null;
     this.#clearReconnectTimer();
     this.#connection = null;

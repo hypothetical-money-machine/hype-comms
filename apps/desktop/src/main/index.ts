@@ -79,6 +79,7 @@ import {
   processAuthCallback,
   type AuthCallbackOutcome,
 } from "./auth-callback";
+import { configureWindowsApplicationIdentity } from "./application-identity";
 import { installCheckForUpdatesMenuItem } from "./application-menu";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
@@ -156,6 +157,7 @@ const WINDOW_MIN_WIDTH = 960;
  */
 const COMPACT_WINDOW_MIN_WIDTH = 640;
 
+configureWindowsApplicationIdentity(app, process.platform);
 protectMainProcessLogStreams([process.stdout, process.stderr]);
 
 protocol.registerSchemesAsPrivileged([
@@ -211,6 +213,7 @@ app.setPath(
 let chatSession: ChatSession | null = null;
 let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
+let macWindowlessRealtimeActive = false;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
 let updateController: UpdateController | null = null;
@@ -379,7 +382,7 @@ function inactiveNotificationContext(): NotificationContext {
   });
 }
 
-function deliverWorkspaceEvent(event: ProductRealtimeEvent): boolean {
+function evaluateWorkspaceNotification(event: ProductRealtimeEvent): void {
   try {
     notificationController?.handleEvent(event, {
       ...(notificationScope === null
@@ -392,7 +395,15 @@ function deliverWorkspaceEvent(event: ProductRealtimeEvent): boolean {
     // the canonical event or thrown value here because either may contain private message data.
     reportMainProcessError("Native notification evaluation failed");
   }
+}
+
+function deliverWorkspaceEvent(event: ProductRealtimeEvent): boolean {
+  evaluateWorkspaceNotification(event);
   return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, event);
+}
+
+function observeWindowlessWorkspaceEvent(event: ProductRealtimeEvent): void {
+  evaluateWorkspaceNotification(event);
 }
 
 function deliverRealtimeState(state: RealtimeConnectionState): void {
@@ -450,6 +461,7 @@ function sessionStateMatchesNotificationScope(
 }
 
 function beginSessionReplacement(): void {
+  macWindowlessRealtimeActive = false;
   workspaceRealtime?.resetSession();
   notificationScope = null;
   notificationActiveGeneration = null;
@@ -536,6 +548,7 @@ function projectNotificationBootstrap(
 
 function deliverSessionState(state: ChatSessionState): void {
   if (!sessionStateMatchesNotificationScope(state, notificationScope)) {
+    macWindowlessRealtimeActive = false;
     workspaceRealtime?.resetSession();
   }
   try {
@@ -1269,11 +1282,23 @@ function registerIpcHandlers(): void {
     if (accepted === false) {
       throw new Error("Workspace realtime recovery delivery is waiting for a ready renderer");
     }
+    macWindowlessRealtimeActive = false;
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStop);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStop, (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime stop sender");
+    if (macWindowlessRealtimeActive) {
+      const state = chatSession?.state;
+      if (state?.status === "signed-in" && state.method === "email") {
+        workspaceRealtime?.enterWindowless({
+          userId: state.userId,
+          workspaceId: state.workspaceId,
+        });
+        return;
+      }
+      macWindowlessRealtimeActive = false;
+    }
     workspaceRealtime?.stop();
   });
 
@@ -1675,6 +1700,7 @@ if (!hasSingleInstanceLock) {
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
         transport: workspaceTransport,
         onEvent: deliverWorkspaceEvent,
+        onWindowlessEvent: observeWindowlessWorkspaceEvent,
         onState: deliverRealtimeState,
       });
       cacheCrypto = new CacheCrypto({
@@ -1769,12 +1795,30 @@ if (!hasSingleInstanceLock) {
   app.on("window-all-closed", () => {
     handleLastWindowClosed({
       platform: process.platform,
-      stopRealtime: () => workspaceRealtime?.stop(),
+      windowlessRealtimeEnabled: __HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__,
+      continueRealtimeWithoutRenderer: () => {
+        const state = chatSession?.state;
+        if (state?.status !== "signed-in" || state.method !== "email") {
+          macWindowlessRealtimeActive = false;
+          workspaceRealtime?.stop();
+          return;
+        }
+        macWindowlessRealtimeActive = true;
+        workspaceRealtime?.enterWindowless({
+          userId: state.userId,
+          workspaceId: state.workspaceId,
+        });
+      },
+      stopRealtime: () => {
+        macWindowlessRealtimeActive = false;
+        workspaceRealtime?.stop();
+      },
       quit: () => app.quit(),
     });
   });
 
   app.on("before-quit", () => {
+    macWindowlessRealtimeActive = false;
     workspaceRealtime?.resetSession();
     notificationScope = null;
     notificationActiveGeneration = null;

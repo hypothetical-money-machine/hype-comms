@@ -177,6 +177,7 @@ async function flushMicrotasks(): Promise<void> {
 function createHarness(options?: {
   readonly ticket?: () => Promise<{ ticket: string; expiresAt: string }>;
   readonly onEvent?: (event: ProductRealtimeEvent) => boolean;
+  readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
   readonly onState?: (state: RealtimeConnectionState) => void;
 }) {
   const sockets: FakeSocket[] = [];
@@ -188,6 +189,9 @@ function createHarness(options?: {
     options?.ticket ?? (async () => ticketResponse()),
   );
   const onEvent = vi.fn<(event: ProductRealtimeEvent) => boolean>(options?.onEvent ?? (() => true));
+  const onWindowlessEvent = vi.fn<(event: ProductRealtimeEvent) => void>(
+    options?.onWindowlessEvent ?? (() => undefined),
+  );
   const createSocket = vi.fn(
     (url: URL, socketOptions: { readonly origin: string; readonly maxPayload: number }) => {
       const socket = new FakeSocket();
@@ -203,6 +207,7 @@ function createHarness(options?: {
     rendererOrigin: "http://127.0.0.1:5173",
     transport: { ticket },
     onEvent,
+    onWindowlessEvent,
     onState: (state) => {
       states.push(state);
       options?.onState?.(state);
@@ -215,6 +220,7 @@ function createHarness(options?: {
     createSocket,
     sockets,
     onEvent,
+    onWindowlessEvent,
     states,
     urls,
     origins,
@@ -397,6 +403,118 @@ describe("WorkspaceRealtime", () => {
     expect(harness.urls[1]?.searchParams.get("after")).toBe("9");
 
     harness.realtime.stop();
+  });
+
+  it("observes windowless events without renderer delivery, buffering, or cursor progress", async () => {
+    const harness = createHarness({ onEvent: () => false });
+
+    harness.realtime.start("8", SCOPE_A);
+    await flushMicrotasks();
+    const windowedSocket = harness.sockets[0];
+    windowedSocket?.message(connectedEvent({ workspaceSequence: "8" }));
+    expect(windowedSocket?.close).toHaveBeenCalledTimes(1);
+
+    // A failed renderer delivery pauses the first generation. Windowless mode reconnects from the
+    // same last acknowledged cursor and treats the callback only as a notification observer.
+    harness.realtime.enterWindowless(SCOPE_A);
+    await flushMicrotasks();
+    const windowlessSocket = harness.sockets[1];
+    expect(harness.urls[1]?.searchParams.get("after")).toBe("8");
+
+    windowlessSocket?.message(connectedEvent({ workspaceSequence: "8" }));
+    windowlessSocket?.message(messageEvent());
+
+    expect(harness.onEvent).toHaveBeenCalledTimes(1);
+    expect(harness.onWindowlessEvent).toHaveBeenCalledTimes(2);
+    expect(windowlessSocket?.close).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Renderer readiness follows HTTP catch-up and opens a new epoch from the durable replica
+    // cursor. The windowless message was never claimed as UI progress or buffered for delivery.
+    harness.realtime.start("8", SCOPE_A);
+    await flushMicrotasks();
+    expect(windowlessSocket?.close).toHaveBeenCalledTimes(1);
+    expect(harness.urls[2]?.searchParams.get("after")).toBe("8");
+    harness.sockets[2]?.message(connectedEvent({ workspaceSequence: "8" }));
+    expect(harness.onEvent).toHaveBeenCalledTimes(2);
+    expect(harness.onWindowlessEvent).toHaveBeenCalledTimes(2);
+
+    harness.realtime.stop();
+  });
+
+  it("resumes windowless transport from the highest renderer acknowledgement", async () => {
+    const harness = createHarness();
+
+    harness.realtime.start("5", SCOPE_A);
+    await flushMicrotasks();
+    harness.realtime.acknowledge("7");
+    harness.realtime.stop();
+
+    harness.realtime.enterWindowless(SCOPE_A);
+    await flushMicrotasks();
+
+    expect(harness.urls[1]?.searchParams.get("after")).toBe("7");
+    harness.realtime.stop();
+  });
+
+  it("keeps a windowless notification callback failure outside transport health", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const harness = createHarness({
+      onWindowlessEvent: () => {
+        throw new Error("private-windowless-canary");
+      },
+    });
+
+    harness.realtime.enterWindowless(SCOPE_A);
+    await flushMicrotasks();
+    const socket = harness.sockets[0];
+    socket?.message(connectedEvent());
+    socket?.message(messageEvent());
+
+    expect(socket?.close).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(harness.onEvent).not.toHaveBeenCalled();
+    expect(harness.onWindowlessEvent).toHaveBeenCalledTimes(2);
+    expect(consoleError).toHaveBeenCalledWith("Windowless workspace realtime observation failed");
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("private-windowless-canary");
+
+    harness.realtime.stop();
+  });
+
+  it("latches a windowless resync demand until renderer recovery supplies a newer cursor", async () => {
+    const harness = createHarness();
+
+    harness.realtime.start("8", SCOPE_A);
+    await flushMicrotasks();
+    const socket = harness.sockets[0];
+    socket?.message(connectedEvent({ workspaceSequence: "8" }));
+    harness.realtime.enterWindowless(SCOPE_A);
+
+    const recovery = resyncRequiredEvent();
+    socket?.message(recovery);
+    expect(harness.onWindowlessEvent).toHaveBeenCalledOnce();
+    expect(harness.onWindowlessEvent).toHaveBeenCalledWith(recovery);
+    expect(socket?.close).toHaveBeenCalledTimes(1);
+    expect(harness.states).toEqual(["connecting", "live", "offline"]);
+
+    socket?.closed();
+    await vi.runOnlyPendingTimersAsync();
+    expect(harness.ticket).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The recreated renderer receives the retained body-free control, but delivery alone cannot
+    // reopen the cursor-expired generation. Its resync flow stops transport, commits a newer
+    // snapshot, and starts once from that new durable cursor.
+    expect(harness.realtime.start("8", SCOPE_A)).toBe(true);
+    expect(harness.onEvent).toHaveBeenLastCalledWith(recovery);
+    expect(harness.ticket).toHaveBeenCalledTimes(1);
+    harness.realtime.stop();
+    harness.realtime.start("9", SCOPE_A);
+    await flushMicrotasks();
+
+    expect(harness.ticket).toHaveBeenCalledTimes(2);
+    expect(harness.urls[1]?.searchParams.get("after")).toBe("9");
+    harness.realtime.resetSession();
   });
 
   it("rejects a replay event from another workspace before delivery", async () => {

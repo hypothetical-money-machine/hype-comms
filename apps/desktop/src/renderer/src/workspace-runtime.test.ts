@@ -1576,6 +1576,76 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
   });
 
+  it("catches up from the encrypted replica before snapshot replacement and realtime", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+    const api = new FakeDesktopApi(bootstrapAt("12"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, peerMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [peerEvent],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.syncedFrom).toEqual(["9", "12"]);
+    expect(api.acknowledged).toEqual(["12", "12"]);
+    expect(api.startedCursors).toEqual(["12"]);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(cache.operations.indexOf("applyEvent:message.created")).toBeLessThan(
+      cache.operations.indexOf("replaceSnapshot", 1),
+    );
+    expect(runtime.state.messages).toEqual(expect.arrayContaining([ownMessage, peerMessage]));
+    expect((await cache.load()).messages).toEqual(
+      expect.arrayContaining([ownMessage, peerMessage]),
+    );
+  });
+
+  it("does not attach recreated-window realtime until retryable replica catch-up completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = new FakeWorkspaceCache();
+      await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.syncResults.push(
+        { status: "retryable", reason: "server", retryAfterMs: 1_000 },
+        {
+          status: "accepted",
+          response: {
+            events: [],
+            nextCursor: "10",
+            highWaterCursor: "10",
+            hasMore: false,
+          },
+        },
+      );
+      const runtime = runtimeWith(api, cache);
+
+      await runtime.start(session);
+      expect(api.syncedFrom).toEqual(["9"]);
+      expect(api.startedCursors).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.startedCursors.length === 1, "recreated-window realtime start");
+      expect(api.syncedFrom).toEqual(["9", "9", "10"]);
+      expect(api.acknowledged).toEqual(["10", "10"]);
+      expect(api.startedCursors).toEqual(["10"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves an older root referenced by a queued reply across snapshot replacement", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
@@ -2210,11 +2280,12 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent(resyncRequired);
       await drain();
 
-      // The resync stops the rejected socket immediately, but its cache recovery stays queued
+      // Startup has not attached realtime while durable catch-up is retrying. The synthetic resync
+      // demand still stops the transport boundary immediately, but its cache recovery stays queued
       // behind the timer retry instead of starting a second repair pass.
       expect(api.stopRequests).toBe(2);
       expect(api.bootstrapRequests).toBe(1);
-      expect(api.startedCursors).toEqual(["10"]);
+      expect(api.startedCursors).toEqual([]);
       expect(runtime.state.stale).toBe(true);
 
       olderSync.resolve({

@@ -385,6 +385,10 @@ export class WorkspaceRuntime {
   #syncAttempt = 0;
   /** True until the current sync pass has fully repaired and reloaded the local projection. */
   #syncRecoveryPending = false;
+  /** A cached replica is still completing its pre-snapshot HTTP catch-up. */
+  #startupReplicaCatchUpPending = false;
+  /** A startup whose durable HTTP catch-up has not yet opened renderer realtime delivery. */
+  #startupRealtimePending = false;
   /**
    * Resync demands in the current chain. Only demands count: a failed download is retried without
    * touching this, and `system.connected` cannot reset it either, so the bound stays armed on a
@@ -501,6 +505,8 @@ export class WorkspaceRuntime {
     this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
+    this.#startupReplicaCatchUpPending = false;
+    this.#startupRealtimePending = false;
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
@@ -583,14 +589,25 @@ export class WorkspaceRuntime {
         stale: true,
       });
 
-      await this.#refreshSnapshot(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
-      await this.#repairAndFlush(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
-      await this.#restartRealtime(generation);
-      this.#setState({ busy: false });
+      if (cached.bootstrap !== null) {
+        // A recreated window first catches up from the encrypted replica cursor. Main may have
+        // observed events for notifications while no renderer existed, but that observation never
+        // became UI progress. Only this HTTP pass may bridge that interval before the normal
+        // authoritative snapshot and its final catch-up open a fresh realtime epoch.
+        this.#startupReplicaCatchUpPending = true;
+        await this.#repairAndFlush(generation, false);
+        if (generation !== this.#generation || this.#cache === null) return;
+        if (this.#syncRecoveryPending) {
+          this.#setState({ busy: false, stale: true });
+          return;
+        }
+        this.#startupReplicaCatchUpPending = false;
+      }
+      await this.#completeStartupAfterReplicaCatchUp(generation);
     } catch (error) {
       if (generation !== this.#generation) return;
+      this.#startupReplicaCatchUpPending = false;
+      this.#startupRealtimePending = false;
       this.#setState({
         busy: false,
         stale: true,
@@ -612,6 +629,8 @@ export class WorkspaceRuntime {
     this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
+    this.#startupReplicaCatchUpPending = false;
+    this.#startupRealtimePending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
@@ -1964,7 +1983,7 @@ export class WorkspaceRuntime {
     this.#membersRetryTimer = null;
   }
 
-  async #repairAndFlush(generation: number): Promise<void> {
+  async #repairAndFlush(generation: number, flushOutbox = true): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
     this.#syncRecoveryPending = true;
@@ -2047,7 +2066,7 @@ export class WorkspaceRuntime {
     // otherwise just because the event page drained. A resync remains stale until realtime has
     // also restarted with the repaired cursor.
     this.#setState({ stale: this.#membersDirty || this.#resyncRecoveryPending });
-    await this.#flushOutbox(generation);
+    if (flushOutbox) await this.#flushOutbox(generation);
   }
 
   async #handleRealtimeEvent(
@@ -2192,6 +2211,25 @@ export class WorkspaceRuntime {
       // remains independent from ordinary realtime events and never races another sync pass.
       void this.#serializeRecovery(() => this.#attemptResync(generation, request));
     }, delayMs);
+  }
+
+  async #completeStartupAfterReplicaCatchUp(generation: number): Promise<void> {
+    if (generation !== this.#generation || this.#cache === null) return;
+    await this.#refreshSnapshot(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    this.#startupRealtimePending = true;
+    await this.#repairAndFlush(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    if (this.#syncRecoveryPending || this.#membershipRepairPending) {
+      // A retryable final catch-up or an unresolved durable membership marker must keep renderer
+      // realtime closed. Starting here could cross an unacknowledged revocation boundary.
+      this.#setState({ busy: false, stale: true });
+      return;
+    }
+    await this.#restartRealtime(generation);
+    if (generation !== this.#generation) return;
+    this.#startupRealtimePending = false;
+    this.#setState({ busy: false });
   }
 
   async #restartRealtime(generation: number): Promise<void> {
@@ -2602,7 +2640,29 @@ export class WorkspaceRuntime {
       // repair resets the attempt and makes this queued retry redundant.
       void this.#serializeRecovery(async () => {
         if (generation !== this.#generation || this.#syncAttempt === 0) return;
-        await this.#repairAndFlush(generation);
+        const wasReplicaCatchUp = this.#startupReplicaCatchUpPending;
+        await this.#repairAndFlush(generation, !wasReplicaCatchUp);
+        if (
+          generation === this.#generation &&
+          wasReplicaCatchUp &&
+          this.#startupReplicaCatchUpPending &&
+          !this.#syncRecoveryPending
+        ) {
+          this.#startupReplicaCatchUpPending = false;
+          await this.#completeStartupAfterReplicaCatchUp(generation);
+          return;
+        }
+        if (
+          generation === this.#generation &&
+          this.#startupRealtimePending &&
+          !this.#syncRecoveryPending &&
+          !this.#membershipRepairPending
+        ) {
+          await this.#restartRealtime(generation);
+          if (generation !== this.#generation) return;
+          this.#startupRealtimePending = false;
+          this.#setState({ busy: false });
+        }
       }).catch((error: unknown) => {
         if (generation === this.#generation) {
           this.#setState({
