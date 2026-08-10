@@ -5,7 +5,8 @@ import type {
   UserKind,
 } from "@hmm-chat/contracts";
 
-export type NotificationEligibilityReason = "verified_mention" | "direct_message";
+export type NotificationEligibilityReason =
+  "verified_mention" | "direct_message" | "participated_thread_reply";
 
 export type NotificationSuppressionReason =
   | "non_message_event"
@@ -76,6 +77,8 @@ export type NotificationPolicyEvent =
       readonly authorKind: UserKind;
       readonly threadRootId: string | null;
       readonly mentionedUserIds: readonly string[];
+      /** Null when an older server omits the capability-gated recipient projection. */
+      readonly recipientNotificationReason: "participated_thread_reply" | null;
     }
   | {
       readonly type: "other";
@@ -140,8 +143,9 @@ export function isMessageVisibleAtLiveTail(input: NotificationPolicyInput): bool
 }
 
 /**
- * Pure, body-free policy for the initial DM and verified-mention slice. A successful decision is
- * only permission to attempt the injected presenter; it is not a durable UI acknowledgement.
+ * Pure, body-free policy for the DM, verified-mention, and participated-thread slices. A
+ * successful decision is only permission to attempt the injected presenter; it is not a durable
+ * UI acknowledgement.
  */
 export function evaluateNotificationPolicy(
   input: NotificationPolicyInput,
@@ -188,6 +192,11 @@ export function evaluateNotificationPolicy(
     reason = "verified_mention";
   } else if (input.event.conversationKind === "direct_message") {
     reason = "direct_message";
+  } else if (
+    input.event.recipientNotificationReason === "participated_thread_reply" &&
+    input.event.threadRootId !== null
+  ) {
+    reason = "participated_thread_reply";
   }
   if (reason === null) return suppressed("not_high_signal");
 

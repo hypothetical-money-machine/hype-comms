@@ -255,6 +255,7 @@ interface EventRow extends QueryResultRow {
   payload: unknown;
   occurred_at: Date | string;
   visible: boolean;
+  participated_thread_notification: boolean;
 }
 
 interface TicketRow extends QueryResultRow {
@@ -266,6 +267,7 @@ interface TicketRow extends QueryResultRow {
   read_state_events: boolean;
   task_events: boolean;
   announcement_channels: boolean;
+  participated_thread_notifications: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -331,6 +333,7 @@ export interface WorkspacePrincipal {
   readonly readStateEvents?: boolean;
   readonly taskEvents?: boolean;
   readonly announcementChannels?: boolean;
+  readonly participatedThreadNotifications?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -2281,6 +2284,7 @@ export class WorkspaceRepository {
           [messageId, mentionedUserId],
         );
       }
+      const audienceUserIds = await this.#conversationAudience(client, conversation);
       const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
         type: "message.created",
         conversation,
@@ -2289,8 +2293,44 @@ export class WorkspaceRepository {
           message: mapMessage(row),
           mentionedUserIds: [...new Set(input.mentionedUserIds)],
         },
-        audienceUserIds: await this.#conversationAudience(client, conversation),
+        audienceUserIds,
       });
+      if (input.threadRootId !== null) {
+        // The conversation lock serializes message commits. This query therefore freezes the root
+        // author and every prior replier at this reply's commit boundary. Joining the event's
+        // already-authorized audience excludes removed members, while the final predicate keeps
+        // the reply author from notifying themselves. Deletion state is intentionally ignored
+        // until message deletion gains its own participation contract.
+        await client.query(
+          `INSERT INTO sync_event_notification_reasons
+             (event_id, workspace_id, user_id, reason)
+           SELECT audience.event_id,
+                  audience.workspace_id,
+                  audience.user_id,
+                  'participated_thread_reply'
+             FROM sync_event_audiences AS audience
+            WHERE audience.event_id = $1
+              AND audience.workspace_id = $2
+              AND audience.user_id <> $3
+              AND EXISTS (
+                SELECT 1
+                  FROM messages AS participant_message
+                 WHERE participant_message.conversation_id = $4
+                   AND (
+                     participant_message.id = $5
+                     OR participant_message.thread_root_id = $5
+                   )
+                   AND participant_message.author_id = audience.user_id
+              )`,
+          [
+            event.id,
+            identity.currentUser.workspaceId,
+            identity.currentUser.user.id,
+            conversationId,
+            input.threadRootId,
+          ],
+        );
+      }
       const response = sendMessageResponseSchema.parse({
         message: mapMessage(row),
         syncCursor: event.workspaceSequence,
@@ -2415,6 +2455,7 @@ export class WorkspaceRepository {
     readStateEvents = false,
     taskEvents = false,
     announcementChannels = false,
+    participatedThreadNotifications = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -2424,6 +2465,7 @@ export class WorkspaceRepository {
         readStateEvents,
         taskEvents,
         announcementChannels,
+        participatedThreadNotifications,
       },
       after,
       limit,
@@ -2457,6 +2499,16 @@ export class WorkspaceRepository {
       }
       const rows = await client.query<EventRow>(
         `SELECT event.*,
+                (
+                  $7::boolean
+                  AND EXISTS (
+                    SELECT 1
+                      FROM sync_event_notification_reasons AS notification_reason
+                     WHERE notification_reason.event_id = event.id
+                       AND notification_reason.user_id = $2
+                       AND notification_reason.reason = 'participated_thread_reply'
+                  )
+                ) AS participated_thread_notification,
                 (
                   EXISTS (
                     SELECT 1
@@ -2500,6 +2552,7 @@ export class WorkspaceRepository {
           limit + 1,
           principal.reactionEvents ?? false,
           principal.taskEvents ?? false,
+          principal.participatedThreadNotifications ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -2507,7 +2560,13 @@ export class WorkspaceRepository {
       const response = syncResponseSchema.parse({
         events: scanned
           .filter((row) => row.visible)
-          .map((row) => this.#mapEvent(row, principal.readStateEvents ?? false)),
+          .map((row) =>
+            this.#mapEvent(
+              row,
+              principal.readStateEvents ?? false,
+              principal.participatedThreadNotifications ?? false,
+            ),
+          ),
         nextCursor,
         highWaterCursor,
         hasMore: rows.rows.length > limit,
@@ -2528,6 +2587,7 @@ export class WorkspaceRepository {
     readStateEvents = false,
     taskEvents = false,
     announcementChannels = false,
+    participatedThreadNotifications = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -2540,8 +2600,9 @@ export class WorkspaceRepository {
     await this.pool.query(
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
-          reaction_events, read_state_events, task_events, announcement_channels)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          reaction_events, read_state_events, task_events, announcement_channels,
+          participated_thread_notifications)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -2554,6 +2615,7 @@ export class WorkspaceRepository {
         readStateEvents,
         taskEvents,
         announcementChannels,
+        participatedThreadNotifications,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -2578,7 +2640,8 @@ export class WorkspaceRepository {
                    ticket.reaction_events,
                    ticket.read_state_events,
                    ticket.task_events,
-                   ticket.announcement_channels
+                   ticket.announcement_channels,
+                   ticket.participated_thread_notifications
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -2587,7 +2650,8 @@ export class WorkspaceRepository {
               ticket.reaction_events,
               ticket.read_state_events,
               ticket.task_events,
-              ticket.announcement_channels
+              ticket.announcement_channels,
+              ticket.participated_thread_notifications
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -2638,6 +2702,7 @@ export class WorkspaceRepository {
         readStateEvents: row.read_state_events,
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
+        participatedThreadNotifications: row.participated_thread_notifications,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -2650,6 +2715,7 @@ export class WorkspaceRepository {
         readStateEvents: row.read_state_events,
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
+        participatedThreadNotifications: row.participated_thread_notifications,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -3481,7 +3547,11 @@ export class WorkspaceRepository {
     return value;
   }
 
-  #mapEvent(row: EventRow, readStateEvents: boolean): WorkspaceEvent {
+  #mapEvent(
+    row: EventRow,
+    readStateEvents: boolean,
+    participatedThreadNotifications: boolean,
+  ): WorkspaceEvent {
     const event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
@@ -3495,6 +3565,21 @@ export class WorkspaceRepository {
       delivery: "at_least_once",
       payload: row.payload,
     });
+    if (event.type === "message.created") {
+      // Never trust shared event JSON to carry a recipient-specific reason. Rebuild the payload
+      // from canonical message fields and add the reason only from the scoped relation selected
+      // for this principal and an explicitly negotiated capability.
+      return workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          message: event.payload.message,
+          mentionedUserIds: event.payload.mentionedUserIds,
+          ...(participatedThreadNotifications && row.participated_thread_notification
+            ? { recipientNotificationReason: "participated_thread_reply" }
+            : {}),
+        },
+      });
+    }
     if (event.type !== "read_cursor.updated" || readStateEvents) return event;
     // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
     // projecting its legacy shape for devices that did not negotiate read-state events.

@@ -39,6 +39,7 @@ export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
 export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
+export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -589,10 +590,23 @@ export const messageCreatedEventSchema = workspaceEventBaseSchema
       .object({
         message: messageSchema,
         mentionedUserIds: z.array(entityIdSchema).max(50),
+        // Recipient-specific and capability-gated by the server. Its absence is the complete
+        // legacy shape, so old servers may omit it and new servers must omit it for old clients.
+        recipientNotificationReason: z.literal("participated_thread_reply").optional(),
       })
       .strict(),
   })
   .superRefine((event, context) => {
+    if (
+      event.payload.recipientNotificationReason !== undefined &&
+      event.payload.message.threadRootId === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "recipientNotificationReason"],
+        message: "A participated-thread reason requires a thread reply",
+      });
+    }
     if (event.payload.message.conversationId !== event.conversationId) {
       context.addIssue({
         code: "custom",

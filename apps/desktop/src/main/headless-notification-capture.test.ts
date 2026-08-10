@@ -209,7 +209,7 @@ describe("HeadlessNotificationCaptureArtifact", () => {
       artifact.append({
         version: 1,
         captureId: "capture-00000002",
-        reason: "verified_mention",
+        reason: "participated_thread_reply",
       }),
     ).toBe(true);
     expect(

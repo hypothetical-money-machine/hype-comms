@@ -47,7 +47,11 @@ function validateRecordLimit(value: number): number {
 }
 
 function isEligibilityReason(value: unknown): value is NotificationEligibilityReason {
-  return value === "verified_mention" || value === "direct_message";
+  return (
+    value === "verified_mention" ||
+    value === "direct_message" ||
+    value === "participated_thread_reply"
+  );
 }
 
 function validateCaptureRecord(value: unknown): HeadlessNotificationCaptureRecord {

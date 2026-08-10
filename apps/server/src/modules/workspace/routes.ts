@@ -1,5 +1,6 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
@@ -467,6 +468,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
       supported.includes(TASK_EVENTS_CAPABILITY),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
     );
   });
 
@@ -480,6 +482,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(READ_STATE_EVENTS_CAPABILITY),
       supported.includes(TASK_EVENTS_CAPABILITY),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
     );
   });
 };

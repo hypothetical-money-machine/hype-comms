@@ -46,6 +46,7 @@ const DM_EVENT = {
   authorKind: "human",
   threadRootId: null,
   mentionedUserIds: [],
+  recipientNotificationReason: null,
 } as const satisfies NotificationPolicyEvent;
 
 const WINDOW = {
@@ -137,6 +138,65 @@ describe("native notification eligibility policy", () => {
         }),
       ),
     ).toEqual({ decision: "eligible", reason: "verified_mention", presentation: "native" });
+  });
+
+  it("notifies for a server-authorized reply to a participated thread", () => {
+    expect(
+      evaluateNotificationPolicy(
+        withEvent({
+          ...DM_EVENT,
+          conversationKind: "channel",
+          threadRootId: THREAD_ROOT_ID,
+          recipientNotificationReason: "participated_thread_reply",
+        }),
+      ),
+    ).toEqual({
+      decision: "eligible",
+      reason: "participated_thread_reply",
+      presentation: "native",
+    });
+  });
+
+  it("applies mention, direct-message, then participated-thread precedence", () => {
+    const participatedReply = {
+      ...DM_EVENT,
+      threadRootId: THREAD_ROOT_ID,
+      recipientNotificationReason: "participated_thread_reply",
+    } as const;
+    expect(evaluateNotificationPolicy(withEvent(participatedReply))).toMatchObject({
+      decision: "eligible",
+      reason: "direct_message",
+    });
+    expect(
+      evaluateNotificationPolicy(
+        withEvent({
+          ...participatedReply,
+          conversationKind: "channel",
+          mentionedUserIds: [USER_ID],
+        }),
+      ),
+    ).toMatchObject({ decision: "eligible", reason: "verified_mention" });
+  });
+
+  it("does not infer participation locally or apply a thread reason to a root message", () => {
+    expect(
+      evaluateNotificationPolicy(
+        withEvent({
+          ...DM_EVENT,
+          conversationKind: "channel",
+          threadRootId: THREAD_ROOT_ID,
+        }),
+      ),
+    ).toEqual({ decision: "suppressed", reason: "not_high_signal" });
+    expect(
+      evaluateNotificationPolicy(
+        withEvent({
+          ...DM_EVENT,
+          conversationKind: "channel",
+          recipientNotificationReason: "participated_thread_reply",
+        }),
+      ),
+    ).toEqual({ decision: "suppressed", reason: "not_high_signal" });
   });
 
   it.each(["human", "bot", "agent"] as const)(

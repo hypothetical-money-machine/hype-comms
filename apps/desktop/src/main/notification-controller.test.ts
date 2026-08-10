@@ -125,6 +125,7 @@ function messageEvent(options: {
   readonly workspaceId?: string;
   readonly authorId?: string | null;
   readonly mentionedUserIds?: readonly string[];
+  readonly recipientNotificationReason?: "participated_thread_reply";
   readonly threadRootId?: string | null;
   readonly body?: string;
 }): Extract<ProductRealtimeEvent, { type: "message.created" }> {
@@ -159,6 +160,9 @@ function messageEvent(options: {
         updatedAt: NOW,
       },
       mentionedUserIds: [...(options.mentionedUserIds ?? [])],
+      ...(options.recipientNotificationReason === undefined
+        ? {}
+        : { recipientNotificationReason: options.recipientNotificationReason }),
     },
   };
 }
@@ -461,6 +465,81 @@ describe("NotificationController freshness and policy integration", () => {
     expect(harness.controller.diagnostics.pendingActions).toBe(0);
     harness.controller.invalidateRenderer(42);
     expect(harness.controller.diagnostics.rendererReady).toBe(false);
+  });
+
+  it("consumes a server-authorized participated-thread reason and opens the exact reply", () => {
+    const harness = createHarness({
+      conversations: [conversationSummary({ kind: "channel", name: "engineering" })],
+    });
+    const presenter = harness.presenter as FakePresenter;
+    const threadRootId = id(301);
+    arm(harness.controller);
+    const event = messageEvent({
+      eventNumber: 12,
+      sequence: 6,
+      threadRootId,
+      recipientNotificationReason: "participated_thread_reply",
+    });
+
+    const first = harness.controller.handleEvent(event);
+    expect(first).toMatchObject({
+      status: "consumed",
+      policy: { decision: "eligible", reason: "participated_thread_reply" },
+      presentationAttempted: true,
+    });
+    expect(presenter.presentations[0]?.presentation).toEqual({
+      title: "Claire",
+      body: "engineering",
+      reason: "participated_thread_reply",
+    });
+
+    expect(harness.controller.handleEvent(event)).toMatchObject({
+      policy: { decision: "suppressed", reason: "duplicate_event" },
+      presentationAttempted: false,
+    });
+    harness.controller.setRealtimeState("reconnecting");
+    expect(
+      harness.controller.handleEvent(
+        messageEvent({
+          eventNumber: 14,
+          sequence: 7,
+          threadRootId,
+          recipientNotificationReason: "participated_thread_reply",
+        }),
+      ),
+    ).toMatchObject({
+      policy: { decision: "suppressed", reason: "pre_live_replay" },
+      presentationAttempted: false,
+    });
+    expect(presenter.attempts).toBe(1);
+
+    presenter.presentations[0]?.callbacks.onClick();
+    harness.controller.bindRenderer(42, 3);
+    expect(harness.controller.rendererReadyAndDrain(42, rendererRequest()).actions).toEqual([
+      expect.objectContaining({
+        conversationId: CONVERSATION_ID,
+        messageId: event.payload.message.id,
+        threadRootId,
+      }),
+    ]);
+  });
+
+  it("does not infer thread participation when an old server omits the recipient reason", () => {
+    const harness = createHarness({
+      conversations: [conversationSummary({ kind: "channel", name: "engineering" })],
+    });
+    const presenter = harness.presenter as FakePresenter;
+    arm(harness.controller);
+
+    expect(
+      harness.controller.handleEvent(
+        messageEvent({ eventNumber: 13, sequence: 6, threadRootId: id(302) }),
+      ),
+    ).toMatchObject({
+      policy: { decision: "suppressed", reason: "not_high_signal" },
+      presentationAttempted: false,
+    });
+    expect(presenter.attempts).toBe(0);
   });
 
   it("retains drained and pushed actions across renderer invalidation until an exact ack", () => {

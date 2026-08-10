@@ -1,5 +1,6 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   THREADS_CAPABILITY,
   type BotScope,
   type CurrentUser,
@@ -389,7 +390,9 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hmm_session=${sessionToken}`,
-      "x-hmm-chat-capabilities": "reaction-events-v1, read-state-events-v1, task-events-v1",
+      "x-hmm-chat-capabilities":
+        `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
+        PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -409,6 +412,7 @@ describe("event capability routes", () => {
       true,
       true,
       false,
+      true,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
@@ -416,6 +420,7 @@ describe("event capability routes", () => {
       true,
       true,
       false,
+      true,
     );
   });
 
@@ -440,6 +445,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
       false,

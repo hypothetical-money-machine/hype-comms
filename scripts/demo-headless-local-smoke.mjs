@@ -7,8 +7,11 @@ import {
   DEFAULT_MANIFEST_RELATIVE_PATH,
   DEFAULT_SMOKE_MESSAGE,
   HEADLESS_DEMO_MANIFEST_VERSION,
+  HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+  HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
   readHeadlessDemoManifest,
   runHeadlessSmoke,
+  runParticipatedThreadNotificationSmoke,
 } from "./demo-headless-smoke.mjs";
 import { signalProcessTree } from "./process-tree.mjs";
 
@@ -27,8 +30,10 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
   let cdpBasePort;
   let messagePrefix = DEFAULT_SMOKE_MESSAGE;
   let timeoutMs = DEFAULT_LOCAL_SMOKE_TIMEOUT_MS;
+  let flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE;
   let receivedMessage = false;
   let receivedTimeout = false;
+  let receivedFlow = false;
 
   for (const argument of arguments_) {
     if (argument.startsWith("--cdp-base-port=")) {
@@ -42,9 +47,20 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
       if (receivedTimeout) throw new Error("--timeout-ms may only be supplied once");
       timeoutMs = parsePositiveInteger(argument.slice("--timeout-ms=".length), "--timeout-ms");
       receivedTimeout = true;
+    } else if (argument.startsWith("--flow=")) {
+      if (receivedFlow) throw new Error("--flow may only be supplied once");
+      flow = argument.slice("--flow=".length);
+      if (
+        flow !== HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE &&
+        flow !== HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD
+      ) {
+        throw new Error("--flow must be direct-message or participated-thread");
+      }
+      receivedFlow = true;
     } else {
       throw new Error(
-        "Usage: test:demo:headless [--cdp-base-port=<port>] [--message=<prefix>] [--timeout-ms=<ms>]",
+        "Usage: test:demo:headless [--cdp-base-port=<port>] [--message=<prefix>] " +
+          "[--timeout-ms=<ms>] [--flow=<direct-message|participated-thread>]",
       );
     }
   }
@@ -54,6 +70,7 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
     cdpBasePort: cdpBasePort ?? DEFAULT_DEMO_CDP_BASE_PORT,
     messagePrefix,
     timeoutMs,
+    flow,
   };
 }
 
@@ -222,14 +239,23 @@ export async function runLocalHeadlessSmoke({
   cdpBasePort = DEFAULT_DEMO_CDP_BASE_PORT,
   messagePrefix = DEFAULT_SMOKE_MESSAGE,
   timeoutMs = DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
+  flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   nodeCommand = process.execPath,
   spawnProcess = spawn,
   readManifest = readHeadlessDemoManifest,
-  runSmoke = runHeadlessSmoke,
+  runSmoke,
+  runDirectMessageSmoke = runHeadlessSmoke,
+  runParticipatedThreadSmoke = runParticipatedThreadNotificationSmoke,
   waitForReady = waitForHeadlessDemoReady,
   stopLauncher = stopHeadlessDemoLauncher,
   writeOutput,
 }) {
+  if (
+    flow !== HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE &&
+    flow !== HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD
+  ) {
+    throw new Error("Headless smoke flow must be direct-message or participated-thread");
+  }
   const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
   let launcher;
 
@@ -256,7 +282,12 @@ export async function runLocalHeadlessSmoke({
       ...(writeOutput === undefined ? {} : { writeOutput }),
     });
     const manifest = await readManifest(ready.manifestPath);
-    const result = await runSmoke({ manifest, messagePrefix, timeoutMs });
+    const selectedSmoke =
+      runSmoke ??
+      (flow === HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD
+        ? runParticipatedThreadSmoke
+        : runDirectMessageSmoke);
+    const result = await selectedSmoke({ manifest, messagePrefix, timeoutMs });
     return { ...result, manifestPath: ready.manifestPath };
   } finally {
     if (launcher !== undefined) await stopLauncher(launcher);

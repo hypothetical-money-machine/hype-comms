@@ -24,6 +24,7 @@ import {
 import {
   evaluateNotificationPolicy,
   type NotificationDeliverySource,
+  type NotificationEligibilityReason,
   type NotificationPolicyEvent,
   type NotificationPolicyResult,
   type NotificationWindowState,
@@ -688,6 +689,7 @@ export class NotificationController {
       authorKind: member?.kind ?? "human",
       threadRootId: event.payload.message.threadRootId,
       mentionedUserIds: event.payload.mentionedUserIds,
+      recipientNotificationReason: event.payload.recipientNotificationReason ?? null,
     };
   }
 
@@ -730,7 +732,7 @@ export class NotificationController {
 
   #prepareMessagePresentation(
     event: Extract<ProductRealtimeEvent, { type: "message.created" }>,
-    reason: "verified_mention" | "direct_message",
+    reason: NotificationEligibilityReason,
     session: ActiveSession,
   ): PendingNotificationPresentation | null {
     if (

@@ -99,6 +99,7 @@ describeWithPostgres("runMigrations", () => {
           "0011_bot_task_principals.sql",
           "0012_task_actor_attribution.sql",
           "0013_agents.sql",
+          "0014_participated_thread_notifications.sql",
           "0015_device_session_token_history.sql",
           "0016_announcement_channels.sql",
         ],
@@ -123,6 +124,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0011_bot_task_principals.sql" },
         { filename: "0012_task_actor_attribution.sql" },
         { filename: "0013_agents.sql" },
+        { filename: "0014_participated_thread_notifications.sql" },
         { filename: "0015_device_session_token_history.sql" },
         { filename: "0016_announcement_channels.sql" },
       ]);

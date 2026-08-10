@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
@@ -819,7 +820,13 @@ describe("transport contracts", () => {
       },
     } as const;
 
-    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(workspaceEventSchema.parse(event)).toEqual({
+      ...event,
+      payload: {
+        ...event.payload,
+        conversation: { ...event.payload.conversation, channelMode: "chat" },
+      },
+    });
     expect(() =>
       workspaceEventSchema.parse({
         ...event,
@@ -894,6 +901,33 @@ describe("transport contracts", () => {
     } as const;
 
     expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(
+      workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          message: { ...event.payload.message, threadRootId: USER_ID },
+          mentionedUserIds: [],
+          recipientNotificationReason: "participated_thread_reply",
+        },
+      }),
+    ).toMatchObject({
+      payload: { recipientNotificationReason: "participated_thread_reply" },
+    });
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, recipientNotificationReason: "local_guess" },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          recipientNotificationReason: "participated_thread_reply",
+        },
+      }),
+    ).toThrow();
     for (const candidate of [
       { ...event, conversationId: MESSAGE_ID },
       { ...event, conversationSequence: "41" },
@@ -1067,13 +1101,14 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}`,
       ),
     ).toEqual([
       REACTION_EVENTS_CAPABILITY,
       READ_STATE_EVENTS_CAPABILITY,
       TASK_EVENTS_CAPABILITY,
       THREADS_CAPABILITY,
+      PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
     ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
