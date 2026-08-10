@@ -949,6 +949,103 @@ button:disabled {
   box-shadow: var(--theme-shadow-dialog);
 }
 
+.preferences-dialog {
+  width: min(480px, 100%);
+  max-height: min(620px, calc(100vh - 64px));
+  overflow-y: auto;
+  padding: 22px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 14px;
+  background: var(--theme-surface-elevated);
+  box-shadow: var(--theme-shadow-dialog);
+}
+
+.preferences-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.preferences-dialog h2,
+.preferences-dialog h3 {
+  margin: 0;
+}
+
+.preferences-dialog h2 {
+  font-size: 20px;
+}
+
+.preferences-dialog h3 {
+  color: var(--theme-text-secondary);
+  font-size: 13px;
+}
+
+.preferences-dialog > header > button {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--theme-text-subtle);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.preferences-dialog > header > button:hover {
+  color: var(--theme-text-strong);
+}
+
+.preferences-dialog > section + section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--theme-border-subtle);
+}
+
+.preferences-dialog .theme-control {
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* ThemeSelector labels its own select "Appearance" so it can stand alone on the sign-in
+   screens. Inside the dialog that repeats the section heading, so hide the visible copy while
+   leaving the label in place — it is what gives the select its accessible name. */
+.preferences-dialog .theme-control > label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.preferences-dialog .compact-mode-control {
+  margin: 10px 0 0;
+}
+
+.preferences-trigger {
+  width: 100%;
+  margin-bottom: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--theme-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.preferences-trigger:hover {
+  background: var(--theme-surface-hover);
+  color: var(--theme-text-strong);
+}
+
 .channel-members-dialog > header,
 .channel-members-dialog > footer,
 .channel-member-add > div,

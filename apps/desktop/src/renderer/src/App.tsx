@@ -18,7 +18,6 @@ import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
-import { CompactModeToggle } from "./compact-mode-toggle";
 import { ConversationHealth } from "./conversation-health";
 import { ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
 import { ArchivedConversationNotice, ConversationEmptyState } from "./conversation-states";
@@ -33,6 +32,7 @@ import {
   lastReadEligibleMessageId,
 } from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
+import { PreferencesDialog } from "./preferences-dialog";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
@@ -440,6 +440,8 @@ export function App({ client, theme, compactMode }: AppProps) {
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [showChannelMembers, setShowChannelMembers] = useState(false);
+  const [showPreferences, setShowPreferences] = useState(false);
+  const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
   const messageList = useRef<HTMLDivElement>(null);
   const timelineConversationId = useRef<string | null>(null);
@@ -1212,8 +1214,17 @@ export function App({ client, theme, compactMode }: AppProps) {
         </section>
 
         <footer className="sidebar-footer">
-          <ThemeSelector theme={theme} />
-          <CompactModeToggle compactMode={compactMode} platform={client.platform} />
+          <button
+            ref={preferencesTrigger}
+            className="preferences-trigger"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded={showPreferences}
+            aria-controls="preferences-dialog"
+            onClick={() => setShowPreferences(true)}
+          >
+            Preferences
+          </button>
           <UpdateControl client={client} />
           <ClientVersion client={client} />
         </footer>
@@ -1665,6 +1676,15 @@ export function App({ client, theme, compactMode }: AppProps) {
           remove={removeChannelMember}
         />
       )}
+      <PreferencesDialog
+        open={showPreferences}
+        theme={theme}
+        compactMode={compactMode}
+        platform={client.platform}
+        triggerRef={preferencesTrigger}
+        onClose={() => setShowPreferences(false)}
+        onOpenChange={chrome.onPopoverOpenChange}
+      />
     </main>
   );
 }
