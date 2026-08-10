@@ -52,6 +52,11 @@ export interface OutboxItem {
   readonly failureReason: string | null;
 }
 
+export interface OutboxUpdateExpectation {
+  readonly status: OutboxStatus;
+  readonly attemptCount: number;
+}
+
 export interface MembershipRepairMarker {
   readonly kind: "membership";
   readonly eventId: string;
@@ -90,6 +95,7 @@ export interface WorkspaceCache {
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     tasks?: readonly Task[],
+    signal?: AbortSignal,
   ): Promise<void>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v1/members`.
@@ -104,17 +110,56 @@ export interface WorkspaceCache {
   upsertConversation(summary: ConversationSummary): Promise<void>;
   /** Durably closes the cache before a membership event can wait on network or shutdown work. */
   stageMembershipRepair(event: MembershipChangedEvent): Promise<boolean>;
-  applyEvent(event: WorkspaceEvent): Promise<boolean>;
+  /**
+   * Applies an event and advances the durable cursor. A membership change first stages its repair,
+   * purges revoked conversation state when applicable, and leaves the cache blocked until an
+   * authoritative snapshot clears the repair marker.
+   */
+  applyEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<boolean>;
   advanceCursor(syncCursor: string): Promise<void>;
-  upsertHistory(messages: readonly Message[], reactions?: readonly Reaction[]): Promise<void>;
-  /** Projects a mutation response without advancing the workspace event cursor. */
-  upsertReaction(reaction: Reaction, conversationId: string): Promise<void>;
+  /** Atomically persists a history page only while its conversation remains authorized. */
+  upsertHistory(
+    conversationId: string,
+    messages: readonly Message[],
+    reactions?: readonly Reaction[],
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  /** Projects a mutation response only while its conversation remains authorized. */
+  upsertReaction(
+    reaction: Reaction,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** Projects a mutation response without advancing the workspace event cursor. */
   removeReaction(reactionId: string): Promise<void>;
-  /** Persists task list or mutation projections without advancing the workspace event cursor. */
-  upsertTasks(tasks: readonly Task[]): Promise<void>;
-  upsertAcknowledgedMessage(message: Message, syncCursor: string): Promise<void>;
-  enqueue(operation: SendMessageOperation, createdAt?: string): Promise<void>;
+  /**
+   * Persists only task projections whose conversations remain authorized, without advancing the
+   * workspace event cursor. Returns the subset accepted atomically.
+   */
+  upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]>;
+  /**
+   * Reconciles a committed send only while its queued operation and authorized conversation still
+   * exist atomically. Returns false when a concurrent repair or projection already retired it.
+   */
+  upsertAcknowledgedMessage(
+    message: Message,
+    expectedClientMessageId: string,
+    syncCursor: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  /** Queues a send only while its conversation remains authorized. */
+  enqueue(
+    operation: SendMessageOperation,
+    createdAt?: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  /** Atomically replaces one failed queued send while its conversation remains authorized. */
+  replaceOutbox(
+    clientMessageId: string,
+    operation: SendMessageOperation,
+    createdAt: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   updateOutbox(
     clientMessageId: string,
     update: {
@@ -123,7 +168,9 @@ export interface WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void>;
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean>;
   removeOutbox(clientMessageId: string): Promise<void>;
   clearServerStatePreservingOutbox(): Promise<void>;
   clearAll(): Promise<void>;
@@ -196,6 +243,8 @@ interface TaskRow {
   readonly assigneeId: string | null;
   readonly status: Task["status"];
   readonly rank: string;
+  /** Non-indexed optimistic version; older cache rows may omit it until the next snapshot. */
+  readonly version?: number;
   readonly updatedAt: string;
   readonly value: CacheCiphertext;
 }
@@ -214,6 +263,19 @@ interface OutboxRow {
 interface EventRow {
   readonly id: string;
   readonly workspaceSequence: string;
+}
+
+function matchesOutboxExpectation(
+  current: Pick<OutboxItem, "status" | "attemptCount">,
+  expected: OutboxUpdateExpectation | undefined,
+): boolean {
+  if (expected === undefined) return true;
+  // A process restart deliberately projects an interrupted durable `sending` row as `pending`.
+  // Treat that one recovery representation as equivalent while still comparing its attempt.
+  const statusMatches =
+    current.status === expected.status ||
+    (current.status === "sending" && expected.status === "pending");
+  return statusMatches && current.attemptCount === expected.attemptCount;
 }
 
 class WorkspaceCacheDatabase extends Dexie {
@@ -569,6 +631,7 @@ function taskRow(task: Task, encrypted: ReadonlyMap<string, CacheCiphertext>): T
     assigneeId: task.assigneeId,
     status: task.status,
     rank: task.rank,
+    version: task.version,
     updatedAt: task.updatedAt,
     value: encryptedValue(encrypted, "task", task.id),
   };
@@ -740,8 +803,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
+    signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    const authorizedConversationIds = new Set(
+      parsed.conversations.map((summary) => summary.conversation.id),
+    );
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
     const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
     const parsedTasks = tasks.map((task) => taskSchema.parse(task));
@@ -759,6 +826,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ...parsedReactions.map((reaction) => protectedRecord("reaction", reaction.id, reaction)),
       ...parsedTasks.map((task) => protectedRecord("task", task.id, task)),
     ]);
+    signal?.throwIfAborted();
     await this.#database.transaction(
       "rw",
       [
@@ -769,9 +837,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.messages,
         this.#database.reactions,
         this.#database.tasks,
+        this.#database.outbox,
         this.#database.events,
       ],
       async () => {
+        signal?.throwIfAborted();
         const metadata = await this.#database.metadata.get("state");
         const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
         if (
@@ -780,12 +850,16 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         ) {
           throw new Error("Authoritative snapshot predates the membership repair marker");
         }
+        const revokedOutboxIds = (await this.#database.outbox.toArray())
+          .filter((row) => !authorizedConversationIds.has(row.conversationId))
+          .map((row) => row.clientMessageId);
         await Promise.all([
           this.#database.workspaces.clear(),
           this.#database.conversations.clear(),
           this.#database.messages.clear(),
           this.#database.reactions.clear(),
           this.#database.tasks.clear(),
+          this.#database.outbox.bulkDelete(revokedOutboxIds),
           this.#database.events.clear(),
         ]);
         await this.#database.workspaces.put({
@@ -815,6 +889,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           lastSyncedAt: new Date().toISOString(),
           repairMarker: null,
         });
+        // Throwing inside the transaction rolls every store back when this cache generation was
+        // retired while its encrypted replacement was in progress.
+        signal?.throwIfAborted();
       },
     );
     await this.#evictMessages();
@@ -899,7 +976,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     });
   }
 
-  async applyEvent(event: WorkspaceEvent): Promise<boolean> {
+  async applyEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     const parsed = workspaceEventSchema.parse(event);
     const metadata = await this.#database.metadata.get("state");
     const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
@@ -967,7 +1045,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             });
           }
           await this.#database.outbox.delete(parsed.payload.message.clientMessageId);
-          await this.#recordEvent(parsed);
+          await this.#recordEvent(parsed, signal);
         },
       );
     } else if (parsed.type === "member.updated") {
@@ -980,7 +1058,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.metadata,
         this.#database.events,
         async () => {
-          await this.#recordEvent(parsed);
+          await this.#recordEvent(parsed, signal);
         },
       );
     } else if (parsed.type === "reaction.added") {
@@ -996,7 +1074,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           await this.#database.reactions.put(
             reactionRow(parsed.payload.reaction, parsed.conversationId, encrypted),
           );
-          await this.#recordEvent(parsed);
+          await this.#recordEvent(parsed, signal);
         },
       );
     } else if (parsed.type === "reaction.removed") {
@@ -1007,21 +1085,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.events,
         async () => {
           await this.#database.reactions.delete(parsed.payload.reaction.id);
-          await this.#recordEvent(parsed);
+          await this.#recordEvent(parsed, signal);
         },
       );
     } else if (parsed.type === "task.created" || parsed.type === "task.updated") {
       const task = parsed.payload.task;
-      const current = await this.#task(task.id);
-      if (current !== null && current.version > task.version) {
-        await this.#database.transaction(
-          "rw",
-          this.#database.metadata,
-          this.#database.events,
-          async () => this.#recordEvent(parsed),
-        );
-        return true;
-      }
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("task", task.id, task),
       ]);
@@ -1031,8 +1099,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.tasks,
         this.#database.events,
         async () => {
-          await this.#database.tasks.put(taskRow(task, encrypted));
-          await this.#recordEvent(parsed);
+          const current = await this.#database.tasks.get(task.id);
+          if (current?.version === undefined || current.version <= task.version) {
+            await this.#database.tasks.put(taskRow(task, encrypted));
+          }
+          await this.#recordEvent(parsed, signal);
         },
       );
     } else {
@@ -1068,7 +1139,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           this.#database.metadata,
           this.#database.events,
           async () => {
-            await this.#recordEvent(parsed);
+            await this.#recordEvent(parsed, signal);
           },
         );
         return true;
@@ -1089,7 +1160,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             updatedAt: summary.conversation.updatedAt,
             value: encryptedValue(encrypted, "conversation", summary.conversation.id),
           });
-          await this.#recordEvent(parsed);
+          await this.#recordEvent(parsed, signal);
         },
       );
     }
@@ -1117,32 +1188,67 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     });
   }
 
-  async upsertAcknowledgedMessage(message: Message, syncCursor: string): Promise<void> {
+  async upsertAcknowledgedMessage(
+    message: Message,
+    expectedClientMessageId: string,
+    syncCursor: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const parsed = messageSchema.parse(message);
+    const expectedId = entityIdSchema.parse(expectedClientMessageId);
     const encrypted = await encryptRecords(this.#crypto, [
       protectedRecord("message", parsed.id, parsed),
     ]);
-    await this.#database.transaction(
-      "rw",
-      this.#database.messages,
-      this.#database.outbox,
-      this.#database.metadata,
-      async () => {
-        const metadata = await this.#database.metadata.get("state");
-        if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) return;
-        await this.#database.messages.put(messageRow(parsed, encrypted));
-        await this.#database.outbox.delete(parsed.clientMessageId);
-        await this.advanceCursor(syncCursor);
-      },
-    );
+    if (signal?.aborted) return false;
+    try {
+      return await this.#database.transaction(
+        "rw",
+        this.#database.messages,
+        this.#database.outbox,
+        this.#database.metadata,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const [metadata, pending, conversation] = await Promise.all([
+            this.#database.metadata.get("state"),
+            this.#database.outbox.get(expectedId),
+            this.#database.conversations.get(parsed.conversationId),
+          ]);
+          if (
+            parseMembershipRepairMarker(metadata?.repairMarker) !== null ||
+            pending?.conversationId !== parsed.conversationId ||
+            conversation === undefined
+          ) {
+            return false;
+          }
+          await this.#database.messages.put(messageRow(parsed, encrypted));
+          await this.#database.outbox.bulkDelete([
+            ...new Set([expectedId, parsed.clientMessageId]),
+          ]);
+          await this.advanceCursor(syncCursor);
+          signal?.throwIfAborted();
+          return true;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
   }
 
   async upsertHistory(
+    conversationId: string,
     messages: readonly Message[],
     reactions?: readonly Reaction[],
-  ): Promise<void> {
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const expectedConversationId = entityIdSchema.parse(conversationId);
     const parsed = messages.map((message) => messageSchema.parse(message));
-    if (parsed.length === 0) return;
+    if (parsed.some((message) => message.conversationId !== expectedConversationId)) {
+      throw new Error("The workspace history crossed conversation scope");
+    }
     const parsedReactions = reactions?.map((reaction) => reactionSchema.parse(reaction));
     const encrypted = await encryptRecords(this.#crypto, [
       ...parsed.map((message) => protectedRecord("message", message.id, message)),
@@ -1150,95 +1256,242 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         protectedRecord("reaction", reaction.id, reaction),
       ),
     ]);
-    await this.#database.transaction(
-      "rw",
-      this.#database.messages,
-      this.#database.reactions,
-      this.#database.metadata,
-      async () => {
-        await this.#assertNoMembershipRepair();
-        await this.#database.messages.bulkPut(
-          parsed.map((message) => messageRow(message, encrypted)),
-        );
-        if (parsedReactions !== undefined) {
-          const messageIds = parsed.map((message) => message.id);
-          await this.#database.reactions.where("messageId").anyOf(messageIds).delete();
-          await this.#database.reactions.bulkPut(reactionRows(parsedReactions, parsed, encrypted));
-        }
-      },
-    );
-    await this.#evictMessages();
+    if (signal?.aborted) return false;
+    let committed: boolean;
+    try {
+      committed = await this.#database.transaction(
+        "rw",
+        this.#database.messages,
+        this.#database.reactions,
+        this.#database.metadata,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const [metadata, conversation] = await Promise.all([
+            this.#database.metadata.get("state"),
+            this.#database.conversations.get(expectedConversationId),
+          ]);
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
+            throw new Error("Membership repair must complete before mutating the cache");
+          }
+          if (conversation === undefined) return false;
+          await this.#database.messages.bulkPut(
+            parsed.map((message) => messageRow(message, encrypted)),
+          );
+          if (parsedReactions !== undefined) {
+            const messageIds = parsed.map((message) => message.id);
+            await this.#database.reactions.where("messageId").anyOf(messageIds).delete();
+            await this.#database.reactions.bulkPut(
+              reactionRows(parsedReactions, parsed, encrypted),
+            );
+          }
+          signal?.throwIfAborted();
+          return true;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
+    if (committed) await this.#evictMessages();
+    return committed && signal?.aborted !== true;
   }
 
-  async upsertReaction(reaction: Reaction, conversationId: string): Promise<void> {
+  async upsertReaction(
+    reaction: Reaction,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const parsed = reactionSchema.parse(reaction);
+    const expectedConversationId = entityIdSchema.parse(conversationId);
     const encrypted = await encryptRecords(this.#crypto, [
       protectedRecord("reaction", parsed.id, parsed),
     ]);
-    await this.#database.transaction(
-      "rw",
-      this.#database.metadata,
-      this.#database.reactions,
-      async () => {
-        await this.#assertNoMembershipRepair();
-        await this.#database.reactions.put(reactionRow(parsed, conversationId, encrypted));
-      },
-    );
+    if (signal?.aborted) return false;
+    try {
+      return await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.reactions,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const [metadata, conversation] = await Promise.all([
+            this.#database.metadata.get("state"),
+            this.#database.conversations.get(expectedConversationId),
+          ]);
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
+            throw new Error("Membership repair must complete before mutating the cache");
+          }
+          if (conversation === undefined) return false;
+          await this.#database.reactions.put(
+            reactionRow(parsed, expectedConversationId, encrypted),
+          );
+          signal?.throwIfAborted();
+          return true;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
   }
 
   async removeReaction(reactionId: string): Promise<void> {
     await this.#database.reactions.delete(reactionId);
   }
 
-  async upsertTasks(tasks: readonly Task[]): Promise<void> {
-    const parsed: Task[] = [];
-    for (const input of tasks) {
-      const task = taskSchema.parse(input);
-      const existing = await this.#task(task.id);
-      if (existing === null || task.version >= existing.version) parsed.push(task);
-    }
-    if (parsed.length === 0) return;
+  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
+    if (signal?.aborted) return [];
+    const parsed = tasks.map((task) => taskSchema.parse(task));
+    if (parsed.length === 0) return [];
     const encrypted = await encryptRecords(
       this.#crypto,
       parsed.map((task) => protectedRecord("task", task.id, task)),
     );
-    await this.#database.transaction(
-      "rw",
-      this.#database.metadata,
-      this.#database.tasks,
-      async () => {
-        await this.#assertNoMembershipRepair();
-        await this.#database.tasks.bulkPut(parsed.map((task) => taskRow(task, encrypted)));
-      },
-    );
+    if (signal?.aborted) return [];
+    try {
+      return await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.tasks,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const metadata = await this.#database.metadata.get("state");
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
+            throw new Error("Membership repair must complete before mutating the cache");
+          }
+          const conversationIds = [...new Set(parsed.map((task) => task.conversationId))];
+          const conversations = await this.#database.conversations.bulkGet(conversationIds);
+          const authorizedIds = new Set(
+            conversationIds.filter((_conversationId, index) => conversations[index] !== undefined),
+          );
+          const authorized = parsed.filter((task) => authorizedIds.has(task.conversationId));
+          const existingRows = await this.#database.tasks.bulkGet(
+            authorized.map((task) => task.id),
+          );
+          const accepted = authorized.filter((task, index) => {
+            const existingVersion = existingRows[index]?.version;
+            return existingVersion === undefined || task.version >= existingVersion;
+          });
+          await this.#database.tasks.bulkPut(accepted.map((task) => taskRow(task, encrypted)));
+          signal?.throwIfAborted();
+          return accepted;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return [];
+      throw error;
+    }
   }
 
   async enqueue(
     operation: SendMessageOperation,
     createdAt = new Date().toISOString(),
-  ): Promise<void> {
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const parsed = sendMessageOperationSchema.parse(operation);
     const id = parsed.message.clientMessageId;
     const encrypted = await encryptRecords(this.#crypto, [protectedRecord("outbox", id, parsed)]);
-    await this.#database.transaction(
-      "rw",
-      this.#database.metadata,
-      this.#database.outbox,
-      async () => {
-        await this.#assertNoMembershipRepair();
-        if ((await this.#database.outbox.get(id)) !== undefined) return;
-        await this.#database.outbox.add({
-          clientMessageId: id,
-          conversationId: parsed.conversationId,
-          createdAt,
-          status: "pending",
-          attemptCount: 0,
-          nextAttemptAt: null,
-          failureReason: null,
-          value: encryptedValue(encrypted, "outbox", id),
-        });
-      },
-    );
+    if (signal?.aborted) return false;
+    try {
+      return await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.outbox,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const [metadata, conversation, existing] = await Promise.all([
+            this.#database.metadata.get("state"),
+            this.#database.conversations.get(parsed.conversationId),
+            this.#database.outbox.get(id),
+          ]);
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
+            throw new Error("Membership repair must complete before mutating the cache");
+          }
+          if (conversation === undefined) return false;
+          if (existing !== undefined) return true;
+          await this.#database.outbox.add({
+            clientMessageId: id,
+            conversationId: parsed.conversationId,
+            createdAt,
+            status: "pending",
+            attemptCount: 0,
+            nextAttemptAt: null,
+            failureReason: null,
+            value: encryptedValue(encrypted, "outbox", id),
+          });
+          signal?.throwIfAborted();
+          return true;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
+  }
+
+  async replaceOutbox(
+    clientMessageId: string,
+    operation: SendMessageOperation,
+    createdAt: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const predecessorId = entityIdSchema.parse(clientMessageId);
+    const parsed = sendMessageOperationSchema.parse(operation);
+    const replacementId = parsed.message.clientMessageId;
+    const encrypted = await encryptRecords(this.#crypto, [
+      protectedRecord("outbox", replacementId, parsed),
+    ]);
+    if (signal?.aborted) return false;
+    try {
+      return await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.outbox,
+        this.#database.conversations,
+        async () => {
+          signal?.throwIfAborted();
+          const [metadata, conversation, predecessor, replacement] = await Promise.all([
+            this.#database.metadata.get("state"),
+            this.#database.conversations.get(parsed.conversationId),
+            this.#database.outbox.get(predecessorId),
+            this.#database.outbox.get(replacementId),
+          ]);
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
+            throw new Error("Membership repair must complete before mutating the cache");
+          }
+          if (
+            conversation === undefined ||
+            predecessor?.conversationId !== parsed.conversationId ||
+            replacement !== undefined
+          ) {
+            return false;
+          }
+          await this.#database.outbox.add({
+            clientMessageId: replacementId,
+            conversationId: parsed.conversationId,
+            createdAt,
+            status: "pending",
+            attemptCount: 0,
+            nextAttemptAt: null,
+            failureReason: null,
+            value: encryptedValue(encrypted, "outbox", replacementId),
+          });
+          await this.#database.outbox.delete(predecessorId);
+          signal?.throwIfAborted();
+          return true;
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
   }
 
   async updateOutbox(
@@ -1249,8 +1502,26 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void> {
-    await this.#database.outbox.update(clientMessageId, update);
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const id = entityIdSchema.parse(clientMessageId);
+    try {
+      return await this.#database.transaction("rw", this.#database.outbox, async () => {
+        signal?.throwIfAborted();
+        const current = await this.#database.outbox.get(id);
+        if (current === undefined || !matchesOutboxExpectation(current, expected)) return false;
+        await this.#database.outbox.update(id, update);
+        // Throwing inside the transaction rolls the status write back when a projection is retired
+        // while IndexedDB is still completing the update.
+        signal?.throwIfAborted();
+        return true;
+      });
+    } catch (error) {
+      if (signal?.aborted) return false;
+      throw error;
+    }
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {
@@ -1364,16 +1635,6 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     );
   }
 
-  async #task(id: string): Promise<Task | null> {
-    const row = await this.#database.tasks.get(id);
-    if (row === undefined) return null;
-    return (
-      (
-        await decryptRows(this.#crypto, "task", [row], [id], (value) => taskSchema.parse(value))
-      )[0] ?? null
-    );
-  }
-
   /**
    * Null when no workspace row is cached — the window a resync opens between
    * `clearServerStatePreservingOutbox()` and the next snapshot refresh. Callers treat that as
@@ -1416,7 +1677,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
   }
 
-  async #recordEvent(event: WorkspaceEvent): Promise<void> {
+  async #recordEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     await this.#assertNoMembershipRepair();
     await this.#database.events.put({
       id: event.id,
@@ -1428,6 +1690,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       syncCursor: event.workspaceSequence,
       lastSyncedAt: new Date().toISOString(),
     });
+    signal?.throwIfAborted();
   }
 
   async #evictMessages(): Promise<void> {
@@ -1503,8 +1766,19 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
+    signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    const authorizedConversationIds = new Set(
+      parsed.conversations.map((summary) => summary.conversation.id),
+    );
+    const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
+    const parsedTasks = tasks.map((task) => taskSchema.parse(task));
+    const conversationIds = new Map(
+      parsedMessages.map((message) => [message.id, message.conversationId] as const),
+    );
+    signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
       compareSequence(parsed.syncCursor, this.#repairMarker.workspaceSequence) < 0
@@ -1515,23 +1789,19 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#currentUserId = parsed.currentUser.user.id;
     this.#members = parsed.members;
     this.#messages.clear();
-    for (const message of messages) this.#messages.set(message.id, messageSchema.parse(message));
+    for (const message of parsedMessages) this.#messages.set(message.id, message);
     this.#reactions.clear();
     this.#reactionConversationIds.clear();
-    const conversationIds = new Map(
-      messages.map((message) => [message.id, message.conversationId] as const),
-    );
-    for (const reaction of reactions) {
-      const parsedReaction = reactionSchema.parse(reaction);
-      const conversationId = conversationIds.get(parsedReaction.messageId);
+    for (const reaction of parsedReactions) {
+      const conversationId = conversationIds.get(reaction.messageId);
       if (conversationId === undefined) continue;
-      this.#reactions.set(parsedReaction.id, parsedReaction);
-      this.#reactionConversationIds.set(parsedReaction.id, conversationId);
+      this.#reactions.set(reaction.id, reaction);
+      this.#reactionConversationIds.set(reaction.id, conversationId);
     }
     this.#tasks.clear();
-    for (const task of tasks) {
-      const parsedTask = taskSchema.parse(task);
-      this.#tasks.set(parsedTask.id, parsedTask);
+    for (const task of parsedTasks) this.#tasks.set(task.id, task);
+    for (const [id, item] of this.#outbox) {
+      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
     }
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
@@ -1593,7 +1863,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async applyEvent(event: WorkspaceEvent): Promise<boolean> {
+  async applyEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     const parsed = workspaceEventSchema.parse(event);
     if (parsed.type === "channel.membership_changed") {
       if (this.#repairMarker === null) {
@@ -1684,6 +1955,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       }
       this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
     }
+    signal?.throwIfAborted();
     return true;
   }
 
@@ -1695,23 +1967,52 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     }
   }
 
-  async upsertAcknowledgedMessage(message: Message, syncCursor: string): Promise<void> {
-    if (this.#repairMarker !== null) return;
+  async upsertAcknowledgedMessage(
+    message: Message,
+    expectedClientMessageId: string,
+    syncCursor: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const parsed = messageSchema.parse(message);
+    const expectedId = entityIdSchema.parse(expectedClientMessageId);
+    const pending = this.#outbox.get(expectedId);
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === parsed.conversationId,
+    );
+    if (
+      this.#repairMarker !== null ||
+      pending?.operation.conversationId !== parsed.conversationId ||
+      authorized !== true
+    ) {
+      return false;
+    }
     this.#messages.set(parsed.id, parsed);
+    this.#outbox.delete(expectedId);
     this.#outbox.delete(parsed.clientMessageId);
     await this.advanceCursor(syncCursor);
+    signal?.throwIfAborted();
+    return true;
   }
 
   async upsertHistory(
+    conversationId: string,
     messages: readonly Message[],
     reactions?: readonly Reaction[],
-  ): Promise<void> {
-    this.#assertNoMembershipRepair();
-    for (const message of messages) {
-      const parsed = messageSchema.parse(message);
-      this.#messages.set(parsed.id, parsed);
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const expectedConversationId = entityIdSchema.parse(conversationId);
+    const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    if (parsedMessages.some((message) => message.conversationId !== expectedConversationId)) {
+      throw new Error("The workspace history crossed conversation scope");
     }
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === expectedConversationId,
+    );
+    this.#assertNoMembershipRepair();
+    if (authorized !== true) return false;
+    for (const message of parsedMessages) this.#messages.set(message.id, message);
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
       for (const [id, reaction] of this.#reactions) {
@@ -1731,13 +2032,26 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         this.#reactionConversationIds.set(parsed.id, conversationId);
       }
     }
+    signal?.throwIfAborted();
+    return true;
   }
 
-  async upsertReaction(reaction: Reaction, conversationId: string): Promise<void> {
+  async upsertReaction(
+    reaction: Reaction,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     this.#assertNoMembershipRepair();
     const parsed = reactionSchema.parse(reaction);
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === conversationId,
+    );
+    if (authorized !== true) return false;
     this.#reactions.set(parsed.id, parsed);
     this.#reactionConversationIds.set(parsed.id, conversationId);
+    signal?.throwIfAborted();
+    return true;
   }
 
   async removeReaction(reactionId: string): Promise<void> {
@@ -1745,25 +2059,40 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#reactionConversationIds.delete(reactionId);
   }
 
-  async upsertTasks(tasks: readonly Task[]): Promise<void> {
+  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
+    if (signal?.aborted) return [];
     this.#assertNoMembershipRepair();
+    const authorizedConversationIds = new Set(
+      this.#snapshot?.conversations.map((summary) => summary.conversation.id) ?? [],
+    );
+    const accepted: Task[] = [];
     for (const task of tasks) {
       const parsed = taskSchema.parse(task);
+      if (!authorizedConversationIds.has(parsed.conversationId)) continue;
       const current = this.#tasks.get(parsed.id);
       if (current === undefined || parsed.version >= current.version) {
         this.#tasks.set(parsed.id, parsed);
+        accepted.push(parsed);
       }
     }
+    signal?.throwIfAborted();
+    return accepted;
   }
 
   async enqueue(
     operation: SendMessageOperation,
     createdAt = new Date().toISOString(),
-  ): Promise<void> {
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     this.#assertNoMembershipRepair();
     const parsed = sendMessageOperationSchema.parse(operation);
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === parsed.conversationId,
+    );
+    if (authorized !== true) return false;
     const id = parsed.message.clientMessageId;
-    if (this.#outbox.has(id)) return;
+    if (this.#outbox.has(id)) return true;
     this.#outbox.set(id, {
       operation: parsed,
       createdAt,
@@ -1772,6 +2101,42 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       nextAttemptAt: null,
       failureReason: null,
     });
+    signal?.throwIfAborted();
+    return true;
+  }
+
+  async replaceOutbox(
+    clientMessageId: string,
+    operation: SendMessageOperation,
+    createdAt: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    this.#assertNoMembershipRepair();
+    const predecessorId = entityIdSchema.parse(clientMessageId);
+    const parsed = sendMessageOperationSchema.parse(operation);
+    const predecessor = this.#outbox.get(predecessorId);
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === parsed.conversationId,
+    );
+    if (
+      authorized !== true ||
+      predecessor?.operation.conversationId !== parsed.conversationId ||
+      this.#outbox.has(parsed.message.clientMessageId)
+    ) {
+      return false;
+    }
+    this.#outbox.set(parsed.message.clientMessageId, {
+      operation: parsed,
+      createdAt,
+      status: "pending",
+      attemptCount: 0,
+      nextAttemptAt: null,
+      failureReason: null,
+    });
+    this.#outbox.delete(predecessorId);
+    signal?.throwIfAborted();
+    return true;
   }
 
   async updateOutbox(
@@ -1782,9 +2147,18 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       readonly nextAttemptAt: string | null;
       readonly failureReason: string | null;
     },
-  ): Promise<void> {
+    signal?: AbortSignal,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     const current = this.#outbox.get(clientMessageId);
-    if (current !== undefined) this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (current === undefined || !matchesOutboxExpectation(current, expected)) return false;
+    this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (signal?.aborted) {
+      this.#outbox.set(clientMessageId, current);
+      return false;
+    }
+    return true;
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {

@@ -20,10 +20,21 @@ import type {
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
+  MessageByIdResponse,
   MessageThreadResponse,
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
+  NotificationAction,
+  NotificationActionAcknowledgement,
+  NotificationActionDrainRequest,
+  NotificationActionDrainResponse,
+  NotificationActivityUpdate,
+  NotificationContext,
+  NotificationCaptureActivationRequest,
+  NotificationCaptureActivationResponse,
+  NotificationPreference,
+  NotificationState,
   ReactionEmoji,
   RemoveReactionResponse,
   ProductRealtimeEvent,
@@ -43,14 +54,21 @@ import type {
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
-export interface NotificationAction {
-  readonly type: "open-channel";
-  readonly channelId: string;
-}
-
 export type ServerStatus = "reachable" | "unreachable";
 /** Re-exported from the contracts package so main, preload, and the renderer cannot drift. */
-export type { RealtimeConnectionState };
+export type {
+  NotificationAction,
+  NotificationActionAcknowledgement,
+  NotificationActionDrainRequest,
+  NotificationActionDrainResponse,
+  NotificationActivityUpdate,
+  NotificationContext,
+  NotificationCaptureActivationRequest,
+  NotificationCaptureActivationResponse,
+  NotificationPreference,
+  NotificationState,
+  RealtimeConnectionState,
+};
 
 export interface SessionTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
@@ -74,7 +92,41 @@ export interface CompactModeTransport {
   readonly onCompactModeChanged: (listener: (enabled: boolean) => void) => () => void;
 }
 
-export interface DesktopApi extends SessionTransport, ThemeTransport, CompactModeTransport {
+/**
+ * Body-free native-notification bridge. The action drain is also the renderer-ready handshake:
+ * callers invoke it only after their exact workspace session and navigation subscriber are ready.
+ */
+export interface NotificationTransport {
+  readonly getNotificationContext: () => Promise<NotificationContext>;
+  readonly reportNotificationActivity: (activity: NotificationActivityUpdate) => Promise<void>;
+  readonly drainNotificationActions: (
+    ready: NotificationActionDrainRequest,
+  ) => Promise<NotificationActionDrainResponse>;
+  readonly acknowledgeNotificationAction: (
+    acknowledgement: NotificationActionAcknowledgement,
+  ) => Promise<void>;
+  readonly onNotificationAction: (listener: (action: NotificationAction) => void) => () => void;
+  readonly getNotificationState: () => Promise<NotificationState>;
+  readonly setNotificationPreference: (
+    preference: NotificationPreference,
+  ) => Promise<NotificationState>;
+  readonly refreshNotificationCapability: () => Promise<NotificationState>;
+  readonly onNotificationStateChanged: (listener: (state: NotificationState) => void) => () => void;
+}
+
+/** Separate because ordinary renderer transports and their fakes never expose headless controls. */
+export interface NotificationCaptureTransport {
+  /** Available only to the unpackaged headless automation client. */
+  readonly activateCapturedNotification: (captureId: string) => Promise<boolean>;
+}
+
+export interface DesktopApi
+  extends
+    SessionTransport,
+    ThemeTransport,
+    CompactModeTransport,
+    Partial<NotificationTransport>,
+    Partial<NotificationCaptureTransport> {
   readonly platform: DesktopPlatform;
   /** True only for the unpackaged, hidden-window automation client. */
   readonly isHeadless?: boolean;
@@ -83,7 +135,6 @@ export interface DesktopApi extends SessionTransport, ThemeTransport, CompactMod
   readonly checkForUpdates: () => Promise<void>;
   readonly restartToInstallUpdate: () => Promise<void>;
   readonly onUpdateStateChanged: (listener: (state: UpdateState) => void) => () => void;
-  readonly onNotificationAction: (listener: (action: NotificationAction) => void) => () => void;
   readonly initializeCacheCrypto: (scope: CacheScope) => Promise<CacheCryptoStatus>;
   readonly encryptCacheRecords: (
     input: CacheEncryptBatchRequest,
@@ -111,6 +162,7 @@ export interface DesktopApi extends SessionTransport, ThemeTransport, CompactMod
     readonly before?: string;
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
+  readonly getMessageById: (messageId: string) => Promise<MessageByIdResponse>;
   readonly getMessageThread: (input: {
     readonly messageId: string;
     readonly before?: string;

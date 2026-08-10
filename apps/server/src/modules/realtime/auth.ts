@@ -17,6 +17,8 @@ export type RealtimePrincipal =
       readonly taskEvents?: boolean;
       /** False/absent for tickets issued to clients predating announcement channels. */
       readonly announcementChannels?: boolean;
+      /** False/absent for tickets predating recipient-specific thread notification reasons. */
+      readonly participatedThreadNotifications?: boolean;
     }
   | {
       readonly userId: string;
@@ -32,6 +34,8 @@ export type RealtimePrincipal =
       readonly taskEvents?: boolean;
       /** False/absent for tickets issued to clients predating announcement channels. */
       readonly announcementChannels?: boolean;
+      /** False/absent for tickets predating recipient-specific thread notification reasons. */
+      readonly participatedThreadNotifications?: boolean;
     };
 
 /**

@@ -20,11 +20,14 @@ import type {
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   Message,
+  MessageByIdResponse,
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
   MessageThreadResponse,
+  NotificationAction as ExactNotificationAction,
+  NotificationContext,
   ProductRealtimeEvent,
   Reaction,
   ReactionEmoji,
@@ -34,6 +37,7 @@ import type {
   SendMessageOperation,
   SyncAttemptResult,
   Task,
+  TaskListQuery,
   TaskListResponse,
   TaskMutationResponse,
   ThemeState,
@@ -56,11 +60,13 @@ import type {
   OutboxItem,
   WorkspaceCache,
 } from "./workspace-cache";
-import { WorkspaceRuntime } from "./workspace-runtime";
+import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
 const USER_ID = "20000000-0000-4000-8000-000000000001";
 const PEER_ID = "20000000-0000-4000-8000-000000000002";
 const WORKSPACE_ID = "20000000-0000-4000-8000-000000000003";
+const OTHER_USER_ID = "30000000-0000-4000-8000-000000000001";
+const OTHER_WORKSPACE_ID = "30000000-0000-4000-8000-000000000003";
 const CONVERSATION_ID = "20000000-0000-4000-8000-000000000004";
 const SECOND_CONVERSATION_ID = "20000000-0000-4000-8000-000000000005";
 const OWN_MESSAGE_ID = "20000000-0000-4000-8000-000000000006";
@@ -94,6 +100,34 @@ const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" 
   email: "morgan@example.com",
   userId: USER_ID,
   workspaceId: WORKSPACE_ID,
+};
+
+const otherSession: Extract<ChatSessionState, { status: "signed-in"; method: "email" }> = {
+  ...session,
+  name: "Alex",
+  email: "alex@example.com",
+  userId: OTHER_USER_ID,
+  workspaceId: OTHER_WORKSPACE_ID,
+};
+
+const notificationContext: Extract<NotificationContext, { status: "active" }> = {
+  version: 1,
+  status: "active",
+  sessionGeneration: 7,
+  rendererSessionGeneration: 3,
+  userId: USER_ID,
+  workspaceId: WORKSPACE_ID,
+};
+
+const notificationAction: ExactNotificationAction = {
+  version: 1,
+  type: "open-message",
+  sessionGeneration: notificationContext.sessionGeneration,
+  userId: USER_ID,
+  workspaceId: WORKSPACE_ID,
+  conversationId: CONVERSATION_ID,
+  messageId: PEER_MESSAGE_ID,
+  threadRootId: null,
 };
 
 const user = {
@@ -136,6 +170,27 @@ function memberUpdated(id: string, workspaceSequence: string, member: User): Wor
   };
 }
 
+function membershipChanged(
+  id: string,
+  workspaceSequence: string,
+  action: "added" | "updated" | "removed" = "updated",
+  conversationId = CONVERSATION_ID,
+): WorkspaceEvent {
+  return {
+    version: 1,
+    id,
+    type: "channel.membership_changed",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { memberId: USER_ID, action },
+  };
+}
+
 function channel(id: string, slug: string): ConversationSummary {
   return {
     conversation: {
@@ -159,6 +214,38 @@ function channel(id: string, slug: string): ConversationSummary {
     mentionCount: 0,
     readCursor: null,
   };
+}
+
+function directConversation(id: string, participantIds: readonly string[]): ConversationSummary {
+  return {
+    conversation: {
+      id,
+      workspaceId: WORKSPACE_ID,
+      kind: "direct_message",
+      name: null,
+      slug: null,
+      topic: null,
+      access: null,
+      channelMode: null,
+      isArchived: false,
+      createdBy: USER_ID,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    participantIds: [...participantIds],
+    membershipRole: null,
+    lastMessage: null,
+    unreadCount: 0,
+    mentionCount: 0,
+    readCursor: null,
+  };
+}
+
+function catalogConversation(index: number): ConversationSummary {
+  return channel(
+    `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    `catalog-${String(index)}`,
+  );
 }
 
 function bootstrapAt(
@@ -187,6 +274,32 @@ function bootstrapAt(
       announcementChannels: false,
     },
     ...overrides,
+  };
+}
+
+function otherBootstrapAt(syncCursor: string): HumanWorkspaceBootstrapResponse {
+  const otherUser = {
+    ...user,
+    id: OTHER_USER_ID,
+    username: "alex",
+    displayName: "Alex",
+  } as const satisfies User;
+  return {
+    ...bootstrapAt(syncCursor),
+    currentUser: {
+      user: otherUser,
+      email: "alex@example.com",
+      workspaceId: OTHER_WORKSPACE_ID,
+      role: "owner",
+    },
+    workspace: {
+      ...bootstrapAt(syncCursor).workspace,
+      id: OTHER_WORKSPACE_ID,
+      slug: "other-workspace",
+      createdBy: OTHER_USER_ID,
+    },
+    members: [otherUser],
+    conversations: [],
   };
 }
 
@@ -250,6 +363,40 @@ const task: Task = {
   createdAt: NOW,
   updatedAt: NOW,
 };
+
+function catalogTask(
+  index: number,
+  conversationId = CONVERSATION_ID,
+  workspaceId = WORKSPACE_ID,
+): Task {
+  const sequence = String(index + 1);
+  return {
+    ...task,
+    id: `50000000-0000-4000-8000-${sequence.padStart(12, "0")}`,
+    workspaceId,
+    conversationId,
+    number: sequence,
+    rank: sequence,
+    sourceMessageId: null,
+    title: `Catalog task ${sequence}`,
+  };
+}
+
+function taskUpdated(id: string, workspaceSequence: string, updated: Task): WorkspaceEvent {
+  return {
+    version: 1,
+    id,
+    type: "task.updated",
+    occurredAt: NOW,
+    workspaceId: updated.workspaceId,
+    conversationId: updated.conversationId,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: updated.version,
+    delivery: "at_least_once",
+    payload: { task: updated },
+  };
+}
 
 const reactionAddedEvent: WorkspaceEvent = {
   version: 1,
@@ -347,6 +494,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #events = new Set<string>();
   #repairMarker: MembershipRepairMarker | null = null;
   readonly memberReplaceBarriers: Promise<void>[] = [];
+  readonly acknowledgedMessageBarriers: Promise<void>[] = [];
+  readonly loadBarriers: Promise<void>[] = [];
+  readonly outboxUpdateBarriers: Promise<void>[] = [];
+  outboxUpdateAttempts = 0;
+  acknowledgedMessageAttempts = 0;
   upsertFailure: Error | null = null;
 
   get cursor(): string | null {
@@ -356,6 +508,8 @@ class FakeWorkspaceCache implements WorkspaceCache {
   async load(): Promise<CachedWorkspaceState> {
     this.loadCount += 1;
     this.operations.push("load");
+    const barrier = this.loadBarriers.shift();
+    if (barrier !== undefined) await barrier;
     return {
       bootstrap: this.#snapshot,
       messages: [...this.#messages.values()],
@@ -371,7 +525,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
-    const [snapshot, messages, reactions = [], tasks = []] = args;
+    const [snapshot, messages, reactions = [], tasks = [], signal] = args;
+    const authorizedConversationIds = new Set(
+      snapshot.conversations.map((summary) => summary.conversation.id),
+    );
+    signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
       BigInt(snapshot.syncCursor) < BigInt(this.#repairMarker.workspaceSequence)
@@ -386,6 +544,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
     for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     this.#tasks.clear();
     for (const task of tasks) this.#tasks.set(task.id, task);
+    for (const [id, item] of this.#outbox) {
+      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
+    }
     this.#syncCursor = snapshot.syncCursor;
     this.#repairMarker = null;
   }
@@ -431,7 +592,8 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async applyEvent(event: WorkspaceEvent): Promise<boolean> {
+  async applyEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     if (this.#repairMarker !== null && event.type !== "channel.membership_changed") {
       throw new Error("Membership repair must complete before applying later events");
     }
@@ -487,6 +649,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
         this.#tasks.set(event.payload.task.id, event.payload.task);
       }
     }
+    signal?.throwIfAborted();
     return true;
   }
 
@@ -500,9 +663,20 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async upsertHistory(
+    conversationId: string,
     messages: readonly Message[],
     reactions?: readonly Reaction[],
-  ): Promise<void> {
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    if (
+      !this.#snapshot?.conversations.some((summary) => summary.conversation.id === conversationId)
+    ) {
+      return false;
+    }
+    if (messages.some((message) => message.conversationId !== conversationId)) {
+      throw new Error("The workspace history crossed conversation scope");
+    }
     for (const item of messages) this.#messages.set(item.id, item);
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
@@ -511,37 +685,90 @@ class FakeWorkspaceCache implements WorkspaceCache {
       }
       for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     }
+    signal?.throwIfAborted();
+    return true;
   }
 
-  async upsertReaction(reaction: Reaction): Promise<void> {
+  async upsertReaction(
+    reaction: Reaction,
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (
+      signal?.aborted ||
+      !this.#snapshot?.conversations.some((summary) => summary.conversation.id === conversationId)
+    )
+      return false;
     if (this.reactionUpsertFailures > 0) {
       this.reactionUpsertFailures -= 1;
       throw new Error("The encrypted reaction cache is unavailable");
     }
     this.#reactions.set(reaction.id, reaction);
+    signal?.throwIfAborted();
+    return true;
   }
 
   async removeReaction(reactionId: string): Promise<void> {
     this.#reactions.delete(reactionId);
   }
 
-  async upsertTasks(tasks: readonly Task[]): Promise<void> {
-    for (const task of tasks) this.#tasks.set(task.id, task);
+  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
+    if (signal?.aborted) return [];
+    const authorizedIds = new Set(
+      this.#snapshot?.conversations.map((summary) => summary.conversation.id) ?? [],
+    );
+    const accepted = tasks.filter((task) => authorizedIds.has(task.conversationId));
+    for (const task of accepted) this.#tasks.set(task.id, task);
+    signal?.throwIfAborted();
+    return accepted;
   }
 
-  async upsertAcknowledgedMessage(item: Message, syncCursor: string): Promise<void> {
-    if (this.#repairMarker !== null) return;
+  async upsertAcknowledgedMessage(
+    item: Message,
+    expectedClientMessageId: string,
+    syncCursor: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    this.acknowledgedMessageAttempts += 1;
+    await this.acknowledgedMessageBarriers.shift();
+    if (signal?.aborted) return false;
+    const pending = this.#outbox.get(expectedClientMessageId);
+    const authorized = this.#snapshot?.conversations.some(
+      (summary) => summary.conversation.id === item.conversationId,
+    );
+    if (
+      this.#repairMarker !== null ||
+      pending?.operation.conversationId !== item.conversationId ||
+      authorized !== true
+    ) {
+      return false;
+    }
     this.#messages.set(item.id, item);
+    this.#outbox.delete(expectedClientMessageId);
     this.#outbox.delete(item.clientMessageId);
     await this.advanceCursor(syncCursor);
+    signal?.throwIfAborted();
+    return true;
   }
 
-  async enqueue(operation: SendMessageOperation, createdAt = NOW): Promise<void> {
+  async enqueue(
+    operation: SendMessageOperation,
+    createdAt = NOW,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
     if (this.#repairMarker !== null) {
       throw new Error("Membership repair must complete before queueing a send");
     }
+    if (
+      !this.#snapshot?.conversations.some(
+        (summary) => summary.conversation.id === operation.conversationId,
+      )
+    ) {
+      return false;
+    }
     const id = operation.message.clientMessageId;
-    if (this.#outbox.has(id)) return;
+    if (this.#outbox.has(id)) return true;
     this.outboxMutations.push({ type: "enqueue", clientMessageId: id });
     this.#outbox.set(id, {
       operation,
@@ -551,12 +778,65 @@ class FakeWorkspaceCache implements WorkspaceCache {
       nextAttemptAt: null,
       failureReason: null,
     });
+    signal?.throwIfAborted();
+    return true;
   }
 
-  async updateOutbox(...args: Parameters<WorkspaceCache["updateOutbox"]>): Promise<void> {
-    const [clientMessageId, update] = args;
+  async replaceOutbox(
+    clientMessageId: string,
+    operation: SendMessageOperation,
+    createdAt: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted || this.#repairMarker !== null) return false;
+    const predecessor = this.#outbox.get(clientMessageId);
+    if (
+      predecessor?.operation.conversationId !== operation.conversationId ||
+      !this.#snapshot?.conversations.some(
+        (summary) => summary.conversation.id === operation.conversationId,
+      )
+    ) {
+      return false;
+    }
+    this.outboxMutations.push({
+      type: "enqueue",
+      clientMessageId: operation.message.clientMessageId,
+    });
+    this.#outbox.set(operation.message.clientMessageId, {
+      operation,
+      createdAt,
+      status: "pending",
+      attemptCount: 0,
+      nextAttemptAt: null,
+      failureReason: null,
+    });
+    this.outboxMutations.push({ type: "remove", clientMessageId });
+    this.#outbox.delete(clientMessageId);
+    signal?.throwIfAborted();
+    return true;
+  }
+
+  async updateOutbox(...args: Parameters<WorkspaceCache["updateOutbox"]>): Promise<boolean> {
+    const [clientMessageId, update, signal, expected] = args;
+    if (signal?.aborted) return false;
+    this.outboxUpdateAttempts += 1;
+    const barrier = this.outboxUpdateBarriers.shift();
+    if (barrier !== undefined) await barrier;
+    if (signal?.aborted) return false;
     const current = this.#outbox.get(clientMessageId);
-    if (current !== undefined) this.#outbox.set(clientMessageId, { ...current, ...update });
+    if (current === undefined) return false;
+    const expectedStatusMatches =
+      expected === undefined ||
+      current.status === expected.status ||
+      (current.status === "sending" && expected.status === "pending");
+    if (
+      !expectedStatusMatches ||
+      (expected !== undefined && current.attemptCount !== expected.attemptCount)
+    ) {
+      return false;
+    }
+    this.#outbox.set(clientMessageId, { ...current, ...update });
+    return true;
   }
 
   async removeOutbox(clientMessageId: string): Promise<void> {
@@ -594,6 +874,7 @@ class FakeDesktopApi implements DesktopApi {
     scope,
     reason: "credential_store_unavailable",
   };
+  readonly cryptoStatusResults: (CacheCryptoStatus | Promise<CacheCryptoStatus>)[] = [];
   bootstrapRequests = 0;
   stopRequests = 0;
   readonly stopResults: Promise<void>[] = [];
@@ -643,11 +924,25 @@ class FakeDesktopApi implements DesktopApi {
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
   readonly historyRequests: string[] = [];
-  readonly searchResults: MessageSearchResponse[] = [];
+  readonly historyResults = new Map<
+    string,
+    (MessageHistoryResponse | Promise<MessageHistoryResponse>)[]
+  >();
+  readonly messageByIdResults: (MessageByIdResponse | Promise<MessageByIdResponse>)[] = [];
+  readonly messageByIdRequests: string[] = [];
+  messageByIdFailures = 0;
+  readonly searchResults: (MessageSearchResponse | Promise<MessageSearchResponse>)[] = [];
   readonly searchRequests: MessageSearchQuery[] = [];
-  readonly conversationTaskResults: TaskListResponse[] = [];
-  readonly myTaskResults: TaskListResponse[] = [];
+  readonly channelMemberResults: (ChannelMembersResponse | Promise<ChannelMembersResponse>)[] = [];
+  readonly channelMemberRequests: string[] = [];
+  readonly conversationTaskResults: (TaskListResponse | Promise<TaskListResponse>)[] = [];
+  readonly myTaskResults: (TaskListResponse | Promise<TaskListResponse>)[] = [];
   readonly conversationTaskRequests: string[] = [];
+  readonly conversationTaskPageRequests: {
+    readonly conversationId: string;
+    readonly after?: string;
+    readonly limit?: number;
+  }[] = [];
   readonly taskMutationResults: TaskMutationResponse[] = [];
   readonly taskMutations: (CreateTaskOperation | UpdateTaskOperation | MoveTaskOperation)[] = [];
   readCursorFailures = 0;
@@ -753,7 +1048,8 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async initializeCacheCrypto(): Promise<CacheCryptoStatus> {
-    return this.cryptoStatus;
+    const queued = this.cryptoStatusResults.shift();
+    return queued === undefined ? this.cryptoStatus : await queued;
   }
 
   async encryptCacheRecords(): Promise<CacheEncryptBatchResponse> {
@@ -807,6 +1103,8 @@ class FakeDesktopApi implements DesktopApi {
     readonly conversationId: string;
   }): Promise<MessageHistoryResponse> {
     this.historyRequests.push(input.conversationId);
+    const queued = this.historyResults.get(input.conversationId)?.shift();
+    if (queued !== undefined) return await queued;
     return {
       threadSummaries: [],
       threadsSupported: true,
@@ -825,6 +1123,19 @@ class FakeDesktopApi implements DesktopApi {
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
     return response;
+  }
+
+  async getMessageById(messageId: string): Promise<MessageByIdResponse> {
+    this.messageByIdRequests.push(messageId);
+    if (this.messageByIdFailures > 0) {
+      this.messageByIdFailures -= 1;
+      throw new Error("The exact message is unavailable");
+    }
+    const response = this.messageByIdResults.shift();
+    if (response === undefined) {
+      throw new Error("The workspace runtime test queued no exact-message response");
+    }
+    return await response;
   }
 
   async listMessageReactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
@@ -857,16 +1168,26 @@ class FakeDesktopApi implements DesktopApi {
     this.searchRequests.push(input);
     const response = this.searchResults.shift();
     if (response === undefined) throw new Error("The test queued no search result");
-    return response;
+    return await response;
   }
 
-  async listConversationTasks(conversationId: string): Promise<TaskListResponse> {
+  async listConversationTasks(
+    conversationId: string,
+    input: Partial<TaskListQuery> = {},
+  ): Promise<TaskListResponse> {
     this.conversationTaskRequests.push(conversationId);
-    return this.conversationTaskResults.shift() ?? { tasks: [], nextCursor: null, hasMore: false };
+    this.conversationTaskPageRequests.push({ conversationId, ...input });
+    return (
+      (await this.conversationTaskResults.shift()) ?? {
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }
+    );
   }
 
   async listMyTasks(): Promise<TaskListResponse> {
-    return this.myTaskResults.shift() ?? { tasks: [], nextCursor: null, hasMore: false };
+    return (await this.myTaskResults.shift()) ?? { tasks: [], nextCursor: null, hasMore: false };
   }
 
   async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
@@ -917,8 +1238,11 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not archive channels");
   }
 
-  async getChannelMembers(): Promise<ChannelMembersResponse> {
-    throw new Error("The runtime test does not list channel members");
+  async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
+    this.channelMemberRequests.push(conversationId);
+    const response = this.channelMemberResults.shift();
+    if (response === undefined) throw new Error("The test queued no channel members result");
+    return await response;
   }
 
   async upsertChannelMember(): Promise<ChannelMembershipMutationResponse> {
@@ -1033,6 +1357,63 @@ function runtimeWith(api: FakeDesktopApi, cache: WorkspaceCache): WorkspaceRunti
   return new WorkspaceRuntime(api, { createCache: () => cache });
 }
 
+async function cacheWithDurableMembershipMarker(
+  messages: readonly Message[] = [],
+): Promise<FakeWorkspaceCache> {
+  const privateSummary: ConversationSummary = {
+    ...channel(SECOND_CONVERSATION_ID, "leadership"),
+    conversation: {
+      ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+      access: "members",
+    },
+    participantIds: [USER_ID],
+    membershipRole: "owner",
+  };
+  const cache = new FakeWorkspaceCache();
+  await cache.replaceSnapshot(
+    bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+    }),
+    messages,
+  );
+  await cache.applyEvent(
+    membershipChanged(MEMBER_EVENT_ID, "11", "removed", SECOND_CONVERSATION_ID),
+  );
+  return cache;
+}
+
+function addConversationCatalogPages(api: FakeDesktopApi, conversationCount: number): void {
+  let remaining = conversationCount;
+  let conversation = 0;
+  let page = 1;
+  while (remaining > 0) {
+    const pageSize = Math.min(remaining, 100);
+    remaining -= pageSize;
+    api.conversationPages.set(`page-${String(page)}`, {
+      conversations: Array.from({ length: pageSize }, () => catalogConversation(++conversation)),
+      nextCursor: remaining === 0 ? null : `page-${String(page + 1)}`,
+      hasMore: remaining !== 0,
+    });
+    page += 1;
+  }
+}
+
+function addTaskCatalogPages(api: FakeDesktopApi, taskCount: number): void {
+  let taskIndex = 0;
+  let remaining = taskCount;
+  let page = 1;
+  while (remaining > 0) {
+    const pageSize = Math.min(remaining, 200);
+    remaining -= pageSize;
+    api.conversationTaskResults.push({
+      tasks: Array.from({ length: pageSize }, () => catalogTask(taskIndex++)),
+      nextCursor: remaining === 0 ? null : `task-page-${String(page)}`,
+      hasMore: remaining !== 0,
+    });
+    page += 1;
+  }
+}
+
 function queuedOperation(
   clientMessageId: string,
   body: string,
@@ -1058,7 +1439,9 @@ async function enqueuePermanentFailure(
   body: string,
   createdAt = NOW,
 ): Promise<void> {
+  await cache.replaceSnapshot(bootstrapAt("0"), []);
   await cache.enqueue(queuedOperation(clientMessageId, body), createdAt);
+  await cache.clearServerStatePreservingOutbox();
   await cache.updateOutbox(clientMessageId, {
     status: "permanent_failure",
     attemptCount: 1,
@@ -1096,7 +1479,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap?.conversations[0]?.conversation.channelMode).toBe(
       "announcement",
     );
-    expect(api.syncedFrom).toEqual(["10"]);
+    expect(api.syncedFrom).toEqual(["8", "10"]);
     expect(api.startedCursors).toEqual(["10"]);
   });
 
@@ -1372,6 +1755,311 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.messages).toEqual([ownMessage, threadReply]);
   });
 
+  it("catches up from the encrypted replica before snapshot replacement and realtime", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+    const api = new FakeDesktopApi(bootstrapAt("12"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, peerMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [peerEvent],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.syncedFrom).toEqual(["9", "12"]);
+    expect(api.acknowledged).toEqual(["12", "12"]);
+    expect(api.startedCursors).toEqual(["12"]);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(cache.operations.indexOf("applyEvent:message.created")).toBeLessThan(
+      cache.operations.indexOf("replaceSnapshot", 1),
+    );
+    expect(runtime.state.messages).toEqual(expect.arrayContaining([ownMessage, peerMessage]));
+    expect((await cache.load()).messages).toEqual(
+      expect.arrayContaining([ownMessage, peerMessage]),
+    );
+  });
+
+  it("does not attach recreated-window realtime until retryable replica catch-up completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = new FakeWorkspaceCache();
+      await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.syncResults.push(
+        { status: "retryable", reason: "server", retryAfterMs: 1_000 },
+        {
+          status: "accepted",
+          response: {
+            events: [],
+            nextCursor: "10",
+            highWaterCursor: "10",
+            hasMore: false,
+          },
+        },
+      );
+      const runtime = runtimeWith(api, cache);
+
+      await runtime.start(session);
+      expect(api.syncedFrom).toEqual(["9"]);
+      expect(api.startedCursors).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => api.startedCursors.length === 1, "recreated-window realtime start");
+      expect(api.syncedFrom).toEqual(["9", "9", "10"]);
+      expect(api.acknowledged).toEqual(["10", "10"]);
+      expect(api.startedCursors).toEqual(["10"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("repairs a durable marker without skipping a windowless replica gap", async () => {
+    const privateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000050",
+      clientMessageId: "20000000-0000-4000-8000-000000000051",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const cache = await cacheWithDurableMembershipMarker([privateMessage]);
+    const purged = await cache.load();
+    expect(purged.repairMarker?.workspaceSequence).toBe("11");
+    expect(purged.messages).not.toContainEqual(privateMessage);
+    expect(purged.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
+      SECOND_CONVERSATION_ID,
+    );
+
+    const firstGapMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-00000000005c",
+      clientMessageId: "20000000-0000-4000-8000-00000000005d",
+      conversationSequence: "2",
+      body: "First message observed while the renderer was absent",
+    };
+    const secondGapMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-00000000005e",
+      clientMessageId: "20000000-0000-4000-8000-00000000005f",
+      conversationSequence: "3",
+      body: "Second message observed while the renderer was absent",
+    };
+    const firstGapEvent: WorkspaceEvent = {
+      ...peerEvent,
+      id: "20000000-0000-4000-8000-000000000060",
+      workspaceSequence: "12",
+      conversationSequence: "2",
+      payload: { message: firstGapMessage, mentionedUserIds: [] },
+    };
+    const secondGapEvent: WorkspaceEvent = {
+      ...peerEvent,
+      id: "20000000-0000-4000-8000-000000000061",
+      workspaceSequence: "14",
+      conversationSequence: "3",
+      payload: { message: secondGapMessage, mentionedUserIds: [] },
+    };
+    const api = new FakeDesktopApi(bootstrapAt("14"));
+    api.histories.set(CONVERSATION_ID, {
+      // The bounded snapshot hydrates only the newest page. The older gap event remains reachable
+      // through this authoritative history cursor instead of being mistaken for UI progress.
+      messages: [ownMessage, secondGapMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "before-windowless-gap",
+    });
+    const preflight = deferred<SyncAttemptResult>();
+    api.syncResults.push(preflight.promise);
+    const runtime = runtimeWith(api, cache);
+    const starting = runtime.start(session);
+
+    await settle(() => api.syncedFrom.length === 1, "durable marker gap preflight");
+    const stillBlocked = await cache.load();
+    expect(api.syncedFrom).toEqual(["11"]);
+    expect(api.bootstrapRequests).toBe(0);
+    expect(api.acknowledged).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect(stillBlocked.syncCursor).toBe("11");
+    expect(stillBlocked.repairMarker?.workspaceSequence).toBe("11");
+    expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(1);
+
+    preflight.resolve({
+      status: "accepted",
+      response: {
+        events: [firstGapEvent, secondGapEvent],
+        nextCursor: "14",
+        highWaterCursor: "14",
+        hasMore: false,
+      },
+    });
+    await starting;
+
+    const repaired = await cache.load();
+    expect(repaired.repairMarker).toBeNull();
+    expect(repaired.messages).not.toContainEqual(privateMessage);
+    expect(repaired.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
+      SECOND_CONVERSATION_ID,
+    );
+    expect(runtime.state.messages).not.toContainEqual(privateMessage);
+    expect(runtime.state.messages).toContainEqual(secondGapMessage);
+    expect(runtime.state.messages).not.toContainEqual(firstGapMessage);
+    expect(repaired.messages).toContainEqual(secondGapMessage);
+    expect(repaired.messages).not.toContainEqual(firstGapMessage);
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(true);
+    expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
+    expect(api.syncedFrom).toEqual(["11", "14"]);
+    expect(api.acknowledged).toEqual(["14"]);
+    expect(api.startedCursors).toEqual(["14"]);
+    expect(cache.cursor).toBe("14");
+    expect(api.bootstrapRequests).toBe(1);
+    expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(2);
+    expect(
+      cache.operations.filter((operation) => operation === "applyEvent:message.created"),
+    ).toHaveLength(0);
+
+    api.histories.set(CONVERSATION_ID, {
+      messages: [firstGapMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.messages).toEqual(
+      expect.arrayContaining([firstGapMessage, secondGapMessage]),
+    );
+    expect((await cache.load()).messages).toEqual(
+      expect.arrayContaining([firstGapMessage, secondGapMessage]),
+    );
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(false);
+  });
+
+  it("keeps a durable marker when the drained high-water outruns the snapshot", async () => {
+    const cache = await cacheWithDurableMembershipMarker();
+    const api = new FakeDesktopApi(bootstrapAt("13"));
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: "14",
+        highWaterCursor: "14",
+        hasMore: false,
+      },
+    });
+
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const durable = await cache.load();
+    expect(api.syncedFrom).toEqual(["11"]);
+    expect(api.acknowledged).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(durable.syncCursor).toBe("11");
+    expect(durable.repairMarker?.workspaceSequence).toBe("11");
+    expect(runtime.state).toMatchObject({
+      busy: false,
+      stale: true,
+      error: "The workspace catalog has not caught up to the membership change",
+    });
+  });
+
+  it.each([
+    {
+      name: "retryable",
+      result: { status: "retryable", reason: "server", retryAfterMs: 1_000 } as const,
+      error: null,
+    },
+    {
+      name: "permanent",
+      result: { status: "permanent", reason: "forbidden" } as const,
+      error: "This device is no longer allowed to sync this workspace.",
+    },
+  ])("keeps a durable marker when its preflight is $name", async ({ result, error }) => {
+    const cache = await cacheWithDurableMembershipMarker();
+    const api = new FakeDesktopApi(bootstrapAt("14"));
+    api.syncResults.push(result);
+
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const durable = await cache.load();
+    expect(api.syncedFrom).toEqual(["11"]);
+    expect(api.bootstrapRequests).toBe(0);
+    expect(api.acknowledged).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect(durable.syncCursor).toBe("11");
+    expect(durable.repairMarker?.workspaceSequence).toBe("11");
+    expect(runtime.state).toMatchObject({ busy: false, stale: true, error });
+    await runtime.stop();
+  });
+
+  it("automatically resumes a retryable durable-marker preflight", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = await cacheWithDurableMembershipMarker();
+      const api = new FakeDesktopApi(bootstrapAt("14"));
+      api.syncResults.push(
+        { status: "retryable", reason: "server", retryAfterMs: 1_000 },
+        {
+          status: "accepted",
+          response: {
+            events: [],
+            nextCursor: "14",
+            highWaterCursor: "14",
+            hasMore: false,
+          },
+        },
+      );
+      const runtime = runtimeWith(api, cache);
+
+      await runtime.start(session);
+      expect(api.syncedFrom).toEqual(["11"]);
+      expect((await cache.load()).repairMarker?.workspaceSequence).toBe("11");
+      expect(api.startedCursors).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.syncedFrom).toEqual(["11"]);
+      await vi.advanceTimersByTimeAsync(1);
+      await settle(() => api.startedCursors.length === 1, "durable marker retry recovery");
+
+      expect(api.syncedFrom).toEqual(["11", "11", "14"]);
+      expect(api.acknowledged).toEqual(["14"]);
+      expect(api.startedCursors).toEqual(["14"]);
+      expect((await cache.load()).repairMarker).toBeNull();
+      expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
+      await runtime.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds an expired marker cursor to one preflight before snapshot recovery", async () => {
+    const cache = await cacheWithDurableMembershipMarker();
+    const api = new FakeDesktopApi(bootstrapAt("14"));
+    api.syncResults.push({ status: "reset_required", reason: "cursor_expired" });
+
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const repaired = await cache.load();
+    expect(api.syncedFrom).toEqual(["11", "14"]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(api.acknowledged).toEqual(["14"]);
+    expect(api.startedCursors).toEqual(["14"]);
+    expect(repaired.syncCursor).toBe("14");
+    expect(repaired.repairMarker).toBeNull();
+    expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
+  });
+
   it("preserves an older root referenced by a queued reply across snapshot replacement", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
@@ -1451,8 +2139,12 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
-    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+    expect(runtime.state.tasks).toEqual([task]);
+
+    api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
+    await runtime.loadConversationTasks(CONVERSATION_ID);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, CONVERSATION_ID]);
     expect(runtime.state.tasks).toEqual([task]);
 
     const updated: Task = {
@@ -1511,6 +2203,281 @@ describe("WorkspaceRuntime", () => {
       selectedConversationId: CONVERSATION_ID,
       focusedMessageId: OWN_MESSAGE_ID,
     });
+  });
+
+  it("replaces stale cached tasks from the authoritative startup snapshot", async () => {
+    const staleTask = { ...task, title: "Stale cached title" };
+    const currentTask: Task = {
+      ...task,
+      version: 2,
+      title: "Authoritative title",
+      updatedAt: "2026-07-24T12:02:00.000Z",
+    };
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [], [], [staleTask]);
+    const api = new FakeDesktopApi(bootstrapAt("12"));
+    api.conversationTaskResults.push({
+      tasks: [currentTask],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(cache.cursor).toBe("12");
+    expect(runtime.state.tasks).toEqual([currentTask]);
+    expect((await cache.load()).tasks).toEqual([currentTask]);
+  });
+
+  it("hydrates tasks only for channels and the signed-in user's self DM", async () => {
+    const selfDmId = "20000000-0000-4000-8000-000000000030";
+    const peerDmId = "20000000-0000-4000-8000-000000000031";
+    const groupDmId = "20000000-0000-4000-8000-000000000032";
+    const groupDm: ConversationSummary = {
+      ...directConversation(groupDmId, [USER_ID, PEER_ID, AGENT_ID]),
+      conversation: {
+        ...directConversation(groupDmId, [USER_ID, PEER_ID, AGENT_ID]).conversation,
+        kind: "group_direct_message",
+      },
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          directConversation(selfDmId, [USER_ID]),
+          directConversation(peerDmId, [USER_ID, PEER_ID]),
+          groupDm,
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, selfDmId, peerDmId, groupDmId]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
+  });
+
+  it.each([
+    {
+      label: "a page that claims more without a cursor",
+      page: { tasks: [], nextCursor: null, hasMore: true },
+    },
+    {
+      label: "a page that supplies a terminal cursor",
+      page: { tasks: [], nextCursor: "task-page-1", hasMore: false },
+    },
+  ] satisfies { readonly label: string; readonly page: TaskListResponse }[])(
+    "rejects $label before replacing the task snapshot",
+    async ({ page }) => {
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.conversationTaskResults.push(page);
+      const cache = new FakeWorkspaceCache();
+      const runtime = runtimeWith(api, cache);
+
+      await runtime.start(session);
+
+      expect(cache.operations).not.toContain("replaceSnapshot");
+      expect(runtime.state.bootstrap).toBeNull();
+      expect(runtime.state.error).toBe("The workspace task catalog had inconsistent pagination");
+      expect(api.startedCursors).toEqual([]);
+    },
+  );
+
+  it("rejects an empty advancing task page instead of committing a partial snapshot", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push({
+      tasks: [],
+      nextCursor: "task-page-1",
+      hasMore: true,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace task catalog did not make progress");
+  });
+
+  it("rejects an empty terminal task continuation instead of accepting an incomplete page", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push(
+      { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
+      { tasks: [], nextCursor: null, hasMore: false },
+    );
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.conversationTaskPageRequests).toHaveLength(2);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace task catalog did not make progress");
+  });
+
+  it("rejects a task cursor cycle without repeating requests", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push(
+      { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
+      { tasks: [catalogTask(1)], nextCursor: "task-page-2", hasMore: true },
+      { tasks: [catalogTask(2)], nextCursor: "task-page-1", hasMore: true },
+    );
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.conversationTaskPageRequests.map((request) => request.after)).toEqual([
+      undefined,
+      "task-page-1",
+      "task-page-2",
+    ]);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace task catalog did not advance its cursor");
+  });
+
+  it("rejects duplicate task IDs across catalog pages", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push(
+      { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
+      { tasks: [catalogTask(0)], nextCursor: null, hasMore: false },
+    );
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace task catalog repeated a task");
+  });
+
+  it.each([
+    {
+      label: "workspace",
+      task: catalogTask(0, CONVERSATION_ID, OTHER_WORKSPACE_ID),
+      error: "The workspace task catalog crossed workspace scope",
+    },
+    {
+      label: "conversation",
+      task: catalogTask(0, SECOND_CONVERSATION_ID),
+      error: "The workspace task catalog crossed conversation scope",
+    },
+  ])("rejects a task that crosses $label scope", async ({ task: wrongTask, error }) => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push({
+      tasks: [wrongTask],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe(error);
+  });
+
+  it("accepts a complete task catalog at the 20,000-task snapshot capacity", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    addTaskCatalogPages(api, WORKSPACE_SNAPSHOT_TASK_LIMIT);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT / 200);
+    expect(runtime.state.tasks).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT);
+    expect(cache.operations).toContain("replaceSnapshot");
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("rejects a task catalog above the 20,000-task snapshot capacity", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    addTaskCatalogPages(api, WORKSPACE_SNAPSHOT_TASK_LIMIT + 1);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT / 200);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace task catalog exceeded local capacity");
+  });
+
+  it("keeps a task updated concurrently with a realtime membership refresh", async () => {
+    const currentTask: Task = {
+      ...task,
+      version: 2,
+      title: "Updated during membership repair",
+      updatedAt: "2026-07-24T12:02:00.000Z",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    api.bootstrap = bootstrapAt("12");
+    api.conversationTaskResults.push({
+      tasks: [currentTask],
+      nextCursor: null,
+      hasMore: false,
+    });
+    api.emitWorkspaceEvent(membershipChanged(MEMBER_EVENT_ID, "11"));
+    api.emitWorkspaceEvent(taskUpdated(SECOND_MEMBER_EVENT_ID, "12", currentTask));
+
+    // The authoritative repair snapshot already contains the concurrent task update at cursor 12.
+    // Restarting realtime retires the queued task frame from the old socket epoch, so the repaired
+    // cursor is acknowledged once rather than applying and acknowledging that stale frame again.
+    await settle(() => api.acknowledged.includes("12"), "membership snapshot acknowledgement");
+    await drain();
+    expect(api.acknowledged.filter((cursor) => cursor === "12")).toHaveLength(1);
+    expect(cache.cursor).toBe("12");
+    expect(runtime.state.tasks).toEqual([currentTask]);
+    expect((await cache.load()).tasks).toEqual([currentTask]);
+  });
+
+  it("keeps a task updated after a membership event in the same HTTP catch-up page", async () => {
+    const currentTask: Task = {
+      ...task,
+      version: 2,
+      title: "Updated during HTTP membership repair",
+      updatedAt: "2026-07-24T12:02:00.000Z",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("12"));
+    api.bootstrapResults.push(bootstrapAt("10"));
+    api.conversationTaskResults.push(
+      { tasks: [task], nextCursor: null, hasMore: false },
+      { tasks: [currentTask], nextCursor: null, hasMore: false },
+    );
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [
+          membershipChanged(MEMBER_EVENT_ID, "11"),
+          taskUpdated(SECOND_MEMBER_EVENT_ID, "12", currentTask),
+        ],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    // The membership marker retires the rest of its page. After the authoritative snapshot has
+    // durably reached 12, one final empty catch-up from 12 closes the snapshot/realtime gap.
+    expect(api.syncedFrom).toEqual(["10", "12"]);
+    expect(api.acknowledged).toEqual(["12", "12"]);
+    expect(api.startedCursors).toEqual(["12"]);
+    expect(cache.cursor).toBe("12");
+    expect(runtime.state.tasks).toEqual([currentTask]);
+    expect((await cache.load()).tasks).toEqual([currentTask]);
   });
 
   it("keeps realtime events newer than an in-flight search reaction hydration", async () => {
@@ -1611,10 +2578,12 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Original body");
     const laterClientMessageId = "20000000-0000-4000-8000-000000000011";
+    await cache.replaceSnapshot(bootstrapAt("0"), []);
     await cache.enqueue(
       queuedOperation(laterClientMessageId, "Later body"),
       "2026-07-24T12:00:00.001Z",
     );
+    await cache.clearServerStatePreservingOutbox();
     const api = new FakeDesktopApi(bootstrapAt("10"));
     api.sendResults.push({ status: "permanent", reason: "validation" });
     const runtime = runtimeWith(api, cache);
@@ -1728,11 +2697,12 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent(resyncRequired);
       await drain();
 
-      // The resync stops the rejected socket immediately, but its cache recovery stays queued
+      // Startup has not attached realtime while durable catch-up is retrying. The synthetic resync
+      // demand still stops the transport boundary immediately, but its cache recovery stays queued
       // behind the timer retry instead of starting a second repair pass.
       expect(api.stopRequests).toBe(2);
       expect(api.bootstrapRequests).toBe(1);
-      expect(api.startedCursors).toEqual(["10"]);
+      expect(api.startedCursors).toEqual([]);
       expect(runtime.state.stale).toBe(true);
 
       olderSync.resolve({
@@ -2123,6 +3093,107 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap).toBeNull();
   });
 
+  it("clears the old workspace synchronously while a replacement identity bootstrap is pending", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const firstCache = new FakeWorkspaceCache();
+    const replacementCache = new FakeWorkspaceCache();
+    const runtime = new WorkspaceRuntime(api, {
+      createCache: (status) =>
+        status.scope.userId === OTHER_USER_ID ? replacementCache : firstCache,
+    });
+    await runtime.start(session);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(USER_ID);
+
+    const replacementBootstrap = deferred<HumanWorkspaceBootstrapResponse>();
+    api.cryptoStatus = {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    };
+    api.bootstrapResults.push(replacementBootstrap.promise);
+    const replacement = runtime.start(otherSession);
+
+    expect(runtime.state).toMatchObject({
+      bootstrap: null,
+      messages: [],
+      outbox: [],
+      selectedConversationId: null,
+      busy: true,
+    });
+    await drain();
+    expect(runtime.state.bootstrap).toBeNull();
+
+    replacementBootstrap.resolve(otherBootstrapAt("20"));
+    await replacement;
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+  });
+
+  it("does not let delayed old-scope cache initialization replace the current cache", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const delayedCrypto = deferred<CacheCryptoStatus>();
+    api.cryptoStatusResults.push(delayedCrypto.promise, {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    });
+    const firstCache = new FakeWorkspaceCache();
+    const replacementCache = new FakeWorkspaceCache();
+    const runtime = new WorkspaceRuntime(api, {
+      createCache: (status) =>
+        status.scope.userId === OTHER_USER_ID ? replacementCache : firstCache,
+    });
+
+    const firstStart = runtime.start(session);
+    await drain();
+    api.bootstrap = otherBootstrapAt("20");
+    await runtime.start(otherSession);
+
+    delayedCrypto.resolve({
+      mode: "memory_only",
+      scope,
+      reason: "credential_store_unavailable",
+    });
+    await firstStart;
+
+    expect(firstCache.loadCount).toBe(0);
+    expect(replacementCache.loadCount).toBeGreaterThan(0);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+  });
+
+  it("does not publish a delayed old-cache reload after a replacement scope starts", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const firstCache = new FakeWorkspaceCache();
+    await firstCache.replaceSnapshot(bootstrapAt("10"), [ownMessage]);
+    const delayedReload = deferred<void>();
+    firstCache.loadBarriers.push(Promise.resolve(), Promise.resolve(), delayedReload.promise);
+    const replacementCache = new FakeWorkspaceCache();
+    const runtime = new WorkspaceRuntime(api, {
+      createCache: (status) =>
+        status.scope.userId === OTHER_USER_ID ? replacementCache : firstCache,
+    });
+
+    const firstStart = runtime.start(session);
+    await settle(() => firstCache.loadCount === 3, "old cache reload");
+
+    api.cryptoStatus = {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    };
+    api.bootstrap = otherBootstrapAt("20");
+    await runtime.start(otherSession);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+
+    delayedReload.resolve();
+    await firstStart;
+    await drain();
+
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+    expect(runtime.state.messages).toEqual([]);
+  });
+
   it("keeps a server-created channel selected when its cache write fails", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -2166,6 +3237,154 @@ describe("WorkspaceRuntime", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("lets a replacement generation flush while the retired send remains hung", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const hungSend = deferred<SendAttemptResult>();
+    api.sendResults.push(hungSend.promise, {
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
+    await settle(() => api.sent.length === 1, "retired generation send");
+
+    const restarted = runtime.start(session);
+    await settle(() => api.sent.length === 2, "replacement generation send");
+    await restarted;
+
+    expect(api.sent[0]?.message.clientMessageId).toBe(api.sent[1]?.message.clientMessageId);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(runtime.state.messages.map((message) => message.id)).toContain(OWN_MESSAGE_ID);
+
+    hungSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    await drain();
+
+    expect(api.sent).toHaveLength(2);
+    expect(runtime.state.messages.filter((message) => message.id === OWN_MESSAGE_ID)).toHaveLength(
+      1,
+    );
+  });
+
+  it("does not let a retired flush adopt the replacement while a status patch is delayed", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "random"),
+        ],
+      }),
+    );
+    const delayedPermanentPatch = deferred<void>();
+    const replacementSend = deferred<SendAttemptResult>();
+    const secondMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-000000000085",
+      clientMessageId: "20000000-0000-4000-8000-000000000086",
+      conversationId: SECOND_CONVERSATION_ID,
+      conversationSequence: "1",
+    };
+    api.sendResults.push({ status: "permanent", reason: "validation" }, replacementSend.promise, {
+      status: "accepted",
+      response: { message: secondMessage, syncCursor: "12" },
+    });
+    const cache = new FakeWorkspaceCache();
+    cache.outboxUpdateBarriers.push(Promise.resolve(), delayedPermanentPatch.promise);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Old owner", []);
+    await settle(() => cache.outboxUpdateAttempts === 2, "delayed permanent status patch");
+    expect(api.sent).toHaveLength(1);
+    const retiredClientMessageId = api.sent[0]?.message.clientMessageId;
+    if (retiredClientMessageId === undefined) throw new Error("Expected the retired send");
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "Current owner", []);
+
+    const restarted = runtime.start(session);
+    await settle(() => api.sent.length === 2, "replacement send while old patch is delayed");
+
+    delayedPermanentPatch.resolve();
+    await drain();
+    expect(api.sent).toHaveLength(2);
+    expect(
+      (await cache.load()).outbox.find(
+        (item) => item.operation.message.clientMessageId === retiredClientMessageId,
+      ),
+    ).toMatchObject({ status: "sending", attemptCount: 2 });
+
+    replacementSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "11" },
+    });
+    await settle(() => api.sent.length === 3, "replacement owner second conversation send");
+    await restarted;
+
+    expect(api.sent[2]?.conversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(runtime.state.outbox).toEqual([]);
+    expect((await cache.load()).outbox).toEqual([]);
+  });
+
+  it("supersedes a hung send after membership repair preserves its conversation", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const hungSend = deferred<SendAttemptResult>();
+    api.sendResults.push(hungSend.promise, {
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "12" },
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Preserved across repair", []);
+    await settle(() => api.sent.length === 1, "pre-repair send");
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000080",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "membership repair acknowledgement");
+    await settle(() => api.sent.length === 2, "post-repair send owner");
+    await settle(() => runtime.state.outbox.length === 0, "post-repair send reconciliation");
+
+    expect(api.sent[0]?.message.clientMessageId).toBe(api.sent[1]?.message.clientMessageId);
+    expect(runtime.state.outbox).toEqual([]);
+
+    hungSend.resolve({
+      status: "accepted",
+      response: { message: ownMessage, syncCursor: "12" },
+    });
+    await drain();
+
+    expect(api.sent).toHaveLength(2);
+    expect((await cache.load()).outbox).toEqual([]);
+    expect(runtime.state.messages.filter((message) => message.id === OWN_MESSAGE_ID)).toHaveLength(
+      1,
+    );
   });
 
   it("applies a realtime event without reloading the whole decrypted cache", async () => {
@@ -2212,6 +3431,307 @@ describe("WorkspaceRuntime", () => {
 
     runtime.selectConversation(CONVERSATION_ID);
     expect(runtime.state.focusedMessageId).toBeNull();
+  });
+
+  it("drops a search response released after its conversation is revoked", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const privateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000081",
+      clientMessageId: "20000000-0000-4000-8000-000000000082",
+      conversationId: SECOND_CONVERSATION_ID,
+      body: "Must not escape a completed membership repair",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const delayedSearch = deferred<MessageSearchResponse>();
+    api.searchResults.push(delayedSearch.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const searching = runtime.searchMessages("private result");
+    await settle(() => api.searchRequests.length === 1, "delayed search request");
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000083",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "search membership repair");
+
+    delayedSearch.resolve({ results: [{ message: privateMessage }], nextCursor: null });
+    await expect(searching).resolves.toEqual({ results: [], nextCursor: null });
+  });
+
+  it("drops a channel-members response released after its conversation is revoked", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const delayedMembers = deferred<ChannelMembersResponse>();
+    api.channelMemberResults.push(delayedMembers.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const listing = runtime.getChannelMembers(SECOND_CONVERSATION_ID);
+    await settle(() => api.channelMemberRequests.length === 1, "delayed channel members request");
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000084",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "members membership repair");
+
+    delayedMembers.resolve({
+      conversationId: SECOND_CONVERSATION_ID,
+      access: "members",
+      members: [{ user, role: "owner", joinedAt: NOW }],
+      canManage: true,
+    });
+    await expect(listing).rejects.toThrow("This conversation is no longer available");
+  });
+
+  it("reauthorizes and opens an exact notification message in the main timeline", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.messageByIdResults.push({ message: peerMessage });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await runtime.handleNotificationAction(notificationAction, notificationContext);
+
+    expect(api.messageByIdRequests).toEqual([PEER_MESSAGE_ID]);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBe(PEER_MESSAGE_ID);
+    expect(runtime.state.selectedThreadRootId).toBeNull();
+    expect(runtime.state.messages).toContainEqual(peerMessage);
+    expect((await cache.load()).messages).toContainEqual(peerMessage);
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("opens an authorized notification target from the replica before by-ID hydration", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === PEER_MESSAGE_ID),
+      "cached notification target",
+    );
+
+    await runtime.handleNotificationAction(notificationAction, notificationContext);
+
+    expect(api.messageByIdRequests).toEqual([]);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBe(PEER_MESSAGE_ID);
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("opens an exact notification reply inside its canonical thread", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.messageByIdResults.push({ message: threadReply });
+    api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    await runtime.handleNotificationAction(
+      {
+        ...notificationAction,
+        messageId: THREAD_REPLY_ID,
+        threadRootId: OWN_MESSAGE_ID,
+      },
+      notificationContext,
+    );
+
+    expect(api.messageByIdRequests).toEqual([THREAD_REPLY_ID]);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.selectedThreadRootId).toBe(OWN_MESSAGE_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.focusedThreadMessageId).toBe(THREAD_REPLY_ID);
+    expect(runtime.state.messages).toContainEqual(ownMessage);
+    expect(runtime.state.messages).toContainEqual(threadReply);
+  });
+
+  it("discards notification actions outside the current session generation and scope", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const before = runtime.state;
+
+    await runtime.handleNotificationAction(
+      { ...notificationAction, sessionGeneration: notificationContext.sessionGeneration - 1 },
+      notificationContext,
+    );
+    await runtime.handleNotificationAction(
+      { ...notificationAction, userId: OTHER_USER_ID },
+      notificationContext,
+    );
+    await runtime.handleNotificationAction(
+      { ...notificationAction, workspaceId: OTHER_WORKSPACE_ID },
+      notificationContext,
+    );
+    await runtime.handleNotificationAction(notificationAction, {
+      version: 1,
+      status: "inactive",
+      sessionGeneration: null,
+      rendererSessionGeneration: notificationContext.rendererSessionGeneration,
+      userId: null,
+      workspaceId: null,
+    });
+
+    expect(api.messageByIdRequests).toEqual([]);
+    expect(runtime.state).toBe(before);
+  });
+
+  it("falls back only to an authorized conversation when exact hydration is unavailable", async () => {
+    const secondSummary = channel(SECOND_CONVERSATION_ID, "second");
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
+      }),
+    );
+    api.messageByIdFailures = 1;
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+
+    await runtime.handleNotificationAction(notificationAction, notificationContext);
+
+    expect(api.messageByIdRequests).toEqual([PEER_MESSAGE_ID]);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.error).toBe("That notification is no longer available.");
+    expect((await cache.load()).messages).toEqual([]);
+
+    const beforeUnauthorized = runtime.state;
+    await runtime.handleNotificationAction(
+      { ...notificationAction, conversationId: CREATED_CHANNEL_ID },
+      notificationContext,
+    );
+    expect(api.messageByIdRequests).toEqual([PEER_MESSAGE_ID]);
+    expect(runtime.state).toBe(beforeUnauthorized);
+  });
+
+  it("never projects an exact response whose target metadata does not match the action", async () => {
+    const secondSummary = channel(SECOND_CONVERSATION_ID, "second");
+    const mismatchedMessage: Message = {
+      ...peerMessage,
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
+      }),
+    );
+    api.messageByIdResults.push({ message: mismatchedMessage });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+
+    await runtime.handleNotificationAction(notificationAction, notificationContext);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.messages).not.toContainEqual(mismatchedMessage);
+    expect((await cache.load()).messages).not.toContainEqual(mismatchedMessage);
+    expect(runtime.state.error).toBe("That notification is no longer available.");
+  });
+
+  it("discards an exact hydration response after the local runtime generation changes", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const hydration = deferred<MessageByIdResponse>();
+    api.messageByIdResults.push(hydration.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const opening = runtime.handleNotificationAction(notificationAction, notificationContext);
+    await settle(() => api.messageByIdRequests.length === 1, "exact notification hydration");
+    await runtime.stop();
+    api.bootstrap = otherBootstrapAt("20");
+    api.cryptoStatus = {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    };
+    await runtime.start(otherSession);
+    hydration.resolve({ message: peerMessage });
+    await opening;
+
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+    expect(runtime.state.selectedConversationId).toBeNull();
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).messages).toEqual([]);
+  });
+
+  it("does not continue an in-flight reply action into a replacement scope", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.messageByIdResults.push({ message: threadReply });
+    const reactionHydration = deferred<ListMessageReactionsResponse>();
+    api.reactionResults.push(reactionHydration.promise);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    const opening = runtime.handleNotificationAction(
+      {
+        ...notificationAction,
+        messageId: THREAD_REPLY_ID,
+        threadRootId: OWN_MESSAGE_ID,
+      },
+      notificationContext,
+    );
+    await settle(() => api.reactionRequests.length === 1, "notification reaction hydration");
+
+    api.bootstrap = otherBootstrapAt("20");
+    api.cryptoStatus = {
+      mode: "memory_only",
+      scope: { userId: OTHER_USER_ID, workspaceId: OTHER_WORKSPACE_ID },
+      reason: "credential_store_unavailable",
+    };
+    const replacement = runtime.start(otherSession);
+    reactionHydration.resolve({ reactions: [] });
+
+    await expect(opening).resolves.toBe("discarded");
+    await replacement;
+    expect(api.threadRequests).toEqual([]);
+    expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(runtime.state.bootstrap?.workspace.id).toBe(OTHER_WORKSPACE_ID);
+    expect(runtime.state.selectedThreadRootId).toBeNull();
+    expect(runtime.state.focusedThreadMessageId).toBeNull();
   });
 
   it("orders a peer-created conversation the way a cold load would", async () => {
@@ -2340,11 +3860,10 @@ describe("WorkspaceRuntime", () => {
       clientMessageId: "20000000-0000-4000-8000-000000000044",
       conversationId: thirdConversationId,
     };
-    const api = new FakeDesktopApi(
-      bootstrapAt("10", {
-        conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
-      }),
-    );
+    const initial = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
+    });
+    const api = new FakeDesktopApi(initial);
     api.histories.set(SECOND_CONVERSATION_ID, {
       messages: [firstMessage],
       threadSummaries: [],
@@ -2428,6 +3947,270 @@ describe("WorkspaceRuntime", () => {
       "11",
       "12",
     ]);
+  });
+
+  it("retries an in-flight repair snapshot when a second removal invalidates it", async () => {
+    const thirdConversationId = "20000000-0000-4000-8000-000000000052";
+    const firstPrivate = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members" as const,
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner" as const,
+    };
+    const secondPrivate = {
+      ...channel(thirdConversationId, "finance"),
+      conversation: {
+        ...channel(thirdConversationId, "finance").conversation,
+        access: "members" as const,
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner" as const,
+    };
+    const firstMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000053",
+      clientMessageId: "20000000-0000-4000-8000-000000000054",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000055",
+      clientMessageId: "20000000-0000-4000-8000-000000000056",
+      conversationId: thirdConversationId,
+    };
+    const initial = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
+    });
+    const api = new FakeDesktopApi(initial);
+    api.histories.set(SECOND_CONVERSATION_ID, {
+      messages: [firstMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.histories.set(thirdConversationId, {
+      messages: [secondMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new FakeWorkspaceCache();
+    const queuedSecondRemovalId = "20000000-0000-4000-8000-000000000059";
+    await cache.replaceSnapshot(initial, []);
+    await cache.enqueue(
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    );
+    await cache.clearServerStatePreservingOutbox();
+    await cache.updateOutbox(queuedSecondRemovalId, {
+      status: "permanent_failure",
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: "offline",
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.outbox.map((item) => item.operation.conversationId)).toContain(
+      thirdConversationId,
+    );
+
+    const staleFirstRefresh = deferred<HumanWorkspaceBootstrapResponse>();
+    api.bootstrapResults.push(
+      staleFirstRefresh.promise,
+      bootstrapAt("12", { conversations: [channel(CONVERSATION_ID, "general")] }),
+    );
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000057",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.bootstrapRequests === 2, "first in-flight membership snapshot");
+
+    // This event is accepted after the first snapshot captured its membership epoch. Its immediate
+    // barrier hides the revoked conversation, while the first marker still owns durable repair.
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000058",
+        "12",
+        "removed",
+        thirdConversationId,
+      ),
+    );
+    expect(runtime.state.messages).not.toContainEqual(secondMessage);
+    expect((await cache.load()).messages).toContainEqual(secondMessage);
+    expect(runtime.state.outbox).toEqual([]);
+    expect((await cache.load()).outbox.map((item) => item.operation.conversationId)).toContain(
+      thirdConversationId,
+    );
+
+    staleFirstRefresh.resolve(
+      bootstrapAt("11", {
+        conversations: [channel(CONVERSATION_ID, "general"), secondPrivate],
+      }),
+    );
+    await settle(() => api.acknowledged.includes("12"), "both membership acknowledgements");
+    await drain();
+
+    const durable = await cache.load();
+    expect(api.bootstrapRequests).toBe(3);
+    expect(api.acknowledged.filter((cursor) => cursor === "11" || cursor === "12")).toEqual([
+      "11",
+      "12",
+    ]);
+    expect(api.startedCursors).toEqual(["10", "12", "12"]);
+    expect(durable.repairMarker).toBeNull();
+    expect(durable.bootstrap?.conversations.map((summary) => summary.conversation.id)).toEqual([
+      CONVERSATION_ID,
+    ]);
+    expect(durable.messages).toEqual([]);
+    expect(durable.outbox).toEqual([]);
+    expect(runtime.state.messages).toEqual([]);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(api.sent).toEqual([]);
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("drops an older-history response released after membership repair is acknowledged", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const currentPrivateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000076",
+      clientMessageId: "20000000-0000-4000-8000-000000000077",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const olderPrivateMessage: Message = {
+      ...currentPrivateMessage,
+      id: "20000000-0000-4000-8000-000000000078",
+      clientMessageId: "20000000-0000-4000-8000-000000000079",
+      conversationSequence: "0",
+      body: "Must stay purged after a delayed history response",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    api.histories.set(SECOND_CONVERSATION_ID, {
+      messages: [currentPrivateMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "older-private-history",
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const delayedHistory = deferred<MessageHistoryResponse>();
+    api.historyResults.set(SECOND_CONVERSATION_ID, [delayedHistory.promise]);
+    const requestsBeforeLoad = api.historyRequests.length;
+    const loading = runtime.loadOlder(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.length === requestsBeforeLoad + 1,
+      "delayed private history request",
+    );
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-00000000007a",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(
+      () => api.acknowledged.includes("11"),
+      "history membership repair acknowledgement",
+    );
+
+    delayedHistory.resolve({
+      messages: [olderPrivateMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await loading;
+    await drain();
+
+    expect(
+      runtime.state.messages.filter((message) => message.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(
+      (await cache.load()).messages.filter(
+        (message) => message.conversationId === SECOND_CONVERSATION_ID,
+      ),
+    ).toEqual([]);
+  });
+
+  it("drops a task-list response released after membership repair is acknowledged", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const privateTask: Task = {
+      ...task,
+      id: "20000000-0000-4000-8000-00000000007b",
+      conversationId: SECOND_CONVERSATION_ID,
+      sourceMessageId: null,
+      title: "Must stay purged after a delayed task response",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const delayedTasks = deferred<TaskListResponse>();
+    api.conversationTaskResults.push(delayedTasks.promise);
+    const requestsBeforeLoad = api.conversationTaskRequests.length;
+    const loading = runtime.loadConversationTasks(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.conversationTaskRequests.length === requestsBeforeLoad + 1,
+      "delayed private task request",
+    );
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-00000000007c",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "task membership repair acknowledgement");
+
+    delayedTasks.resolve({ tasks: [privateTask], nextCursor: null, hasMore: false });
+    await loading;
+    await drain();
+
+    expect(
+      runtime.state.tasks.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(
+      (await cache.load()).tasks.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
   });
 
   it("rejects an ordinary frame queued by the realtime session a repair superseded", async () => {
@@ -2648,6 +4431,137 @@ describe("WorkspaceRuntime", () => {
 
     repair.resolve(bootstrapAt("12"));
     await settle(() => api.acknowledged.includes("12"), "in-flight send membership repair");
+  });
+
+  it("drops an in-flight send response that resolves after membership repair", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const accepted = deferred<SendAttemptResult>();
+    api.sendResults.push(accepted.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "In flight before removal", []);
+    await settle(() => api.sent.length === 1, "private send in flight");
+    const sent = api.sent[0];
+    if (sent === undefined) throw new Error("Expected an in-flight send");
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-00000000005a",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "membership repair before send response");
+
+    accepted.resolve({
+      status: "accepted",
+      response: {
+        message: {
+          ...ownMessage,
+          id: "20000000-0000-4000-8000-00000000005b",
+          clientMessageId: sent.message.clientMessageId,
+          conversationId: SECOND_CONVERSATION_ID,
+        },
+        syncCursor: "12",
+      },
+    });
+    await drain();
+
+    const durable = await cache.load();
+    expect(
+      durable.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(durable.outbox).toEqual([]);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("drops an accepted send when membership repair wins cache reconciliation", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    const accepted = deferred<SendAttemptResult>();
+    api.sendResults.push(accepted.promise);
+    const cache = new FakeWorkspaceCache();
+    const cacheReconciliation = deferred<void>();
+    cache.acknowledgedMessageBarriers.push(cacheReconciliation.promise);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "In flight before removal", []);
+    await settle(() => api.sent.length === 1, "private send in flight");
+    const sent = api.sent[0];
+    if (sent === undefined) throw new Error("Expected an in-flight send");
+
+    accepted.resolve({
+      status: "accepted",
+      response: {
+        message: {
+          ...ownMessage,
+          id: "20000000-0000-4000-8000-00000000005c",
+          clientMessageId: sent.message.clientMessageId,
+          conversationId: SECOND_CONVERSATION_ID,
+        },
+        syncCursor: "12",
+      },
+    });
+    await settle(
+      () => cache.acknowledgedMessageAttempts === 1,
+      "accepted send cache reconciliation",
+    );
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-00000000005d",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.acknowledged.includes("11"), "repair during cache reconciliation");
+    cacheReconciliation.resolve();
+    await drain();
+
+    const durable = await cache.load();
+    expect(
+      durable.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(durable.outbox).toEqual([]);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(runtime.state.outbox).toEqual([]);
+    expect(runtime.state.error).toBeNull();
   });
 
   it("publishes a durable purge before a hung old-run shutdown can block a fresh run", async () => {
@@ -3122,7 +5036,82 @@ describe("WorkspaceRuntime", () => {
     ]);
   });
 
-  it("stops paging when the server claims more conversations without advancing", async () => {
+  it.each([
+    {
+      label: "a bootstrap that claims more without a cursor",
+      bootstrap: bootstrapAt("10", {
+        conversationsNextCursor: null,
+        conversationsHasMore: true,
+      }),
+      page: null,
+    },
+    {
+      label: "a bootstrap that supplies a terminal cursor",
+      bootstrap: bootstrapAt("10", {
+        conversationsNextCursor: NEXT_PAGE_CURSOR,
+        conversationsHasMore: false,
+      }),
+      page: null,
+    },
+    {
+      label: "a page that claims more without a cursor",
+      bootstrap: bootstrapAt("10", {
+        conversationsNextCursor: NEXT_PAGE_CURSOR,
+        conversationsHasMore: true,
+      }),
+      page: {
+        conversations: [channel(SECOND_CONVERSATION_ID, "second")],
+        nextCursor: null,
+        hasMore: true,
+      },
+    },
+    {
+      label: "a page that supplies a terminal cursor",
+      bootstrap: bootstrapAt("10", {
+        conversationsNextCursor: NEXT_PAGE_CURSOR,
+        conversationsHasMore: true,
+      }),
+      page: {
+        conversations: [channel(SECOND_CONVERSATION_ID, "second")],
+        nextCursor: "terminal-cursor",
+        hasMore: false,
+      },
+    },
+  ])("rejects $label before replacing the snapshot", async ({ bootstrap, page }) => {
+    const api = new FakeDesktopApi(bootstrap);
+    if (page !== null) api.conversationPages.set(NEXT_PAGE_CURSOR, page);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.bootstrap).toBeNull();
+    expect(runtime.state.error).toBe(
+      "The workspace conversation catalog had inconsistent pagination",
+    );
+    expect(api.startedCursors).toEqual([]);
+  });
+
+  it("rejects an empty advancing conversation page instead of accepting a partial catalog", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [],
+      nextCursor: "page-2",
+      hasMore: true,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR]);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.bootstrap).toBeNull();
+    expect(runtime.state.error).toBe("The workspace conversation catalog did not make progress");
+  });
+
+  it("rejects a nonadvancing conversation cursor instead of accepting a partial catalog", async () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
@@ -3131,11 +5120,209 @@ describe("WorkspaceRuntime", () => {
       nextCursor: NEXT_PAGE_CURSOR,
       hasMore: true,
     });
-    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
     expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR]);
-    expect(runtime.state.bootstrap?.conversations).toHaveLength(2);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe(
+      "The workspace conversation catalog did not advance its cursor",
+    );
+  });
+
+  it("rejects a conversation cursor cycle without repeating requests", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [channel(SECOND_CONVERSATION_ID, "second")],
+      nextCursor: "page-2",
+      hasMore: true,
+    });
+    api.conversationPages.set("page-2", {
+      conversations: [catalogConversation(1)],
+      nextCursor: NEXT_PAGE_CURSOR,
+      hasMore: true,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR, "page-2"]);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe(
+      "The workspace conversation catalog did not advance its cursor",
+    );
+  });
+
+  it("rejects duplicate conversation IDs across catalog pages", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [channel(CONVERSATION_ID, "duplicate")],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace conversation catalog repeated a conversation");
+  });
+
+  it("rejects a conversation summary from another workspace", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [
+        {
+          ...channel(SECOND_CONVERSATION_ID, "second"),
+          conversation: {
+            ...channel(SECOND_CONVERSATION_ID, "second").conversation,
+            workspaceId: OTHER_WORKSPACE_ID,
+          },
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace conversation catalog crossed workspace scope");
+  });
+
+  it("accepts a complete catalog at the replica's 5,000-conversation capacity", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: "page-1", conversationsHasMore: true }),
+    );
+    addConversationCatalogPages(api, 4_999);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(api.listedAfter).toHaveLength(50);
+    expect(runtime.state.bootstrap?.conversations).toHaveLength(5_000);
+    expect(cache.operations).toContain("replaceSnapshot");
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("rejects a catalog above the replica's 5,000-conversation capacity", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsNextCursor: "page-1", conversationsHasMore: true }),
+    );
+    addConversationCatalogPages(api, 5_000);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    expect(api.listedAfter).toHaveLength(50);
+    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(runtime.state.error).toBe("The workspace conversation catalog exceeded local capacity");
+  });
+
+  it("keeps a malformed membership-removal catalog durably purged and retry-blocking", async () => {
+    vi.useFakeTimers();
+    try {
+      const privateSummary: ConversationSummary = {
+        ...channel(SECOND_CONVERSATION_ID, "leadership"),
+        conversation: {
+          ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+          access: "members",
+        },
+        participantIds: [USER_ID],
+        membershipRole: "owner",
+      };
+      const privateMessage: Message = {
+        ...peerMessage,
+        id: "20000000-0000-4000-8000-00000000002c",
+        conversationId: SECOND_CONVERSATION_ID,
+      };
+      const api = new FakeDesktopApi(
+        bootstrapAt("10", {
+          conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+        }),
+      );
+      api.histories.set(SECOND_CONVERSATION_ID, {
+        messages: [privateMessage],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+      const cache = new FakeWorkspaceCache();
+      const runtime = runtimeWith(api, cache);
+      await runtime.start(session);
+      const replacementsBeforeRemoval = cache.operations.filter(
+        (operation) => operation === "replaceSnapshot",
+      ).length;
+
+      api.bootstrap = bootstrapAt("11", {
+        conversationsNextCursor: NEXT_PAGE_CURSOR,
+        conversationsHasMore: true,
+      });
+      api.conversationPages.set(NEXT_PAGE_CURSOR, {
+        conversations: [],
+        nextCursor: "page-2",
+        hasMore: true,
+      });
+      api.emitWorkspaceEvent({
+        version: 1,
+        id: "20000000-0000-4000-8000-00000000002d",
+        type: "channel.membership_changed",
+        occurredAt: NOW,
+        workspaceId: WORKSPACE_ID,
+        conversationId: SECOND_CONVERSATION_ID,
+        workspaceSequence: "11",
+        conversationSequence: null,
+        entityVersion: 1,
+        delivery: "at_least_once",
+        payload: { memberId: USER_ID, action: "removed" },
+      });
+      api.emitWorkspaceEvent({
+        ...reactionAddedEvent,
+        id: "20000000-0000-4000-8000-00000000002e",
+        workspaceSequence: "12",
+      });
+
+      await settle(() => api.stopRequests === 1, "malformed membership repair block");
+      await drain();
+
+      expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(
+        replacementsBeforeRemoval,
+      );
+      expect(cache.cursor).toBe("11");
+      expect(api.acknowledged).not.toContain("11");
+      expect(api.acknowledged).not.toContain("12");
+      expect(api.startedCursors).toEqual(["10"]);
+      expect(
+        runtime.state.bootstrap?.conversations.map((item) => item.conversation.id),
+      ).not.toContain(SECOND_CONVERSATION_ID);
+      expect(runtime.state.messages).not.toContainEqual(privateMessage);
+      const blocked = await cache.load();
+      expect(blocked.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
+        SECOND_CONVERSATION_ID,
+      );
+      expect(blocked.messages).not.toContainEqual(privateMessage);
+      expect(blocked.repairMarker).toEqual({
+        kind: "membership",
+        eventId: "20000000-0000-4000-8000-00000000002d",
+        workspaceSequence: "11",
+        conversationId: SECOND_CONVERSATION_ID,
+        selfRemoval: true,
+      });
+      expect(cache.operations).not.toContain("applyEvent:reaction.added");
+      expect(runtime.state.stale).toBe(true);
+      expect(runtime.state.error).toBe("The workspace conversation catalog did not make progress");
+      await runtime.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("surfaces a permanent sync failure instead of silently going stale", async () => {

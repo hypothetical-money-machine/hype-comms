@@ -1,5 +1,6 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   THREADS_CAPABILITY,
   type BotScope,
   type CurrentUser,
@@ -205,6 +206,23 @@ class FakeWorkspaceRepository {
     replies: [],
     nextCursor: null,
   }));
+  readonly messageById = vi.fn(async () => ({
+    message: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 1,
+      clientMessageId: messageId,
+      authorId: userId,
+      threadRootId: null,
+      body: "Root",
+      bodyFormat: "hmm_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  }));
   readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
     message: {
       id: replyId,
@@ -372,7 +390,9 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hmm_session=${sessionToken}`,
-      "x-hmm-chat-capabilities": "reaction-events-v1, read-state-events-v1, task-events-v1",
+      "x-hmm-chat-capabilities":
+        `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
+        PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -392,6 +412,7 @@ describe("event capability routes", () => {
       true,
       true,
       false,
+      true,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
@@ -399,6 +420,7 @@ describe("event capability routes", () => {
       true,
       true,
       false,
+      true,
     );
   });
 
@@ -423,6 +445,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
       false,
@@ -797,6 +820,40 @@ describe("task routes", () => {
 });
 
 describe("message thread routes", () => {
+  it("loads one exact authorized message without exposing a search primitive", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/messages/${messageId}`,
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      message: expect.objectContaining({ id: messageId, conversationId }),
+    });
+    expect(repository.messageById).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+    );
+  });
+
+  it("rejects a malformed exact-message target before repository access", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/messages/not-a-uuid",
+      headers: { cookie: `hmm_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(repository.messageById).not.toHaveBeenCalled();
+  });
+
   it("gates thread summaries while accepting legacy and capable history clients", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);

@@ -4,6 +4,7 @@ import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   type SendMessageOperation,
@@ -24,6 +25,7 @@ const THREAD_REPLY_CLIENT_ID = "10000000-0000-4000-8000-000000000014";
 const CLIENT_CAPABILITIES = [
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
@@ -252,6 +254,32 @@ describe("WorkspaceTransport bootstrap compatibility", () => {
 });
 
 describe("WorkspaceTransport threads", () => {
+  it("fetches and strictly parses one exact authorized message", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ message: THREAD_REPLY });
+    });
+
+    await expect(transport.messageById(THREAD_REPLY.id)).resolves.toEqual({
+      message: THREAD_REPLY,
+    });
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/messages/${THREAD_REPLY.id}`,
+        init: expect.objectContaining({ method: "GET" }),
+      },
+    ]);
+  });
+
+  it("rejects an exact-message response with an unrelated field", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ message: THREAD_REPLY, authorized: true }),
+    );
+
+    await expect(transport.messageById(THREAD_REPLY.id)).rejects.toThrow();
+  });
+
   it("advertises thread support when requesting conversation history", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
@@ -407,6 +435,36 @@ describe("WorkspaceTransport sync classification", () => {
     );
 
     await expect(transport.sync("41")).resolves.toEqual({
+      status: "permanent",
+      reason: "invalid_response",
+    });
+  });
+
+  it("rejects a sync page whose nested event entity contradicts its envelope", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({
+        events: [
+          {
+            version: 1,
+            id: "10000000-0000-4000-8000-000000000020",
+            type: "message.created",
+            occurredAt: NOW,
+            workspaceId: CURRENT_USER.workspaceId,
+            conversationId: MEMBER_ID,
+            workspaceSequence: "43",
+            conversationSequence: THREAD_ROOT.conversationSequence,
+            entityVersion: THREAD_ROOT.version,
+            delivery: "at_least_once",
+            payload: { message: THREAD_ROOT, mentionedUserIds: [] },
+          },
+        ],
+        nextCursor: "43",
+        highWaterCursor: "43",
+        hasMore: false,
+      }),
+    );
+
+    await expect(transport.sync("42")).resolves.toEqual({
       status: "permanent",
       reason: "invalid_response",
     });

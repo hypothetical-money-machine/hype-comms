@@ -6,10 +6,17 @@ import {
   DEFAULT_MANIFEST_RELATIVE_PATH,
   HEADLESS_DEMO_MANIFEST_KIND,
   HEADLESS_DEMO_MANIFEST_VERSION,
+  HEADLESS_NOTIFICATION_CAPTURE_KEYS,
+  HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+  HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
   assertHeadlessReadCursorIsBlocked,
+  enableHeadlessNotificationCapture,
+  parseHeadlessNotificationCaptureArtifact,
   parseHeadlessDemoManifest,
   parseSmokeArguments,
   runHeadlessSmoke,
+  runParticipatedThreadNotificationSmoke,
+  waitForNewHeadlessNotificationCapture,
 } from "./demo-headless-smoke.mjs";
 
 const artifactDirectory = path.resolve("/tmp/hmm-headless-demo-artifacts");
@@ -77,6 +84,7 @@ test("reads the local manifest default and constrains smoke CLI options", () => 
     manifestPath: path.join(root, DEFAULT_MANIFEST_RELATIVE_PATH),
     messagePrefix: "HMM headless automation smoke",
     timeoutMs: 30_000,
+    flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   });
   assert.deepEqual(
     parseSmokeArguments(
@@ -88,14 +96,148 @@ test("reads the local manifest default and constrains smoke CLI options", () => 
       manifestPath: "/tmp/session.json",
       messagePrefix: "Visible receipt",
       timeoutMs: 5_000,
+      flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
     },
   );
   assert.throws(() => parseSmokeArguments(["--unknown"], {}, root), /Usage:/u);
   assert.throws(() => parseSmokeArguments(["--timeout-ms=0"], {}, root), /positive integer/u);
+  assert.equal(
+    parseSmokeArguments(["--flow=participated-thread"], {}, root).flow,
+    HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
+  );
+  assert.throws(() => parseSmokeArguments(["--flow=unknown"], {}, root), /--flow must be/u);
+});
+
+test("strictly accepts only body-free, target-free notification capture records", () => {
+  const captureId = "capture_0123456789abcdef";
+  const contents = `${JSON.stringify({
+    version: 1,
+    captureId,
+    reason: "direct_message",
+  })}\n`;
+  assert.deepEqual(parseHeadlessNotificationCaptureArtifact(contents, ["canary body"]), [
+    { version: 1, captureId, reason: "direct_message" },
+  ]);
+  assert.deepEqual(
+    parseHeadlessNotificationCaptureArtifact(
+      `${JSON.stringify({
+        version: 1,
+        captureId: "capture_participated_1234",
+        reason: "participated_thread_reply",
+      })}\n`,
+    ),
+    [
+      {
+        version: 1,
+        captureId: "capture_participated_1234",
+        reason: "participated_thread_reply",
+      },
+    ],
+  );
+  assert.deepEqual(HEADLESS_NOTIFICATION_CAPTURE_KEYS, ["captureId", "reason", "version"]);
+  assert.throws(
+    () =>
+      parseHeadlessNotificationCaptureArtifact(
+        `${JSON.stringify({
+          version: 1,
+          captureId,
+          reason: "direct_message",
+          messageId: "30000000-0000-4000-8000-000000000001",
+        })}\n`,
+      ),
+    /unexpected fields/u,
+  );
+  assert.throws(
+    () => parseHeadlessNotificationCaptureArtifact(contents, [captureId]),
+    /leaked message or target data/u,
+  );
+  assert.throws(
+    () => parseHeadlessNotificationCaptureArtifact(contents.slice(0, -1)),
+    /incomplete record/u,
+  );
+  assert.throws(
+    () =>
+      parseHeadlessNotificationCaptureArtifact(
+        `${JSON.stringify({ version: 1, captureId, reason: "locally_inferred_thread" })}\n`,
+      ),
+    /invalid reason/u,
+  );
+});
+
+test("waits for one new capture and rejects duplicate presentation", async () => {
+  const existing = `${JSON.stringify({
+    version: 1,
+    captureId: "capture_existing_1234",
+    reason: "verified_mention",
+  })}\n`;
+  const incoming = `${JSON.stringify({
+    version: 1,
+    captureId: "capture_incoming_1234",
+    reason: "direct_message",
+  })}\n`;
+  const reads = [existing, `${existing}${incoming}`, `${existing}${incoming}`];
+  let currentTime = 0;
+  const result = await waitForNewHeadlessNotificationCapture({
+    filePath: "/tmp/notifications-woots.jsonl",
+    knownCaptureIds: new Set(["capture_existing_1234"]),
+    forbiddenValues: ["private canary"],
+    timeoutMs: 1_000,
+    readArtifact: async () => reads.shift() ?? `${existing}${incoming}`,
+    pause: async (milliseconds) => {
+      currentTime += milliseconds;
+    },
+    now: () => currentTime,
+  });
+  assert.deepEqual(result, {
+    version: 1,
+    captureId: "capture_incoming_1234",
+    reason: "direct_message",
+  });
+
+  const duplicate = `${incoming}${JSON.stringify({
+    version: 1,
+    captureId: "capture_duplicate_1234",
+    reason: "direct_message",
+  })}\n`;
+  await assert.rejects(
+    waitForNewHeadlessNotificationCapture({
+      filePath: "/tmp/notifications-woots.jsonl",
+      knownCaptureIds: new Set(),
+      forbiddenValues: [],
+      timeoutMs: 1,
+      readArtifact: async () => duplicate,
+    }),
+    /more than one/u,
+  );
+});
+
+test("enables only metadata notification capture on a headless client", async () => {
+  await enableHeadlessNotificationCapture({
+    evaluate: async () => ({
+      version: 1,
+      devicePreference: "enabled",
+      contentPreviewPreference: "disabled",
+      nativeSupport: "supported",
+      osPermission: "unknown",
+    }),
+  });
+  await assert.rejects(
+    enableHeadlessNotificationCapture({
+      evaluate: async () => ({
+        version: 1,
+        devicePreference: "enabled",
+        contentPreviewPreference: "enabled",
+        nativeSupport: "supported",
+        osPermission: "unknown",
+      }),
+    }),
+    /metadata-only supported state/u,
+  );
 });
 
 function page(name, receivedMessages) {
   const events = [];
+  const messageId = "30000000-0000-4000-8000-000000000001";
   const dialog = {
     getByLabel: (label, options) => ({
       fill: async (value) => {
@@ -110,9 +252,27 @@ function page(name, receivedMessages) {
   };
   return {
     events,
-    evaluate: async () => {
-      events.push(["read-cursor-guard"]);
-      return "Read cursors are disabled for headless automation clients";
+    evaluate: async (callback, argument) => {
+      const source = String(callback);
+      if (source.includes("advanceReadCursor")) {
+        events.push(["read-cursor-guard"]);
+        return "Read cursors are disabled for headless automation clients";
+      }
+      if (source.includes("setNotificationPreference")) {
+        events.push(["enable-notifications"]);
+        return {
+          version: 1,
+          devicePreference: "enabled",
+          contentPreviewPreference: "disabled",
+          nativeSupport: "supported",
+          osPermission: "unknown",
+        };
+      }
+      if (source.includes("activateCapturedNotification")) {
+        events.push(["activate-notification", argument]);
+        return true;
+      }
+      throw new Error("Unexpected page evaluation");
     },
     getByLabel: (label, options) => ({
       fill: async (value) => {
@@ -129,9 +289,25 @@ function page(name, receivedMessages) {
       };
     },
     getByText: (value, options) => ({
+      locator: (selector) => ({
+        getAttribute: async (attribute) => {
+          events.push(["target-id", value, options, selector, attribute]);
+          return messageId;
+        },
+      }),
       waitFor: async (waitOptions) => {
         assert.ok(receivedMessages.includes(value), "the sent body is visible to Woots");
         events.push(["receipt", value, options, waitOptions]);
+      },
+    }),
+    locator: (selector) => ({
+      getByText: (value, options) => ({
+        waitFor: async (waitOptions) => {
+          events.push(["highlighted-body", selector, value, options, waitOptions]);
+        },
+      }),
+      waitFor: async (waitOptions) => {
+        events.push(["highlighted-target", selector, waitOptions]);
       },
     }),
     name,
@@ -174,6 +350,22 @@ test("smoke drives accessible controls and leaves a screenshot plus screencast",
     messagePrefix: "Round trip",
     captureId: "fixed-run",
     capture,
+    readArtifact: async () => "",
+    waitForNotificationCapture: async (options) => {
+      calls.push([
+        "notification",
+        options.filePath,
+        [...options.knownCaptureIds],
+        options.forbiddenValues,
+        options.timeoutMs,
+        typeof options.readArtifact,
+      ]);
+      return {
+        version: 1,
+        captureId: "capture_0123456789abcdef",
+        reason: "direct_message",
+      };
+    },
   });
 
   assert.deepEqual(result, {
@@ -182,6 +374,7 @@ test("smoke drives accessible controls and leaves a screenshot plus screencast",
     artifacts: {
       screenshotPath: path.join(artifactDirectory, "smoke-fixed-run-woots.png"),
       videoPath: path.join(artifactDirectory, "smoke-fixed-run-claire.webm"),
+      notificationCapturePath: path.join(artifactDirectory, "notifications-woots.jsonl"),
     },
   });
   assert.equal(receivedMessages[0], "Round trip [fixed-run]");
@@ -196,6 +389,14 @@ test("smoke drives accessible controls and leaves a screenshot plus screencast",
       {
         size: { width: 1280, height: 800 },
       },
+    ],
+    [
+      "notification",
+      path.join(artifactDirectory, "notifications-woots.jsonl"),
+      [],
+      ["Round trip [fixed-run]", "30000000-0000-4000-8000-000000000001"],
+      30_000,
+      "function",
     ],
     ["png", "woots", path.join(artifactDirectory, "smoke-fixed-run-woots.png")],
     ["stop", path.join(artifactDirectory, "smoke-fixed-run-claire.webm")],
@@ -214,6 +415,223 @@ test("smoke drives accessible controls and leaves a screenshot plus screencast",
     clairePage.events.some((event) => event[0] === "read-cursor-guard"),
     true,
   );
+  assert.equal(
+    wootsPage.events.some((event) => event[0] === "enable-notifications"),
+    true,
+  );
+  assert.deepEqual(
+    wootsPage.events.find((event) => event[0] === "activate-notification"),
+    ["activate-notification", "capture_0123456789abcdef"],
+  );
+  assert.equal(
+    wootsPage.events.some((event) => event[0] === "highlighted-target"),
+    true,
+  );
+});
+
+function participatedThreadPage(name, messages, messageIds) {
+  const events = [];
+  const dialog = {
+    getByLabel: (label, options) => ({
+      fill: async (value) => events.push(["search", label, options, value]),
+    }),
+    getByRole: (role, options) => ({
+      click: async () => events.push(["choose", role, String(options.name)]),
+    }),
+  };
+  const thread = {
+    waitFor: async (options) => events.push(["thread-visible", options]),
+    getByLabel: (label, options) => ({
+      fill: async (value) => {
+        events.push(["thread-composer", label, options, value]);
+        messages.add(value);
+      },
+    }),
+    getByRole: (role, options) => ({
+      click: async () => events.push(["thread-click", role, options.name]),
+    }),
+    locator: (selector) => ({
+      waitFor: async (options) => events.push(["thread-target", selector, options]),
+      getByText: (value, options) => ({
+        waitFor: async (waitOptions) => {
+          assert.ok(messages.has(value), "the exact thread reply is available");
+          events.push(["thread-highlight", selector, value, options, waitOptions]);
+        },
+      }),
+    }),
+  };
+  return {
+    name,
+    events,
+    evaluate: async (callback, argument) => {
+      const source = String(callback);
+      if (source.includes("advanceReadCursor"))
+        return "Read cursors are disabled for headless automation clients";
+      if (source.includes("setNotificationPreference")) {
+        return {
+          version: 1,
+          devicePreference: "enabled",
+          contentPreviewPreference: "disabled",
+          nativeSupport: "supported",
+          osPermission: "unknown",
+        };
+      }
+      if (source.includes("activateCapturedNotification")) {
+        events.push(["activate-notification", argument]);
+        return true;
+      }
+      throw new Error("Unexpected page evaluation");
+    },
+    getByLabel: (label, options) => ({
+      fill: async (value) => {
+        events.push(["composer", label, options, value]);
+        messages.add(value);
+      },
+    }),
+    getByRole: (role, options) => {
+      if (role === "dialog") return dialog;
+      return { click: async () => events.push(["click", role, options.name]) };
+    },
+    getByText: (value, options) => ({
+      waitFor: async (waitOptions) => {
+        assert.ok(messages.has(value), "the committed message is visible");
+        events.push(["receipt", value, options, waitOptions]);
+      },
+      locator: (selector) => ({
+        getAttribute: async (attribute) => {
+          events.push(["target-id", value, selector, attribute]);
+          return messageIds.get(value) ?? null;
+        },
+        hover: async () => events.push(["hover", value]),
+        getByRole: (role, roleOptions) => ({
+          click: async () => events.push(["open-thread", role, String(roleOptions.name)]),
+        }),
+      }),
+    }),
+    locator: (selector) => {
+      assert.equal(selector, 'aside[aria-label="Thread"]');
+      return thread;
+    },
+  };
+}
+
+test("participated-thread smoke proves exact opaque click-through and mention precedence", async () => {
+  const captureId = "thread-run";
+  const messagePrefix = "Thread proof";
+  const rootMessage = `${messagePrefix} thread root [${captureId}]`;
+  const replyMessage = `${messagePrefix} participated reply [${captureId}]`;
+  const mentionMessage = `@woots ${messagePrefix} mention precedence [${captureId}]`;
+  const messageIds = new Map([
+    [rootMessage, "30000000-0000-4000-8000-000000000001"],
+    [replyMessage, "30000000-0000-4000-8000-000000000002"],
+    [mentionMessage, "30000000-0000-4000-8000-000000000003"],
+  ]);
+  const messages = new Set();
+  const clairePage = participatedThreadPage("claire", messages, messageIds);
+  const wootsPage = participatedThreadPage("woots", messages, messageIds);
+  const captureCalls = [];
+  const capture = {
+    DEFAULT_CAPTURE_SIZE: { width: 1280, height: 800 },
+    capturePng: async (page_, outputPath) => {
+      captureCalls.push(["png", page_.name, outputPath]);
+      return outputPath;
+    },
+    connectToCdp: async (cdpUrl) => ({
+      page: cdpUrl.includes(":9222") ? clairePage : wootsPage,
+      disconnect: async () => captureCalls.push(["disconnect", cdpUrl]),
+    }),
+    startWebmScreencast: async (page_, outputPath) => {
+      captureCalls.push(["webm", page_.name, outputPath]);
+      return { outputPath };
+    },
+    stopWebmScreencast: async (recording) => captureCalls.push(["stop", recording.outputPath]),
+    waitForWorkspaceReady: async (page_) => captureCalls.push(["ready", page_.name]),
+  };
+  let captureAttempt = 0;
+  const result = await runParticipatedThreadNotificationSmoke({
+    manifest: manifest(),
+    messagePrefix,
+    captureId,
+    capture,
+    readArtifact: async () => "",
+    waitForNotificationCapture: async (options) => {
+      captureAttempt += 1;
+      captureCalls.push([
+        "notification",
+        captureAttempt,
+        [...options.knownCaptureIds],
+        options.forbiddenValues,
+      ]);
+      if (captureAttempt === 1) {
+        assert.deepEqual(options.forbiddenValues, [
+          rootMessage,
+          replyMessage,
+          messageIds.get(rootMessage),
+          messageIds.get(replyMessage),
+        ]);
+        return {
+          version: 1,
+          captureId: "capture_participated_1234",
+          reason: "participated_thread_reply",
+        };
+      }
+      assert.deepEqual([...options.knownCaptureIds], ["capture_participated_1234"]);
+      assert.deepEqual(options.forbiddenValues, [
+        rootMessage,
+        replyMessage,
+        mentionMessage,
+        messageIds.get(rootMessage),
+        messageIds.get(replyMessage),
+        messageIds.get(mentionMessage),
+      ]);
+      return {
+        version: 1,
+        captureId: "capture_mention_123456",
+        reason: "verified_mention",
+      };
+    },
+  });
+
+  assert.deepEqual(result, {
+    version: 1,
+    event: "passed",
+    flow: HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
+    assertions: {
+      participatedThreadReason: "participated_thread_reply",
+      mentionPrecedenceReason: "verified_mention",
+      exactThreadClickThrough: true,
+      bodyAndTargetFreeCapture: true,
+    },
+    artifacts: {
+      screenshotPath: path.join(
+        artifactDirectory,
+        "smoke-thread-run-participated-thread-woots.png",
+      ),
+      precedenceScreenshotPath: path.join(
+        artifactDirectory,
+        "smoke-thread-run-mention-precedence-woots.png",
+      ),
+      videoPath: path.join(artifactDirectory, "smoke-thread-run-participated-thread-claire.webm"),
+      notificationCapturePath: path.join(artifactDirectory, "notifications-woots.jsonl"),
+    },
+  });
+  assert.equal(captureAttempt, 2);
+  assert.deepEqual(
+    wootsPage.events.filter((event) => event[0] === "activate-notification"),
+    [
+      ["activate-notification", "capture_participated_1234"],
+      ["activate-notification", "capture_mention_123456"],
+    ],
+  );
+  assert.equal(wootsPage.events.filter((event) => event[0] === "thread-target").length, 2);
+  assert.equal(
+    wootsPage.events.filter((event) => event[0] === "choose" && String(event[2]).includes("Design"))
+      .length,
+    2,
+  );
+  assert.equal(captureCalls.filter((call) => call[0] === "png").length, 2);
+  assert.equal(captureCalls.filter((call) => call[0] === "stop").length, 1);
+  assert.equal(captureCalls.filter((call) => call[0] === "disconnect").length, 2);
 });
 
 test("disconnects a CDP attachment that succeeds after its peer fails", async () => {
@@ -280,6 +698,12 @@ test("disconnects both CDP clients when stopping the screencast fails", async ()
       manifest: manifest(),
       captureId: "stop-failure",
       capture,
+      readArtifact: async () => "",
+      waitForNotificationCapture: async () => ({
+        version: 1,
+        captureId: "capture_0123456789abcdef",
+        reason: "direct_message",
+      }),
     }),
     /Screencast shutdown failed/u,
   );
@@ -315,6 +739,12 @@ test("preserves a smoke failure when screencast shutdown also fails", async () =
       manifest: manifest(),
       captureId: "capture-failure",
       capture,
+      readArtifact: async () => "",
+      waitForNotificationCapture: async () => ({
+        version: 1,
+        captureId: "capture_0123456789abcdef",
+        reason: "direct_message",
+      }),
     }),
     /Screenshot capture failed/u,
   );

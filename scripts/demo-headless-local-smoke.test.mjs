@@ -14,6 +14,8 @@ import {
 import {
   DEFAULT_MANIFEST_RELATIVE_PATH,
   HEADLESS_DEMO_MANIFEST_VERSION,
+  HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+  HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
 } from "./demo-headless-smoke.mjs";
 
 function launcher() {
@@ -31,6 +33,7 @@ test("parses the self-contained local smoke command options", () => {
     cdpBasePort: 9222,
     messagePrefix: "HMM headless automation smoke",
     timeoutMs: DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
+    flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   });
   assert.deepEqual(
     parseLocalHeadlessSmokeArguments([
@@ -42,6 +45,7 @@ test("parses the self-contained local smoke command options", () => {
       cdpBasePort: 9410,
       messagePrefix: "Round trip",
       timeoutMs: 5000,
+      flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
     },
   );
   assert.throws(
@@ -49,6 +53,10 @@ test("parses the self-contained local smoke command options", () => {
     /Usage:/u,
   );
   assert.throws(() => parseLocalHeadlessSmokeArguments(["--timeout-ms=0"]), /positive integer/u);
+  assert.equal(
+    parseLocalHeadlessSmokeArguments(["--flow=participated-thread"]).flow,
+    HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
+  );
 });
 
 test("waits for the versioned ready record and ignores normal launcher output", async () => {
@@ -146,6 +154,42 @@ test("launches, attaches through the ready manifest, runs the smoke, and always 
     ],
     ["stop", child],
   ]);
+});
+
+test("selects the isolated participated-thread smoke without changing the default flow", async () => {
+  const projectRoot = path.resolve("/repo/hmm-chat");
+  const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
+  const child = launcher();
+  const selected = [];
+
+  const result = await runLocalHeadlessSmoke({
+    projectRoot,
+    flow: HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
+    spawnProcess: () => child,
+    waitForReady: async () => ({ manifestPath }),
+    readManifest: async () => ({ private: "manifest-only" }),
+    runDirectMessageSmoke: async () => {
+      throw new Error("default smoke must not run");
+    },
+    runParticipatedThreadSmoke: async (options) => {
+      selected.push(options);
+      return { version: 1, event: "passed", flow: HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD };
+    },
+    stopLauncher: async () => undefined,
+  });
+
+  assert.deepEqual(selected, [
+    {
+      manifest: { private: "manifest-only" },
+      messagePrefix: "HMM headless automation smoke",
+      timeoutMs: DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
+    },
+  ]);
+  assert.equal(result.flow, HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD);
+  await assert.rejects(
+    runLocalHeadlessSmoke({ projectRoot, flow: "locally-inferred-thread" }),
+    /Headless smoke flow must be/u,
+  );
 });
 
 test("stops the launcher when the attached smoke fails", async () => {

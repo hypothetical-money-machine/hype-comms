@@ -957,6 +957,148 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("freezes a capability-gated participated-thread reason for each authorized recipient", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "thread root"),
+      mentionedUserIds: [],
+    });
+    const firstReply = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "member reply"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+    const secondReply = await repository.sendMessage(observer, generalId, {
+      ...message(randomUUID(), "follow-up for @owner"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [ownerId],
+    });
+
+    const persisted = await pool.query<{ user_id: string; reason: string }>(
+      `SELECT notification_reason.user_id, notification_reason.reason
+         FROM sync_event_notification_reasons AS notification_reason
+         JOIN sync_events AS event ON event.id = notification_reason.event_id
+        WHERE event.payload -> 'message' ->> 'id' = $1
+        ORDER BY notification_reason.user_id`,
+      [secondReply.message.id],
+    );
+    expect(persisted.rows).toEqual([
+      { user_id: ownerId, reason: "participated_thread_reply" },
+      { user_id: memberId, reason: "participated_thread_reply" },
+    ]);
+    const sharedPayload = await pool.query<{ contains_recipient_reason: boolean }>(
+      `SELECT payload ? 'recipientNotificationReason' AS contains_recipient_reason
+         FROM sync_events
+        WHERE payload -> 'message' ->> 'id' = $1`,
+      [secondReply.message.id],
+    );
+    expect(sharedPayload.rows).toEqual([{ contains_recipient_reason: false }]);
+
+    const eventFor = (sync: Awaited<ReturnType<WorkspaceRepository["sync"]>>, messageId: string) =>
+      sync.events.find(
+        (event) => event.type === "message.created" && event.payload.message.id === messageId,
+      );
+    const legacyOwner = eventFor(
+      await repository.sync(owner, firstReply.syncCursor, 100),
+      secondReply.message.id,
+    );
+    expect(legacyOwner?.payload).not.toHaveProperty("recipientNotificationReason");
+
+    const [ownerEvent, memberEvent, observerEvent] = await Promise.all(
+      [owner, member, observer].map(async (recipient) =>
+        eventFor(
+          await repository.sync(
+            recipient,
+            firstReply.syncCursor,
+            100,
+            false,
+            false,
+            false,
+            false,
+            true,
+          ),
+          secondReply.message.id,
+        ),
+      ),
+    );
+    expect(ownerEvent?.payload).toMatchObject({
+      mentionedUserIds: [ownerId],
+      recipientNotificationReason: "participated_thread_reply",
+    });
+    expect(memberEvent?.payload).toMatchObject({
+      recipientNotificationReason: "participated_thread_reply",
+    });
+    expect(observerEvent?.payload).not.toHaveProperty("recipientNotificationReason");
+
+    // A later participant cannot retroactively become eligible for an earlier reply.
+    const earlierForObserver = eventFor(
+      await repository.sync(observer, root.syncCursor, 100, false, false, false, false, true),
+      firstReply.message.id,
+    );
+    expect(earlierForObserver?.payload).not.toHaveProperty("recipientNotificationReason");
+  });
+
+  it("does not retain a participated-thread reason for a removed channel member", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Private thread notifications",
+      slug: "private-thread-notifications",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    const root = await repository.sendMessage(member, conversationId, {
+      ...message(randomUUID(), "member-owned root"),
+      mentionedUserIds: [],
+    });
+    const removed = await repository.removeChannelMember(owner, conversationId, memberId);
+    const reply = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "reply after removal"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+
+    const reasons = await pool.query<{ user_id: string }>(
+      `SELECT notification_reason.user_id
+         FROM sync_event_notification_reasons AS notification_reason
+         JOIN sync_events AS event ON event.id = notification_reason.event_id
+        WHERE event.payload -> 'message' ->> 'id' = $1`,
+      [reply.message.id],
+    );
+    expect(reasons.rows).toEqual([]);
+    const replyEvent = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM sync_events
+        WHERE payload -> 'message' ->> 'id' = $1`,
+      [reply.message.id],
+    );
+    const replyEventId = replyEvent.rows[0]?.id;
+    if (replyEventId === undefined) throw new Error("Reply event was not stored");
+    await expect(
+      pool.query(
+        `INSERT INTO sync_event_notification_reasons
+           (event_id, workspace_id, user_id, reason)
+         VALUES ($1, $2, $3, 'participated_thread_reply')`,
+        [replyEventId, workspaceId, memberId],
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+    const removedMemberSync = await repository.sync(
+      member,
+      removed.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(
+      removedMemberSync.events.some(
+        (event) =>
+          event.type === "message.created" && event.payload.message.id === reply.message.id,
+      ),
+    ).toBe(false);
+  });
+
   it("rejects missing, cross-conversation, nested, and unauthorized thread roots", async () => {
     const root = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "general root"),
@@ -1287,6 +1429,43 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.addReaction(owner, archivedMessage.message.id, "👍"),
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+  });
+
+  it("hydrates an exact message only while the requester can access its conversation", async () => {
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Notification Targets",
+      slug: "notification-targets",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = privateChannel.conversation.conversation.id;
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "exact notification target"),
+      mentionedUserIds: [],
+    });
+
+    await expect(repository.messageById(owner, sent.message.id)).resolves.toEqual({
+      message: sent.message,
+    });
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    await expect(repository.messageById(member, sent.message.id)).resolves.toEqual({
+      message: sent.message,
+    });
+
+    await repository.removeChannelMember(owner, conversationId, memberId);
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.messageById(member, randomUUID())).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
   });
 
   it("keeps direct-message history and events private while advancing other cursors", async () => {
@@ -1942,10 +2121,11 @@ describeWithPostgres("WorkspaceRepository", () => {
       readStateEvents: false,
       taskEvents: false,
       announcementChannels: false,
+      participatedThreadNotifications: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -1955,6 +2135,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       readStateEvents: true,
       taskEvents: true,
       announcementChannels: true,
+      participatedThreadNotifications: true,
     });
   });
 

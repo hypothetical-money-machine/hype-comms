@@ -5,6 +5,7 @@ import type {
   ChannelMode,
   ChatSessionState,
   Message,
+  NotificationContext,
   Reaction,
   ReactionEmoji,
   Task,
@@ -37,6 +38,11 @@ import {
   lastReadEligibleMessageId,
 } from "./message-read-tracking";
 import { MessageReactions } from "./message-reactions";
+import { createNotificationActivityView } from "./notification-activity";
+import {
+  NotificationSessionRuntime,
+  notificationTransportFrom,
+} from "./notification-session-runtime";
 import { PreferencesDialog } from "./preferences-dialog";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -448,9 +454,25 @@ export function App({ client, theme, compactMode }: AppProps) {
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
+  const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
+  const notificationBindingGeneration = useRef(0);
+  const notificationTransport = useMemo(() => notificationTransportFrom(client), [client]);
+  const notificationSession = useMemo(() => {
+    if (notificationTransport === null) return null;
+    return new NotificationSessionRuntime(notificationTransport, {
+      handleNotificationAction: async (action, context) => {
+        const result = await runtime.handleNotificationAction(action, context);
+        if (result === "discarded") return;
+        setPaneView("chat");
+        setShowChannelMembers(false);
+        setShowPreferences(false);
+      },
+    });
+  }, [notificationTransport, runtime]);
   const messageList = useRef<HTMLDivElement>(null);
   const timelineConversationId = useRef<string | null>(null);
   const stickToTimelineBottom = useRef(true);
+  const [timelineAtLiveTail, setTimelineAtLiveTail] = useState(false);
   const readTrackingFrame = useRef<number | null>(null);
   const readTrackingConversationId = useRef<string | null>(null);
   const messageVisibilityMemory = useRef({
@@ -460,6 +482,7 @@ export function App({ client, theme, compactMode }: AppProps) {
   const threadList = useRef<HTMLDivElement>(null);
   const threadComposer = useRef<HTMLTextAreaElement>(null);
   const stickToThreadBottom = useRef(true);
+  const [threadAtLiveTail, setThreadAtLiveTail] = useState(false);
   const threadReadTrackingFrame = useRef<number | null>(null);
   const threadReadTrackingRootId = useRef<string | null>(null);
   const threadMessageVisibilityMemory = useRef({
@@ -477,6 +500,11 @@ export function App({ client, theme, compactMode }: AppProps) {
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
+    notificationSession?.start();
+    return () => notificationSession?.dispose();
+  }, [notificationSession]);
+
+  useEffect(() => {
     const onShortcut = (event: KeyboardEvent): void => {
       if (event.repeat) return;
       if (!isCompactModeShortcut(event, client.platform)) return;
@@ -489,12 +517,55 @@ export function App({ client, theme, compactMode }: AppProps) {
     return () => document.removeEventListener("keydown", onShortcut);
   }, [client, compactMode]);
 
+  const startWorkspaceSession = useCallback(
+    async (
+      next: SignedInSession,
+      options: {
+        readonly resetLocalCache?: boolean;
+      } = {},
+    ): Promise<void> => {
+      const bindingGeneration = ++notificationBindingGeneration.current;
+      // Every workspace restart is a renderer-readiness boundary, even when user/workspace ids do
+      // not change. Retire actions and detach the old activity tail before any asynchronous cache
+      // or bootstrap work; NotificationSessionRuntime keeps the revision itself monotonic.
+      notificationSession?.invalidate();
+      setNotificationContext(null);
+
+      try {
+        if (options.resetLocalCache === true) {
+          await runtime.resetLocalCache();
+          if (bindingGeneration !== notificationBindingGeneration.current) return;
+        }
+        await runtime.start(next);
+        if (bindingGeneration !== notificationBindingGeneration.current) return;
+
+        // WorkspaceRuntime reports bootstrap failures in its state instead of rejecting start(),
+        // so an inactive result is expected on the first attempt and Retry binds again here.
+        const context = (await notificationSession?.bind(next.userId, next.workspaceId)) ?? null;
+        if (bindingGeneration === notificationBindingGeneration.current) {
+          setNotificationContext(context);
+        }
+      } catch {
+        if (bindingGeneration !== notificationBindingGeneration.current) return;
+        notificationSession?.invalidate();
+        setNotificationContext(null);
+      }
+    },
+    [notificationSession, runtime],
+  );
+
   const applySession = useCallback(
     (next: ChatSessionState) => {
       setSession(next);
       if (next.status === "signed-in" && next.method === "email") {
-        void runtime.start(next);
-      } else if (next.status === "signed-out") {
+        void startWorkspaceSession(next);
+        return;
+      }
+
+      notificationBindingGeneration.current += 1;
+      notificationSession?.invalidate();
+      setNotificationContext(null);
+      if (next.status === "signed-out") {
         resetDrafts();
         setThreadDrafts({});
         setEditingClientMessageId(null);
@@ -504,7 +575,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         void runtime.stop();
       }
     },
-    [resetDrafts, runtime],
+    [notificationSession, resetDrafts, runtime, startWorkspaceSession],
   );
 
   const retrySession = useCallback(async (): Promise<void> => {
@@ -526,9 +597,11 @@ export function App({ client, theme, compactMode }: AppProps) {
     return () => {
       active = false;
       unsubscribe();
+      notificationBindingGeneration.current += 1;
+      notificationSession?.invalidate();
       void runtime.stop();
     };
-  }, [applySession, client, runtime]);
+  }, [applySession, client, notificationSession, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
@@ -645,6 +718,8 @@ export function App({ client, theme, compactMode }: AppProps) {
   useEffect(() => {
     setShowChannelMembers(false);
     setPaneView("chat");
+    setTimelineAtLiveTail(false);
+    setThreadAtLiveTail(false);
   }, [runtimeState.selectedConversationId]);
 
   useEffect(() => {
@@ -707,7 +782,11 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   const handleTimelineScroll = useCallback((): void => {
     const list = messageList.current;
-    if (list !== null) stickToTimelineBottom.current = isTimelineAtBottom(list);
+    if (list !== null) {
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToTimelineBottom.current = atLiveTail;
+      setTimelineAtLiveTail(atLiveTail);
+    }
     scheduleReadTracking();
   }, [scheduleReadTracking]);
 
@@ -753,7 +832,11 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   const handleThreadScroll = useCallback((): void => {
     const list = threadList.current;
-    if (list !== null) stickToThreadBottom.current = isTimelineAtBottom(list);
+    if (list !== null) {
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToThreadBottom.current = atLiveTail;
+      setThreadAtLiveTail(atLiveTail);
+    }
     scheduleThreadReadTracking();
   }, [scheduleThreadReadTracking]);
 
@@ -797,6 +880,8 @@ export function App({ client, theme, compactMode }: AppProps) {
 
   useEffect(() => setThreadComposerError(""), [selectedThreadRootId]);
 
+  useEffect(() => setThreadAtLiveTail(false), [selectedThreadRootId]);
+
   useEffect(() => {
     if (selectedThreadRootId !== null) return;
     threadReadTrackingRootId.current = null;
@@ -818,7 +903,9 @@ export function App({ client, theme, compactMode }: AppProps) {
     } else if (stickToTimelineBottom.current) {
       list.scrollTop = list.scrollHeight;
     }
-    stickToTimelineBottom.current = isTimelineAtBottom(list);
+    const atLiveTail = isTimelineAtBottom(list);
+    stickToTimelineBottom.current = atLiveTail;
+    setTimelineAtLiveTail(atLiveTail);
     scheduleReadTracking();
   }, [
     messages.length,
@@ -844,10 +931,33 @@ export function App({ client, theme, compactMode }: AppProps) {
     const list = threadList.current;
     if (list !== null && shouldScrollToLatest) {
       list.scrollTop = list.scrollHeight;
-      stickToThreadBottom.current = isTimelineAtBottom(list);
+      const atLiveTail = isTimelineAtBottom(list);
+      stickToThreadBottom.current = atLiveTail;
+      setThreadAtLiveTail(atLiveTail);
     }
     scheduleThreadReadTracking();
   }, [scheduleThreadReadTracking, selectedThreadRootId, threadPending.length, threadReplies]);
+
+  useEffect(() => {
+    if (notificationSession === null || notificationContext?.status !== "active") return;
+    const conversationId = runtimeState.selectedConversationId;
+    const view = createNotificationActivityView({
+      pane: paneView,
+      conversationId,
+      timelineAtLiveTail,
+      threadRootId: selectedThreadRootId,
+      threadAtLiveTail,
+    });
+    void notificationSession.report(view).catch(() => undefined);
+  }, [
+    notificationContext,
+    notificationSession,
+    paneView,
+    runtimeState.selectedConversationId,
+    selectedThreadRootId,
+    threadAtLiveTail,
+    timelineAtLiveTail,
+  ]);
 
   useEffect(() => {
     const focusedMessageId = runtimeState.focusedMessageId;
@@ -993,10 +1103,8 @@ export function App({ client, theme, compactMode }: AppProps) {
     [runtime],
   );
 
-  const rebuildLocalCache = async (signedIn: SignedInSession): Promise<void> => {
-    await runtime.resetLocalCache();
-    await runtime.start(signedIn);
-  };
+  const rebuildLocalCache = (signedIn: SignedInSession): Promise<void> =>
+    startWorkspaceSession(signedIn, { resetLocalCache: true });
 
   const signOut = async (): Promise<void> => {
     if (
@@ -1061,7 +1169,7 @@ export function App({ client, theme, compactMode }: AppProps) {
           </p>
           {runtimeState.error !== null && (
             <div className="message-actions">
-              <button type="button" onClick={() => void runtime.start(session)}>
+              <button type="button" onClick={() => void startWorkspaceSession(session)}>
                 Retry
               </button>
               <button type="button" onClick={() => void rebuildLocalCache(session)}>
@@ -1269,7 +1377,7 @@ export function App({ client, theme, compactMode }: AppProps) {
               stale={runtimeState.stale}
               cacheMode={runtimeState.cacheMode}
               notice={workspaceNotice}
-              onRetry={() => void runtime.start(session)}
+              onRetry={() => void startWorkspaceSession(session)}
               onResetCache={() => void rebuildLocalCache(session)}
             />
           </div>
@@ -1706,6 +1814,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         open={showPreferences}
         theme={theme}
         compactMode={compactMode}
+        notifications={notificationTransport ?? undefined}
         platform={client.platform}
         triggerRef={preferencesTrigger}
         onClose={() => setShowPreferences(false)}

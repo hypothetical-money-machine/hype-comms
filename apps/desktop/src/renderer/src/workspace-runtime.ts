@@ -1,5 +1,6 @@
 import {
   sendMessageOperationSchema,
+  TASK_PAGE_MAX_LIMIT,
   type CacheCryptoStatus,
   type CacheScope,
   type ChannelMembershipMutationResponse,
@@ -12,6 +13,8 @@ import {
   type MessageSearchResponse,
   type MessageSearchResult,
   type MessageThreadSummary,
+  type NotificationAction,
+  type NotificationContext,
   type ProductRealtimeEvent,
   type Reaction,
   type ReactionEmoji,
@@ -33,8 +36,10 @@ import {
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   type CachedWorkspaceState,
+  type MembershipRepairMarker,
   type OutboxItem,
   type OutboxStatus,
+  type OutboxUpdateExpectation,
   type WorkspaceCache,
 } from "./workspace-cache";
 
@@ -97,6 +102,19 @@ const MAX_CONSECUTIVE_RESYNCS = 3;
  */
 const RESYNC_CHAIN_RESET_MS = 60_000;
 
+/** Body-free copy for a missing, revoked, or invalid notification target. */
+const NOTIFICATION_TARGET_UNAVAILABLE = "That notification is no longer available.";
+
+/** Mirrors the encrypted replica's `workspaceSnapshotSchema` conversation bound. */
+const WORKSPACE_CONVERSATION_LIMIT = 5_000;
+
+/**
+ * Maximum authoritative task catalog accepted by one workspace snapshot replacement. A snapshot
+ * above this bound is left wholly uncommitted so its high-water cursor cannot hide a partial task
+ * projection. Exported so capacity tests and operational documentation can name the same limit.
+ */
+export const WORKSPACE_SNAPSHOT_TASK_LIMIT = 20_000;
+
 const INITIAL_STATE: WorkspaceRuntimeState = {
   bootstrap: null,
   messages: [],
@@ -134,6 +152,16 @@ function firstConversation(snapshot: WorkspaceSnapshot): string | null {
     )?.conversation.id ??
     snapshot.conversations[0]?.conversation.id ??
     null
+  );
+}
+
+/** Matches the server's task target rule for the signed-in human renderer. */
+function isTaskConversation(summary: ConversationSummary, currentUserId: string): boolean {
+  return (
+    summary.conversation.kind === "channel" ||
+    (summary.conversation.kind === "direct_message" &&
+      summary.participantIds.length === 1 &&
+      summary.participantIds[0] === currentUserId)
   );
 }
 
@@ -345,6 +373,13 @@ interface ReadTarget {
   retryTimer: ReturnType<typeof setTimeout> | null;
 }
 
+interface ProjectionGuard {
+  readonly cache: WorkspaceCache;
+  readonly generation: number;
+  readonly membershipEpoch: number;
+  readonly signal: AbortSignal;
+}
+
 export class WorkspaceRuntime {
   readonly #listeners = new Set<(state: WorkspaceRuntimeState) => void>();
   readonly #client: DesktopApi;
@@ -352,13 +387,19 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
-  #flushing = false;
+  /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
+  #outboxFlushOwner: ProjectionGuard | null = null;
+  #outboxFlushRequested = false;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #syncAttempt = 0;
   /** True until the current sync pass has fully repaired and reloaded the local projection. */
   #syncRecoveryPending = false;
+  /** A cached replica is still completing its pre-snapshot HTTP catch-up. */
+  #startupReplicaCatchUpPending = false;
+  /** A startup whose durable HTTP catch-up has not yet opened renderer realtime delivery. */
+  #startupRealtimePending = false;
   /**
    * Resync demands in the current chain. Only demands count: a failed download is retried without
    * touching this, and `system.connected` cannot reset it either, so the bound stays armed on a
@@ -388,6 +429,8 @@ export class WorkspaceRuntime {
   /** Serializes durable replacements in the active cache generation without delaying reads. */
   #membersReplacementQueue: Promise<void> = Promise.resolve();
   #membersReplacementAbortController = new AbortController();
+  /** Aborts every non-event projection before a membership barrier or retired generation wins. */
+  #projectionAbortController = new AbortController();
   #membersRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #membersAttempt = 0;
   #eventQueue: Promise<void> = Promise.resolve();
@@ -452,6 +495,14 @@ export class WorkspaceRuntime {
   }
 
   async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
+    const scope: CacheScope = {
+      userId: session.userId,
+      workspaceId: session.workspaceId,
+    };
+    const scopeChanged =
+      this.#scope === null ||
+      this.#scope.userId !== scope.userId ||
+      this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
@@ -465,10 +516,24 @@ export class WorkspaceRuntime {
     this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
+    this.#startupReplicaCatchUpPending = false;
+    this.#startupRealtimePending = false;
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
-    this.#setState({ busy: true, error: null });
+    // ChatSession may transition directly from one signed-in identity to another. Retire every
+    // visible and writable reference to the old scope before the first async cache/bootstrap step;
+    // otherwise old messages could remain rendered under the replacement session boundary.
+    this.#scope = scope;
+    if (scopeChanged) {
+      this.#cache = null;
+      this.#syncCursor = null;
+      this.#historyCursors.clear();
+      this.#threadCursors.clear();
+      this.#setState({ ...INITIAL_STATE, busy: true });
+    } else {
+      this.#setState({ busy: true, error: null });
+    }
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#eventQueue = Promise.resolve();
@@ -480,6 +545,9 @@ export class WorkspaceRuntime {
     this.#unsubscribeEvent = this.#client.onWorkspaceEvent((event) => {
       const realtimeEpoch = this.#realtimeEpoch;
       if (event.type === "channel.membership_changed") {
+        // Abort cache transactions synchronously, before the event queue can wait behind the
+        // projection they must roll back. The repair itself receives the fresh signal.
+        this.#rotateProjectionBarrier();
         // Acceptance happens before queueing. A repair ahead of this one may retire the socket,
         // but it must not retire this obligation or acknowledge a cursor that crosses it.
         this.#acceptedMembershipRepairs.set(event.id, event.workspaceSequence);
@@ -511,18 +579,21 @@ export class WorkspaceRuntime {
       this.#setState({ connection });
     });
 
-    const scope: CacheScope = {
-      userId: session.userId,
-      workspaceId: session.workspaceId,
-    };
     // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
     // and that reset has to know which member's database it is allowed to delete.
-    this.#scope = scope;
     try {
       const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
-      this.#cache = this.#createCache(cryptoStatus);
-      const cached = await this.#cache.load();
-      if (generation !== this.#generation) return;
+      if (generation !== this.#generation || scope !== this.#scope) return;
+      if (
+        cryptoStatus.scope.userId !== scope.userId ||
+        cryptoStatus.scope.workspaceId !== scope.workspaceId
+      ) {
+        throw new Error("The encrypted cache scope did not match the signed-in session");
+      }
+      const cache = this.#createCache(cryptoStatus);
+      this.#cache = cache;
+      const cached = await cache.load();
+      if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
@@ -540,14 +611,36 @@ export class WorkspaceRuntime {
         stale: true,
       });
 
-      await this.#refreshSnapshot(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
-      await this.#repairAndFlush(generation);
-      if (generation !== this.#generation || this.#cache === null) return;
-      await this.#restartRealtime(generation);
-      this.#setState({ busy: false });
+      const replicaAvailable = cached.bootstrap !== null;
+      if (cached.repairMarker !== null) {
+        await this.#recoverDurableMembershipMarker(
+          generation,
+          cache,
+          cached.repairMarker,
+          cached.syncCursor ?? "0",
+        );
+        return;
+      }
+
+      if (replicaAvailable) {
+        // A recreated window first catches up from the encrypted replica cursor. Main may have
+        // observed events for notifications while no renderer existed, but that observation never
+        // became UI progress. Only this HTTP pass may bridge that interval before the normal
+        // authoritative snapshot and its final catch-up open a fresh realtime epoch.
+        this.#startupReplicaCatchUpPending = true;
+        await this.#repairAndFlush(generation, false);
+        if (generation !== this.#generation || this.#cache === null) return;
+        if (this.#syncRecoveryPending) {
+          this.#setState({ busy: false, stale: true });
+          return;
+        }
+        this.#startupReplicaCatchUpPending = false;
+      }
+      await this.#completeStartupAfterReplicaCatchUp(generation);
     } catch (error) {
       if (generation !== this.#generation) return;
+      this.#startupReplicaCatchUpPending = false;
+      this.#startupRealtimePending = false;
       this.#setState({
         busy: false,
         stale: true,
@@ -569,6 +662,8 @@ export class WorkspaceRuntime {
     this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
+    this.#startupReplicaCatchUpPending = false;
+    this.#startupRealtimePending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
@@ -695,8 +790,9 @@ export class WorkspaceRuntime {
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
-    if (this.#membershipRepairPending) {
-      throw new Error("Membership repair must complete before sending messages");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) {
+      throw new Error("This conversation is no longer available");
     }
     const summary = this.#state.bootstrap?.conversations.find(
       (candidate) => candidate.conversation.id === conversationId,
@@ -725,7 +821,8 @@ export class WorkspaceRuntime {
       },
     });
     const createdAt = new Date().toISOString();
-    await cache.enqueue(operation, createdAt);
+    const queued = await cache.enqueue(operation, createdAt, projection.signal);
+    if (!queued || !this.#isProjectionCurrent(projection, conversationId)) return;
     this.#setState({
       outbox: [
         ...this.#state.outbox,
@@ -756,6 +853,10 @@ export class WorkspaceRuntime {
     if (predecessor.status !== "permanent_failure") {
       throw new Error("Only a permanently failed message can be replaced");
     }
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, predecessor.operation.conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
 
     const replacementClientMessageId = crypto.randomUUID();
     const operation = sendMessageOperationSchema.parse({
@@ -778,10 +879,15 @@ export class WorkspaceRuntime {
       failureReason: null,
     };
 
-    // The replacement must exist durably before the predecessor can be removed. If either write
-    // fails, at least one encrypted outbox record still contains the authored text.
-    await cache.enqueue(operation, predecessor.createdAt);
-    await cache.removeOutbox(clientMessageId);
+    const replaced = await cache.replaceOutbox(
+      clientMessageId,
+      operation,
+      predecessor.createdAt,
+      projection.signal,
+    );
+    if (!replaced || !this.#isProjectionCurrent(projection, predecessor.operation.conversationId)) {
+      return;
+    }
 
     const outbox = [...this.#state.outbox];
     const predecessorIndex = outbox.findIndex(
@@ -800,17 +906,174 @@ export class WorkspaceRuntime {
   }
 
   async searchMessages(query: string, after?: string): Promise<MessageSearchResponse> {
-    return this.#client.searchMessages({
+    const cache = this.#cache;
+    if (cache === null) return { results: [], nextCursor: null };
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection)) return { results: [], nextCursor: null };
+    const response = await this.#client.searchMessages({
       query,
       ...(after === undefined ? {} : { after }),
       limit: 25,
     });
+    if (!this.#isProjectionCurrent(projection)) return { results: [], nextCursor: null };
+    return {
+      ...response,
+      results: response.results.filter((result) =>
+        this.#isConversationAuthorized(result.message.conversationId),
+      ),
+    };
+  }
+
+  /**
+   * Reauthorizes and hydrates one exact body-free native-notification target.
+   *
+   * Main's action is bound to a session generation, while this runtime also has its own local
+   * generation. Both are checked before and after network work so a sign-out, scope replacement,
+   * or renderer restart cannot project an old response into the new workspace.
+   */
+  async handleNotificationAction(
+    action: NotificationAction,
+    currentContext: NotificationContext,
+  ): Promise<"discarded" | "fallback" | "opened"> {
+    const generation = this.#generation;
+    if (!this.#isCurrentNotificationAction(action, currentContext, generation)) return "discarded";
+    // Revoked or otherwise unauthorized targets are discarded. The explanatory fallback below
+    // is only for a message that cannot be restored inside a still-authorized conversation.
+    if (!this.#isConversationAuthorized(action.conversationId)) return "discarded";
+
+    let message = this.#state.messages.find((candidate) => candidate.id === action.messageId);
+    if (message === undefined) {
+      try {
+        ({ message } = await this.#client.getMessageById(action.messageId));
+      } catch {
+        return (await this.#fallbackNotificationAction(action, currentContext, generation))
+          ? "fallback"
+          : "discarded";
+      }
+    }
+    if (!this.#isCurrentNotificationAction(action, currentContext, generation)) return "discarded";
+    if (
+      message.id !== action.messageId ||
+      message.conversationId !== action.conversationId ||
+      message.threadRootId !== action.threadRootId
+    ) {
+      return (await this.#fallbackNotificationAction(action, currentContext, generation))
+        ? "fallback"
+        : "discarded";
+    }
+
+    try {
+      // Search-result navigation already owns exact message/thread focus, authorized conversation
+      // rechecks, reaction hydration, cache projection, and the legacy no-threads fallback.
+      await this.openSearchResult({ message });
+    } catch {
+      return (await this.#fallbackNotificationAction(action, currentContext, generation))
+        ? "fallback"
+        : "discarded";
+    }
+    if (!this.#isCurrentNotificationAction(action, currentContext, generation)) return "discarded";
+    this.#setState({ error: null });
+    return "opened";
+  }
+
+  #isCurrentNotificationAction(
+    action: NotificationAction,
+    currentContext: NotificationContext,
+    generation: number,
+  ): boolean {
+    const snapshot = this.#state.bootstrap;
+    return (
+      currentContext.status === "active" &&
+      generation === this.#generation &&
+      this.#cache !== null &&
+      this.#scope?.userId === currentContext.userId &&
+      this.#scope.workspaceId === currentContext.workspaceId &&
+      snapshot?.currentUser.user.id === currentContext.userId &&
+      snapshot.workspace.id === currentContext.workspaceId &&
+      action.sessionGeneration === currentContext.sessionGeneration &&
+      action.userId === currentContext.userId &&
+      action.workspaceId === currentContext.workspaceId
+    );
+  }
+
+  #isConversationAuthorized(conversationId: string): boolean {
+    return (
+      this.#state.bootstrap?.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      ) ?? false
+    );
+  }
+
+  #captureProjection(cache: WorkspaceCache): ProjectionGuard {
+    return {
+      cache,
+      generation: this.#generation,
+      membershipEpoch: this.#membershipEpoch,
+      signal: this.#projectionAbortController.signal,
+    };
+  }
+
+  #isProjectionCurrent(guard: ProjectionGuard, conversationId?: string): boolean {
+    return (
+      guard.generation === this.#generation &&
+      guard.cache === this.#cache &&
+      guard.membershipEpoch === this.#membershipEpoch &&
+      !guard.signal.aborted &&
+      !this.#membershipRepairPending &&
+      (conversationId === undefined || this.#isConversationAuthorized(conversationId))
+    );
+  }
+
+  #isOutboxFlushOwnerCurrent(owner: ProjectionGuard, conversationId?: string): boolean {
+    return this.#outboxFlushOwner === owner && this.#isProjectionCurrent(owner, conversationId);
+  }
+
+  #rotateProjectionBarrier(): void {
+    this.#projectionAbortController.abort();
+    this.#projectionAbortController = new AbortController();
+  }
+
+  async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
+    if (!this.#isProjectionCurrent(projection)) return;
+    const accepted = await projection.cache.upsertTasks(tasks, projection.signal);
+    if (!this.#isProjectionCurrent(projection)) return;
+    const authorized = accepted.filter((task) =>
+      this.#isConversationAuthorized(task.conversationId),
+    );
+    if (authorized.length > 0) {
+      this.#setState({ tasks: mergeTasks(this.#state.tasks, authorized) });
+    }
+  }
+
+  async #fallbackNotificationAction(
+    action: NotificationAction,
+    currentContext: NotificationContext,
+    generation: number,
+  ): Promise<boolean> {
+    let applied = false;
+    await this.#serialize(async () => {
+      if (!this.#isCurrentNotificationAction(action, currentContext, generation)) return;
+      const authorized = this.#isConversationAuthorized(action.conversationId);
+      if (!authorized) return;
+      this.#setState({
+        selectedConversationId: action.conversationId,
+        focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+        error: NOTIFICATION_TARGET_UNAVAILABLE,
+      });
+      applied = true;
+    });
+    return applied;
   }
 
   async loadConversationTasks(conversationId: string): Promise<void> {
     const cache = this.#cache;
-    const generation = this.#generation;
     if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     this.#setState({ tasksBusy: true, taskError: null });
     try {
       const tasks: Task[] = [];
@@ -820,29 +1083,29 @@ export class WorkspaceRuntime {
           ...(after === undefined ? {} : { after }),
           limit: 200,
         });
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
         tasks.push(...page.tasks);
         if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
         after = page.nextCursor;
       }
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertTasks(tasks);
-        this.#setState({ tasks: mergeTasks(this.#state.tasks, tasks) });
+        await this.#projectTasks(projection, tasks);
       });
     } catch (error) {
-      if (generation === this.#generation) {
+      if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not load this task board") });
       }
       throw error;
     } finally {
-      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+      if (projection.generation === this.#generation) this.#setState({ tasksBusy: false });
     }
   }
 
   async loadMyTasks(): Promise<void> {
     const cache = this.#cache;
-    const generation = this.#generation;
     if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection)) return;
     this.#setState({ tasksBusy: true, taskError: null });
     try {
       const tasks: Task[] = [];
@@ -852,22 +1115,21 @@ export class WorkspaceRuntime {
           ...(after === undefined ? {} : { after }),
           limit: 200,
         });
+        if (!this.#isProjectionCurrent(projection)) return;
         tasks.push(...page.tasks);
         if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
         after = page.nextCursor;
       }
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertTasks(tasks);
-        this.#setState({ tasks: mergeTasks(this.#state.tasks, tasks) });
+        await this.#projectTasks(projection, tasks);
       });
     } catch (error) {
-      if (generation === this.#generation) {
+      if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not load My Tasks") });
       }
       throw error;
     } finally {
-      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+      if (projection.generation === this.#generation) this.#setState({ tasksBusy: false });
     }
   }
 
@@ -881,8 +1143,11 @@ export class WorkspaceRuntime {
     readonly sourceMessageId?: string | null;
   }): Promise<Task> {
     const cache = this.#cache;
-    const generation = this.#generation;
     if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, input.conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
     this.#setState({ tasksBusy: true, taskError: null });
     try {
       const result = await this.#client.createTask({
@@ -896,18 +1161,16 @@ export class WorkspaceRuntime {
         sourceMessageId: input.sourceMessageId ?? null,
       });
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertTasks([result.task]);
-        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+        await this.#projectTasks(projection, [result.task]);
       });
       return result.task;
     } catch (error) {
-      if (generation === this.#generation) {
+      if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not create the task") });
       }
       throw error;
     } finally {
-      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+      if (projection.generation === this.#generation) this.#setState({ tasksBusy: false });
     }
   }
 
@@ -922,9 +1185,12 @@ export class WorkspaceRuntime {
     },
   ): Promise<Task> {
     const cache = this.#cache;
-    const generation = this.#generation;
     const current = this.#state.tasks.find((task) => task.id === taskId);
     if (cache === null || current === undefined) throw new Error("Task is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, current.conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
     this.#setState({ tasksBusy: true, taskError: null });
     try {
       const result = await this.#client.updateTask({
@@ -934,26 +1200,27 @@ export class WorkspaceRuntime {
         ...input,
       });
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertTasks([result.task]);
-        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+        await this.#projectTasks(projection, [result.task]);
       });
       return result.task;
     } catch (error) {
-      if (generation === this.#generation) {
+      if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not update the task") });
       }
       throw error;
     } finally {
-      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+      if (projection.generation === this.#generation) this.#setState({ tasksBusy: false });
     }
   }
 
   async moveTask(taskId: string, status: TaskStatus, beforeTaskId: string | null): Promise<Task> {
     const cache = this.#cache;
-    const generation = this.#generation;
     const current = this.#state.tasks.find((task) => task.id === taskId);
     if (cache === null || current === undefined) throw new Error("Task is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, current.conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
     this.#setState({ tasksBusy: true, taskError: null });
     try {
       const result = await this.#client.moveTask({
@@ -964,45 +1231,43 @@ export class WorkspaceRuntime {
         beforeTaskId,
       });
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertTasks([result.task]);
-        this.#setState({ tasks: mergeTasks(this.#state.tasks, [result.task]) });
+        await this.#projectTasks(projection, [result.task]);
       });
       return result.task;
     } catch (error) {
-      if (generation === this.#generation) {
+      if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not move the task") });
       }
       throw error;
     } finally {
-      if (generation === this.#generation) this.#setState({ tasksBusy: false });
+      if (projection.generation === this.#generation) this.#setState({ tasksBusy: false });
     }
   }
 
   async openSearchResult(result: MessageSearchResult): Promise<void> {
     const cache = this.#cache;
     const snapshot = this.#state.bootstrap;
-    const generation = this.#generation;
     if (cache === null || snapshot === null) throw new Error("Workspace is still loading");
     const conversationId = result.message.conversationId;
     if (!snapshot.conversations.some((summary) => summary.conversation.id === conversationId)) {
       throw new Error("This conversation is no longer available");
     }
+    const projection = this.#captureProjection(cache);
     const threadRootId = this.#state.threadsSupported ? result.message.threadRootId : null;
+    let projected = false;
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      const currentSnapshot = this.#state.bootstrap;
-      if (
-        currentSnapshot === null ||
-        !currentSnapshot.conversations.some((summary) => summary.conversation.id === conversationId)
-      ) {
-        throw new Error("This conversation is no longer available");
-      }
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       // Keep the query inside the event queue. Events already received are applied first, while
       // events committed during the query queue behind this projection and therefore win after it.
       const hydrated = await this.#client.listMessageReactions([result.message.id]);
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      await cache.upsertHistory([result.message], hydrated.reactions);
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const persisted = await cache.upsertHistory(
+        conversationId,
+        [result.message],
+        hydrated.reactions,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const messages = mergeMessages(this.#state.messages, [result.message]);
       this.#setState({
         messages,
@@ -1018,7 +1283,11 @@ export class WorkspaceRuntime {
         threadLoading: threadRootId !== null,
         threadError: null,
       });
+      projected = true;
     });
+    // The serialized projection can retire quietly when a session replacement wins during an
+    // awaited reaction read. Do not let its continuation open an old thread in the new scope.
+    if (!projected || !this.#isProjectionCurrent(projection, conversationId)) return;
     if (threadRootId !== null) await this.openThread(threadRootId, result.message.id);
   }
 
@@ -1060,25 +1329,32 @@ export class WorkspaceRuntime {
 
   async #fetchThreadPage(threadRootId: string, before: string | undefined): Promise<void> {
     const cache = this.#cache;
-    const generation = this.#generation;
     if (cache === null) {
       this.#setState({ threadLoading: false, threadError: "Workspace cache is unavailable" });
       return;
     }
+    const projection = this.#captureProjection(cache);
     try {
       await this.#serialize(async () => {
-        if (generation !== this.#generation || cache !== this.#cache) return;
+        if (!this.#isProjectionCurrent(projection)) return;
         const thread = await this.#client.getMessageThread({
           messageId: threadRootId,
           ...(before === undefined ? {} : { before }),
           limit: 50,
         });
-        if (generation !== this.#generation || cache !== this.#cache) return;
+        const conversationId = thread.root.conversationId;
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
         const messages = [thread.root, ...thread.replies];
         const messageIds = messages.map((message) => message.id);
         const hydrated = await this.#client.listMessageReactions(messageIds);
-        if (generation !== this.#generation || cache !== this.#cache) return;
-        await cache.upsertHistory(messages, hydrated.reactions);
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        const persisted = await cache.upsertHistory(
+          conversationId,
+          messages,
+          hydrated.reactions,
+          projection.signal,
+        );
+        if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
         this.#threadCursors.set(threadRootId, thread.nextCursor);
         this.#setState({
           messages: mergeMessages(this.#state.messages, messages),
@@ -1090,11 +1366,16 @@ export class WorkspaceRuntime {
       });
     } catch (error) {
       try {
-        if (await this.#downgradeAfterThreadFailure(threadRootId, generation, cache)) return;
+        if (await this.#downgradeAfterThreadFailure(threadRootId, projection.generation, cache)) {
+          return;
+        }
       } catch {
         // Preserve the original thread failure when capability renegotiation is also unavailable.
       }
-      if (generation === this.#generation && this.#state.selectedThreadRootId === threadRootId) {
+      if (
+        projection.generation === this.#generation &&
+        this.#state.selectedThreadRootId === threadRootId
+      ) {
         this.#setState({
           threadLoading: false,
           threadError: errorMessage(error, "Could not load the thread"),
@@ -1113,6 +1394,13 @@ export class WorkspaceRuntime {
       (message) => message.id === threadRootId && message.threadRootId === null,
     );
     if (root === undefined) return false;
+    const projection = this.#captureProjection(cache);
+    if (
+      projection.generation !== generation ||
+      !this.#isProjectionCurrent(projection, root.conversationId)
+    ) {
+      return true;
+    }
     const history = await this.#client.getConversationMessages({
       conversationId: root.conversationId,
       limit: 50,
@@ -1124,9 +1412,15 @@ export class WorkspaceRuntime {
         ? { reactions: [] }
         : await this.#client.listMessageReactions(messageIds);
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, root.conversationId)) return;
+      const persisted = await cache.upsertHistory(
+        root.conversationId,
+        history.messages,
+        hydrated.reactions,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, root.conversationId)) return;
       this.#historyCursors.set(root.conversationId, history.nextCursor);
-      await cache.upsertHistory(history.messages, hydrated.reactions);
       const selectedThreadRootId = this.#state.selectedThreadRootId;
       this.#setState({
         messages: mergeMessages(this.#state.messages, history.messages),
@@ -1146,12 +1440,22 @@ export class WorkspaceRuntime {
   }
 
   async retryMessage(clientMessageId: string): Promise<void> {
-    await this.#patchOutbox(clientMessageId, {
-      status: "pending",
-      attemptCount: 0,
-      nextAttemptAt: null,
-      failureReason: null,
-    });
+    const current = this.#state.outbox.find(
+      (item) => item.operation.message.clientMessageId === clientMessageId,
+    );
+    if (current === undefined) return;
+    await this.#patchOutbox(
+      clientMessageId,
+      {
+        status: "pending",
+        attemptCount: 0,
+        nextAttemptAt: null,
+        failureReason: null,
+      },
+      undefined,
+      undefined,
+      { status: current.status, attemptCount: current.attemptCount },
+    );
     void this.#flushOutbox(this.#generation);
   }
 
@@ -1161,7 +1465,6 @@ export class WorkspaceRuntime {
   }
 
   async addReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
-    const generation = this.#generation;
     const cache = this.#cache;
     if (cache === null || this.#state.bootstrap === null) {
       throw new Error("Workspace is still loading");
@@ -1170,22 +1473,21 @@ export class WorkspaceRuntime {
       this.#state.messages.find((message) => message.id === messageId)?.conversationId ??
       this.#state.selectedConversationId;
     if (conversationId === null) throw new Error("Message is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     const result = await this.#client.addMessageReaction(messageId, emoji);
-    if (generation !== this.#generation || cache !== this.#cache) return;
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
         return;
       }
-      if (
-        !this.#state.bootstrap?.conversations.some(
-          (summary) => summary.conversation.id === conversationId,
-        )
-      ) {
-        return;
-      }
-      await cache.upsertReaction(result.reaction, conversationId);
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      const persisted = await cache.upsertReaction(
+        result.reaction,
+        conversationId,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       this.#setState({ reactions: mergeReactions(this.#state.reactions, [result.reaction]) });
     });
   }
@@ -1303,7 +1605,20 @@ export class WorkspaceRuntime {
   }
 
   async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
-    return this.#client.getChannelMembers(conversationId);
+    const cache = this.#cache;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) {
+      throw new Error("This conversation is no longer available");
+    }
+    const response = await this.#client.getChannelMembers(conversationId);
+    if (
+      !this.#isProjectionCurrent(projection, conversationId) ||
+      response.conversationId !== conversationId
+    ) {
+      throw new Error("This conversation is no longer available");
+    }
+    return response;
   }
 
   async upsertChannelMember(
@@ -1327,24 +1642,31 @@ export class WorkspaceRuntime {
 
   async loadOlder(conversationId: string): Promise<void> {
     const cache = this.#cache;
-    const generation = this.#generation;
     const before = this.#historyCursors.get(conversationId);
     if (cache === null || before === null) return;
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     const history = await this.#client.getConversationMessages({
       conversationId,
       ...(before === undefined ? {} : { before }),
       limit: 50,
     });
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       const messageIds = history.messages.map((message) => message.id);
       const hydrated =
         messageIds.length === 0
           ? { reactions: [] }
           : await this.#client.listMessageReactions(messageIds);
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const persisted = await cache.upsertHistory(
+        conversationId,
+        history.messages,
+        hydrated.reactions,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       this.#historyCursors.set(conversationId, history.nextCursor);
-      await cache.upsertHistory(history.messages, hydrated.reactions);
       this.#setState({
         messages: mergeMessages(this.#state.messages, history.messages),
         threadSummaries: history.threadsSupported
@@ -1417,17 +1739,65 @@ export class WorkspaceRuntime {
   /** Pages `/v1/conversations` until the server stops claiming more, per the bootstrap contract. */
   async #fetchSnapshot(): Promise<WorkspaceSnapshot> {
     const bootstrap = await this.#client.getWorkspaceBootstrap();
-    const conversations = [...bootstrap.conversations];
-    const seen = new Set(conversations.map((summary) => summary.conversation.id));
-    let cursor = bootstrap.conversationsNextCursor;
+    const conversations: ConversationSummary[] = [];
+    const seenConversationIds = new Set<string>();
+    const seenCursors = new Set<string>();
+
+    const validateCursor = (hasMore: boolean, nextCursor: string | null): string | null => {
+      if (hasMore !== (nextCursor !== null)) {
+        throw new Error("The workspace conversation catalog had inconsistent pagination");
+      }
+      return nextCursor;
+    };
+    const appendPage = (
+      summaries: readonly ConversationSummary[],
+      requireProgress: boolean,
+    ): void => {
+      if (requireProgress && summaries.length === 0) {
+        throw new Error("The workspace conversation catalog did not make progress");
+      }
+      if (conversations.length + summaries.length > WORKSPACE_CONVERSATION_LIMIT) {
+        throw new Error("The workspace conversation catalog exceeded local capacity");
+      }
+      const pageIds = new Set<string>();
+      for (const summary of summaries) {
+        if (summary.conversation.workspaceId !== bootstrap.workspace.id) {
+          throw new Error("The workspace conversation catalog crossed workspace scope");
+        }
+        const conversationId = summary.conversation.id;
+        if (seenConversationIds.has(conversationId) || pageIds.has(conversationId)) {
+          throw new Error("The workspace conversation catalog repeated a conversation");
+        }
+        pageIds.add(conversationId);
+      }
+      for (const summary of summaries) {
+        seenConversationIds.add(summary.conversation.id);
+        conversations.push(summary);
+      }
+    };
+
+    let cursor = validateCursor(bootstrap.conversationsHasMore, bootstrap.conversationsNextCursor);
+    appendPage(bootstrap.conversations, bootstrap.conversationsHasMore);
+    if (cursor !== null) {
+      if (conversations.length >= WORKSPACE_CONVERSATION_LIMIT) {
+        throw new Error("The workspace conversation catalog exceeded local capacity");
+      }
+      seenCursors.add(cursor);
+    }
     while (cursor !== null) {
       const page = await this.#client.listConversations({ after: cursor });
-      const added = page.conversations.filter((summary) => !seen.has(summary.conversation.id));
-      for (const summary of added) seen.add(summary.conversation.id);
-      conversations.push(...added);
-      // A server that claims another page without advancing must not spin the renderer.
-      if (added.length === 0 || page.nextCursor === cursor) break;
-      cursor = page.nextCursor;
+      const nextCursor = validateCursor(page.hasMore, page.nextCursor);
+      appendPage(page.conversations, true);
+      if (nextCursor !== null) {
+        if (nextCursor === cursor || seenCursors.has(nextCursor)) {
+          throw new Error("The workspace conversation catalog did not advance its cursor");
+        }
+        if (conversations.length >= WORKSPACE_CONVERSATION_LIMIT) {
+          throw new Error("The workspace conversation catalog exceeded local capacity");
+        }
+        seenCursors.add(nextCursor);
+      }
+      cursor = nextCursor;
     }
     return {
       currentUser: bootstrap.currentUser,
@@ -1439,25 +1809,49 @@ export class WorkspaceRuntime {
     };
   }
 
-  async #refreshSnapshot(generation: number): Promise<void> {
+  async #refreshSnapshot(generation: number, minimumCursor?: string): Promise<boolean> {
     const cache = this.#cache;
-    if (cache === null) return;
+    const scope = this.#scope;
     const membershipEpoch = this.#membershipEpoch;
+    if (cache === null || scope === null || generation !== this.#generation) return false;
+    const signal = this.#projectionAbortController.signal;
+    const isCurrent = (): boolean =>
+      generation === this.#generation &&
+      cache === this.#cache &&
+      scope === this.#scope &&
+      membershipEpoch === this.#membershipEpoch &&
+      !signal.aborted;
     const openThreadRootId = this.#state.selectedThreadRootId;
     const openThreadConversationId = this.#state.selectedConversationId;
     const snapshot = await this.#fetchSnapshot();
+    if (!isCurrent()) return false;
+    if (
+      snapshot.currentUser.user.id !== scope.userId ||
+      snapshot.workspace.id !== scope.workspaceId
+    ) {
+      throw new Error("The workspace catalog did not match the signed-in session");
+    }
+    if (minimumCursor !== undefined && compareSequence(snapshot.syncCursor, minimumCursor) < 0) {
+      throw new Error("The workspace catalog has not caught up to the membership change");
+    }
     const messages: Message[] = [];
     const threadSummaries: MessageThreadSummary[] = [];
     const reactions: Reaction[] = [];
+    const tasks: Task[] = [];
+    const seenTaskIds = new Set<string>();
     let threadsSupported = true;
-    this.#historyCursors.clear();
-    this.#threadCursors.clear();
+    // Build paging state off to the side. An old session can finish a request after a new one has
+    // started; it must not clear or populate the new scope's live cursor maps before the final
+    // generation check.
+    const historyCursors = new Map<string, string | null>();
+    const threadCursors = new Map<string, string | null>();
     for (const summary of snapshot.conversations) {
       const history = await this.#client.getConversationMessages({
         conversationId: summary.conversation.id,
         limit: 50,
       });
-      this.#historyCursors.set(summary.conversation.id, history.nextCursor);
+      if (!isCurrent()) return false;
+      historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
       threadSummaries.push(...history.threadSummaries);
       threadsSupported &&= history.threadsSupported;
@@ -1465,7 +1859,51 @@ export class WorkspaceRuntime {
         const hydrated = await this.#client.listMessageReactions(
           history.messages.map((message) => message.id),
         );
+        if (!isCurrent()) return false;
         reactions.push(...hydrated.reactions);
+      }
+      if (isTaskConversation(summary, snapshot.currentUser.user.id)) {
+        let after: string | undefined;
+        const seenCursors = new Set<string>();
+        for (;;) {
+          const page = await this.#client.listConversationTasks(summary.conversation.id, {
+            ...(after === undefined ? {} : { after }),
+            limit: TASK_PAGE_MAX_LIMIT,
+          });
+          if (!isCurrent()) return false;
+          if (page.hasMore !== (page.nextCursor !== null)) {
+            throw new Error("The workspace task catalog had inconsistent pagination");
+          }
+          if ((after !== undefined || page.hasMore) && page.tasks.length === 0) {
+            throw new Error("The workspace task catalog did not make progress");
+          }
+          if (tasks.length + page.tasks.length > WORKSPACE_SNAPSHOT_TASK_LIMIT) {
+            throw new Error("The workspace task catalog exceeded local capacity");
+          }
+          for (const task of page.tasks) {
+            if (task.workspaceId !== snapshot.workspace.id) {
+              throw new Error("The workspace task catalog crossed workspace scope");
+            }
+            if (task.conversationId !== summary.conversation.id) {
+              throw new Error("The workspace task catalog crossed conversation scope");
+            }
+            if (seenTaskIds.has(task.id)) {
+              throw new Error("The workspace task catalog repeated a task");
+            }
+            seenTaskIds.add(task.id);
+          }
+          tasks.push(...page.tasks);
+          const nextCursor = page.nextCursor;
+          if (nextCursor === null) break;
+          if (tasks.length >= WORKSPACE_SNAPSHOT_TASK_LIMIT) {
+            throw new Error("The workspace task catalog exceeded local capacity");
+          }
+          if (nextCursor === after || seenCursors.has(nextCursor)) {
+            throw new Error("The workspace task catalog did not advance its cursor");
+          }
+          seenCursors.add(nextCursor);
+          after = nextCursor;
+        }
       }
     }
     const visibleConversationIds = new Set(
@@ -1502,11 +1940,13 @@ export class WorkspaceRuntime {
         messageId: openThreadRootId,
         limit: 50,
       });
+      if (!isCurrent()) return false;
       const threadMessages = [thread.root, ...thread.replies];
       const hydrated = await this.#client.listMessageReactions(
         threadMessages.map((message) => message.id),
       );
-      this.#threadCursors.set(openThreadRootId, thread.nextCursor);
+      if (!isCurrent()) return false;
+      threadCursors.set(openThreadRootId, thread.nextCursor);
       refreshedMessages = mergeMessages(refreshedMessages, threadMessages);
       refreshedReactions = replaceMessageReactions(
         refreshedReactions,
@@ -1514,16 +1954,27 @@ export class WorkspaceRuntime {
         hydrated.reactions,
       );
     }
-    if (generation !== this.#generation || membershipEpoch !== this.#membershipEpoch) return;
-    const retainedTasks = this.#state.tasks.filter((task) =>
-      visibleConversationIds.has(task.conversationId),
-    );
-    await cache.replaceSnapshot(snapshot, refreshedMessages, refreshedReactions, retainedTasks);
+    if (!isCurrent()) return false;
+    try {
+      await cache.replaceSnapshot(snapshot, refreshedMessages, refreshedReactions, tasks, signal);
+    } catch (error) {
+      if (!isCurrent()) return false;
+      throw error;
+    }
+    if (!isCurrent()) return false;
     const loaded = await cache.load();
-    if (generation !== this.#generation || membershipEpoch !== this.#membershipEpoch) return;
+    if (!isCurrent()) return false;
     this.#membershipRepairPending =
       loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
     this.#syncCursor = loaded.syncCursor;
+    this.#historyCursors.clear();
+    for (const [conversationId, cursor] of historyCursors) {
+      this.#historyCursors.set(conversationId, cursor);
+    }
+    this.#threadCursors.clear();
+    for (const [threadRootId, cursor] of threadCursors) {
+      this.#threadCursors.set(threadRootId, cursor);
+    }
     const loadedSnapshot = loaded.bootstrap;
     const currentSelection = this.#state.selectedConversationId;
     const selectedConversationId =
@@ -1558,6 +2009,7 @@ export class WorkspaceRuntime {
       stale: this.#syncRecoveryPending || this.#resyncRecoveryPending,
       error: null,
     });
+    return true;
   }
 
   /**
@@ -1662,12 +2114,13 @@ export class WorkspaceRuntime {
 
   /**
    * Detaches the next cache generation from writes that may still be waiting on an old cache's
-   * storage or crypto. Those writes retain their generation guards, but can no longer stall a
-   * current-session directory replacement indefinitely.
+   * storage or crypto. Member writes can no longer stall the current queue, and a snapshot
+   * transaction observes the aborted signal before it can replace the new scope.
    */
   #retireMembersReplacementQueue(): void {
     this.#membersReplacementAbortController.abort();
     this.#membersReplacementAbortController = new AbortController();
+    this.#rotateProjectionBarrier();
     this.#membersReplacementQueue = Promise.resolve();
   }
 
@@ -1687,7 +2140,7 @@ export class WorkspaceRuntime {
     this.#membersRetryTimer = null;
   }
 
-  async #repairAndFlush(generation: number): Promise<void> {
+  async #repairAndFlush(generation: number, flushOutbox = true): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
     this.#syncRecoveryPending = true;
@@ -1742,12 +2195,28 @@ export class WorkspaceRuntime {
           }
           continue;
         }
-        await cache.applyEvent(event);
+        const projection = this.#captureProjection(cache);
+        if (!this.#isProjectionCurrent(projection)) return;
+        try {
+          await cache.applyEvent(event, projection.signal);
+        } catch (error) {
+          if (!this.#isProjectionCurrent(projection)) return;
+          throw error;
+        }
+        if (!this.#isProjectionCurrent(projection)) return;
       }
       if (repairedMembership) continue;
+      if (generation !== this.#generation || cache !== this.#cache) return;
       await cache.advanceCursor(result.response.nextCursor);
+      if (generation !== this.#generation || cache !== this.#cache) return;
       await this.#client.acknowledgeWorkspaceEvent(result.response.nextCursor);
-      this.#syncCursor = result.response.nextCursor;
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (
+        this.#syncCursor === null ||
+        compareSequence(result.response.nextCursor, this.#syncCursor) > 0
+      ) {
+        this.#syncCursor = result.response.nextCursor;
+      }
       cursor = result.response.nextCursor;
       if (!result.response.hasMore) break;
     }
@@ -1756,13 +2225,74 @@ export class WorkspaceRuntime {
     // is the refreshed directory rather than the stale cached one. Also the retry site for a
     // realtime refetch that failed earlier.
     if (this.#membersDirty) await this.#refreshMembers(generation);
-    await this.#reloadCache();
+    if (!(await this.#reloadCache(generation, cache))) return;
     this.#syncRecoveryPending = false;
     // A directory read that failed leaves the client genuinely stale, so the flush must not claim
     // otherwise just because the event page drained. A resync remains stale until realtime has
     // also restarted with the repaired cursor.
     this.#setState({ stale: this.#membersDirty || this.#resyncRecoveryPending });
-    await this.#flushOutbox(generation);
+    if (flushOutbox) await this.#flushOutbox(generation);
+  }
+
+  /**
+   * Reads through one finite server high-water while a durable membership marker prevents every
+   * cache mutation. The events are intentionally not projected: the complete snapshot fetched
+   * immediately afterwards is their authorized representation, including a lazy history cursor
+   * for messages outside its first hydrated page.
+   */
+  async #drainMembershipRepairGap(
+    generation: number,
+    startCursor: string,
+  ): Promise<
+    | { readonly status: "ready"; readonly minimumCursor?: string }
+    | { readonly status: "retryable"; readonly retryAfterMs: number | null }
+    | { readonly status: "blocked" }
+  > {
+    let cursor = startCursor;
+    let targetHighWater: string | null = null;
+    for (;;) {
+      const result = await this.#client.syncWorkspace(cursor);
+      if (generation !== this.#generation || this.#cache === null) {
+        return { status: "blocked" };
+      }
+      if (result.status === "authentication_required") return { status: "blocked" };
+      if (result.status === "permanent") {
+        this.#setState({ stale: true, error: syncFailureMessage(result.reason) });
+        return { status: "blocked" };
+      }
+      if (result.status === "retryable") {
+        this.#setState({ stale: true });
+        return { status: "retryable", retryAfterMs: result.retryAfterMs };
+      }
+      if (result.status === "reset_required") {
+        // The server has explicitly declared this cursor unrecoverable. One authoritative snapshot
+        // may replace it; unlike ordinary pagination, this never loops on repeated reset replies.
+        return { status: "ready" };
+      }
+
+      const { nextCursor, highWaterCursor } = result.response;
+      if (
+        compareSequence(highWaterCursor, cursor) < 0 ||
+        compareSequence(nextCursor, cursor) < 0 ||
+        compareSequence(nextCursor, highWaterCursor) > 0
+      ) {
+        throw new Error("The workspace sync response crossed its recovery high-water");
+      }
+      targetHighWater ??= highWaterCursor;
+      if (compareSequence(cursor, targetHighWater) >= 0) {
+        return { status: "ready", minimumCursor: cursor };
+      }
+      if (compareSequence(nextCursor, cursor) <= 0) {
+        throw new Error("The workspace sync response did not advance its recovery cursor");
+      }
+      cursor = nextCursor;
+      if (compareSequence(cursor, targetHighWater) >= 0) {
+        return { status: "ready", minimumCursor: cursor };
+      }
+      if (!result.response.hasMore) {
+        throw new Error("The workspace sync response ended before its recovery high-water");
+      }
+    }
   }
 
   async #handleRealtimeEvent(
@@ -1785,7 +2315,9 @@ export class WorkspaceRuntime {
     }
     if (event.type === "system.connected") {
       await this.#cache.advanceCursor(event.workspaceSequence);
+      if (generation !== this.#generation || this.#cache === null) return;
       await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
+      if (generation !== this.#generation || this.#cache === null) return;
       // A live socket makes a queued resync backoff pointless: the server took this cursor, so
       // dropping the cached workspace again would only cost another full download. A resync whose
       // download failed is a different matter — the cache has no workspace until it lands — so
@@ -1907,6 +2439,75 @@ export class WorkspaceRuntime {
     }, delayMs);
   }
 
+  async #completeStartupAfterReplicaCatchUp(generation: number): Promise<void> {
+    if (generation !== this.#generation || this.#cache === null) return;
+    await this.#refreshSnapshot(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    await this.#completeStartupAfterSnapshot(generation);
+  }
+
+  /**
+   * Completes the crash-recovery path for a durable membership marker. A retryable preflight keeps
+   * the marker intact and resumes this exact continuation; the ordinary sync retry cannot run while
+   * the marker blocks event application.
+   */
+  async #recoverDurableMembershipMarker(
+    generation: number,
+    cache: WorkspaceCache,
+    marker: MembershipRepairMarker,
+    startCursor: string,
+  ): Promise<void> {
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    const preflight = await this.#drainMembershipRepairGap(generation, startCursor);
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    if (preflight.status === "retryable") {
+      this.#setState({ busy: false, stale: true });
+      this.#scheduleMembershipMarkerRetry(
+        generation,
+        cache,
+        marker,
+        startCursor,
+        preflight.retryAfterMs,
+      );
+      return;
+    }
+    if (preflight.status === "blocked") {
+      this.#syncAttempt = 0;
+      this.#setState({ busy: false, stale: true });
+      return;
+    }
+    const repaired = await this.#refreshSnapshot(generation, preflight.minimumCursor);
+    if (!repaired || generation !== this.#generation || cache !== this.#cache) return;
+    const repairedState = await cache.load();
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    if (repairedState.repairMarker !== null) {
+      throw new Error("Membership repair did not clear its durable marker");
+    }
+    this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
+    this.#syncCursor = repairedState.syncCursor;
+    this.#publishMembershipCache(repairedState, marker.conversationId);
+    // The snapshot is now the durable UI representation of the drained gap. Only the final
+    // catch-up below may advance and acknowledge beyond it before realtime attaches.
+    await this.#completeStartupAfterSnapshot(generation);
+  }
+
+  async #completeStartupAfterSnapshot(generation: number): Promise<void> {
+    if (generation !== this.#generation || this.#cache === null) return;
+    this.#startupRealtimePending = true;
+    await this.#repairAndFlush(generation);
+    if (generation !== this.#generation || this.#cache === null) return;
+    if (this.#syncRecoveryPending || this.#membershipRepairPending) {
+      // A retryable final catch-up or an unresolved durable membership marker must keep renderer
+      // realtime closed. Starting here could cross an unacknowledged revocation boundary.
+      this.#setState({ busy: false, stale: true });
+      return;
+    }
+    await this.#restartRealtime(generation);
+    if (generation !== this.#generation) return;
+    this.#startupRealtimePending = false;
+    this.#setState({ busy: false });
+  }
+
   async #restartRealtime(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
@@ -1924,6 +2525,9 @@ export class WorkspaceRuntime {
   ): Promise<boolean> {
     const cache = this.#cache;
     if (cache === null) return false;
+    // HTTP catch-up membership events do not pass through the realtime listener. Rotate here too;
+    // for realtime this harmlessly advances to the signal the authoritative repair will use.
+    this.#rotateProjectionBarrier();
     this.#membershipRepairPending = true;
     this.#membershipEpoch += 1;
     this.#clearRetryTimer();
@@ -1950,8 +2554,19 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
 
     if (repairedMembership) {
-      await this.#refreshSnapshot(generation);
-      if (generation !== this.#generation || cache !== this.#cache) return true;
+      // Another accepted membership change can invalidate this snapshot while its network reads
+      // are in flight. Keep the first durable marker in place and retry at the newest membership
+      // epoch; letting the queued repair run first would make it collide with that marker, while
+      // acknowledging now could cross a revocation that has not been durably repaired.
+      for (;;) {
+        const attemptedMembershipEpoch = this.#membershipEpoch;
+        const refreshed = await this.#refreshSnapshot(generation);
+        if (generation !== this.#generation || cache !== this.#cache) return true;
+        if (refreshed) break;
+        if (this.#membershipEpoch === attemptedMembershipEpoch) {
+          throw new Error("Membership repair snapshot was invalidated without a newer event");
+        }
+      }
       const repaired = await cache.load();
       if (repaired.repairMarker !== null) {
         throw new Error("Membership repair did not clear its durable marker");
@@ -2080,13 +2695,23 @@ export class WorkspaceRuntime {
 
   async #applyWorkspaceEvent(event: WorkspaceEvent, generation: number): Promise<void> {
     const cache = this.#cache;
-    if (cache === null) return;
+    if (cache === null || generation !== this.#generation) return;
     if (event.type === "channel.membership_changed") {
       await this.#repairMembershipEvent(event, generation, true);
       return;
     }
-    const applied = await cache.applyEvent(event);
+    const projection = this.#captureProjection(cache);
+    if (projection.generation !== generation || !this.#isProjectionCurrent(projection)) return;
+    let applied: boolean;
+    try {
+      applied = await cache.applyEvent(event, projection.signal);
+    } catch (error) {
+      if (!this.#isProjectionCurrent(projection)) return;
+      throw error;
+    }
+    if (!this.#isProjectionCurrent(projection)) return;
     await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
+    if (!this.#isProjectionCurrent(projection)) return;
     if (!applied) return;
     this.#syncCursor = event.workspaceSequence;
     if (event.type === "member.updated") {
@@ -2168,75 +2793,150 @@ export class WorkspaceRuntime {
 
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
-    if (
-      this.#flushing ||
-      this.#membershipRepairPending ||
-      cache === null ||
-      generation !== this.#generation
-    ) {
+    if (this.#membershipRepairPending || cache === null || generation !== this.#generation) {
       return;
     }
-    this.#flushing = true;
+    const owner = this.#captureProjection(cache);
+    if (
+      this.#outboxFlushOwner?.signal === owner.signal &&
+      this.#outboxFlushOwner.cache === owner.cache &&
+      this.#outboxFlushOwner.generation === owner.generation
+    ) {
+      // Do not race the current projection's worker. Its `finally` block will observe this request
+      // even when it arrived after that worker found no deliverable item.
+      this.#outboxFlushRequested = true;
+      return;
+    }
+    // A generation change or membership barrier rotates the projection signal. The replacement
+    // worker must not wait for an old request that can remain hung indefinitely.
+    this.#outboxFlushOwner = owner;
+    this.#outboxFlushRequested = false;
     this.#clearRetryTimer();
     try {
       for (;;) {
-        if (this.#membershipRepairPending) return;
+        if (!this.#isOutboxFlushOwnerCurrent(owner)) return;
         const next = nextDeliverable(this.#state.outbox, Date.now());
         if (next === undefined) {
           this.#scheduleNextRetry(this.#state.outbox, generation);
           break;
         }
         const id = next.operation.message.clientMessageId;
+        if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
         const attempt = next.attemptCount + 1;
-        await this.#patchOutbox(id, {
-          status: "sending",
-          attemptCount: attempt,
-          nextAttemptAt: null,
-          failureReason: null,
-        });
-        if (generation !== this.#generation || this.#membershipRepairPending) return;
+        const patched = await this.#patchOutbox(
+          id,
+          {
+            status: "sending",
+            attemptCount: attempt,
+            nextAttemptAt: null,
+            failureReason: null,
+          },
+          owner,
+          next.operation.conversationId,
+          { status: next.status, attemptCount: next.attemptCount },
+        );
+        if (!patched || !this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) {
+          return;
+        }
         const result = await this.#client.sendConversationMessage(next.operation);
-        if (generation !== this.#generation || this.#membershipRepairPending) return;
+        if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
+        // A membership repair can finish while this request is still in flight. Its authoritative
+        // snapshot removes revoked sends from both the cache and this projection; a late response
+        // no longer owns anything and must not reinsert its message after the barrier has cleared.
+        if (!this.#state.outbox.some((item) => item.operation.message.clientMessageId === id)) {
+          continue;
+        }
         if (result.status === "accepted") {
           // The send response's cursor is a whole-workspace sequence, so a peer event still in
           // flight can be below it. Record the message durably but keep this client's cursor at
           // what it has actually applied, and never acknowledge the send cursor to the server.
-          await cache.upsertAcknowledgedMessage(result.response.message, this.#syncCursor ?? "0");
-          if (generation !== this.#generation || this.#membershipRepairPending) return;
+          const persisted = await cache.upsertAcknowledgedMessage(
+            result.response.message,
+            id,
+            this.#syncCursor ?? "0",
+            owner.signal,
+          );
+          if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
+          if (!persisted) {
+            if (this.#state.outbox.some((item) => item.operation.message.clientMessageId === id)) {
+              return;
+            }
+            continue;
+          }
+          if (
+            !this.#state.bootstrap?.conversations.some(
+              (summary) => summary.conversation.id === result.response.message.conversationId,
+            )
+          ) {
+            return;
+          }
           this.#acceptMessage(result.response.message, id);
           continue;
         }
         if (result.status === "authentication_required") {
-          await this.#patchOutbox(id, {
-            status: "paused_auth",
-            attemptCount: attempt,
-            nextAttemptAt: null,
-            failureReason: "Sign in to retry",
-          });
+          const paused = await this.#patchOutbox(
+            id,
+            {
+              status: "paused_auth",
+              attemptCount: attempt,
+              nextAttemptAt: null,
+              failureReason: "Sign in to retry",
+            },
+            owner,
+            next.operation.conversationId,
+            { status: "sending", attemptCount: attempt },
+          );
+          if (!paused) return;
           break;
         }
         if (result.status === "permanent") {
-          await this.#patchOutbox(id, {
-            status: "permanent_failure",
-            attemptCount: attempt,
-            nextAttemptAt: null,
-            failureReason: result.reason,
-          });
+          const failed = await this.#patchOutbox(
+            id,
+            {
+              status: "permanent_failure",
+              attemptCount: attempt,
+              nextAttemptAt: null,
+              failureReason: result.reason,
+            },
+            owner,
+            next.operation.conversationId,
+            { status: "sending", attemptCount: attempt },
+          );
+          if (!failed) return;
           continue;
         }
         const delay = result.retryAfterMs ?? retryDelay(attempt);
-        await this.#patchOutbox(id, {
-          status: "retry_wait",
-          attemptCount: attempt,
-          nextAttemptAt: new Date(Date.now() + delay).toISOString(),
-          failureReason: result.reason,
-        });
+        const waiting = await this.#patchOutbox(
+          id,
+          {
+            status: "retry_wait",
+            attemptCount: attempt,
+            nextAttemptAt: new Date(Date.now() + delay).toISOString(),
+            failureReason: result.reason,
+          },
+          owner,
+          next.operation.conversationId,
+          { status: "sending", attemptCount: attempt },
+        );
+        if (!waiting) return;
         // Without rearming here the message waits for a manual retry or a restart forever.
         this.#scheduleNextRetry(this.#state.outbox, generation);
         break;
       }
     } finally {
-      this.#flushing = false;
+      if (this.#outboxFlushOwner === owner) {
+        const rerun = this.#outboxFlushRequested;
+        this.#outboxFlushOwner = null;
+        this.#outboxFlushRequested = false;
+        if (
+          rerun &&
+          generation === this.#generation &&
+          cache === this.#cache &&
+          !this.#membershipRepairPending
+        ) {
+          void this.#flushOutbox(generation);
+        }
+      }
     }
   }
 
@@ -2266,19 +2966,40 @@ export class WorkspaceRuntime {
     );
   }
 
-  async #patchOutbox(clientMessageId: string, update: OutboxUpdate): Promise<void> {
-    await this.#cache?.updateOutbox(clientMessageId, update);
+  async #patchOutbox(
+    clientMessageId: string,
+    update: OutboxUpdate,
+    owner?: ProjectionGuard,
+    conversationId?: string,
+    expected?: OutboxUpdateExpectation,
+  ): Promise<boolean> {
+    const cache = owner?.cache ?? this.#cache;
+    if (
+      cache === null ||
+      (owner !== undefined && !this.#isOutboxFlushOwnerCurrent(owner, conversationId))
+    ) {
+      return false;
+    }
+    const committed = await cache.updateOutbox(clientMessageId, update, owner?.signal, expected);
+    if (!committed) return false;
+    if (owner !== undefined && !this.#isOutboxFlushOwnerCurrent(owner, conversationId)) {
+      return false;
+    }
     this.#setState({
       outbox: this.#state.outbox.map((item) =>
         item.operation.message.clientMessageId === clientMessageId ? { ...item, ...update } : item,
       ),
     });
+    return true;
   }
 
-  async #reloadCache(): Promise<void> {
-    const cache = this.#cache;
-    if (cache === null) return;
+  async #reloadCache(generation: number, cache: WorkspaceCache): Promise<boolean> {
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
+      return false;
     const loaded = await cache.load();
+    if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
+      return false;
     let threadSummaries = this.#state.threadSummaries;
     const knownMessageIds = new Set(this.#state.messages.map((message) => message.id));
     for (const message of loaded.messages) {
@@ -2300,6 +3021,38 @@ export class WorkspaceRuntime {
       tasks: loaded.tasks,
       outbox: loaded.outbox,
     });
+    return true;
+  }
+
+  #scheduleMembershipMarkerRetry(
+    generation: number,
+    cache: WorkspaceCache,
+    marker: MembershipRepairMarker,
+    startCursor: string,
+    retryAfterMs: number | null,
+  ): void {
+    this.#clearSyncRetryTimer();
+    this.#syncAttempt += 1;
+    const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
+    this.#syncRetryTimer = setTimeout(() => {
+      this.#syncRetryTimer = null;
+      void this.#serializeRecovery(async () => {
+        if (generation !== this.#generation || cache !== this.#cache || this.#syncAttempt === 0) {
+          return;
+        }
+        this.#setState({ busy: true });
+        await this.#recoverDurableMembershipMarker(generation, cache, marker, startCursor);
+      }).catch((error: unknown) => {
+        if (generation === this.#generation && cache === this.#cache) {
+          this.#syncAttempt = 0;
+          this.#setState({
+            busy: false,
+            stale: true,
+            error: errorMessage(error, "Could not initialize the workspace"),
+          });
+        }
+      });
+    }, delay);
   }
 
   #scheduleSyncRetry(generation: number, retryAfterMs: number | null): void {
@@ -2313,7 +3066,29 @@ export class WorkspaceRuntime {
       // repair resets the attempt and makes this queued retry redundant.
       void this.#serializeRecovery(async () => {
         if (generation !== this.#generation || this.#syncAttempt === 0) return;
-        await this.#repairAndFlush(generation);
+        const wasReplicaCatchUp = this.#startupReplicaCatchUpPending;
+        await this.#repairAndFlush(generation, !wasReplicaCatchUp);
+        if (
+          generation === this.#generation &&
+          wasReplicaCatchUp &&
+          this.#startupReplicaCatchUpPending &&
+          !this.#syncRecoveryPending
+        ) {
+          this.#startupReplicaCatchUpPending = false;
+          await this.#completeStartupAfterReplicaCatchUp(generation);
+          return;
+        }
+        if (
+          generation === this.#generation &&
+          this.#startupRealtimePending &&
+          !this.#syncRecoveryPending &&
+          !this.#membershipRepairPending
+        ) {
+          await this.#restartRealtime(generation);
+          if (generation !== this.#generation) return;
+          this.#startupRealtimePending = false;
+          this.#setState({ busy: false });
+        }
       }).catch((error: unknown) => {
         if (generation === this.#generation) {
           this.#setState({

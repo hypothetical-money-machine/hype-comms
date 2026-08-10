@@ -229,6 +229,15 @@ domain events are:
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
+Before `system.connected` proves the ticket's exact user scope, desktop main buffers at most 1,024
+validated replay events and 4 MiB of serialized frames; each WebSocket frame is also capped at
+4 MiB. Overflow drops the message-bearing buffer, stops that connection generation without a
+same-cursor reconnect, and retains only a body-free, scope-bound resync control until renderer HTTP
+recovery supplies a newer durable cursor. A renderer navigation or crash similarly pauses event
+delivery at the last acknowledged cursor. Shared event schemas also verify canonical cross-field
+relations—such as message conversation/sequence/version and task workspace/conversation/version—
+for both WebSocket and HTTP sync before either path can reach the encrypted replica.
+
 Reaction, task, and read-state events are capability-gated for rolling compatibility. A client
 advertises `reaction-events-v1`, `task-events-v1`, and `read-state-events-v1` through
 `X-HMM-Chat-Capabilities` on both
@@ -285,15 +294,28 @@ temporary downloads are removed on logout and on the next startup. Offline full-
 and offline attachment uploads are deferred: queued sends contain text, mentions, and thread
 context only, and the UI requires connectivity before attaching a file.
 
-Startup and reconnect use this sequence:
+A full snapshot replacement authoritatively pages task boards for every visible channel and the
+signed-in person's self DM; peer and group DMs are not task targets and are never queried. The
+aggregate replacement is capped at 20,000 tasks. Inconsistent or cyclic pagination, duplicate task
+IDs, crossed workspace/conversation scope, or capacity overflow fails the entire replacement before
+its bootstrap high-water cursor is committed, so cached task state is never silently retained or
+partially advanced past.
+
+Renderer startup and authoritative recovery use this sequence. An ordinary socket reconnect resumes
+from the last durable acknowledgement without rebuilding the snapshot:
 
 1. Render decrypted cache with an explicit stale/offline state while main restores a session.
-2. If there is no cursor, call bootstrap. Otherwise page `/sync` until its high-water cursor.
-3. Obtain a realtime ticket and connect with the last durably applied cursor; the server
+2. When an encrypted replica exists, page `/sync` from its durable cursor and apply that catch-up
+   before replacing the snapshot. This repairs any interval main observed while macOS had no
+   renderer without treating notification progress as UI progress.
+3. Build an authoritative snapshot from bootstrap plus every conversation, history, reaction,
+   and eligible task page, then commit it atomically at the bootstrap high-water cursor.
+4. Page `/sync` again from that committed cursor until its current high-water cursor.
+5. Obtain a realtime ticket and connect with the last durably applied cursor; the server
    replays the connection gap.
-4. For each event, validate its version/audience, apply an idempotent entity upsert/delete and
+6. For each event, validate its version/audience, apply an idempotent entity upsert/delete and
    cursor advance in one IndexedDB transaction, then update visible state.
-5. Once membership/conversation state is current, flush the outbox FIFO within each
+7. Once membership/conversation state is current, flush the outbox FIFO within each
    conversation and with at most three conversations in flight.
 
 Duplicate event IDs are ignored, older entity versions cannot overwrite newer data, and a
@@ -390,12 +412,49 @@ shared focus treatment before it can be added to the built-in registry.
 - Search returns a body snippet with escaped highlights but no durable download URL. Empty,
   stop-word-only, and overly broad queries return a validated user error; queries are
   limited to 200 characters and 30 per minute per member.
-- Main issues native notifications only while the app is running and its window is not
-  focused. Notify for a new DM, a verified mention, or a reply to a thread the user started
-  or has replied to; suppress self-authored and currently visible messages. Notification
-  previews default off, showing only author/conversation. Clicking routes to the exact
-  conversation/thread and fetches it if absent from cache. Denied OS permission is a normal
-  settings state, not a retry loop. A fully quit desktop receives no push notification.
+- Native notifications follow the main/renderer, freshness, and action boundary in
+  [ADR 0002](adr/0002-native-notification-boundary.md). Milestones 0 through 3 are implemented and
+  covered deterministically, including direct messages, verified mentions, and the
+  capability-gated recipient-specific `participated_thread_reply` reason. Main applies precedence
+  in that order: verified mention, direct message, then participated-thread reply. It never infers
+  participation from local thread state.
+- The implementation is compiled off unless the build-time
+  `HMM_NATIVE_NOTIFICATIONS_ENABLED=1` switch is explicit; unset and `0` fail closed, and the
+  device preference also defaults disabled. Notification bookkeeping is ephemeral and never
+  advances or delays the renderer replica, sync cursor, read cursor, unread count, or mention
+  count.
+- Once explicitly enabled, main evaluates only a fresh `message.created` from the connection armed
+  by its validated `system.connected`. Replay, catch-up, duplicates, null/self authors, focus, an
+  exact stream visible at its live tail, stale scope, disabled/unsupported capability, and OS
+  denial are quiet. Human, bot, and agent authors follow the same policy. Group DMs remain
+  ineligible.
+- In a flag-enabled macOS build, closing the last window keeps only notification observation on the
+  authenticated realtime connection. That path sends no renderer event, buffers no UI event, and
+  cannot advance the renderer cursor. A recreated renderer catches up from the encrypted replica
+  cursor, commits the authoritative snapshot and final HTTP sync, then opens a new realtime epoch.
+  A windowless `system.resync_required` stops and latches body-free recovery until that renderer
+  supplies a strictly newer durable cursor. Default-off builds retain last-window realtime stop;
+  Windows and Linux stop realtime and quit after the last window closes. The
+  [main transport](../apps/desktop/src/main/workspace-realtime.test.ts) and
+  [renderer recovery](../apps/desktop/src/renderer/src/workspace-runtime.test.ts) suites prove this
+  separation.
+- Notification content defaults to bounded author/conversation metadata, never message body text.
+  A body-free, scope-bound click action restores the exact conversation/message/thread only in its
+  originating process and current session generation. Main retains delivery until an exact
+  post-navigation renderer acknowledgement, so reloads re-drain safely without repeating handled
+  navigation. Denial or presenter failure is a stable local state, not a prompt/retry/reconnect
+  loop; a fully quit desktop receives no push. Headless automation uses a body-free opaque-ID
+  capture/activation path and never constructs a native presenter.
+- On Windows, main sets the exact Electron Builder AppUserModelID
+  `com.hypotheticalmoneymachine.hmmchat` before creating a `BrowserWindow`; a
+  [deterministic identity test](../apps/desktop/src/main/application-identity.test.ts) prevents
+  source/package drift. Stable installed NSIS attribution and click handling remain part of the
+  native evidence gate.
+- No installed operating-system notification evidence exists yet, so ordinary build and device
+  defaults must not flip. Milestone 4 remains blocked on the complete external host matrix: current
+  and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64
+  installed from both AppImage and Debian packages. The existing package smoke only verifies build
+  contents; it does not install, launch, display, or click a native toast.
 
 ## Security, privacy, and operations
 

@@ -1,13 +1,21 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ThemePreference, ThemeState } from "@hmm-chat/contracts";
+import type {
+  NotificationActionDrainResponse,
+  NotificationContext,
+  NotificationPreference,
+  NotificationState,
+  ThemePreference,
+  ThemeState,
+} from "@hmm-chat/contracts";
 import { createElement, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   CompactModeTransport,
   DesktopPlatform,
+  NotificationTransport,
   ThemeTransport,
 } from "../../shared/desktop-api";
 import { getThemeDefinition } from "../../shared/theme";
@@ -76,9 +84,64 @@ class PreferencesCompactModeTransport implements CompactModeTransport {
   }
 }
 
+class PreferencesNotificationTransport implements NotificationTransport {
+  state: NotificationState = {
+    version: 1,
+    devicePreference: "disabled",
+    contentPreviewPreference: "disabled",
+    nativeSupport: "supported",
+    osPermission: "granted",
+  };
+  readonly listeners = new Set<(state: NotificationState) => void>();
+
+  async getNotificationState(): Promise<NotificationState> {
+    return this.state;
+  }
+
+  async setNotificationPreference(preference: NotificationPreference): Promise<NotificationState> {
+    this.state = { ...this.state, ...preference };
+    this.emit();
+    return this.state;
+  }
+
+  async refreshNotificationCapability(): Promise<NotificationState> {
+    return this.state;
+  }
+
+  onNotificationStateChanged(listener: (state: NotificationState) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async getNotificationContext(): Promise<NotificationContext> {
+    throw new Error("Preferences do not read notification session context");
+  }
+
+  async reportNotificationActivity(): Promise<void> {
+    throw new Error("Preferences do not report notification activity");
+  }
+
+  async drainNotificationActions(): Promise<NotificationActionDrainResponse> {
+    throw new Error("Preferences do not drain notification actions");
+  }
+
+  async acknowledgeNotificationAction(): Promise<void> {
+    throw new Error("Preferences do not acknowledge notification actions");
+  }
+
+  onNotificationAction(): () => void {
+    throw new Error("Preferences do not subscribe to notification actions");
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) listener(this.state);
+  }
+}
+
 interface PreferencesHarnessProps {
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
   readonly onOpenChange: (open: boolean) => void;
 }
@@ -86,6 +149,7 @@ interface PreferencesHarnessProps {
 function PreferencesHarness({
   theme,
   compactMode,
+  notifications,
   platform,
   onOpenChange,
 }: PreferencesHarnessProps) {
@@ -109,6 +173,7 @@ function PreferencesHarness({
       open,
       theme,
       compactMode,
+      notifications,
       platform,
       triggerRef,
       onClose: () => setOpen(false),
@@ -117,7 +182,7 @@ function PreferencesHarness({
   );
 }
 
-async function renderPreferences() {
+async function renderPreferences(notifications?: NotificationTransport) {
   const themeClient = new PreferencesThemeTransport();
   const compactModeClient = new PreferencesCompactModeTransport();
   const theme = new ThemeRuntime(themeClient, document.documentElement);
@@ -129,6 +194,7 @@ async function renderPreferences() {
     createElement(PreferencesHarness, {
       theme,
       compactMode,
+      notifications,
       platform: "linux",
       onOpenChange,
     }),
@@ -220,7 +286,7 @@ describe("PreferencesDialog", () => {
     expect(rendered.onOpenChange).toHaveBeenLastCalledWith(false);
   });
 
-  it("renders both preference controls and reflects live runtime changes", async () => {
+  it("renders every preference section and reflects live runtime changes", async () => {
     const { compactModeClient, themeClient } = await renderPreferences();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
 
@@ -228,6 +294,10 @@ describe("PreferencesDialog", () => {
     expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Layout", level: 3 })).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Compact mode" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Notifications", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe(
+      "Notifications are unavailable in this build.",
+    );
 
     themeClient.emit({
       preference: "light",
@@ -244,5 +314,24 @@ describe("PreferencesDialog", () => {
         (screen.getByRole("checkbox", { name: "Compact mode" }) as HTMLInputElement).checked,
       ).toBe(true);
     });
+  });
+
+  it("includes notification controls in the dialog focus trap when the bridge is available", async () => {
+    const notifications = new PreferencesNotificationTransport();
+    await renderPreferences(notifications);
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const dialog = screen.getByRole("dialog", { name: "Preferences" });
+    const first = screen.getByRole("button", { name: "Close preferences" });
+    expect(await screen.findByRole("checkbox", { name: /Enable notifications/ })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: /Show message previews/ })).toBeTruthy();
+    const last = screen.getByRole("button", { name: "Refresh capability" });
+
+    last.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    first.focus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
   });
 });

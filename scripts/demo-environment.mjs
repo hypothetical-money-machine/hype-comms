@@ -10,6 +10,8 @@ export const DEMO_API_PORT = 3000;
 export const DEMO_RENDERER_PORT = 5173;
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
 export const HEADLESS_DEMO_MANIFEST_KIND = "hmm-chat-headless-demo";
+export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
+  "HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
 
 const HEADLESS_DEMO_CLIENT_PROFILES = ["claire", "woots"];
 const TCP_PORT_MAX = 65_535;
@@ -208,12 +210,18 @@ export function headlessElectronViteArguments(cdpPort) {
   return [`--remoteDebuggingPort=${String(port)}`, "--", "--remote-debugging-address=127.0.0.1"];
 }
 
-export function deriveHeadlessDesktopEnvironment(baseEnv, { profile, callbackFile, cdpPort }) {
+export function deriveHeadlessDesktopEnvironment(
+  baseEnv,
+  { profile, callbackFile, cdpPort, artifactsDirectory },
+) {
   if (!HEADLESS_DEMO_CLIENT_PROFILES.includes(profile)) {
     throw new Error("Headless demo desktop profile is invalid");
   }
   if (typeof callbackFile !== "string" || callbackFile === "") {
     throw new Error("Headless demo auth callback file is required");
+  }
+  if (typeof artifactsDirectory !== "string" || !path.isAbsolute(artifactsDirectory)) {
+    throw new Error("Headless demo artifacts directory must be absolute");
   }
   assertTcpPort(cdpPort, "The CDP port");
   const environment = { ...baseEnv };
@@ -222,8 +230,10 @@ export function deriveHeadlessDesktopEnvironment(baseEnv, { profile, callbackFil
   return {
     ...environment,
     HMM_DESKTOP_HEADLESS: "1",
+    HMM_NATIVE_NOTIFICATIONS_ENABLED: "1",
     HMM_DESKTOP_PROFILE: profile,
     HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
+    [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: path.resolve(artifactsDirectory),
   };
 }
 
@@ -343,6 +353,8 @@ export function deriveDemoEnvironment(baseEnv, projectRoot) {
   // A normal demo must remain interactive even when a caller's shell has automation settings.
   // The headless launcher adds its own pinned CDP configuration after this normalization.
   delete env.HMM_DESKTOP_HEADLESS;
+  delete env.HMM_NATIVE_NOTIFICATIONS_ENABLED;
+  delete env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV];
   delete env.ELECTRON_CLI_ARGS;
   delete env.REMOTE_DEBUGGING_PORT;
   return { env, port, databaseUrl: databaseUrl.toString(), paths };

@@ -201,13 +201,44 @@ const taskEventBaseSchema = realtimeEventEnvelopeSchema.extend({
   payload: z.object({ task: taskSchema }).strict(),
 });
 
-export const taskCreatedEventSchema = taskEventBaseSchema.extend({
-  type: z.literal("task.created"),
-});
+function refineTaskEvent(
+  event: z.infer<typeof taskEventBaseSchema>,
+  context: z.RefinementCtx,
+): void {
+  if (event.payload.task.workspaceId !== event.workspaceId) {
+    context.addIssue({
+      code: "custom",
+      path: ["payload", "task", "workspaceId"],
+      message: "Task workspace must match the event workspace",
+    });
+  }
+  if (event.payload.task.conversationId !== event.conversationId) {
+    context.addIssue({
+      code: "custom",
+      path: ["payload", "task", "conversationId"],
+      message: "Task conversation must match the event conversation",
+    });
+  }
+  if (event.payload.task.version !== event.entityVersion) {
+    context.addIssue({
+      code: "custom",
+      path: ["payload", "task", "version"],
+      message: "Task version must match the event entity version",
+    });
+  }
+}
 
-export const taskUpdatedEventSchema = taskEventBaseSchema.extend({
-  type: z.literal("task.updated"),
-});
+export const taskCreatedEventSchema = taskEventBaseSchema
+  .extend({
+    type: z.literal("task.created"),
+  })
+  .superRefine(refineTaskEvent);
+
+export const taskUpdatedEventSchema = taskEventBaseSchema
+  .extend({
+    type: z.literal("task.updated"),
+  })
+  .superRefine(refineTaskEvent);
 
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export type TaskPriority = z.infer<typeof taskPrioritySchema>;

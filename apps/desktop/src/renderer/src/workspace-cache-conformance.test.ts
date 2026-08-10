@@ -321,6 +321,19 @@ const queuedAlphaMessage: SendMessageOperation = {
   },
 };
 
+const queuedDirectMessage: SendMessageOperation = {
+  conversationId: DIRECT_ID,
+  idempotencyKey: "10000000-0000-4000-8000-000000000070",
+  message: {
+    threadRootId: null,
+    body: "Must survive an unrelated membership repair",
+    bodyFormat: "hmm_markdown_v1",
+    clientMessageId: "10000000-0000-4000-8000-000000000070",
+    mentionedUserIds: [],
+    attachmentIds: [],
+  },
+};
+
 /** One more than `workspaceSnapshotSchema.members`'s `.max(25)` — the list that bricks `load()`. */
 const overCapacityMembers: readonly User[] = Array.from({ length: 26 }, (_unused, index) => {
   const suffix = String(index).padStart(2, "0");
@@ -445,7 +458,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("orders messages by conversation sequence after an out-of-order upsertHistory", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
-    await cache.upsertHistory([messageSequence10, messageSequence1, messageSequence2]);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence10, messageSequence1, messageSequence2]);
 
     const state = await cache.load();
     const sequences = state.messages.map((message) => message.conversationSequence);
@@ -693,6 +706,147 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
+  it("prunes only outbox rows outside an authoritative conversation catalog", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    await cache.enqueue(queuedDirectMessage, "2026-07-24T12:00:01.000Z");
+
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: snapshot.conversations.filter(
+          (summary) => summary.conversation.id !== ALPHA_ID,
+        ),
+        syncCursor: "12",
+      },
+      [],
+    );
+
+    expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([
+      queuedDirectMessage,
+    ]);
+  });
+
+  it("updates an outbox status only for the current attempt and projection", async () => {
+    const cache = create();
+    const clientMessageId = queuedAlphaMessage.message.clientMessageId;
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const sending = {
+      status: "sending" as const,
+      attemptCount: 1,
+      nextAttemptAt: null,
+      failureReason: null,
+    };
+
+    const retired = new AbortController();
+    retired.abort();
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, retired.signal, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, undefined, {
+        status: "sending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      cache.updateOutbox(clientMessageId, sending, undefined, {
+        status: "pending",
+        attemptCount: 0,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      cache.updateOutbox(
+        clientMessageId,
+        {
+          status: "retry_wait",
+          attemptCount: 1,
+          nextAttemptAt: NOW,
+          failureReason: "network",
+        },
+        undefined,
+        { status: "sending", attemptCount: 1 },
+      ),
+    ).resolves.toBe(true);
+
+    expect((await cache.load()).outbox[0]).toMatchObject({
+      status: "retry_wait",
+      attemptCount: 1,
+      failureReason: "network",
+    });
+  });
+
+  it("accepts a send response only while its outbox row and conversation are authorized", async () => {
+    const cache = create();
+    const acknowledged: Message = {
+      ...messageSequence2,
+      id: "10000000-0000-4000-8000-000000000074",
+      clientMessageId: "10000000-0000-4000-8000-000000000075",
+      authorId: MORGAN_ID,
+      threadRootId: queuedAlphaMessage.message.threadRootId,
+      body: queuedAlphaMessage.message.body,
+      conversationSequence: "11",
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+
+    // A resync can temporarily preserve the queued operation without an authorization catalog.
+    // The response stays uncommitted until a complete snapshot proves the conversation.
+    await cache.clearServerStatePreservingOutbox();
+    await expect(
+      cache.upsertAcknowledgedMessage(
+        acknowledged,
+        queuedAlphaMessage.message.clientMessageId,
+        "1",
+      ),
+    ).resolves.toBe(false);
+    expect((await cache.load()).messages).toEqual([]);
+    expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([queuedAlphaMessage]);
+
+    await cache.replaceSnapshot({ ...snapshot, syncCursor: "1" }, []);
+    await expect(
+      cache.upsertAcknowledgedMessage(
+        acknowledged,
+        queuedAlphaMessage.message.clientMessageId,
+        "1",
+      ),
+    ).resolves.toBe(true);
+    const accepted = await cache.load();
+    expect(accepted.messages).toEqual([acknowledged]);
+    expect(accepted.outbox).toEqual([]);
+  });
+
+  it("leaves an existing snapshot unchanged when its replacement generation is aborted", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await expect(
+      cache.replaceSnapshot(
+        { ...snapshot, conversations: [], syncCursor: "12" },
+        [],
+        [],
+        [],
+        abortController.signal,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("0");
+    expect(state.bootstrap?.conversations.map((item) => item.conversation.id)).toEqual([
+      ALPHA_ID,
+      ZEBRA_ID,
+      DIRECT_ID,
+    ]);
+    expect(state.messages).toEqual([messageSequence2]);
+  });
+
   it("does not discard a member replace that arrives before the first snapshot", async () => {
     // A cache that has never seen replaceSnapshot (or has just had clearServerStatePreservingOutbox
     // run) still has to accept a replaceMembers write rather than silently dropping it --
@@ -743,7 +897,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const reaction = reactionAddedEvent.payload.reaction;
     await cache.replaceSnapshot(snapshot, [messageSequence2], [reaction]);
 
-    await cache.upsertHistory([messageSequence2], []);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence2], []);
     expect((await cache.load()).reactions).toEqual([]);
 
     await cache.upsertReaction(reaction, ALPHA_ID);
@@ -792,6 +946,82 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 });
 
 describe("PersistentWorkspaceCache durability", () => {
+  it("rolls back a projection when its membership signal aborts at transaction commit", async () => {
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, []);
+    const baseSignal = new AbortController().signal;
+    let commitChecks = 0;
+    let aborted = false;
+    const signal = new Proxy(baseSignal, {
+      get(target, property) {
+        if (property === "aborted") return aborted;
+        if (property === "throwIfAborted") {
+          return () => {
+            commitChecks += 1;
+            if (commitChecks === 2) {
+              aborted = true;
+              throw new DOMException("Membership projection retired", "AbortError");
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2], [], signal)).resolves.toBe(
+      false,
+    );
+
+    expect(commitChecks).toBe(2);
+    expect((await cache.load()).messages).toEqual([]);
+  });
+
+  it("rolls back an outbox status when its owner aborts at transaction commit", async () => {
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const baseSignal = new AbortController().signal;
+    let commitChecks = 0;
+    let aborted = false;
+    const signal = new Proxy(baseSignal, {
+      get(target, property) {
+        if (property === "aborted") return aborted;
+        if (property === "throwIfAborted") {
+          return () => {
+            commitChecks += 1;
+            if (commitChecks === 2) {
+              aborted = true;
+              throw new DOMException("Outbox owner retired", "AbortError");
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(
+      cache.updateOutbox(
+        queuedAlphaMessage.message.clientMessageId,
+        {
+          status: "sending",
+          attemptCount: 1,
+          nextAttemptAt: null,
+          failureReason: null,
+        },
+        signal,
+        { status: "pending", attemptCount: 0 },
+      ),
+    ).resolves.toBe(false);
+
+    expect(commitChecks).toBe(2);
+    expect((await cache.load()).outbox[0]).toMatchObject({
+      status: "pending",
+      attemptCount: 0,
+    });
+  });
+
   it("keeps a completed self-removal purge durable across reopen", async () => {
     const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
     await first.replaceSnapshot(
@@ -892,7 +1122,7 @@ describe("workspace cache implementation parity", () => {
     });
     for (const cache of [memory, persistent]) {
       await cache.replaceSnapshot(snapshot, []);
-      await cache.upsertHistory([messageSequence10, messageSequence1]);
+      await cache.upsertHistory(ALPHA_ID, [messageSequence10, messageSequence1]);
       await cache.applyEvent(messageCreatedEvent);
       await cache.applyEvent(readCursorEvent);
       await cache.applyEvent(memberUpdatedEvent);
