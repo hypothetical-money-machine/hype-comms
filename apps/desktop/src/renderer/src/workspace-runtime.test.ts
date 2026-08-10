@@ -3283,6 +3283,111 @@ describe("WorkspaceRuntime", () => {
     ]);
   });
 
+  it("retries an in-flight repair snapshot when a second removal invalidates it", async () => {
+    const thirdConversationId = "20000000-0000-4000-8000-000000000052";
+    const firstPrivate = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members" as const,
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner" as const,
+    };
+    const secondPrivate = {
+      ...channel(thirdConversationId, "finance"),
+      conversation: {
+        ...channel(thirdConversationId, "finance").conversation,
+        access: "members" as const,
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner" as const,
+    };
+    const firstMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000053",
+      clientMessageId: "20000000-0000-4000-8000-000000000054",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000055",
+      clientMessageId: "20000000-0000-4000-8000-000000000056",
+      conversationId: thirdConversationId,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
+      }),
+    );
+    api.histories.set(SECOND_CONVERSATION_ID, {
+      messages: [firstMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.histories.set(thirdConversationId, {
+      messages: [secondMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const staleFirstRefresh = deferred<HumanWorkspaceBootstrapResponse>();
+    api.bootstrapResults.push(
+      staleFirstRefresh.promise,
+      bootstrapAt("12", { conversations: [channel(CONVERSATION_ID, "general")] }),
+    );
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000057",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(() => api.bootstrapRequests === 2, "first in-flight membership snapshot");
+
+    // This event is accepted after the first snapshot captured its membership epoch. Its immediate
+    // barrier hides the revoked conversation, while the first marker still owns durable repair.
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-000000000058",
+        "12",
+        "removed",
+        thirdConversationId,
+      ),
+    );
+    expect(runtime.state.messages).not.toContainEqual(secondMessage);
+    expect((await cache.load()).messages).toContainEqual(secondMessage);
+
+    staleFirstRefresh.resolve(
+      bootstrapAt("11", {
+        conversations: [channel(CONVERSATION_ID, "general"), secondPrivate],
+      }),
+    );
+    await settle(() => api.acknowledged.includes("12"), "both membership acknowledgements");
+    await drain();
+
+    const durable = await cache.load();
+    expect(api.bootstrapRequests).toBe(3);
+    expect(api.acknowledged.filter((cursor) => cursor === "11" || cursor === "12")).toEqual([
+      "11",
+      "12",
+    ]);
+    expect(api.startedCursors).toEqual(["10", "12", "12"]);
+    expect(durable.repairMarker).toBeNull();
+    expect(durable.bootstrap?.conversations.map((summary) => summary.conversation.id)).toEqual([
+      CONVERSATION_ID,
+    ]);
+    expect(durable.messages).toEqual([]);
+    expect(runtime.state.messages).toEqual([]);
+    expect(runtime.state.error).toBeNull();
+  });
+
   it("rejects an ordinary frame queued by the realtime session a repair superseded", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();

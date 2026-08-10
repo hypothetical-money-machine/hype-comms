@@ -2291,8 +2291,19 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
 
     if (repairedMembership) {
-      await this.#refreshSnapshot(generation);
-      if (generation !== this.#generation || cache !== this.#cache) return true;
+      // Another accepted membership change can invalidate this snapshot while its network reads
+      // are in flight. Keep the first durable marker in place and retry at the newest membership
+      // epoch; letting the queued repair run first would make it collide with that marker, while
+      // acknowledging now could cross a revocation that has not been durably repaired.
+      for (;;) {
+        const attemptedMembershipEpoch = this.#membershipEpoch;
+        const refreshed = await this.#refreshSnapshot(generation);
+        if (generation !== this.#generation || cache !== this.#cache) return true;
+        if (refreshed) break;
+        if (this.#membershipEpoch === attemptedMembershipEpoch) {
+          throw new Error("Membership repair snapshot was invalidated without a newer event");
+        }
+      }
       const repaired = await cache.load();
       if (repaired.repairMarker !== null) {
         throw new Error("Membership repair did not clear its durable marker");
