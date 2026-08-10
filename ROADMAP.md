@@ -60,8 +60,8 @@ Roughly in order:
 - Structured mention completion on the existing verified mention model.
 - File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
   authorized filename search.
-- Native notifications with focus and self suppression, and click-through to the
-  conversation.
+- [Native notifications](docs/native-notifications-roadmap.md) with focus, visibility, self, and replay
+  suppression plus exact, scope-bound click-through to the message or thread.
 - Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
   an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
   and notarization plus the cross-platform update feed are already running.
