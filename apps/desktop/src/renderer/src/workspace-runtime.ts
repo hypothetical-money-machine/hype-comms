@@ -589,7 +589,23 @@ export class WorkspaceRuntime {
         stale: true,
       });
 
-      if (cached.bootstrap !== null) {
+      let replicaAvailable = cached.bootstrap !== null;
+      if (cached.repairMarker !== null) {
+        // A prior run already purged revoked data but crashed before its authoritative replacement
+        // committed. This durable privacy barrier is the sole exception to replica-first startup:
+        // advancing HTTP sync while the marker exists would either fail or cross the revocation.
+        const repaired = await this.#refreshSnapshot(generation);
+        if (!repaired || generation !== this.#generation || this.#cache === null) return;
+        const repairedCache = this.#cache;
+        const repairedState = await repairedCache.load();
+        if (generation !== this.#generation || repairedCache !== this.#cache) return;
+        if (repairedState.repairMarker !== null) {
+          throw new Error("Membership repair did not clear its durable marker");
+        }
+        replicaAvailable = repairedState.bootstrap !== null;
+      }
+
+      if (replicaAvailable) {
         // A recreated window first catches up from the encrypted replica cursor. Main may have
         // observed events for notifications while no renderer existed, but that observation never
         // became UI progress. Only this HTTP pass may bridge that interval before the normal

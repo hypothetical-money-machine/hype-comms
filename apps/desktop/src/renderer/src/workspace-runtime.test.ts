@@ -1646,6 +1646,57 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
+  it("repairs a durable membership marker before replica catch-up", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const privateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000050",
+      clientMessageId: "20000000-0000-4000-8000-000000000051",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const initial = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(initial, [privateMessage]);
+    await cache.applyEvent(
+      membershipChanged(MEMBER_EVENT_ID, "11", "removed", SECOND_CONVERSATION_ID),
+    );
+    const purged = await cache.load();
+    expect(purged.repairMarker?.workspaceSequence).toBe("11");
+    expect(purged.messages).not.toContainEqual(privateMessage);
+    expect(purged.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
+      SECOND_CONVERSATION_ID,
+    );
+
+    const api = new FakeDesktopApi(bootstrapAt("11"));
+    const runtime = runtimeWith(api, cache);
+    // FakeWorkspaceCache rejects cursor advancement while a repair marker exists, so reaching the
+    // two catch-up passes proves the authoritative replacement committed before replica sync.
+    await runtime.start(session);
+
+    const repaired = await cache.load();
+    expect(repaired.repairMarker).toBeNull();
+    expect(repaired.messages).not.toContainEqual(privateMessage);
+    expect(repaired.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
+      SECOND_CONVERSATION_ID,
+    );
+    expect(runtime.state.messages).not.toContainEqual(privateMessage);
+    expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
+    expect(api.syncedFrom).toEqual(["11", "11"]);
+    expect(api.acknowledged).toEqual(["11", "11"]);
+    expect(api.startedCursors).toEqual(["11"]);
+    expect(cache.cursor).toBe("11");
+  });
+
   it("preserves an older root referenced by a queued reply across snapshot replacement", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
@@ -2019,6 +2070,7 @@ describe("WorkspaceRuntime", () => {
     // Restarting realtime retires the queued task frame from the old socket epoch, so the repaired
     // cursor is acknowledged once rather than applying and acknowledging that stale frame again.
     await settle(() => api.acknowledged.includes("12"), "membership snapshot acknowledgement");
+    await drain();
     expect(api.acknowledged.filter((cursor) => cursor === "12")).toHaveLength(1);
     expect(cache.cursor).toBe("12");
     expect(runtime.state.tasks).toEqual([currentTask]);
