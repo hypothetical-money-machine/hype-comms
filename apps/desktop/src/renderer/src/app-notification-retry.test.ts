@@ -65,7 +65,12 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   conversationsNextCursor: null,
   conversationsHasMore: false,
   syncCursor: "10",
-  featureFlags: { channels: true, directMessages: true, mentions: true },
+  featureFlags: {
+    channels: true,
+    directMessages: true,
+    mentions: true,
+    announcementChannels: false,
+  },
 };
 
 const channelBootstrap: HumanWorkspaceBootstrapResponse = {
@@ -80,6 +85,7 @@ const channelBootstrap: HumanWorkspaceBootstrapResponse = {
         slug: "general",
         topic: null,
         access: "workspace",
+        channelMode: "chat",
         isArchived: false,
         createdBy: USER_ID,
         createdAt: NOW,

@@ -78,6 +78,7 @@ function conversationSummary(options?: {
       slug: kind === "channel" ? `channel-${conversationId.slice(-4)}` : null,
       topic: null,
       access: kind === "channel" ? "workspace" : null,
+      channelMode: kind === "channel" ? "chat" : null,
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,

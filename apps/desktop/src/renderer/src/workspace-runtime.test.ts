@@ -226,6 +226,7 @@ function directConversation(id: string, participantIds: readonly string[]): Conv
       slug: null,
       topic: null,
       access: null,
+      channelMode: null,
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,
@@ -1478,7 +1479,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap?.conversations[0]?.conversation.channelMode).toBe(
       "announcement",
     );
-    expect(api.syncedFrom).toEqual(["10"]);
+    expect(api.syncedFrom).toEqual(["8", "10"]);
     expect(api.startedCursors).toEqual(["10"]);
   });
 
@@ -3143,6 +3144,7 @@ describe("WorkspaceRuntime", () => {
     });
 
     const firstStart = runtime.start(session);
+    await drain();
     api.bootstrap = otherBootstrapAt("20");
     await runtime.start(otherSession);
 

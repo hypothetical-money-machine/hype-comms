@@ -44,6 +44,7 @@ function conversation(value: number): ConversationSummary {
       slug: `channel-${String(value)}`,
       topic: null,
       access: "workspace",
+      channelMode: "chat",
       isArchived: false,
       createdBy: USER_ID,
       createdAt: NOW,
