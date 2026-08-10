@@ -91,12 +91,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     packageSmokeWorkflow,
-    /runner: '\["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"\]'/u,
+    /runner: '\["self-hosted", "Linux", "ARM64", "hmm-chat-release", "docker"\]'/u,
   );
-  assert.doesNotMatch(
-    packageSmokeWorkflow,
-    /runner: '\["self-hosted", "Linux", "X64", "hmm-chat-release"/u,
-  );
+  assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
+  assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
   assert.doesNotMatch(releaseWorkflow, /actions\/(?:upload|download)-artifact/u);
   assert.match(releaseWorkflow, /name: Prepare GitHub Release[\s\S]*contents: write/u);
