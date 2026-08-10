@@ -52,9 +52,9 @@ jobs:
           - platform: Windows
             runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
           - platform: Linux
-            # Smoke packages do not need release credentials. Keep them on the always-on CI
-            # runner so an unavailable legacy release runner cannot block pull requests.
-            runner: '["self-hosted", "Linux", "X64", "docker", "docker-mac-mini"]'
+            # Smoke packages do not need release credentials. Run the Linux lane on the native
+            # ARM64 runner so package tooling is exercised on the architecture it targets.
+            runner: '["self-hosted", "Linux", "ARM64", "hmm-chat-release", "docker"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
@@ -68,6 +68,13 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+
+      - name: Verify native Linux ARM64 runner
+        if: matrix.platform == 'Linux'
+        shell: sh
+        run: |
+          test "$(uname -m)" = "aarch64"
+          test "$(node -p 'process.arch')" = "arm64"
 
       # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
       # Its PowerShell execution policy also rejects the generated scripts used by Actions.

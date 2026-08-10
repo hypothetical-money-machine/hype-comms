@@ -3,11 +3,11 @@
 The ARM64 runner replaces the GitHub-hosted Linux release lane and runs the required PostgreSQL
 CI job in an isolated Ubuntu container, natively on the Apple-silicon Mac Mini. PostgreSQL 16 is
 baked into the image so CI can create an unprivileged, job-scoped database cluster without a
-Docker socket or passwordless sudo. The legacy x64 service remains available for ad hoc
-release-environment compatibility checks; pull-request smoke packaging runs on the separate
-always-on x64 CI runner. Each service uses the matching official GitHub Actions runner and AWS
-CLI binaries, stores only runner state in its own named Docker volume, and does not mount the host
-filesystem or Docker socket.
+Docker socket or passwordless sudo. Linux release packaging and pull-request smoke packaging both
+run on this native ARM64 service. The legacy x64 service remains available for ad hoc
+release-environment compatibility checks. Each service uses the matching official GitHub Actions
+runner and AWS CLI binaries, stores only runner state in its own named Docker volume, and does not
+mount the host filesystem or Docker socket.
 
 Build and register the ARM64 runner once:
 
