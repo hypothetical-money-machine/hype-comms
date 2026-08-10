@@ -184,7 +184,7 @@ describe("PersistentWorkspaceCache", () => {
 
     const restarted = new PersistentWorkspaceCache({ crypto, scope });
     expect((await restarted.load()).outbox).toHaveLength(1);
-    await restarted.upsertAcknowledgedMessage(message, "1");
+    await restarted.upsertAcknowledgedMessage(message, CLIENT_MESSAGE_ID, "1");
 
     const recovered = await restarted.load();
     expect(recovered.outbox).toEqual([]);
@@ -247,6 +247,7 @@ describe("PersistentWorkspaceCache", () => {
     const mine = new PersistentWorkspaceCache({ crypto, scope });
     const theirs = new PersistentWorkspaceCache({ crypto, scope: otherScope });
     await mine.replaceSnapshot(bootstrap, []);
+    await theirs.replaceSnapshot(bootstrap, []);
     await mine.enqueue(operation);
     await theirs.enqueue(operation);
 

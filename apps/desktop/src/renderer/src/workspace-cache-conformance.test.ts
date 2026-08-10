@@ -458,7 +458,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("orders messages by conversation sequence after an out-of-order upsertHistory", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
-    await cache.upsertHistory([messageSequence10, messageSequence1, messageSequence2]);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence10, messageSequence1, messageSequence2]);
 
     const state = await cache.load();
     const sequences = state.messages.map((message) => message.conversationSequence);
@@ -728,6 +728,46 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     ]);
   });
 
+  it("accepts a send response only while its outbox row and conversation are authorized", async () => {
+    const cache = create();
+    const acknowledged: Message = {
+      ...messageSequence2,
+      id: "10000000-0000-4000-8000-000000000074",
+      clientMessageId: "10000000-0000-4000-8000-000000000075",
+      authorId: MORGAN_ID,
+      threadRootId: queuedAlphaMessage.message.threadRootId,
+      body: queuedAlphaMessage.message.body,
+      conversationSequence: "11",
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+
+    // A resync can temporarily preserve the queued operation without an authorization catalog.
+    // The response stays uncommitted until a complete snapshot proves the conversation.
+    await cache.clearServerStatePreservingOutbox();
+    await expect(
+      cache.upsertAcknowledgedMessage(
+        acknowledged,
+        queuedAlphaMessage.message.clientMessageId,
+        "1",
+      ),
+    ).resolves.toBe(false);
+    expect((await cache.load()).messages).toEqual([]);
+    expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([queuedAlphaMessage]);
+
+    await cache.replaceSnapshot({ ...snapshot, syncCursor: "1" }, []);
+    await expect(
+      cache.upsertAcknowledgedMessage(
+        acknowledged,
+        queuedAlphaMessage.message.clientMessageId,
+        "1",
+      ),
+    ).resolves.toBe(true);
+    const accepted = await cache.load();
+    expect(accepted.messages).toEqual([acknowledged]);
+    expect(accepted.outbox).toEqual([]);
+  });
+
   it("leaves an existing snapshot unchanged when its replacement generation is aborted", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, [messageSequence2]);
@@ -804,7 +844,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const reaction = reactionAddedEvent.payload.reaction;
     await cache.replaceSnapshot(snapshot, [messageSequence2], [reaction]);
 
-    await cache.upsertHistory([messageSequence2], []);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence2], []);
     expect((await cache.load()).reactions).toEqual([]);
 
     await cache.upsertReaction(reaction, ALPHA_ID);
@@ -853,6 +893,37 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 });
 
 describe("PersistentWorkspaceCache durability", () => {
+  it("rolls back a projection when its membership signal aborts at transaction commit", async () => {
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, []);
+    const baseSignal = new AbortController().signal;
+    let commitChecks = 0;
+    let aborted = false;
+    const signal = new Proxy(baseSignal, {
+      get(target, property) {
+        if (property === "aborted") return aborted;
+        if (property === "throwIfAborted") {
+          return () => {
+            commitChecks += 1;
+            if (commitChecks === 2) {
+              aborted = true;
+              throw new DOMException("Membership projection retired", "AbortError");
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2], [], signal)).resolves.toBe(
+      false,
+    );
+
+    expect(commitChecks).toBe(2);
+    expect((await cache.load()).messages).toEqual([]);
+  });
+
   it("keeps a completed self-removal purge durable across reopen", async () => {
     const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
     await first.replaceSnapshot(
@@ -953,7 +1024,7 @@ describe("workspace cache implementation parity", () => {
     });
     for (const cache of [memory, persistent]) {
       await cache.replaceSnapshot(snapshot, []);
-      await cache.upsertHistory([messageSequence10, messageSequence1]);
+      await cache.upsertHistory(ALPHA_ID, [messageSequence10, messageSequence1]);
       await cache.applyEvent(messageCreatedEvent);
       await cache.applyEvent(readCursorEvent);
       await cache.applyEvent(memberUpdatedEvent);
