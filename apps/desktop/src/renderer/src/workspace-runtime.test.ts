@@ -958,6 +958,7 @@ class FakeDesktopApi implements DesktopApi {
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
   readonly #notificationListeners = new Set<(action: NotificationAction) => void>();
   #preparedRealtimeScope: RealtimeSessionScope | null = null;
+  #preparedRealtimeCursor: string | null = null;
   #activeRealtimeScope: RealtimeSessionScope | null = null;
   #nextRealtimeEpoch = 0;
 
@@ -966,7 +967,7 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   emitWorkspaceEvent(event: ProductRealtimeEvent): void {
-    const scope = this.#activeRealtimeScope;
+    const scope = this.#activeRealtimeScope ?? this.#preparedRealtimeScope;
     if (scope === null) return;
     for (const listener of this.#eventListeners) listener({ scope, event });
   }
@@ -1057,7 +1058,9 @@ class FakeDesktopApi implements DesktopApi {
 
   async initializeCacheCrypto(): Promise<CacheCryptoStatus> {
     const queued = this.cryptoStatusResults.shift();
-    return queued === undefined ? this.cryptoStatus : await queued;
+    const status = queued === undefined ? this.cryptoStatus : await queued;
+    this.cryptoStatus = status;
+    return status;
   }
 
   async encryptCacheRecords(): Promise<CacheEncryptBatchResponse> {
@@ -1306,13 +1309,13 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async startWorkspaceRealtime(after: string): Promise<RealtimeSessionScope> {
-    this.startedCursors.push(after);
     const scope = Object.freeze({
-      userId: USER_ID,
-      workspaceId: WORKSPACE_ID,
+      userId: this.cryptoStatus.scope.userId,
+      workspaceId: this.cryptoStatus.scope.workspaceId,
       epoch: ++this.#nextRealtimeEpoch,
     });
     this.#preparedRealtimeScope = scope;
+    this.#preparedRealtimeCursor = after;
     return scope;
   }
 
@@ -1321,9 +1324,17 @@ class FakeDesktopApi implements DesktopApi {
       throw new Error("The fake realtime scope was superseded");
     }
     this.#activeRealtimeScope = scope;
+    const preparedCursor = this.#preparedRealtimeCursor ?? "0";
+    const acknowledgedCursor = this.acknowledged.at(-1);
+    const startedCursor =
+      acknowledgedCursor === undefined || BigInt(preparedCursor) > BigInt(acknowledgedCursor)
+        ? preparedCursor
+        : acknowledgedCursor;
+    this.startedCursors.push(startedCursor);
     // The real server reports the connection live once its first flush drains and sends the resync
     // demand from a later flush on that same socket, then closes it, so the client sees both.
-    if (this.connectedOnStart) this.emitWorkspaceEvent(connectedAt(this.startedCursors.at(-1) ?? "0"));
+    if (this.connectedOnStart)
+      this.emitWorkspaceEvent(connectedAt(this.startedCursors.at(-1) ?? "0"));
     if (this.resyncOnStart) this.emitWorkspaceEvent(resyncRequired);
   }
 
@@ -1332,6 +1343,7 @@ class FakeDesktopApi implements DesktopApi {
     if (scope === undefined || this.#activeRealtimeScope?.epoch === scope.epoch) {
       this.#activeRealtimeScope = null;
       this.#preparedRealtimeScope = null;
+      this.#preparedRealtimeCursor = null;
     }
     await this.stopResults.shift();
   }
@@ -2496,10 +2508,10 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
 
-    // The membership marker retires the rest of its page. After the authoritative snapshot has
-    // durably reached 12, one final empty catch-up from 12 closes the snapshot/realtime gap.
+    // The membership marker retires the rest of its page. The scoped transport is retired before
+    // the final catch-up, so only the current scope can acknowledge the durable cursor.
     expect(api.syncedFrom).toEqual(["10", "12"]);
-    expect(api.acknowledged).toEqual(["12", "12"]);
+    expect(api.acknowledged).toEqual(["12"]);
     expect(api.startedCursors).toEqual(["12"]);
     expect(cache.cursor).toBe("12");
     expect(runtime.state.tasks).toEqual([currentTask]);
@@ -2685,20 +2697,19 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent(resyncRequired);
       await settle(() => runtime.state.error !== null, "failed first resync attempt");
 
-      // The timer retry reaches its bootstrap request and stalls. A newer server demand must keep
-      // ownership of stale state even after this older download eventually succeeds.
+      // The timer retry reaches its bootstrap request and stalls. A demand that arrives after the
+      // old scoped transport was retired is stale and must not start a second recovery owner.
       await vi.advanceTimersByTimeAsync(1_000);
       await settle(() => api.bootstrapRequests === 3, "stalled older resync retry");
       api.emitWorkspaceEvent(resyncRequired);
       olderRetry.resolve(bootstrapAt("40"));
-      await settle(() => api.stopRequests === 3, "newer resync demand");
 
       expect(api.startedCursors).toEqual(["5"]);
       expect(runtime.state.stale).toBe(true);
 
-      await vi.advanceTimersByTimeAsync(1_000);
-      await settle(() => api.startedCursors.length === 2, "newer resync recovery");
-      expect(api.startedCursors).toEqual(["5", "50"]);
+      await settle(() => api.startedCursors.length === 2, "older resync recovery");
+      expect(api.startedCursors).toEqual(["5", "40"]);
+      await settle(() => !runtime.state.stale, "settled older resync recovery");
       expect(runtime.state.stale).toBe(false);
     } finally {
       random.mockRestore();
@@ -4055,10 +4066,8 @@ describe("WorkspaceRuntime", () => {
         SECOND_CONVERSATION_ID,
       ),
     );
-    await settle(() => api.bootstrapRequests === 2, "first in-flight membership snapshot");
-
-    // This event is accepted after the first snapshot captured its membership epoch. Its immediate
-    // barrier hides the revoked conversation, while the first marker still owns durable repair.
+    // Both events are accepted before the first repair can retire the prepared scope. The first
+    // marker owns durable repair while the second marker invalidates its snapshot.
     api.emitWorkspaceEvent(
       membershipChanged(
         "20000000-0000-4000-8000-000000000058",
@@ -4088,7 +4097,7 @@ describe("WorkspaceRuntime", () => {
       "11",
       "12",
     ]);
-    expect(api.startedCursors).toEqual(["10", "12", "12"]);
+    expect(api.startedCursors).toEqual(["10", "11", "12"]);
     expect(durable.repairMarker).toBeNull();
     expect(durable.bootstrap?.conversations.map((summary) => summary.conversation.id)).toEqual([
       CONVERSATION_ID,

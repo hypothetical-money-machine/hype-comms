@@ -21,6 +21,21 @@ const INVALID_EVENT_CLOSE_CODE = 1002;
 const INVALID_EVENT_CLOSE_REASON = "Invalid realtime event";
 const REPLAY_OVERFLOW_CLOSE_CODE = 1009;
 const REPLAY_OVERFLOW_CLOSE_REASON = "Realtime replay buffer exceeded";
+const KNOWN_PRODUCT_REALTIME_EVENT_TYPES = new Set([
+  "member.updated",
+  "channel.created",
+  "channel.archived",
+  "direct_conversation.created",
+  "channel.membership_changed",
+  "message.created",
+  "reaction.added",
+  "reaction.removed",
+  "read_cursor.updated",
+  "task.created",
+  "task.updated",
+  "system.resync_required",
+  "system.connected",
+]);
 
 export const WORKSPACE_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
 export const WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT = 1_024;
@@ -238,15 +253,18 @@ export class WorkspaceRealtime {
    * replica cursor from which this transport opens a fresh epoch.
    */
   enterWindowless(expectedScope: WorkspaceRealtimeScope): void {
-    this.#rendererDeliveryReady = false;
-    this.#windowless = true;
-
     const recovery = this.#pendingAuthoritativeRecovery;
     if (recovery !== null) {
-      if (this.#sameScope(recovery.scope, expectedScope)) return;
+      if (this.#sameScope(recovery.scope, expectedScope)) {
+        this.#rendererDeliveryReady = false;
+        this.#windowless = true;
+        return;
+      }
       this.#pendingAuthoritativeRecovery = null;
     }
     if (!this.#stopped && this.#scope !== null && this.#sameScope(this.#scope, expectedScope)) {
+      this.#rendererDeliveryReady = false;
+      this.#windowless = true;
       return;
     }
 
@@ -257,6 +275,8 @@ export class WorkspaceRealtime {
         userId: expectedScope.userId,
         workspaceId: expectedScope.workspaceId,
       });
+    this.#rendererDeliveryReady = false;
+    this.#windowless = true;
     this.#beginEpoch(this.#cursor, scope);
   }
 
@@ -440,6 +460,10 @@ export class WorkspaceRealtime {
     }
     const parsed = productRealtimeEventSchema.safeParse(input);
     if (!parsed.success) {
+      if (KNOWN_PRODUCT_REALTIME_EVENT_TYPES.has(envelope.data.type)) {
+        this.#rejectInvalidEvent(connection);
+        return;
+      }
       // A structurally valid event from a newer server is optional to this client. It remains in
       // the durable stream for a future version, but does not make this socket unusable.
       this.#onDrop("unsupported-event");
@@ -514,10 +538,7 @@ export class WorkspaceRealtime {
     }
 
     try {
-      if (
-        !this.#rendererDeliveryReady ||
-        !this.#onEvent({ scope: connection.scope, event })
-      ) {
+      if (!this.#rendererDeliveryReady || !this.#onEvent({ scope: connection.scope, event })) {
         // No durable renderer acknowledgement can follow a frame that did not cross the current
         // subscribed renderer boundary. Pause instead of reconnecting: the next explicit renderer
         // start follows HTTP catch-up and supplies the replica's durable cursor.
@@ -572,7 +593,10 @@ export class WorkspaceRealtime {
     this.#epoch += 1;
     const recoveryEpoch = this.#epoch;
     this.#stopped = true;
-    this.#scope = null;
+    // Keep the receiving scope attached to the retained body-free control. The renderer must be
+    // able to accept that control before it performs authoritative HTTP recovery, even though the
+    // transport itself is stopped and cannot reconnect from the overflowing cursor.
+    this.#scope = scope;
     this.#ticketEpoch = null;
     this.#clearReconnectTimer();
     this.#connection = null;

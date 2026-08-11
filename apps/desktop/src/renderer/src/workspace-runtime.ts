@@ -623,6 +623,8 @@ export class WorkspaceRuntime {
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
+      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
+      if (generation !== this.#generation || this.#cache !== cache) return;
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -2353,6 +2355,10 @@ export class WorkspaceRuntime {
   ): Promise<void> {
     const acceptedMembershipRepair =
       event.type === "channel.membership_changed" && this.#acceptedMembershipRepairs.has(event.id);
+    const sameSessionScope =
+      this.#scope !== null &&
+      realtimeScope.userId === this.#scope.userId &&
+      realtimeScope.workspaceId === this.#scope.workspaceId;
     // Ordinary frames still belong to the socket epoch that delivered them. Membership repairs
     // recorded by the listener are obligations of this renderer generation, even when an earlier
     // repair restarted realtime before their queued turn arrived.
@@ -2360,7 +2366,7 @@ export class WorkspaceRuntime {
       generation !== this.#generation ||
       (realtimeEpoch !== this.#realtimeEpoch && !acceptedMembershipRepair) ||
       this.#cache === null ||
-      !this.#isActiveRealtimeScope(realtimeScope, generation)
+      !sameSessionScope
     ) {
       return;
     }
@@ -2386,7 +2392,13 @@ export class WorkspaceRuntime {
       if (resyncRequest !== null) await this.#resync(generation, resyncRequest);
       return;
     }
-    await this.#applyWorkspaceEvent(event, realtimeScope, generation);
+    await this.#applyWorkspaceEvent(
+      event,
+      realtimeScope,
+      generation,
+      realtimeEpoch,
+      acceptedMembershipRepair,
+    );
   }
 
   /**
@@ -2565,17 +2577,11 @@ export class WorkspaceRuntime {
     this.#setState({ busy: false });
   }
 
-  async #restartRealtime(generation: number): Promise<void> {
-    const cache = this.#cache;
-    if (cache === null || generation !== this.#generation) return;
-    const loaded = await cache.load();
-    if (generation !== this.#generation) return;
-    this.#syncCursor = loaded.syncCursor;
-    this.#realtimeEpoch += 1;
-    const prepared = await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
+  async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
+    const prepared = await this.#client.startWorkspaceRealtime(after);
     if (generation !== this.#generation) {
       await this.#client.stopWorkspaceRealtime(prepared);
-      return;
+      return null;
     }
     const scope = this.#scope;
     if (
@@ -2588,6 +2594,19 @@ export class WorkspaceRuntime {
       throw new Error("Main prepared realtime for a different signed-in session");
     }
     this.#realtimeScope = prepared;
+    return prepared;
+  }
+
+  async #restartRealtime(generation: number): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return;
+    const loaded = await cache.load();
+    if (generation !== this.#generation) return;
+    this.#syncCursor = loaded.syncCursor;
+    this.#realtimeEpoch += 1;
+    const prepared =
+      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor ?? "0"));
+    if (prepared === null || generation !== this.#generation) return;
     try {
       await this.#client.activateWorkspaceRealtime(prepared);
     } catch (error) {
@@ -2627,9 +2646,10 @@ export class WorkspaceRuntime {
     // work is still establishing the privacy boundary.
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
-    const shutdown = (realtimeScope === null
-      ? this.#client.stopWorkspaceRealtime()
-      : this.#client.stopWorkspaceRealtime(realtimeScope)
+    const shutdown = (
+      realtimeScope === null
+        ? this.#client.stopWorkspaceRealtime()
+        : this.#client.stopWorkspaceRealtime(realtimeScope)
     ).then(
       () => null,
       (error: unknown) => error,
@@ -2793,12 +2813,19 @@ export class WorkspaceRuntime {
     event: WorkspaceEvent,
     realtimeScope: RealtimeSessionScope,
     generation: number,
+    realtimeEpoch: number,
+    acceptedMembershipRepair: boolean,
   ): Promise<void> {
     const cache = this.#cache;
+    const sameSessionScope =
+      this.#scope !== null &&
+      realtimeScope.userId === this.#scope.userId &&
+      realtimeScope.workspaceId === this.#scope.workspaceId;
     if (
       cache === null ||
       generation !== this.#generation ||
-      !this.#isActiveRealtimeScope(realtimeScope, generation)
+      !sameSessionScope ||
+      (realtimeEpoch !== this.#realtimeEpoch && !acceptedMembershipRepair)
     ) {
       return;
     }
