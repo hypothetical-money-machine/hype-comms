@@ -186,6 +186,35 @@ describe("useCompactChrome", () => {
     expect(result.current.getState().revealed).toBe(false);
   });
 
+  it("collapses on demand even while the pointer rests inside the chrome", () => {
+    const { result } = renderHook(() => useCompactChrome(true));
+    act(() => result.current.hotzoneProps.onMouseEnter());
+    act(() => result.current.chromeProps.onMouseEnter());
+
+    act(() => result.current.collapse());
+    expect(result.current.getState().revealed).toBe(false);
+    expect(document.documentElement.hasAttribute("data-chrome-revealed")).toBe(false);
+
+    // The resting pointer must not resurrect the chrome once the timers run out.
+    act(() => vi.advanceTimersByTime(1000));
+    expect(result.current.getState().revealed).toBe(false);
+  });
+
+  it("stays collapsed when the pinning popover closes after a quick-switcher selection", () => {
+    const { result } = renderHook(() => useCompactChrome(true));
+    act(() => result.current.chromeProps.onMouseEnter());
+    act(() => result.current.hotzoneProps.onMouseEnter());
+    act(() => result.current.onPopoverOpenChange(true));
+
+    // Choosing a conversation collapses first; the switcher then closes and releases its pin.
+    act(() => result.current.collapse());
+    expect(result.current.getState().revealed).toBe(false);
+
+    act(() => result.current.onPopoverOpenChange(false));
+    act(() => vi.advanceTimersByTime(1000));
+    expect(result.current.getState().revealed).toBe(false);
+  });
+
   it("hides after focus leaves the hotzone without entering the chrome", () => {
     const { result } = renderHook(() => useCompactChrome(true));
 

@@ -1228,7 +1228,12 @@ export function App({ client, theme, compactMode }: AppProps) {
           }))}
           selectedConversationId={runtimeState.selectedConversationId}
           platform={client.platform}
-          onSelect={(conversationId) => runtime.selectConversation(conversationId)}
+          onSelect={(conversationId) => {
+            runtime.selectConversation(conversationId);
+            // Picking a destination means "show me the channel": a pointer resting on the
+            // overlay would otherwise hold it open over the conversation it just selected.
+            chrome.collapse();
+          }}
           onOpenChange={chrome.onPopoverOpenChange}
         />
 
@@ -1243,7 +1248,10 @@ export function App({ client, theme, compactMode }: AppProps) {
               : runtime.conversationName(summary);
           }}
           search={(query, after) => runtime.searchMessages(query, after)}
-          openResult={(result) => runtime.openSearchResult(result)}
+          openResult={async (result) => {
+            await runtime.openSearchResult(result);
+            chrome.collapse();
+          }}
           onOpenChange={chrome.onPopoverOpenChange}
         />
 
