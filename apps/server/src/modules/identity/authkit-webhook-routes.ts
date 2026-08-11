@@ -21,6 +21,7 @@ export const workOSWebhookRoutes: FastifyPluginAsync<WorkOSWebhookRoutesOptions>
   app,
   { processor },
 ) => {
+  app.removeContentTypeParser("application/json");
   app.addContentTypeParser(
     "application/json",
     { parseAs: "string", bodyLimit: WORKOS_WEBHOOK_BODY_LIMIT },

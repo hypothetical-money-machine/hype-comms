@@ -584,7 +584,7 @@ describe("AuthKit routes", () => {
         "https://api.workos.com/user_management/authorize?client_id=client_test&state=opaque",
     });
     const app = await buildApp({
-      trustedProxies: ["10.0.0.0/8"],
+      trustedProxies: ["10.0.0.0/8", "127.0.0.1"],
       identity: {
         service: identity.asService(),
         authKitAdmissionEnabled: true,
@@ -613,6 +613,36 @@ describe("AuthKit routes", () => {
     expect(firstClientThrottled.statusCode).toBe(429);
     expect(distinctClientAllowed.statusCode).toBe(201);
     expect(authKit.beginDesktopAuthorization).toHaveBeenCalledTimes(11);
+  });
+
+  it("preserves the exact raw JSON body through the configured webhook route", async () => {
+    const identity = new FakeIdentityService();
+    const processWebhook = vi.fn().mockResolvedValue("processed" as const);
+    const app = await buildApp({
+      identity: {
+        service: identity.asService(),
+        workosWebhookProcessor: { process: processWebhook },
+      },
+    });
+    apps.push(app);
+    const payload = '{"event":"session.revoked", "data":{"id":"session_test"}}\n';
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/auth/workos/webhook",
+      headers: {
+        "content-type": "application/json",
+        "workos-signature": "signed-test-payload",
+      },
+      payload,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(processWebhook).toHaveBeenCalledWith({
+      payload,
+      signature: "signed-test-payload",
+    });
   });
 
   it("uses one fixed credential-free custom callback and hides provider cancellation details", async () => {

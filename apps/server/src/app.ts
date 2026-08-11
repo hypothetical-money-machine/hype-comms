@@ -54,10 +54,10 @@ export interface BuildAppOptions {
 export async function buildApp(options: BuildAppOptions = {}) {
   const lifecycle = options.lifecycle ?? new Lifecycle();
   const allowedOrigins = new Set(options.allowedOrigins ?? ["http://127.0.0.1:5173"]);
-  const trustProxy = options.trustedProxies?.join(",");
+  const trustProxy = options.trustedProxies?.length ? [...options.trustedProxies] : undefined;
   const app = Fastify({
     logger: options.logger ?? false,
-    ...(trustProxy === undefined || trustProxy === "" ? {} : { trustProxy }),
+    ...(trustProxy === undefined ? {} : { trustProxy }),
   });
 
   registerErrorHandling(app);

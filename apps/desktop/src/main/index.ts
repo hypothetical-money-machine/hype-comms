@@ -1752,7 +1752,12 @@ async function drainPendingAuthCallbacks(): Promise<void> {
       if (pendingCallback === undefined) continue;
       const parsed = parseAuthCallback(pendingCallback.value);
       if (parsed === null) continue;
-      if (parsed.kind === "authkit" && authKitCancellationFenced) continue;
+      if (parsed.kind === "authkit" && authKitCancellationFenced) {
+        // A fenced flow has been superseded by sign-out, magic-link authentication, or an
+        // explicit restart. Retaining its callback would let stale provider state sign the user
+        // back in after that newer intent once protected storage becomes available again.
+        continue;
+      }
       const currentSession = chatSession;
       if (parsed.kind === "magic_link") {
         const callbackIntent = advanceAuthIntent();
@@ -1838,7 +1843,10 @@ async function drainPendingAuthCallbacks(): Promise<void> {
 function handleAuthCallback(value: string): boolean {
   const parsed = parseAuthCallback(value);
   if (parsed === null) return false;
-  if (parsed.kind === "authkit" && authKitCancellationFenced) return true;
+  if (parsed.kind === "authkit" && authKitCancellationFenced) {
+    // Acknowledge the owned protocol URL without retaining a callback from a superseded flow.
+    return true;
+  }
 
   pendingAuthCallbacks.push({ value, transientAttempts: 0 });
   void drainPendingAuthCallbacks();
