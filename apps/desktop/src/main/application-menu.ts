@@ -1,46 +1,56 @@
-import type { Menu, MenuItem } from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 
-/**
- * Adds the update command to Electron's existing default menu without replacing the native
- * platform roles and shortcuts.
- */
-export function installCheckForUpdatesMenuItem(
-  applicationMenu: Menu | null,
-  item: MenuItem,
-  platform: NodeJS.Platform,
-): boolean {
-  if (applicationMenu === null) {
-    return false;
-  }
+export const CHECK_FOR_UPDATES_MENU_ITEM_ID = "check-for-updates";
 
-  const parent =
-    platform === "darwin"
-      ? applicationMenu.items[0]
-      : applicationMenu.items.find(
-          (candidate) => candidate.role === "help" || candidate.label?.toLowerCase() === "help",
-        );
-  const submenu = parent?.submenu;
-  if (submenu === undefined || submenu === null) {
-    return false;
-  }
-
-  const position = platform === "darwin" ? findDarwinInsertPosition(submenu.items) : 0;
-  submenu.insert(position, item);
-  return true;
+export interface ApplicationMenuOptions {
+  readonly platform: NodeJS.Platform;
+  readonly checkForUpdatesEnabled: boolean;
+  readonly onCheckForUpdates: () => void;
 }
 
 /**
- * Finds where to insert the update command in the macOS application submenu: immediately after
- * "About …" so it reads as a natural extension of the app-identity section. Electron lowercases
- * built-in roles at runtime, so the role comparison is case-insensitive defensively. Falls back
- * to the first separator, then to the top of the menu, when no About item is present.
+ * Builds the application menu from documented Electron roles. Electron's generated Linux menu
+ * has no Help menu, and the Menu returned by getApplicationMenu() does not support adding items.
+ * Owning the template keeps the native platform roles while guaranteeing a home for the update
+ * command.
  */
-function findDarwinInsertPosition(items: readonly MenuItem[]): number {
-  const aboutIndex = items.findIndex((candidate) => candidate.role?.toLowerCase() === "about");
-  if (aboutIndex >= 0) {
-    return aboutIndex + 1;
+export function buildApplicationMenu(
+  options: ApplicationMenuOptions,
+): MenuItemConstructorOptions[] {
+  const checkForUpdatesItem: MenuItemConstructorOptions = {
+    id: CHECK_FOR_UPDATES_MENU_ITEM_ID,
+    label: "Check for Updates…",
+    enabled: options.checkForUpdatesEnabled,
+    click: options.onCheckForUpdates,
+  };
+
+  const standardMenus: MenuItemConstructorOptions[] = [
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
+  ];
+
+  if (options.platform === "darwin") {
+    return [
+      {
+        role: "appMenu",
+        submenu: [
+          { role: "about" },
+          checkForUpdatesItem,
+          { type: "separator" },
+          { role: "services" },
+          { type: "separator" },
+          { role: "hide" },
+          { role: "hideOthers" },
+          { role: "unhide" },
+          { type: "separator" },
+          { role: "quit" },
+        ],
+      },
+      ...standardMenus,
+    ];
   }
 
-  const firstSeparator = items.findIndex((candidate) => candidate.type === "separator");
-  return firstSeparator >= 0 ? firstSeparator : 0;
+  return [...standardMenus, { role: "help", submenu: [checkForUpdatesItem] }];
 }

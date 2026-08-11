@@ -1,13 +1,9 @@
 /**
  * Evidence capture for the Check for Updates menu item.
  *
- * Installs the item with the same Linux/Windows Help placement as production, opens a real
- * Electron BrowserWindow with the native application menu, asserts the Help submenu order,
- * and captures the live window via Spectacle (active window).
- *
- * Note: open native submenu popups are separate Wayland surfaces and are not included in
- * active-window captures; fullscreen portal capture returns black in this agent session.
- * Placement of "Check for Updates…" as Help[0] is asserted here and covered by unit tests.
+ * Builds the same owned, role-based Linux menu as production, opens a real Electron BrowserWindow,
+ * asserts the Help submenu order, and captures the live native menu bar. On Wayland, native submenu
+ * popups are separate surfaces and are not included in active-window captures.
  *
  * Usage:
  *   env -u ELECTRON_RUN_AS_NODE node_modules/.bin/electron scripts/capture-check-for-updates-menu.mjs
@@ -17,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, Menu, MenuItem } from "electron";
+import { app, BrowserWindow, Menu } from "electron";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const OUTPUT = path.join(projectRoot, "docs", "screenshots", "check-for-updates-menu.png");
@@ -26,22 +22,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Mirrors apps/desktop/src/main/application-menu.ts non-darwin placement. */
-function installCheckForUpdatesMenuItem(applicationMenu, item) {
-  const parent = applicationMenu.items.find(
-    (candidate) => candidate.role === "help" || candidate.label?.toLowerCase() === "help",
-  );
-  const submenu = parent?.submenu;
-  if (submenu === undefined || submenu === null) {
-    throw new Error("Help submenu not found");
-  }
-  submenu.insert(0, item);
-  return parent;
-}
-
 app
   .whenReady()
   .then(async () => {
+    // Mirrors apps/desktop/src/main/application-menu.ts for non-macOS platforms.
     const applicationMenu = Menu.buildFromTemplate([
       { role: "fileMenu" },
       { role: "editMenu" },
@@ -49,20 +33,19 @@ app
       { role: "windowMenu" },
       {
         role: "help",
-        submenu: [{ role: "about" }, { type: "separator" }, { role: "toggleDevTools" }],
+        submenu: [
+          {
+            id: "check-for-updates",
+            label: "Check for Updates…",
+            enabled: true,
+          },
+        ],
       },
     ]);
-
-    const helpParent = installCheckForUpdatesMenuItem(
-      applicationMenu,
-      new MenuItem({
-        label: "Check for Updates…",
-        enabled: true,
-      }),
-    );
     Menu.setApplicationMenu(applicationMenu);
 
-    const firstHelpLabel = helpParent.submenu?.items[0]?.label;
+    const helpParent = applicationMenu.items.at(-1);
+    const firstHelpLabel = helpParent?.submenu?.items[0]?.label;
     if (firstHelpLabel !== "Check for Updates…") {
       throw new Error(
         `expected Help[0] to be Check for Updates…, got ${JSON.stringify(firstHelpLabel)}`,
@@ -101,7 +84,7 @@ app
     <h1>Hype Comms</h1>
     <p>Native application menu (Linux/Windows).</p>
     <p><code>Help</code> → first item is <code>Check for Updates…</code>
-      (installed via the production placement rule; asserted before capture).</p>
+      (built from the owned production template; asserted before capture).</p>
   </main></body>
 </html>`),
     );
