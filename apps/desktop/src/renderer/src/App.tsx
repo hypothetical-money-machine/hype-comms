@@ -44,6 +44,7 @@ import {
   notificationTransportFrom,
 } from "./notification-session-runtime";
 import { PreferencesDialog } from "./preferences-dialog";
+import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
@@ -66,6 +67,7 @@ interface AppProps {
   readonly client: DesktopApi;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly sidebarPosition: SidebarPositionRuntime;
 }
 
 type UpdateClient = Pick<
@@ -434,7 +436,7 @@ export function PendingMessageRow({
   );
 }
 
-export function App({ client, theme, compactMode }: AppProps) {
+export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const isHeadless = client.isHeadless === true;
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
@@ -1203,11 +1205,21 @@ export function App({ client, theme, compactMode }: AppProps) {
       data-testid="workspace-ready"
     >
       {compact && <CompactHotzone chrome={chrome} />}
-      <aside className="workspace-rail" aria-label="Workspace" {...chrome.chromeProps}>
+      <aside
+        id="workspace-rail"
+        className="workspace-rail"
+        aria-label="Workspace"
+        {...chrome.chromeProps}
+      >
         <div className="workspace-mark">H</div>
       </aside>
 
-      <aside className="sidebar" {...chrome.chromeProps}>
+      <aside
+        id="workspace-sidebar"
+        className="sidebar"
+        aria-label="Workspace navigation"
+        {...chrome.chromeProps}
+      >
         <header className="workspace-header">
           <div>
             <p className="eyebrow">Workspace</p>
@@ -1823,6 +1835,7 @@ export function App({ client, theme, compactMode }: AppProps) {
         open={showPreferences}
         theme={theme}
         compactMode={compactMode}
+        sidebarPosition={sidebarPosition}
         notifications={notificationTransport ?? undefined}
         platform={client.platform}
         triggerRef={preferencesTrigger}

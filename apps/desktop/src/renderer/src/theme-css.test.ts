@@ -190,4 +190,29 @@ describe("renderer theme CSS", () => {
     expect(messageActionsButtonRule?.groups?.body).toContain("background: transparent");
     expect(messageActionsButtonRule?.groups?.body).toContain("color: var(--theme-text-strong)");
   });
+
+  it("mirrors every navigation surface for right-side placement", () => {
+    const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
+
+    expect(styles).toMatch(
+      /html\[data-sidebar-position="right"\] \.shell\s*\{[^}]*grid-template-areas:\s*"conversation sidebar rail"/u,
+    );
+    expect(styles).toMatch(
+      /html\[data-sidebar-position="right"\] \.shell\.thread-open\s*\{[^}]*grid-template-areas:\s*"conversation thread sidebar rail"/u,
+    );
+    expect(styles).toContain('grid-template-areas: "thread sidebar rail"');
+    expect(styles).toMatch(
+      /html\[data-compact\]\[data-sidebar-position="right"\]\s*\{[^}]*--compact-chrome-translate-x:\s*calc\(var\(--rail-width\) \+ var\(--sidebar-width\)\)/u,
+    );
+    expect(styles).toMatch(
+      /html\[data-compact\]\[data-sidebar-position="right"\] \.workspace-rail\s*\{[^}]*right:\s*0;[^}]*left:\s*auto/u,
+    );
+    expect(styles).toMatch(
+      /html\[data-compact\]\[data-sidebar-position="right"\] \.sidebar\s*\{[^}]*right:\s*var\(--rail-width\);[^}]*left:\s*auto/u,
+    );
+    expect(styles).toMatch(
+      /html\[data-sidebar-position="right"\] \.compact-hotzone\s*\{[^}]*right:\s*0;[^}]*left:\s*auto/u,
+    );
+    expect(styles).toContain("box-shadow: inset -7px 0 var(--theme-border-accent)");
+  });
 });

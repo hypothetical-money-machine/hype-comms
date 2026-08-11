@@ -177,14 +177,32 @@ button:disabled {
   height: 100vh;
   grid-template-rows: minmax(0, 1fr);
   grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(0, 1fr);
+  grid-template-areas: "rail sidebar conversation";
   background: var(--theme-surface-shell);
 }
 
 .shell.thread-open {
-  grid-template-columns: 68px 284px minmax(360px, 1fr) minmax(340px, 420px);
+  grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(360px, 1fr) minmax(
+      340px,
+      420px
+    );
+  grid-template-areas: "rail sidebar conversation thread";
+}
+
+html[data-sidebar-position="right"] .shell {
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width) var(--rail-width);
+  grid-template-areas: "conversation sidebar rail";
+}
+
+html[data-sidebar-position="right"] .shell.thread-open {
+  grid-template-columns: minmax(360px, 1fr) minmax(340px, 420px) var(--sidebar-width) var(
+      --rail-width
+    );
+  grid-template-areas: "conversation thread sidebar rail";
 }
 
 .workspace-rail {
+  grid-area: rail;
   padding: 14px 13px;
   border-right: 1px solid var(--theme-border-subtle);
   background: var(--theme-surface-rail);
@@ -200,11 +218,18 @@ button:disabled {
   position: relative;
   z-index: 2;
   display: flex;
+  grid-area: sidebar;
   min-width: 0;
   flex-direction: column;
   overflow: visible;
   border-right: 1px solid var(--theme-border-subtle);
   background: var(--theme-surface-sidebar);
+}
+
+html[data-sidebar-position="right"] .workspace-rail,
+html[data-sidebar-position="right"] .sidebar {
+  border-right: 0;
+  border-left: 1px solid var(--theme-border-subtle);
 }
 
 .workspace-header {
@@ -669,6 +694,7 @@ button:disabled {
 
 .conversation-pane {
   display: grid;
+  grid-area: conversation;
   min-width: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--theme-surface-content);
@@ -1075,6 +1101,10 @@ button:disabled {
 
 .preferences-dialog .compact-mode-control {
   margin: 10px 0 0;
+}
+
+.preferences-dialog .sidebar-position-control {
+  margin-top: 10px;
 }
 
 .preferences-dialog .notification-settings {
@@ -2553,6 +2583,7 @@ button:disabled {
 
 .thread-pane {
   display: grid;
+  grid-area: thread;
   min-width: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
   border-left: 1px solid var(--theme-border-subtle);
@@ -2665,15 +2696,21 @@ button:disabled {
 
 @media (max-width: 1180px) {
   .shell.thread-open {
-    grid-template-columns: 68px 284px minmax(0, 1fr);
+    grid-template-columns: var(--rail-width) var(--sidebar-width) minmax(0, 1fr);
+    grid-template-areas: "rail sidebar thread";
+  }
+
+  html[data-sidebar-position="right"] .shell.thread-open {
+    grid-template-columns: minmax(0, 1fr) var(--sidebar-width) var(--rail-width);
+    grid-template-areas: "thread sidebar rail";
   }
 
   .shell.thread-open .conversation-pane {
     display: none;
   }
 
-  .shell.thread-open .thread-pane {
-    grid-column: 3;
+  html[data-sidebar-position="right"] .shell.thread-open .thread-pane {
+    border-left: 0;
   }
 }
 
@@ -2868,8 +2905,22 @@ button:disabled {
    `data-compact` attribute is applied to <html> before first paint, so the chrome never
    flashes in, while `data-chrome-revealed` (set imperatively by useCompactChrome so hover
    passes never re-render the app) slides it back over the conversation pane. */
+html[data-compact] {
+  --compact-chrome-translate-x: calc(-1 * (var(--rail-width) + var(--sidebar-width)));
+}
+
+html[data-compact][data-sidebar-position="right"] {
+  --compact-chrome-translate-x: calc(var(--rail-width) + var(--sidebar-width));
+}
+
 html[data-compact] .shell {
   grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "conversation";
+}
+
+html[data-compact] .shell.thread-open {
+  grid-template-columns: minmax(360px, 1fr) minmax(340px, 420px);
+  grid-template-areas: "conversation thread";
 }
 
 html[data-compact] .conversation-health {
@@ -2897,7 +2948,7 @@ html[data-compact] .sidebar {
   top: 0;
   bottom: 0;
   z-index: 12;
-  transform: translateX(calc(-1 * (var(--rail-width) + var(--sidebar-width))));
+  transform: translateX(var(--compact-chrome-translate-x));
   visibility: hidden;
 }
 
@@ -2910,6 +2961,16 @@ html[data-compact] .sidebar {
   left: var(--rail-width);
   width: var(--sidebar-width);
   box-shadow: var(--theme-shadow-popover);
+}
+
+html[data-compact][data-sidebar-position="right"] .workspace-rail {
+  right: 0;
+  left: auto;
+}
+
+html[data-compact][data-sidebar-position="right"] .sidebar {
+  right: var(--rail-width);
+  left: auto;
 }
 
 html[data-compact][data-chrome-revealed] .workspace-rail,
@@ -2943,6 +3004,22 @@ html[data-compact][data-chrome-revealed] .sidebar {
   box-shadow: inset 3px 0 var(--theme-border-accent);
 }
 
+html[data-sidebar-position="right"] .compact-hotzone {
+  right: 0;
+  left: auto;
+}
+
+html[data-sidebar-position="right"] .compact-hotzone.attention {
+  box-shadow: inset -3px 0 var(--theme-border-accent);
+}
+
+@media (max-width: 1180px) {
+  html[data-compact] .shell.thread-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "thread";
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   html[data-compact] .workspace-rail,
   html[data-compact] .sidebar {
@@ -2960,6 +3037,10 @@ html[data-compact][data-chrome-revealed] .sidebar {
     animation: compact-hotzone-pulse 1.5s ease-in-out infinite;
   }
 
+  html[data-sidebar-position="right"] .compact-hotzone.attention {
+    animation-name: compact-hotzone-pulse-right;
+  }
+
   @keyframes compact-hotzone-pulse {
     0%,
     100% {
@@ -2968,6 +3049,17 @@ html[data-compact][data-chrome-revealed] .sidebar {
 
     50% {
       box-shadow: inset 7px 0 var(--theme-border-accent);
+    }
+  }
+
+  @keyframes compact-hotzone-pulse-right {
+    0%,
+    100% {
+      box-shadow: inset -3px 0 var(--theme-border-accent);
+    }
+
+    50% {
+      box-shadow: inset -7px 0 var(--theme-border-accent);
     }
   }
 }
@@ -2999,4 +3091,33 @@ html[data-compact][data-chrome-revealed] .sidebar {
 
 .compact-mode-control-error {
   width: 100%;
+}
+
+.sidebar-position-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+}
+
+.sidebar-position-options {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sidebar-position-options label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.sidebar-position-options input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--theme-border-accent);
 }

@@ -14,6 +14,7 @@ export function CompactHotzone({ chrome }: { readonly chrome: CompactChrome }) {
       <button
         type="button"
         className={state.attention ? "compact-hotzone attention" : "compact-hotzone"}
+        aria-controls="workspace-rail workspace-sidebar"
         aria-label={
           state.revealed
             ? "Hide navigation"
