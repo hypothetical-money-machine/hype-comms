@@ -59,7 +59,6 @@ import {
   dialog,
   ipcMain,
   Menu,
-  MenuItem,
   nativeTheme,
   net,
   Notification,
@@ -83,7 +82,7 @@ import {
   type AuthCallbackOutcome,
 } from "./auth-callback";
 import { configureWindowsApplicationIdentity } from "./application-identity";
-import { installCheckForUpdatesMenuItem } from "./application-menu";
+import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
 import { CompactModeController } from "./compact-mode-controller";
@@ -1736,26 +1735,25 @@ if (!hasSingleInstanceLock) {
           !app.isPackaged || process.platform !== "darwin" || hasMacDeveloperIdSignature(),
       });
       updateController.subscribe(deliverUpdateState);
-      const applicationMenu = Menu.getApplicationMenu();
-      const checkForUpdatesItem = new MenuItem({
-        label: "Check for Updates…",
-        enabled: isCheckForUpdatesEnabled(updateController.state),
-        click: () => {
-          void handleCheckForUpdatesMenuClick().catch((error: unknown) => {
-            console.error("Check for Updates failed", error);
-          });
-        },
-      });
+      const applicationMenu = Menu.buildFromTemplate(
+        buildApplicationMenu({
+          platform: process.platform,
+          checkForUpdatesEnabled: isCheckForUpdatesEnabled(updateController.state),
+          onCheckForUpdates: () => {
+            void handleCheckForUpdatesMenuClick().catch((error: unknown) => {
+              console.error("Check for Updates failed", error);
+            });
+          },
+        }),
+      );
+      const checkForUpdatesItem = applicationMenu.getMenuItemById(CHECK_FOR_UPDATES_MENU_ITEM_ID);
+      if (checkForUpdatesItem === null) {
+        throw new Error("The application menu is missing Check for Updates");
+      }
       updateController.subscribe((state) => {
         checkForUpdatesItem.enabled = isCheckForUpdatesEnabled(state);
       });
-      if (installCheckForUpdatesMenuItem(applicationMenu, checkForUpdatesItem, process.platform)) {
-        Menu.setApplicationMenu(applicationMenu);
-      } else {
-        console.warn(
-          "The Check for Updates menu item could not be installed; the default menu shape changed",
-        );
-      }
+      Menu.setApplicationMenu(applicationMenu);
 
       registerIpcHandlers();
 
