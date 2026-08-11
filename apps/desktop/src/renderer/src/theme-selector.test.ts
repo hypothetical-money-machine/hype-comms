@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
+import type { ThemeDesign, ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
 import { getThemeDefinition } from "../../shared/theme";
@@ -34,6 +34,7 @@ class SelectorThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: this.state.resolvedThemeId,
         resolvedColorScheme: this.state.resolvedColorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     } else {
       const definition = getThemeDefinition(preference);
@@ -41,8 +42,22 @@ class SelectorThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: definition.id,
         resolvedColorScheme: definition.colorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     }
+    for (const listener of this.listeners) listener(this.state);
+    return this.state;
+  }
+
+  async setThemeDesign(design: ThemeDesign): Promise<ThemeState> {
+    const definition =
+      design.preference === "system" ? null : getThemeDefinition(design.preference);
+    this.state = {
+      preference: design.preference,
+      resolvedThemeId: definition?.id ?? this.state.resolvedThemeId,
+      resolvedColorScheme: definition?.colorScheme ?? this.state.resolvedColorScheme,
+      accentColor: design.accentColor,
+    };
     for (const listener of this.listeners) listener(this.state);
     return this.state;
   }
@@ -115,6 +130,23 @@ describe("ThemeSelector", () => {
       expect(screen.getByText("Following system · Light")).toBeTruthy();
     });
     expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("system");
+    theme.dispose();
+  });
+
+  it("describes an active custom accent", async () => {
+    const client = new SelectorThemeTransport();
+    const { theme } = await renderSelector(client);
+
+    client.emit({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "#2563eb",
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Dark theme · Custom accent")).toBeTruthy();
+    });
     theme.dispose();
   });
 

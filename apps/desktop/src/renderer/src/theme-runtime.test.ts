@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
+import type { ThemeDesign, ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
 import { getThemeDefinition, themeCssVariable, THEME_TOKEN_NAMES } from "../../shared/theme";
@@ -15,6 +15,7 @@ class FakeThemeTransport implements ThemeTransport {
   setError: Error | null = null;
   subscriptionError: Error | null = null;
   readonly setPreferences: ThemePreference[] = [];
+  readonly setDesigns: ThemeDesign[] = [];
   readonly listeners = new Set<(state: ThemeState) => void>();
 
   constructor(
@@ -40,6 +41,7 @@ class FakeThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: this.state.resolvedThemeId,
         resolvedColorScheme: this.state.resolvedColorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     } else {
       const definition = getThemeDefinition(preference);
@@ -47,8 +49,25 @@ class FakeThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: definition.id,
         resolvedColorScheme: definition.colorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     }
+    return this.state;
+  }
+
+  async setThemeDesign(design: ThemeDesign): Promise<ThemeState> {
+    this.setDesigns.push(design);
+    if (this.setError !== null) throw this.setError;
+    const definition =
+      design.preference === "system"
+        ? getThemeDefinition(this.state.resolvedThemeId)
+        : getThemeDefinition(design.preference);
+    this.state = {
+      preference: design.preference,
+      resolvedThemeId: definition.id,
+      resolvedColorScheme: definition.colorScheme,
+      accentColor: design.accentColor,
+    };
     return this.state;
   }
 
@@ -187,6 +206,24 @@ describe("ThemeRuntime", () => {
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
     });
+    runtime.dispose();
+  });
+
+  it("applies and publishes a saved custom accent", async () => {
+    const root = createRoot();
+    const client = new FakeThemeTransport();
+    const runtime = new ThemeRuntime(client, root);
+    await runtime.start();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+
+    await runtime.setDesign({ preference: "dark", accentColor: "#2563eb" });
+
+    expect(client.setDesigns).toEqual([{ preference: "dark", accentColor: "#2563eb" }]);
+    expect(runtime.state.accentColor).toBe("#2563eb");
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.style.getPropertyValue(themeCssVariable("actionPrimary"))).toBe("#2563eb");
+    expect(listener).toHaveBeenCalledTimes(1);
     runtime.dispose();
   });
 });

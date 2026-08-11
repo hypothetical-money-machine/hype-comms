@@ -1,4 +1,9 @@
-import type { ResolvedColorScheme, ThemePreference, ThemeState } from "@hype-comms/contracts";
+import type {
+  ResolvedColorScheme,
+  ThemeDesign,
+  ThemePreference,
+  ThemeState,
+} from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,6 +17,7 @@ class FakeNativeTheme implements NativeThemeAdapter {
   #themeSource: "system" | ResolvedColorScheme = "system";
   #systemUsesDarkColors: boolean;
   #throwOnNextSource = false;
+  sourceAssignments = 0;
 
   constructor(systemUsesDarkColors = false) {
     this.#systemUsesDarkColors = systemUsesDarkColors;
@@ -26,6 +32,7 @@ class FakeNativeTheme implements NativeThemeAdapter {
       this.#throwOnNextSource = false;
       throw new Error("native theme unavailable");
     }
+    this.sourceAssignments += 1;
     this.#themeSource = value;
     this.emitUpdated();
   }
@@ -65,22 +72,27 @@ class FakeNativeTheme implements NativeThemeAdapter {
 }
 
 class FakePreferencePersistence implements ThemePreferencePersistence {
-  readonly saves: ThemePreference[] = [];
+  readonly saves: ThemeDesign[] = [];
   loadRequests = 0;
   activeSaves = 0;
   maximumActiveSaves = 0;
   nextSaveError: Error | null = null;
   nextSaveGate: Promise<void> | null = null;
 
-  constructor(readonly loadedPreference: ThemePreference = "system") {}
+  readonly loadedDesign: ThemeDesign;
 
-  async load(): Promise<ThemePreference> {
-    this.loadRequests += 1;
-    await Promise.resolve();
-    return this.loadedPreference;
+  constructor(loaded: ThemePreference | ThemeDesign = "system") {
+    this.loadedDesign =
+      typeof loaded === "string" ? { preference: loaded, accentColor: null } : loaded;
   }
 
-  async save(preference: ThemePreference): Promise<void> {
+  async load(): Promise<ThemeDesign> {
+    this.loadRequests += 1;
+    await Promise.resolve();
+    return this.loadedDesign;
+  }
+
+  async save(design: ThemeDesign): Promise<void> {
     this.activeSaves += 1;
     this.maximumActiveSaves = Math.max(this.maximumActiveSaves, this.activeSaves);
     await Promise.resolve();
@@ -93,7 +105,7 @@ class FakePreferencePersistence implements ThemePreferencePersistence {
       this.activeSaves -= 1;
       throw error;
     }
-    this.saves.push(preference);
+    this.saves.push(design);
     this.activeSaves -= 1;
   }
 }
@@ -125,6 +137,7 @@ describe("ThemeController", () => {
       preference: "system",
       resolvedThemeId: "dark",
       resolvedColorScheme: "dark",
+      accentColor: null,
     });
     expect(second).toBe(first);
     expect(Object.isFrozen(first)).toBe(true);
@@ -141,6 +154,7 @@ describe("ThemeController", () => {
       preference: "light",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
     expect(nativeTheme.themeSource).toBe("light");
   });
@@ -157,8 +171,18 @@ describe("ThemeController", () => {
     nativeTheme.useSystemDarkColors(false);
 
     expect(states).toEqual([
-      { preference: "system", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
-      { preference: "system", resolvedThemeId: "light", resolvedColorScheme: "light" },
+      {
+        preference: "system",
+        resolvedThemeId: "dark",
+        resolvedColorScheme: "dark",
+        accentColor: null,
+      },
+      {
+        preference: "system",
+        resolvedThemeId: "light",
+        resolvedColorScheme: "light",
+        accentColor: null,
+      },
     ]);
     expect(controller.state).toBe(states[1]);
   });
@@ -175,14 +199,83 @@ describe("ThemeController", () => {
       preference: "dark",
       resolvedThemeId: "dark",
       resolvedColorScheme: "dark",
+      accentColor: null,
     });
     nativeTheme.useSystemDarkColors(false);
 
-    expect(persistence.saves).toEqual(["dark"]);
+    expect(persistence.saves).toEqual([{ preference: "dark", accentColor: null }]);
     expect(nativeTheme.themeSource).toBe("dark");
     expect(states).toEqual([
-      { preference: "dark", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
+      {
+        preference: "dark",
+        resolvedThemeId: "dark",
+        resolvedColorScheme: "dark",
+        accentColor: null,
+      },
     ]);
+  });
+
+  it("persists a canonical accent without touching native source and preserves it across changes", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence();
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+    const assignmentsAfterInitialization = nativeTheme.sourceAssignments;
+
+    await expect(
+      controller.setDesign({ preference: "system", accentColor: "#A15EFF" }),
+    ).resolves.toEqual({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: "#a15eff",
+    });
+    expect(nativeTheme.sourceAssignments).toBe(assignmentsAfterInitialization);
+
+    nativeTheme.useSystemDarkColors(true);
+    expect(controller.state).toEqual({
+      preference: "system",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "#a15eff",
+    });
+
+    await controller.setPreference("dark");
+    expect(controller.state.accentColor).toBe("#a15eff");
+    expect(persistence.saves).toEqual([
+      { preference: "system", accentColor: "#a15eff" },
+      { preference: "dark", accentColor: "#a15eff" },
+    ]);
+  });
+
+  it("serializes a full design before a preference-only update without losing its accent", async () => {
+    const persistence = new FakePreferencePersistence();
+    const controller = controllerWith(new FakeNativeTheme(), persistence);
+    await controller.initialize();
+
+    await Promise.all([
+      controller.setDesign({ preference: "system", accentColor: "#be123c" }),
+      controller.setPreference("light"),
+    ]);
+
+    expect(persistence.maximumActiveSaves).toBe(1);
+    expect(persistence.saves).toEqual([
+      { preference: "system", accentColor: "#be123c" },
+      { preference: "light", accentColor: "#be123c" },
+    ]);
+    expect(controller.state).toMatchObject({ preference: "light", accentColor: "#be123c" });
+  });
+
+  it("rejects invalid accent data before persistence", async () => {
+    const persistence = new FakePreferencePersistence();
+    const controller = controllerWith(new FakeNativeTheme(), persistence);
+    await controller.initialize();
+
+    await expect(
+      controller.setDesign({ preference: "dark", accentColor: "url(file:///tmp/x)" }),
+    ).rejects.toThrow();
+    expect(persistence.saves).toEqual([]);
+    expect(controller.state.accentColor).toBeNull();
   });
 
   it("preserves prior state when persistence rejects and recovers for a later write", async () => {
@@ -199,6 +292,7 @@ describe("ThemeController", () => {
       preference: "system",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
     expect(nativeTheme.themeSource).toBe("system");
     expect(states).toEqual([]);
@@ -206,7 +300,39 @@ describe("ThemeController", () => {
     await expect(controller.setPreference("light")).resolves.toMatchObject({
       preference: "light",
     });
-    expect(persistence.saves).toEqual(["light"]);
+    expect(persistence.saves).toEqual([{ preference: "light", accentColor: null }]);
+  });
+
+  it("reconciles a system scheme update that arrives during a rejected save", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence();
+    let releaseSave: (() => void) | undefined;
+    persistence.nextSaveGate = new Promise((resolve) => {
+      releaseSave = resolve;
+    });
+    persistence.nextSaveError = new Error("disk full");
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+    const states: ThemeState[] = [];
+    controller.subscribe((state) => states.push(state));
+
+    const request = controller.setPreference("dark");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(persistence.activeSaves).toBe(1);
+    nativeTheme.useSystemDarkColors(true);
+    releaseSave?.();
+
+    await expect(request).rejects.toThrow("disk full");
+    expect(nativeTheme.themeSource).toBe("system");
+    expect(controller.state).toEqual({
+      preference: "system",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: null,
+    });
+    expect(states).toEqual([controller.state]);
+    expect(persistence.saves).toEqual([]);
   });
 
   it("serializes rapid changes and publishes them in request order", async () => {
@@ -219,12 +345,16 @@ describe("ThemeController", () => {
     await Promise.all([controller.setPreference("dark"), controller.setPreference("light")]);
 
     expect(persistence.maximumActiveSaves).toBe(1);
-    expect(persistence.saves).toEqual(["dark", "light"]);
+    expect(persistence.saves).toEqual([
+      { preference: "dark", accentColor: null },
+      { preference: "light", accentColor: null },
+    ]);
     expect(states.map((state) => state.preference)).toEqual(["dark", "light"]);
     expect(controller.state).toEqual({
       preference: "light",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
   });
 
@@ -275,11 +405,17 @@ describe("ThemeController", () => {
       preference: "dark",
       resolvedThemeId: "dark",
       resolvedColorScheme: "dark",
+      accentColor: null,
     });
 
     expect(listenerErrors).toEqual([listenerFailure]);
     expect(delivered).toEqual([
-      { preference: "dark", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
+      {
+        preference: "dark",
+        resolvedThemeId: "dark",
+        resolvedColorScheme: "dark",
+        accentColor: null,
+      },
     ]);
   });
 
@@ -306,11 +442,12 @@ describe("ThemeController", () => {
       preference: "system",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
-    expect(persistence.saves).toEqual(["dark"]);
+    expect(persistence.saves).toEqual([{ preference: "dark", accentColor: null }]);
   });
 
-  it("rolls persistence back when the native adapter rejects", async () => {
+  it("does not persist a preference when the native adapter rejects", async () => {
     const nativeTheme = new FakeNativeTheme(false);
     const persistence = new FakePreferencePersistence();
     const controller = controllerWith(nativeTheme, persistence);
@@ -323,9 +460,10 @@ describe("ThemeController", () => {
       preference: "system",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
     expect(nativeTheme.themeSource).toBe("system");
-    expect(persistence.saves).toEqual(["dark", "system"]);
+    expect(persistence.saves).toEqual([]);
   });
 
   it("unsubscribes from native updates and rejects new work after disposal", async () => {
@@ -345,6 +483,7 @@ describe("ThemeController", () => {
       preference: "system",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: null,
     });
     expect(() => controller.subscribe(() => undefined)).toThrow(/disposed/);
     await expect(controller.setPreference("dark")).rejects.toThrow(/disposed/);

@@ -43,6 +43,7 @@ import {
   sendMessageOperationSchema,
   sequenceSchema,
   taskListQuerySchema,
+  themeDesignSchema,
   themePreferenceSchema,
   updateTaskOperationSchema,
   upsertChannelMemberOperationSchema,
@@ -884,6 +885,25 @@ function registerIpcHandlers(): void {
       return await themeController.setPreference(parsed.data);
     } catch (error) {
       throw new Error("Could not save the appearance preference", { cause: error });
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.themeDesignSet);
+  ipcMain.handle(DESKTOP_CHANNELS.themeDesignSet, async (event, design: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted theme-design-set IPC sender");
+    }
+    if (themeController === null) {
+      throw new Error("Appearance is unavailable");
+    }
+    const parsed = themeDesignSchema.safeParse(design);
+    if (!parsed.success) {
+      throw new Error("Invalid theme design");
+    }
+    try {
+      return await themeController.setDesign(parsed.data);
+    } catch (error) {
+      throw new Error("Could not save the theme design", { cause: error });
     }
   });
 

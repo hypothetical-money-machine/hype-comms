@@ -34,27 +34,50 @@ afterEach(async () => {
 });
 
 describe("ThemePreferenceStore", () => {
-  it("uses the system preference when the file is missing", async () => {
+  it("uses an accent-free system design when the file is missing", async () => {
     const store = new ThemePreferenceStore({ userDataPath: await scratchDirectory() });
-    await expect(store.load()).resolves.toBe("system");
+    await expect(store.load()).resolves.toEqual({ preference: "system", accentColor: null });
   });
 
-  it("round-trips a versioned preference in a private file", async () => {
+  it("round-trips a versioned design in a private file", async () => {
     const userDataPath = await scratchDirectory();
     const store = new ThemePreferenceStore({ userDataPath });
 
-    await store.save("dark");
+    await store.save({ preference: "dark", accentColor: "#A15EFF" });
 
     expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual({
-      version: 1,
+      version: 2,
       preference: "dark",
+      accentColor: "#a15eff",
     });
-    await expect(new ThemePreferenceStore({ userDataPath }).load()).resolves.toBe("dark");
+    await expect(new ThemePreferenceStore({ userDataPath }).load()).resolves.toEqual({
+      preference: "dark",
+      accentColor: "#a15eff",
+    });
 
     if (process.platform !== "win32") {
       expect((await stat(preferenceDirectory(userDataPath))).mode & 0o777).toBe(0o700);
       expect((await stat(preferenceFile(userDataPath))).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("migrates a strict version-1 preference and writes version 2 on the next save", async () => {
+    const userDataPath = await scratchDirectory();
+    await writeStoredValue(userDataPath, JSON.stringify({ version: 1, preference: "light" }));
+    const store = new ThemePreferenceStore({ userDataPath });
+
+    await expect(store.load()).resolves.toEqual({ preference: "light", accentColor: null });
+    expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual({
+      version: 1,
+      preference: "light",
+    });
+
+    await store.save({ preference: "light", accentColor: "#2563eb" });
+    expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual({
+      version: 2,
+      preference: "light",
+      accentColor: "#2563eb",
+    });
   });
 
   it("does not collide with an existing application preferences file", async () => {
@@ -64,8 +87,8 @@ describe("ThemePreferenceStore", () => {
     await writeFile(existingPreferences, existingValue, "utf8");
     const store = new ThemePreferenceStore({ userDataPath });
 
-    await expect(store.save("dark")).resolves.toBeUndefined();
-    await expect(store.load()).resolves.toBe("dark");
+    await expect(store.save({ preference: "dark", accentColor: null })).resolves.toBeUndefined();
+    await expect(store.load()).resolves.toEqual({ preference: "dark", accentColor: null });
     await expect(readFile(existingPreferences, "utf8")).resolves.toBe(existingValue);
   });
 
@@ -74,17 +97,21 @@ describe("ThemePreferenceStore", () => {
     const store = new ThemePreferenceStore({ userDataPath });
     const invalidValues = [
       "not json",
-      JSON.stringify({ preference: "dark" }),
+      JSON.stringify({ preference: "dark", accentColor: null }),
       JSON.stringify({ version: 2, preference: "dark" }),
+      JSON.stringify({ version: 3, preference: "dark", accentColor: null }),
       JSON.stringify({ version: 1, preference: "midnight" }),
       JSON.stringify({ version: 1, preference: "dim" }),
       JSON.stringify({ version: 1, preference: "dark", extra: true }),
+      JSON.stringify({ version: 2, preference: "dark", accentColor: "#fff" }),
+      JSON.stringify({ version: 2, preference: "dark", accentColor: "url(file:///tmp/x)" }),
+      JSON.stringify({ version: 2, preference: "dark", accentColor: null, extra: true }),
       "x".repeat(MAX_THEME_PREFERENCE_FILE_BYTES + 1),
     ];
 
     for (const value of invalidValues) {
       await writeStoredValue(userDataPath, value);
-      await expect(store.load()).resolves.toBe("system");
+      await expect(store.load()).resolves.toEqual({ preference: "system", accentColor: null });
     }
   });
 
@@ -92,9 +119,13 @@ describe("ThemePreferenceStore", () => {
     const userDataPath = await scratchDirectory();
     const store = new ThemePreferenceStore({ userDataPath });
 
-    await Promise.all([store.save("dark"), store.save("light"), store.save("system")]);
+    await Promise.all([
+      store.save({ preference: "dark", accentColor: "#be123c" }),
+      store.save({ preference: "light", accentColor: "#2563eb" }),
+      store.save({ preference: "system", accentColor: null }),
+    ]);
 
-    await expect(store.load()).resolves.toBe("system");
+    await expect(store.load()).resolves.toEqual({ preference: "system", accentColor: null });
     expect(await readdir(preferenceDirectory(userDataPath))).toEqual(["theme.json"]);
   });
 
@@ -102,8 +133,10 @@ describe("ThemePreferenceStore", () => {
     const userDataPath = await scratchDirectory();
     const store = new ThemePreferenceStore({ userDataPath });
 
-    await expect(store.save("dim")).rejects.toThrow(/Unknown built-in theme: dim/u);
-    await expect(store.load()).resolves.toBe("system");
+    await expect(store.save({ preference: "dim", accentColor: null })).rejects.toThrow(
+      /Unknown built-in theme: dim/u,
+    );
+    await expect(store.load()).resolves.toEqual({ preference: "system", accentColor: null });
   });
 
   it("continues saving after an earlier write fails", async () => {
@@ -111,11 +144,16 @@ describe("ThemePreferenceStore", () => {
     await writeFile(preferenceDirectory(userDataPath), "not a directory", "utf8");
     const store = new ThemePreferenceStore({ userDataPath });
 
-    await expect(store.save("dark")).rejects.toThrow();
+    await expect(store.save({ preference: "dark", accentColor: null })).rejects.toThrow();
 
     await rm(preferenceDirectory(userDataPath));
-    await expect(store.save("light")).resolves.toBeUndefined();
-    await expect(store.load()).resolves.toBe("light");
+    await expect(
+      store.save({ preference: "light", accentColor: "#2563eb" }),
+    ).resolves.toBeUndefined();
+    await expect(store.load()).resolves.toEqual({
+      preference: "light",
+      accentColor: "#2563eb",
+    });
   });
 
   it.skipIf(process.platform === "win32")(
@@ -125,11 +163,16 @@ describe("ThemePreferenceStore", () => {
       const syncDirectory = vi.fn(() => Promise.reject(new Error("directory sync unavailable")));
       const store = new ThemePreferenceStore({ userDataPath, syncDirectory });
 
-      await expect(store.save("dark")).resolves.toBeUndefined();
+      await expect(
+        store.save({ preference: "dark", accentColor: "#be123c" }),
+      ).resolves.toBeUndefined();
 
       expect(syncDirectory).toHaveBeenCalledOnce();
       expect(syncDirectory).toHaveBeenCalledWith(preferenceDirectory(userDataPath));
-      await expect(store.load()).resolves.toBe("dark");
+      await expect(store.load()).resolves.toEqual({
+        preference: "dark",
+        accentColor: "#be123c",
+      });
       expect(await readdir(preferenceDirectory(userDataPath))).toEqual(["theme.json"]);
     },
   );

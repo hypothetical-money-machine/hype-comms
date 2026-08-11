@@ -65,6 +65,7 @@ import {
   taskListQuerySchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
+  themeDesignSchema,
   themePreferenceSchema,
   updateStateSchema,
   updateTaskOperationSchema,
@@ -93,6 +94,7 @@ import {
   type RealtimeSessionScope,
   type ScopedProductRealtimeEvent,
   type SendMessageOperation,
+  type ThemeDesign,
   type ThemePreference,
   type ThemeState,
   type TaskListQuery,
@@ -214,6 +216,10 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
           DESKTOP_CHANNELS.themeSet,
           themePreferenceSchema.parse(preference),
         ),
+      ),
+    setThemeDesign: async (design: ThemeDesign) =>
+      parseBuiltInThemeState(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.themeDesignSet, themeDesignSchema.parse(design)),
       ),
     onThemeStateChanged: (listener: (state: ThemeState) => void) =>
       subscribe(DESKTOP_CHANNELS.themeChanged, listener, isBuiltInThemeState),
