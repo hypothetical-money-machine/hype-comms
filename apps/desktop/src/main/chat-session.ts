@@ -41,7 +41,7 @@ const RENEWAL_RETRY_DELAY_MS = 5 * 60_000;
 const RENEWAL_MAX_RETRY_DELAY_MS = 60 * 60_000;
 
 export const INVALID_MAGIC_LINK_MESSAGE = "This sign-in link is invalid or has expired";
-export const AUTHKIT_FAILED_MESSAGE = "AuthKit sign-in could not be completed. Please try again.";
+export const AUTHKIT_FAILED_MESSAGE = "WorkOS sign-in could not be completed. Please try again.";
 export const SESSION_UNREACHABLE_MESSAGE =
   "Could not reach the chat server. Your session is preserved.";
 export const SESSION_SERVER_ERROR_MESSAGE =
@@ -325,7 +325,7 @@ export class ChatSession {
     }
     if (!response.ok) {
       throw new ChatSessionError(
-        await readErrorMessage(response, "Could not start AuthKit sign-in"),
+        await readErrorMessage(response, "Could not start WorkOS sign-in"),
       );
     }
     try {

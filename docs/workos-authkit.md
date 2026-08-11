@@ -30,7 +30,7 @@ local revocation. Existing magic links remain compatible during rollout.
 An indeterminate handoff exchange is terminal and is never retried automatically. Starting again
 creates completely new provider and desktop transactions.
 
-![Signed-out Hype Comms desktop showing AuthKit and magic-link choices](screenshots/workos-authkit-sign-in.png)
+![Signed-out Hype Comms desktop showing WorkOS and magic-link choices](screenshots/workos-authkit-sign-in.png)
 
 ## WorkOS dashboard setup
 
@@ -143,8 +143,9 @@ A safe rollout is:
    gated off.
 4. After every old server has been drained, set `HMM_AUTHKIT_ADMISSION_ENABLED=true` on every new
    server and verify capability discovery reports `authKit: true` consistently.
-5. Ship the desktop update. New clients show AuthKit; old clients continue using magic links. Keep
-   magic-link delivery until the rollback window and desired migration period are complete.
+5. Ship the desktop update. New clients show **Sign in with WorkOS**; old clients continue using
+   magic links. Keep magic-link delivery until the rollback window and desired migration period
+   are complete.
 
 ## Rollback
 

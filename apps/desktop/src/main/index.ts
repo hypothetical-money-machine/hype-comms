@@ -987,7 +987,7 @@ function registerIpcHandlers(): void {
           authKitPendingIntentGeneration = null;
         }
         reportMainProcessError("AuthKit authorization could not be started");
-        throw new Error("Could not start AuthKit sign-in", { cause: error });
+        throw new Error("Could not start WorkOS sign-in", { cause: error });
       }
     })();
     authKitStartPromise = start;
@@ -1025,7 +1025,7 @@ function registerIpcHandlers(): void {
         type: "warning" as const,
         message: "Signed out, but secure sign-in cancellation is still pending",
         detail:
-          "Close any AuthKit browser window. Hype Comms will keep retrying the protected cancellation.",
+          "Close any WorkOS sign-in window. Hype Comms will keep retrying the protected cancellation.",
       };
       const window = mainWindow;
       if (window === null || window.isDestroyed()) {

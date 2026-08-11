@@ -17,7 +17,7 @@ SQLite-to-PostgreSQL cutover boundary.
 
 If you only want to use Hype Comms, you do not need Docker, PostgreSQL, Node, or a local server.
 Install the desktop build provided by the workspace owner and open it. When the deployment has
-WorkOS AuthKit enabled, choose **Continue with AuthKit** and finish in the system browser. You can
+WorkOS AuthKit enabled, choose **Sign in with WorkOS** and finish in the system browser. You can
 also enter your invited email address and follow a magic link when that rollout-compatible method
 is enabled. Either method creates or restores the same local identity and revocable device session.
 

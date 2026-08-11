@@ -224,7 +224,7 @@ function SignIn({
       await client.startAuthKitSignIn();
       setStatus("Finish signing in in the browser. You can return here when it completes.");
     } catch (error) {
-      setStatus(errorMessage(error, "Could not start AuthKit sign-in"));
+      setStatus(errorMessage(error, "Could not start WorkOS sign-in"));
     } finally {
       setAuthKitStarting(false);
     }
@@ -265,7 +265,7 @@ function SignIn({
             disabled={authKitStarting || requesting}
             onClick={() => void startAuthKit()}
           >
-            {authKitStarting ? "Opening secure sign-in…" : "Continue with AuthKit"}
+            {authKitStarting ? "Opening secure sign-in…" : "Sign in with WorkOS"}
           </button>
         )}
         {capabilities.authKit && capabilities.magicLink && (
