@@ -44,6 +44,12 @@ export interface CompactChrome {
   readonly getState: () => CompactChromeState;
   readonly notifyUnread: () => void;
   readonly onPopoverOpenChange: (open: boolean) => void;
+  /**
+   * Hides the chrome immediately, overriding the hover/focus keep-open checks. Call when the
+   * user navigates somewhere (quick switcher pick, search result) — a pointer left resting on
+   * the overlay would otherwise keep it covering the destination indefinitely.
+   */
+  readonly collapse: () => void;
   readonly chromeProps: CompactChromeProps;
   readonly hotzoneProps: CompactHotzoneProps;
 }
@@ -248,7 +254,15 @@ export function useCompactChrome(active: boolean): CompactChrome {
   );
 
   return useMemo(
-    () => ({ subscribe, getState, notifyUnread, onPopoverOpenChange, chromeProps, hotzoneProps }),
-    [chromeProps, getState, hotzoneProps, notifyUnread, onPopoverOpenChange, subscribe],
+    () => ({
+      subscribe,
+      getState,
+      notifyUnread,
+      onPopoverOpenChange,
+      collapse,
+      chromeProps,
+      hotzoneProps,
+    }),
+    [chromeProps, collapse, getState, hotzoneProps, notifyUnread, onPopoverOpenChange, subscribe],
   );
 }
