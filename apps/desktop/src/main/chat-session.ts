@@ -1,17 +1,31 @@
 import {
   apiErrorEnvelopeSchema,
+  authCapabilitiesSchema,
+  authKitLogoutUrlHeaderName,
+  authKitLogoutUrlSchema,
+  createDesktopAuthorizationRequestSchema,
+  createDesktopAuthorizationResponseSchema,
   currentUserSchema,
+  exchangeAuthHandoffRequestSchema,
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
   requestMagicLinkSchema,
   type ChatSessionState,
+  type AuthCapabilities,
+  type AuthKitLogoutUrl,
+  type CreateDesktopAuthorizationRequest,
+  type CreateDesktopAuthorizationResponse,
   type CurrentUser,
+  type ExchangeAuthHandoffRequest,
   type MagicLinkDeliveryState,
   type MagicLinkToken,
 } from "@hmm-chat/contracts";
 
 import {
+  createAuthCapabilitiesUrl,
+  createAuthHandoffExchangeUrl,
   createCurrentUserUrl,
+  createDesktopAuthorizationUrl,
   createIdentitySessionUrl,
   createMagicLinkUrl,
 } from "../shared/api-origin";
@@ -27,6 +41,7 @@ const RENEWAL_RETRY_DELAY_MS = 5 * 60_000;
 const RENEWAL_MAX_RETRY_DELAY_MS = 60 * 60_000;
 
 export const INVALID_MAGIC_LINK_MESSAGE = "This sign-in link is invalid or has expired";
+export const AUTHKIT_FAILED_MESSAGE = "AuthKit sign-in could not be completed. Please try again.";
 export const SESSION_UNREACHABLE_MESSAGE =
   "Could not reach the chat server. Your session is preserved.";
 export const SESSION_SERVER_ERROR_MESSAGE =
@@ -119,6 +134,9 @@ export class ChatSession {
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
   readonly #identitySessionUrl: string;
+  readonly #authCapabilitiesUrl: string;
+  readonly #authHandoffExchangeUrl: string;
+  readonly #desktopAuthorizationUrl: string;
   readonly #sessionRefreshUrl: string;
   readonly #currentUserUrl: string;
   readonly #magicLinkUrl: string;
@@ -127,12 +145,16 @@ export class ChatSession {
   #state: ChatSessionState = { status: "signed-out" };
   #renewalTimer: ReturnType<typeof setTimeout> | null = null;
   #renewalFailures = 0;
+  #logoutUrl: AuthKitLogoutUrl | null = null;
 
   constructor(options: { apiOrigin: string; cookies: SessionCookieStore; request: SessionFetch }) {
     this.#apiOrigin = options.apiOrigin;
     this.#cookies = options.cookies;
     this.#request = options.request;
     this.#identitySessionUrl = createIdentitySessionUrl(options.apiOrigin);
+    this.#authCapabilitiesUrl = createAuthCapabilitiesUrl(options.apiOrigin);
+    this.#authHandoffExchangeUrl = createAuthHandoffExchangeUrl(options.apiOrigin);
+    this.#desktopAuthorizationUrl = createDesktopAuthorizationUrl(options.apiOrigin);
     this.#sessionRefreshUrl = new URL("/v1/auth/session/refresh", options.apiOrigin).href;
     this.#currentUserUrl = createCurrentUserUrl(options.apiOrigin);
     this.#magicLinkUrl = createMagicLinkUrl(options.apiOrigin);
@@ -228,6 +250,7 @@ export class ChatSession {
   }
 
   #applySignedIn(identity: CurrentUser): void {
+    this.#logoutUrl = null;
     this.#setState({
       status: "signed-in",
       method: "email",
@@ -263,6 +286,95 @@ export class ChatSession {
     }
 
     throw new ChatSessionError(message);
+  }
+
+  /** Older servers have no discovery endpoint, so their existing magic-link path remains usable. */
+  async getAuthCapabilities(): Promise<AuthCapabilities> {
+    let response: Response;
+    try {
+      response = await this.#fetch(this.#authCapabilitiesUrl, { method: "GET" });
+    } catch {
+      throw new ChatSessionError("Could not reach the chat server");
+    }
+    if (response.status === 404) {
+      return { authKit: false, magicLink: true };
+    }
+    if (!response.ok) {
+      throw new ChatSessionError("Could not load sign-in options");
+    }
+    try {
+      return authCapabilitiesSchema.parse(await response.json());
+    } catch {
+      throw new ChatSessionError("The chat server returned invalid sign-in options");
+    }
+  }
+
+  async beginDesktopAuthorization(
+    input: CreateDesktopAuthorizationRequest,
+  ): Promise<CreateDesktopAuthorizationResponse> {
+    const request = createDesktopAuthorizationRequestSchema.parse(input);
+    let response: Response;
+    try {
+      response = await this.#fetch(this.#desktopAuthorizationUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+    } catch {
+      throw new ChatSessionError("Could not reach the authentication service");
+    }
+    if (!response.ok) {
+      throw new ChatSessionError(
+        await readErrorMessage(response, "Could not start AuthKit sign-in"),
+      );
+    }
+    try {
+      return createDesktopAuthorizationResponseSchema.parse(await response.json());
+    } catch {
+      throw new ChatSessionError("The authentication service returned an invalid response");
+    }
+  }
+
+  exchangeAuthKitHandoff(input: ExchangeAuthHandoffRequest): Promise<ChatSessionState> {
+    return this.#runMutation(() => this.#exchangeAuthKitHandoff(input));
+  }
+
+  async #exchangeAuthKitHandoff(input: ExchangeAuthHandoffRequest): Promise<ChatSessionState> {
+    const handoff = exchangeAuthHandoffRequestSchema.parse(input);
+    let response: Response;
+    try {
+      response = await this.#fetch(this.#authHandoffExchangeUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(handoff),
+      });
+    } catch {
+      return this.#failAuthKitSignIn();
+    }
+    if (!response.ok) {
+      return this.#failAuthKitSignIn();
+    }
+
+    let identity: CurrentUser;
+    try {
+      identity = currentUserSchema.parse(await response.json());
+    } catch {
+      return this.#failAuthKitSignIn();
+    }
+    this.#applySignedIn(identity);
+    await this.#scheduleRenewal();
+    return this.#state;
+  }
+
+  reportAuthKitFailure(): void {
+    if (this.#state.status !== "signed-in") {
+      this.#setState({ status: "signed-out", message: AUTHKIT_FAILED_MESSAGE });
+    }
+  }
+
+  #failAuthKitSignIn(): never {
+    this.reportAuthKitFailure();
+    throw new ChatSessionError(AUTHKIT_FAILED_MESSAGE);
   }
 
   exchangeMagicLink(token: MagicLinkToken): Promise<ChatSessionState> {
@@ -335,10 +447,19 @@ export class ChatSession {
 
   async #signOut(): Promise<ChatSessionState> {
     this.#stopRenewal();
-    await this.#deleteSession(this.#identitySessionUrl);
+    this.#logoutUrl = null;
+    const logoutUrl = await this.#deleteSession(this.#identitySessionUrl);
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
+    this.#logoutUrl = logoutUrl;
     this.#setState({ status: "signed-out" });
     return this.#state;
+  }
+
+  /** Returns the provider logout target once without adding it to renderer-visible session state. */
+  consumeLogoutUrl(): AuthKitLogoutUrl | null {
+    const logoutUrl = this.#logoutUrl;
+    this.#logoutUrl = null;
+    return logoutUrl;
   }
 
   /**
@@ -426,11 +547,17 @@ export class ChatSession {
     }
   }
 
-  async #deleteSession(url: string): Promise<void> {
+  async #deleteSession(url: string): Promise<AuthKitLogoutUrl | null> {
     try {
-      await this.#fetch(url, { method: "DELETE" });
+      const response = await this.#fetch(url, { method: "DELETE" });
+      if (!response.ok) return null;
+      const parsed = authKitLogoutUrlSchema.safeParse(
+        response.headers.get(authKitLogoutUrlHeaderName),
+      );
+      return parsed.success ? parsed.data : null;
     } catch {
       // Local cookie removal still signs this device out of that method.
+      return null;
     }
   }
 

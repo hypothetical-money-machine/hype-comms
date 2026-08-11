@@ -11,6 +11,8 @@ import {
   NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
   NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
   NOTIFICATION_STATE_IPC_MAX_BYTES,
+  authAppVersionSchema,
+  authDevicePlatformSchema,
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
@@ -76,11 +78,13 @@ import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
 import type { RealtimeConnectionState, ServerStatus } from "../shared/desktop-api";
 import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
+import { parseAuthCallback } from "./auth-callback";
+import { AuthKitFlow } from "./authkit-flow";
 import {
-  parseAuthCallbackToken,
-  processAuthCallback,
-  type AuthCallbackOutcome,
-} from "./auth-callback";
+  AuthKitProtectedStoreCorruptError,
+  AuthKitProtectedStoreUnavailableError,
+  SafeStorageAuthKitPendingStore,
+} from "./authkit-pending-store";
 import { configureWindowsApplicationIdentity } from "./application-identity";
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { ChatSession, ChatSessionError } from "./chat-session";
@@ -181,9 +185,17 @@ let rendererSessionGeneration = 0;
 const mainWindowRecreationCoordinator = new MainWindowRecreationCoordinator();
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
-const pendingAuthCallbackUrls: string[] = [];
+interface PendingAuthCallback {
+  readonly transientAttempts: number;
+  readonly value: string;
+}
+
+const AUTH_CALLBACK_RETRY_DELAYS_MS = [1_000, 3_000, 10_000] as const;
+const pendingAuthCallbacks: PendingAuthCallback[] = [];
 let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
+let authCallbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let authIntentGeneration = 0;
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
 const headlessDesktopConfiguration = resolveHeadlessDesktopConfiguration(
   process.env,
@@ -213,6 +225,13 @@ app.setPath(
   ),
 );
 let chatSession: ChatSession | null = null;
+let authKitFlow: AuthKitFlow | null = null;
+let authKitPendingStore: SafeStorageAuthKitPendingStore | null = null;
+let authKitCancellationPromise: Promise<void> | null = null;
+let authKitCancellationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let authKitCancellationFenced = false;
+let authKitPendingIntentGeneration: number | null = null;
+let authKitStartPromise: Promise<void> | null = null;
 let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
 let macWindowlessRealtimeActive = false;
@@ -468,6 +487,66 @@ function beginSessionReplacement(): void {
   notificationScope = null;
   notificationActiveGeneration = null;
   notificationController?.markReplacing();
+}
+
+function advanceAuthIntent(): number {
+  if (authIntentGeneration >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("Authentication intent generation is exhausted");
+  }
+  authIntentGeneration += 1;
+  return authIntentGeneration;
+}
+
+function scheduleAuthKitCancellationRetry(): void {
+  if (
+    authKitCancellationRetryTimer !== null ||
+    authKitFlow === null ||
+    authKitPendingStore === null
+  ) {
+    return;
+  }
+  authKitCancellationRetryTimer = setTimeout(() => {
+    authKitCancellationRetryTimer = null;
+    void cancelPendingAuthKit().catch(() => undefined);
+  }, 5_000);
+  authKitCancellationRetryTimer.unref();
+}
+
+async function cancelPendingAuthKit(): Promise<void> {
+  if (authKitCancellationPromise !== null) return authKitCancellationPromise;
+  const flow = authKitFlow;
+  const store = authKitPendingStore;
+  if (flow === null || store === null) return;
+  authKitCancellationFenced = true;
+  const cancellation = (async (): Promise<void> => {
+    try {
+      await store.armCancellationFence();
+      try {
+        await flow.cancel();
+      } catch (error) {
+        if (!(error instanceof AuthKitProtectedStoreCorruptError)) throw error;
+        // Corrupt pending material cannot produce a valid callback. Remove it directly because the
+        // flow deliberately refuses to initialize from an unauthenticated/ill-formed record.
+        await store.clear();
+      }
+      authKitPendingIntentGeneration = null;
+      await store.clearCancellationFence();
+      authKitCancellationFenced = false;
+      if (authKitCancellationRetryTimer !== null) {
+        clearTimeout(authKitCancellationRetryTimer);
+        authKitCancellationRetryTimer = null;
+      }
+    } catch (error) {
+      scheduleAuthKitCancellationRetry();
+      throw error;
+    }
+  })();
+  authKitCancellationPromise = cancellation;
+  try {
+    await cancellation;
+  } finally {
+    if (authKitCancellationPromise === cancellation) authKitCancellationPromise = null;
+  }
 }
 
 function isCurrentNotificationScope(scope: NonNullable<typeof notificationScope>): boolean {
@@ -846,13 +925,116 @@ function registerIpcHandlers(): void {
     return chatSession?.state ?? { status: "signed-out" };
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionAuthCapabilities);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionAuthCapabilities, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted authentication-capabilities IPC sender");
+    }
+    if (chatSession === null) {
+      throw new Error("Chat is not configured");
+    }
+
+    const capabilities = await chatSession.getAuthCapabilities();
+    if (!capabilities.authKit || authKitPendingStore === null) return capabilities;
+    if (authKitCancellationFenced) return { ...capabilities, authKit: false };
+    try {
+      await authKitPendingStore.assertAvailable();
+      return capabilities;
+    } catch {
+      return { ...capabilities, authKit: false };
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionStartAuthKit);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionStartAuthKit, async (event): Promise<void> => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AuthKit IPC sender");
+    }
+    if (chatSession === null || authKitFlow === null || authKitPendingStore === null) {
+      throw new Error("AuthKit sign-in is unavailable");
+    }
+    if (chatSession.state.status !== "signed-out") {
+      throw new Error("Sign out before starting a different authentication attempt");
+    }
+
+    // Coalesce duplicate trusted IPC while the first start is persisting state and opening the
+    // browser. Advancing a second intent here could make the first continuation cancel the shared
+    // AuthKitFlow operation after it had already opened a usable authorization URL.
+    if (authKitStartPromise !== null) return authKitStartPromise;
+
+    const startIntent = advanceAuthIntent();
+    const start = (async (): Promise<void> => {
+      try {
+        // Retire any older attempt through the durable fence before replacing it. This also keeps
+        // a failed protected-store deletion from resurrecting the superseded attempt on restart.
+        await cancelPendingAuthKit();
+        // Preflight stable device metadata before opening the system browser. A credential-store
+        // failure after the callback would otherwise consume an otherwise usable handoff.
+        await authKitPendingStore.loadOrCreateInstallationId();
+        if (startIntent !== authIntentGeneration) {
+          throw new Error("AuthKit authorization was superseded");
+        }
+        // Bind the intent before awaiting the browser open. A very fast provider callback queues
+        // behind AuthKitFlow.start(), but may snapshot this generation before start() resolves.
+        authKitPendingIntentGeneration = startIntent;
+        await authKitFlow.start();
+        if (startIntent !== authIntentGeneration) {
+          await cancelPendingAuthKit();
+          throw new Error("AuthKit authorization was superseded");
+        }
+      } catch (error) {
+        if (authKitPendingIntentGeneration === startIntent) {
+          authKitPendingIntentGeneration = null;
+        }
+        reportMainProcessError("AuthKit authorization could not be started");
+        throw new Error("Could not start AuthKit sign-in", { cause: error });
+      }
+    })();
+    authKitStartPromise = start;
+    try {
+      await start;
+    } finally {
+      if (authKitStartPromise === start) authKitStartPromise = null;
+    }
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignOut);
   ipcMain.handle(DESKTOP_CHANNELS.sessionSignOut, async (event) => {
     if (!isTrustedIpcSender(event)) {
       throw new Error("Untrusted sign-out IPC sender");
     }
+    advanceAuthIntent();
+    let cancellationFailed = false;
+    try {
+      await cancelPendingAuthKit();
+    } catch {
+      cancellationFailed = true;
+      reportMainProcessError("Pending AuthKit authorization cancellation will be retried");
+    }
+
     beginSessionReplacement();
-    return (await chatSession?.signOut()) ?? { status: "signed-out" };
+    const state = (await chatSession?.signOut()) ?? { status: "signed-out" as const };
+    const logoutUrl = chatSession?.consumeLogoutUrl() ?? null;
+    if (logoutUrl !== null) {
+      void shell.openExternal(logoutUrl).catch(() => {
+        reportMainProcessError("WorkOS logout page could not be opened");
+      });
+    }
+    if (cancellationFailed && headlessDesktopConfiguration === null) {
+      const content = {
+        type: "warning" as const,
+        message: "Signed out, but secure sign-in cancellation is still pending",
+        detail:
+          "Close any AuthKit browser window. Hype Comms will keep retrying the protected cancellation.",
+      };
+      const window = mainWindow;
+      if (window === null || window.isDestroyed()) {
+        await dialog.showMessageBox(content);
+      } else {
+        await dialog.showMessageBox(window, content);
+      }
+    }
+    return state;
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.notificationContext);
@@ -1536,46 +1718,129 @@ async function showUpdateCheckDialog(
   }
 }
 
+function scheduleAuthCallbackRetry(callback: PendingAuthCallback): boolean {
+  const delay = AUTH_CALLBACK_RETRY_DELAYS_MS[callback.transientAttempts];
+  if (delay === undefined) return false;
+  pendingAuthCallbacks.unshift({
+    value: callback.value,
+    transientAttempts: callback.transientAttempts + 1,
+  });
+  if (authCallbackRetryTimer === null) {
+    authCallbackRetryTimer = setTimeout(() => {
+      authCallbackRetryTimer = null;
+      void drainPendingAuthCallbacks();
+    }, delay);
+    authCallbackRetryTimer.unref();
+  }
+  return true;
+}
+
 async function drainPendingAuthCallbacks(): Promise<void> {
-  if (!authCallbacksReady || chatSession === null || drainingAuthCallbacks) {
+  if (
+    !authCallbacksReady ||
+    chatSession === null ||
+    drainingAuthCallbacks ||
+    authCallbackRetryTimer !== null
+  ) {
     return;
   }
 
   drainingAuthCallbacks = true;
   try {
-    while (pendingAuthCallbackUrls.length > 0) {
-      const value = pendingAuthCallbackUrls.shift();
-      if (value === undefined) {
+    while (pendingAuthCallbacks.length > 0) {
+      const pendingCallback = pendingAuthCallbacks.shift();
+      if (pendingCallback === undefined) continue;
+      const parsed = parseAuthCallback(pendingCallback.value);
+      if (parsed === null) continue;
+      if (parsed.kind === "authkit" && authKitCancellationFenced) continue;
+      const currentSession = chatSession;
+      if (parsed.kind === "magic_link") {
+        const callbackIntent = advanceAuthIntent();
+        try {
+          await cancelPendingAuthKit();
+        } catch {
+          // This callback remains authoritative in the current process because its generation
+          // invalidates AuthKit. Protected deletion continues in the background and is retried on
+          // every restore before another provider callback can be accepted.
+        }
+        if (callbackIntent !== authIntentGeneration) continue;
+        try {
+          beginSessionReplacement();
+          await currentSession.exchangeMagicLink(parsed.token);
+          focusMainWindow();
+        } catch {
+          // ChatSession publishes the credential-preserving or terminal failure state.
+        }
         continue;
       }
 
-      const currentSession = chatSession;
-      const outcome: AuthCallbackOutcome = await processAuthCallback(value, async (token) => {
-        // A later queued callback may run after an earlier one already established a new scope.
-        // Re-enter replacement immediately before every exchange so that scope cannot keep a
-        // socket alive across the credential mutation.
+      const flow = authKitFlow;
+      const store = authKitPendingStore;
+      if (flow === null || store === null) {
+        currentSession.reportAuthKitFailure();
+        continue;
+      }
+
+      const callbackIntent = authKitPendingIntentGeneration;
+      try {
+        // Load metadata before retiring PKCE state. A temporarily locked credential store then
+        // leaves the whole callback retryable instead of burning a valid one-time handoff.
+        const installationId =
+          "code" in parsed.callback ? await store.loadOrCreateInstallationId() : null;
+        const outcome = await flow.handleCallback(parsed.callback);
+        if (outcome.status === "ignored") continue;
+        if (outcome.status === "expired" || outcome.status === "authentication_failed") {
+          authKitPendingIntentGeneration = null;
+          currentSession.reportAuthKitFailure();
+          focusMainWindow();
+          continue;
+        }
+        authKitPendingIntentGeneration = null;
+        if (
+          installationId === null ||
+          callbackIntent === null ||
+          callbackIntent !== authIntentGeneration ||
+          currentSession.state.status !== "signed-out"
+        ) {
+          continue;
+        }
+
+        // Once enqueued, ChatSession serializes this exchange against sign-out. The generation
+        // check covers a sign-out that completed while protected state was being read; a later
+        // sign-out queues behind the exchange and therefore wins.
         beginSessionReplacement();
-        await currentSession.exchangeMagicLink(token);
-      });
-      if (outcome === "succeeded") {
+        await currentSession.exchangeAuthKitHandoff({
+          code: outcome.handoff.callback.code,
+          codeVerifier: outcome.handoff.codeVerifier,
+          installationId,
+          platform: authDevicePlatformSchema.parse(process.platform),
+          appVersion: authAppVersionSchema.parse(app.getVersion()),
+        });
         focusMainWindow();
+      } catch (error) {
+        if (
+          error instanceof AuthKitProtectedStoreUnavailableError &&
+          scheduleAuthCallbackRetry(pendingCallback)
+        ) {
+          break;
+        }
+        currentSession.reportAuthKitFailure();
       }
     }
   } finally {
     drainingAuthCallbacks = false;
-    if (pendingAuthCallbackUrls.length > 0) {
+    if (pendingAuthCallbacks.length > 0 && authCallbackRetryTimer === null) {
       void drainPendingAuthCallbacks();
     }
   }
 }
 
 function handleAuthCallback(value: string): boolean {
-  if (parseAuthCallbackToken(value) === null) {
-    return false;
-  }
+  const parsed = parseAuthCallback(value);
+  if (parsed === null) return false;
+  if (parsed.kind === "authkit" && authKitCancellationFenced) return true;
 
-  beginSessionReplacement();
-  pendingAuthCallbackUrls.push(value);
+  pendingAuthCallbacks.push({ value, transientAttempts: 0 });
   void drainPendingAuthCallbacks();
   return true;
 }
@@ -1701,6 +1966,35 @@ if (!hasSingleInstanceLock) {
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
       });
+      authKitPendingStore = new SafeStorageAuthKitPendingStore({
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        platform: process.platform,
+        safeStorage,
+        userDataPath: app.getPath("userData"),
+      });
+      authKitFlow = new AuthKitFlow({
+        api: chatSession,
+        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        openExternal: (url) => shell.openExternal(url),
+        store: authKitPendingStore,
+      });
+      try {
+        authKitCancellationFenced = await authKitPendingStore.hasCancellationFence();
+        if (authKitCancellationFenced) {
+          await cancelPendingAuthKit();
+        } else {
+          const authKitStatus = await authKitFlow.initialize();
+          authKitPendingIntentGeneration =
+            authKitStatus.status === "pending" ? authIntentGeneration : null;
+        }
+      } catch {
+        // Async safeStorage may be temporarily unavailable while the OS keyring is locked. A
+        // durable cancellation fence stays fail-closed and the cleanup loop retries it without
+        // preventing magic-link restore or application startup.
+        reportMainProcessError("Protected AuthKit state is temporarily unavailable");
+        authKitCancellationFenced = true;
+        scheduleAuthKitCancellationRetry();
+      }
       workspaceTransport = new WorkspaceTransport(__HMM_CHAT_API_ORIGIN__, chatSession);
       if (notificationController !== null) {
         notificationProjectionRepairCoordinator = new NotificationProjectionRepairCoordinator({
@@ -1779,6 +2073,12 @@ if (!hasSingleInstanceLock) {
 
       // Restores a session left over from a previous run; the cookie outlives the process.
       const restoredSession = await chatSession.restore();
+      if (restoredSession.status !== "signed-out") {
+        advanceAuthIntent();
+        await cancelPendingAuthKit().catch(() => {
+          reportMainProcessError("Pending AuthKit authorization cancellation will be retried");
+        });
+      }
 
       const initialCallbackUrl = findAuthCallbackUrl(process.argv);
       if (initialCallbackUrl !== null) {
@@ -1832,6 +2132,18 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
+    if (authCallbackRetryTimer !== null) {
+      clearTimeout(authCallbackRetryTimer);
+      authCallbackRetryTimer = null;
+    }
+    if (authKitCancellationRetryTimer !== null) {
+      clearTimeout(authKitCancellationRetryTimer);
+      authKitCancellationRetryTimer = null;
+    }
+    authKitFlow?.dispose();
+    authKitFlow = null;
+    authKitPendingStore = null;
+    authKitStartPromise = null;
     macWindowlessRealtimeActive = false;
     workspaceRealtime?.resetSession();
     notificationScope = null;

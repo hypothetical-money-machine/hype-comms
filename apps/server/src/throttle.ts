@@ -6,10 +6,61 @@ interface FailureWindow {
   resetAt: number;
 }
 
+interface AttemptWindow {
+  attempts: number;
+  resetAt: number;
+}
+
 export interface SignInThrottleOptions {
   readonly maxFailures?: number;
   readonly windowMs?: number;
   readonly now?: () => number;
+}
+
+export interface FixedWindowAttemptThrottleOptions {
+  readonly maxAttempts?: number;
+  readonly windowMs?: number;
+  readonly now?: () => number;
+}
+
+/** Counts every request in a fixed window and returns the wait for the first rejected request. */
+export class FixedWindowAttemptThrottle {
+  readonly #windows = new Map<string, AttemptWindow>();
+  readonly #maxAttempts: number;
+  readonly #windowMs: number;
+  readonly #now: () => number;
+
+  constructor(options: FixedWindowAttemptThrottleOptions = {}) {
+    this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_FAILURES;
+    this.#windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
+    this.#now = options.now ?? (() => Date.now());
+    if (!Number.isSafeInteger(this.#maxAttempts) || this.#maxAttempts < 1) {
+      throw new TypeError("maxAttempts must be a positive integer");
+    }
+    if (!Number.isSafeInteger(this.#windowMs) || this.#windowMs < 1) {
+      throw new TypeError("windowMs must be a positive integer");
+    }
+  }
+
+  /** Records an allowed attempt and returns 0, or returns milliseconds until retry. */
+  recordAttempt(key: string): number {
+    const now = this.#now();
+    this.#prune(now);
+    const window = this.#windows.get(key);
+    if (window === undefined) {
+      this.#windows.set(key, { attempts: 1, resetAt: now + this.#windowMs });
+      return 0;
+    }
+    if (window.attempts >= this.#maxAttempts) return window.resetAt - now;
+    window.attempts += 1;
+    return 0;
+  }
+
+  #prune(now: number): void {
+    for (const [key, window] of this.#windows) {
+      if (now >= window.resetAt) this.#windows.delete(key);
+    }
+  }
 }
 
 /**

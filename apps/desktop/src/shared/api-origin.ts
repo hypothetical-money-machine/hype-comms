@@ -61,3 +61,15 @@ export function createCurrentUserUrl(apiOrigin: string): string {
 export function createMagicLinkUrl(apiOrigin: string): string {
   return new URL("/v1/auth/magic-link", apiOrigin).href;
 }
+
+export function createAuthCapabilitiesUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/capabilities", apiOrigin).href;
+}
+
+export function createDesktopAuthorizationUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/desktop-authorizations", apiOrigin).href;
+}
+
+export function createAuthHandoffExchangeUrl(apiOrigin: string): string {
+  return new URL("/v1/auth/exchange", apiOrigin).href;
+}

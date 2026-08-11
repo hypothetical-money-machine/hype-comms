@@ -1,6 +1,7 @@
 import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
+  AuthCapabilities,
   CacheCryptoStatus,
   CacheDecryptBatchRequest,
   CacheDecryptBatchResponse,
@@ -75,6 +76,9 @@ export type {
 export interface SessionTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
   readonly getSessionState: () => Promise<ChatSessionState>;
+  /** Optional only so narrow test transports and older embedders remain source-compatible. */
+  readonly getAuthCapabilities?: () => Promise<AuthCapabilities>;
+  readonly startAuthKitSignIn?: () => Promise<void>;
   readonly requestMagicLink: (email: string) => Promise<MagicLinkDeliveryState>;
   readonly signOut: () => Promise<ChatSessionState>;
   readonly onSessionChanged: (listener: (state: ChatSessionState) => void) => () => void;

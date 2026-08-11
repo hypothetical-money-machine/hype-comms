@@ -114,7 +114,7 @@ at the current 25-member scale.
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                                                                                                    |
 | User and membership    | A user is `human`, `bot`, or `agent`. Human email is normalized for comparison and unique; bots and agents have no email and cannot create device sessions. A membership is `owner` or `member` and `invited`, `active`, or `revoked`; bots and agents are always members. Capacity counts every active principal transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                          |
-| Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Access and rotating refresh credentials belong to a revocable device session. Only token hashes are stored.                                                                                                                          |
+| Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Optional AuthKit uses a ten-minute encrypted provider transaction and a five-minute desktop-PKCE handoff; verified provider identity still passes local invite admission. Both methods create the same rotating, revocable local device session, and only credential hashes plus the upstream session ID needed for revocation are retained. |
 | Bot credential         | Owner-issued service credential with one or both `tasks:read` and `tasks:write` scopes, a required expiry, last-used time, and optional revocation time. The 256-bit token is shown once and only its SHA-256 hash is stored. Rotation atomically revokes every prior credential for that bot.                                                                                                        |
 | Bot channel grant      | Explicit bot-to-channel authorization. A grant is required even when the channel access mode is `workspace`; it never grants a DM. Visibility is the intersection of an active bot membership, credential scope, and channel grant.                                                                                                                                                              |
 | Agent credential       | Owner-issued, non-expiring bearer credential with immutable `workspace:read`, `messages:write`, `conversations:write`, and/or `read-cursors:write` scopes. The prefixed 256-bit token is shown once and only its SHA-256 hash is stored. Disabling an agent revokes its active membership and every token.                                                                                           |
@@ -170,9 +170,12 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | Route                                                                         | Contract                                                                                                                                  |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /livez`, `GET /readyz`                                                   | Process liveness and dependency readiness; no sensitive diagnostic data.                                                                  |
-| `POST /v1/auth/magic-links`                                                   | Accept email plus PKCE-style code challenge and always return `202`; send only for a valid invited/active email.                          |
-| `POST /v1/auth/exchange`                                                      | Exchange a short-lived callback code plus verifier for an access credential, rotating refresh credential, and session summary.            |
-| `POST /v1/auth/refresh`, `DELETE /v1/auth/session`                            | Rotate a refresh credential or revoke the current device session.                                                                         |
+| `GET /v1/auth/capabilities`                                                   | Discover the additive AuthKit and self-service magic-link methods without exposing configuration.                                         |
+| `POST /v1/auth/magic-link`                                                    | Uniformly accept an invited/active email when self-service delivery is enabled; never reveal membership.                                  |
+| `POST /v1/auth/desktop-authorizations`, `GET /v1/auth/workos/callback`        | Start dual-PKCE AuthKit in the system browser, then return a credential-free Hype Comms handoff to the fixed desktop scheme.              |
+| `POST /v1/auth/exchange`                                                      | Exchange a five-minute desktop-PKCE handoff once, set the existing HttpOnly `hmm_session` cookie, and return the current local user.       |
+| `POST /v1/auth/session/refresh`, `DELETE /v1/auth/session`                    | Rotate the local device credential or revoke the current device session.                                                                  |
+| `POST /v1/auth/workos/webhook`                                                | Verify the exact signed raw WorkOS event and idempotently apply upstream session revocation.                                               |
 | `GET /v1/sessions`, `DELETE /v1/sessions/:id`                                 | List and revoke the caller's other device sessions.                                                                                       |
 | `GET /v1/bootstrap`                                                           | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
 | `GET /v1/members`                                                             | Active member directory for DMs and mention completion.                                                                                   |
@@ -476,6 +479,28 @@ reuse revokes the device-session family. Tokens are random 256-bit values, store
 hashes server-side, and scoped to one user, workspace, and device session.
 Membership/session status is checked on every authorized request and ticket redemption, so
 invitation revocation, member removal, and session revocation take effect immediately.
+
+The current pilot's optional WorkOS AuthKit path is additive to that local session boundary. Main
+creates and protects desktop state plus an S256 verifier; the server independently creates a
+WorkOS PKCE transaction and keeps its verifier encrypted with AES-256-GCM. WorkOS returns only to
+the fixed server callback. The server consumes state before code exchange, verifies the RS256
+access JWT against WorkOS JWKS and this Application's exact `client_id`, rejects unverified email
+and impersonation, discards upstream tokens, and applies the existing local invitation/capacity
+transaction. A fresh five-minute Hype Comms handoff is bound to desktop PKCE and is the only code
+sent through `hmm-chat://auth/callback`. A one-use handoff creates the same `hmm_session` cookie and
+device-session lineage as magic-link sign-in; protected routes, realtime tickets, cache scopes,
+and rolling clients therefore keep one authorization model.
+
+Only stable `(provider, subject) -> local user` ownership, the last verified email, and the WorkOS
+session ID needed for active-session enforcement survive admission. Signed, raw-body-verified
+`session.revoked` webhooks are deduplicated by event ID and revoke matching local device sessions;
+the exchange and webhook serialize on the upstream session ID so a revocation racing a handoff
+cannot create a live local session. Startup and hourly reconciliation strictly paginate the
+complete active WorkOS session set for each relevant subject and revoke only exact local snapshot
+rows missing upstream. Incomplete provider state preserves local rows for a later retry, while a
+new session cannot be revoked from an older snapshot. Provider session links are cleared on local
+revocation or expiry, and provider-independent maintenance removes expired encrypted state even
+after provider-secret loss. AuthKit validity alone never grants workspace access.
 
 Agent bearer credentials are accepted only by agent-capable identity and workspace routes. Every
 request checks the token hash, token revocation, active agent membership, and the route's immutable

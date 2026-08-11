@@ -107,6 +107,53 @@ describeWithPostgres("IdentityRepository", () => {
     ).toBe("unavailable");
   });
 
+  it("atomically revokes a local token and returns only its optional WorkOS session id", async () => {
+    const authKitHash = Buffer.alloc(32, 20);
+    const magicLinkHash = Buffer.alloc(32, 21);
+    const authKitSessionId = "10000000-0000-4000-8000-000000000021";
+    const magicLinkSessionId = "10000000-0000-4000-8000-000000000022";
+    await Promise.all([
+      repository.insertDeviceSession({
+        id: authKitSessionId,
+        userId,
+        tokenHash: authKitHash,
+        label: "AuthKit device",
+        createdAt: now,
+        lastSeenAt: now,
+        expiresAt: later,
+      }),
+      repository.insertDeviceSession({
+        id: magicLinkSessionId,
+        userId,
+        tokenHash: magicLinkHash,
+        label: "Magic-link device",
+        createdAt: now,
+        lastSeenAt: now,
+        expiresAt: later,
+      }),
+    ]);
+    await pool.query("UPDATE device_sessions SET workos_session_id = $2 WHERE id = $1", [
+      authKitSessionId,
+      "session_01ABC",
+    ]);
+
+    await expect(repository.revokeDeviceSessionByTokenHash(authKitHash, later)).resolves.toBe(
+      "session_01ABC",
+    );
+    await expect(
+      pool.query<{ workos_session_id: string | null }>(
+        "SELECT workos_session_id FROM device_sessions WHERE id = $1",
+        [authKitSessionId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ workos_session_id: null }] });
+    await expect(
+      repository.revokeDeviceSessionByTokenHash(magicLinkHash, later),
+    ).resolves.toBeNull();
+    await expect(repository.revokeDeviceSessionByTokenHash(authKitHash, later)).resolves.toBeNull();
+    expect(await repository.findDeviceSessionByTokenHash(authKitHash)).toBeNull();
+    expect(await repository.findDeviceSessionByTokenHash(magicLinkHash)).toBeNull();
+  });
+
   it("revokes every session for a user and makes their tokens unusable", async () => {
     const firstHash = Buffer.alloc(32, 5);
     const secondHash = Buffer.alloc(32, 6);

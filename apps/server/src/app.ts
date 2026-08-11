@@ -7,6 +7,10 @@ import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import type { MetricsRegistry } from "./metrics.js";
 import type { BotService } from "./modules/bots/service.js";
+import { authKitRoutes } from "./modules/identity/authkit-routes.js";
+import type { AuthKitService } from "./modules/identity/authkit-service.js";
+import { workOSWebhookRoutes } from "./modules/identity/authkit-webhook-routes.js";
+import type { WorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
@@ -22,6 +26,8 @@ export interface BuildAppOptions {
   readonly allowedOrigins?: readonly string[];
   readonly consumeRealtimeTicket?: ConsumeRealtimeTicket;
   readonly cookieSecure?: boolean;
+  /** Socket peers allowed to supply forwarded client metadata, expressed only as IPs/CIDRs. */
+  readonly trustedProxies?: readonly string[];
   readonly metrics?: {
     readonly registry: MetricsRegistry;
     readonly token: string;
@@ -33,6 +39,10 @@ export interface BuildAppOptions {
     readonly selfServiceMagicLink?: boolean;
     /** False while the previous server remains a supported production rollback target. */
     readonly agentProvisioningEnabled?: boolean;
+    /** Fail-closed gate for new AuthKit authorization, callback, and exchange traffic. */
+    readonly authKitAdmissionEnabled?: boolean;
+    readonly authKitService?: AuthKitService;
+    readonly workosWebhookProcessor?: WorkOSWebhookProcessor;
   };
   readonly workspace?: {
     readonly repository: WorkspaceRepository;
@@ -44,8 +54,10 @@ export interface BuildAppOptions {
 export async function buildApp(options: BuildAppOptions = {}) {
   const lifecycle = options.lifecycle ?? new Lifecycle();
   const allowedOrigins = new Set(options.allowedOrigins ?? ["http://127.0.0.1:5173"]);
+  const trustProxy = options.trustedProxies?.join(",");
   const app = Fastify({
     logger: options.logger ?? false,
+    ...(trustProxy === undefined || trustProxy === "" ? {} : { trustProxy }),
   });
 
   registerErrorHandling(app);
@@ -128,10 +140,27 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (options.identity !== undefined) {
         await v1.register(identityRoutes, {
           service: options.identity.service,
+          ...(options.identity.authKitService === undefined
+            ? {}
+            : { authKitService: options.identity.authKitService }),
           cookieSecure: options.cookieSecure ?? true,
           selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
           agentProvisioningEnabled: options.identity.agentProvisioningEnabled ?? true,
         });
+        await v1.register(authKitRoutes, {
+          identityService: options.identity.service,
+          cookieSecure: options.cookieSecure ?? true,
+          magicLinkAvailable: options.identity.selfServiceMagicLink ?? true,
+          authKitAdmissionEnabled: options.identity.authKitAdmissionEnabled ?? false,
+          ...(options.identity.authKitService === undefined
+            ? {}
+            : { authKitService: options.identity.authKitService }),
+        });
+        if (options.identity.workosWebhookProcessor !== undefined) {
+          await v1.register(workOSWebhookRoutes, {
+            processor: options.identity.workosWebhookProcessor,
+          });
+        }
       }
       if (options.identity !== undefined && options.workspace !== undefined) {
         await v1.register(workspaceRoutes, {

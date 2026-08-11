@@ -93,6 +93,15 @@ describe("authentication callback validation", () => {
   ])("rejects unexpected callback URL %s", (url) => {
     expect(normalizeAuthCallbackUrl(url)).toBeNull();
   });
+
+  it("keeps route normalization compatible with legacy and AuthKit callback shapes", () => {
+    const magicLink = `hmm-chat://auth/callback?token=${"m".repeat(43)}`;
+    const authKit = `hmm-chat://auth/callback?code=${"c".repeat(43)}&state=${"s".repeat(43)}`;
+
+    expect(normalizeAuthCallbackUrl(magicLink)).toBe(magicLink);
+    expect(normalizeAuthCallbackUrl(authKit)).toBe(authKit);
+    expect(findAuthCallbackUrl([magicLink, authKit])).toBe(magicLink);
+  });
 });
 
 describe("authentication protocol registration", () => {

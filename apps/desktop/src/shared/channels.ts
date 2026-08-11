@@ -13,6 +13,8 @@ export const DESKTOP_CHANNELS = Object.freeze({
   compactModeSet: "compact-mode:set",
   compactModeChanged: "compact-mode:changed",
   sessionState: "chat:session-state",
+  sessionAuthCapabilities: "chat:session-auth-capabilities",
+  sessionStartAuthKit: "chat:session-start-authkit",
   sessionRequestMagicLink: "chat:session-request-magic-link",
   sessionSignOut: "chat:session-sign-out",
   sessionChanged: "chat:session-changed",

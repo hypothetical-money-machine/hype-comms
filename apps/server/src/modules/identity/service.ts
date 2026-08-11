@@ -10,6 +10,7 @@ import {
   type AgentCurrentPrincipal,
   type AgentScope,
   type AgentToken,
+  type AuthKitProviderSessionId,
   type CurrentUser,
   type CurrentPrincipal,
   type DeviceSession,
@@ -277,11 +278,11 @@ export class IdentityService {
     };
   }
 
-  async signOut(sessionToken: string): Promise<void> {
-    const session = await this.#repository.findDeviceSessionByTokenHash(hashToken(sessionToken));
-    if (session !== null) {
-      await this.#repository.revokeDeviceSession(session.id, iso(this.#clock()));
-    }
+  async signOut(sessionToken: string): Promise<AuthKitProviderSessionId | null> {
+    return this.#repository.revokeDeviceSessionByTokenHash(
+      hashToken(sessionToken),
+      iso(this.#clock()),
+    );
   }
 
   async listDevices(userId: EntityId): Promise<DeviceSession[]> {

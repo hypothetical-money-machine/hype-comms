@@ -4,6 +4,7 @@ import {
   agentCurrentPrincipalSchema,
   agentSchema,
   agentTokenSchema,
+  authKitProviderSessionIdSchema,
   deviceSessionSchema,
   emailSchema,
   entityIdSchema,
@@ -16,6 +17,7 @@ import {
   type AgentCurrentPrincipal,
   type AgentScope,
   type AgentToken,
+  type AuthKitProviderSessionId,
   type DeviceSession,
   type Email,
   type EntityId,
@@ -137,6 +139,10 @@ interface DeviceSessionRow extends QueryResultRow {
 
 interface DeviceSessionRotationRow extends DeviceSessionRow {
   readonly rotation_snapshot: unknown;
+}
+
+interface RevokedDeviceSessionProviderRow extends QueryResultRow {
+  readonly workos_session_id: unknown;
 }
 
 interface CountRow extends QueryResultRow {
@@ -802,6 +808,37 @@ export class IdentityRepository {
   }
 
   /**
+   * Revokes the presented local credential and returns its optional provider session identifier in
+   * the same statement. A malformed legacy value is treated as absent after the local revocation;
+   * upstream logout metadata must never be able to make local sign-out fail.
+   */
+  async revokeDeviceSessionByTokenHash(
+    tokenHash: Buffer,
+    revokedAt: IsoDateTime,
+  ): Promise<AuthKitProviderSessionId | null> {
+    const result = await this.#database.query<RevokedDeviceSessionProviderRow>(
+      `WITH target AS MATERIALIZED (
+         SELECT id, workos_session_id
+           FROM device_sessions
+          WHERE token_hash = $1 AND revoked_at IS NULL
+          FOR UPDATE
+       ),
+       revoked AS (
+         UPDATE device_sessions AS session
+            SET revoked_at = $2,
+                workos_session_id = NULL
+           FROM target
+          WHERE session.id = target.id AND session.revoked_at IS NULL
+         RETURNING target.workos_session_id
+       )
+       SELECT workos_session_id FROM revoked`,
+      [tokenHash, revokedAt],
+    );
+    const parsed = authKitProviderSessionIdSchema.safeParse(result.rows[0]?.workos_session_id);
+    return parsed.success ? parsed.data : null;
+  }
+
+  /**
    * Rotation is also the renewal point of the sliding refresh window: `expiresAt`, when given,
    * moves the stored expiry forward, and omitting it leaves the expiry untouched. The guard is
    * evaluated against the pre-update row, so a revoked or already-expired session is still refused
@@ -891,7 +928,8 @@ export class IdentityRepository {
   async revokeDeviceSession(id: EntityId, revokedAt: IsoDateTime): Promise<DeviceSession | null> {
     const result = await this.#database.query<DeviceSessionRow>(
       `UPDATE device_sessions
-          SET revoked_at = $2
+          SET revoked_at = $2,
+              workos_session_id = NULL
         WHERE id = $1 AND revoked_at IS NULL
         RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
       [id, revokedAt],
@@ -906,7 +944,8 @@ export class IdentityRepository {
   ): Promise<DeviceSession | null> {
     const result = await this.#database.query<DeviceSessionRow>(
       `UPDATE device_sessions
-          SET revoked_at = $3
+          SET revoked_at = $3,
+              workos_session_id = NULL
         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
         RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
       [id, userId, revokedAt],
@@ -917,7 +956,8 @@ export class IdentityRepository {
   async revokeAllDeviceSessions(userId: EntityId, revokedAt: IsoDateTime): Promise<number> {
     const result = await this.#database.query(
       `UPDATE device_sessions
-          SET revoked_at = $2
+          SET revoked_at = $2,
+              workos_session_id = NULL
         WHERE user_id = $1 AND revoked_at IS NULL`,
       [userId, revokedAt],
     );
