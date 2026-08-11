@@ -32,7 +32,7 @@ const verifiedAuthentication = {
 describe("WorkOS access-token verification", () => {
   it("requires bounded identity, session, temporal, unique, and expected-client claims", () => {
     const claims = {
-      iss: "https://api.workos.com",
+      iss: "https://api.workos.com/",
       sub: "user_01ABC",
       sid: "session_01ABC",
       client_id: "client_test",
@@ -78,7 +78,7 @@ describe("WorkOS access-token verification", () => {
       createLocalJWKSet({ keys: [publicJwk] }),
     );
     const issuedAt = Math.floor(Date.now() / 1_000);
-    const sign = (clientId: string, issuer = "https://api.workos.com") =>
+    const sign = (clientId: string, issuer = "https://api.workos.com/") =>
       new SignJWT({
         sid: "session_01ABC",
         client_id: clientId,
@@ -121,7 +121,7 @@ describe("WorkOS access-token verification", () => {
       jti: "01HQSXZXPPFPKMDD32RKTFY6PV",
     })
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer("https://api.workos.com")
+      .setIssuer("https://api.workos.com/")
       .setSubject("user_01ABC")
       .setIssuedAt(issuedAt)
       .setExpirationTime(issuedAt + 300)

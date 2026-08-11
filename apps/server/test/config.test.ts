@@ -148,7 +148,7 @@ describe("loadConfig", () => {
         apiKey: "sk_test_example",
         clientId: "client_example",
         redirectUri: "http://127.0.0.1:3000/v1/auth/workos/callback",
-        jwtIssuer: "https://api.workos.com",
+        jwtIssuer: "https://api.workos.com/",
         encryptionKey: Buffer.alloc(32),
       },
     });
@@ -190,7 +190,7 @@ describe("loadConfig", () => {
     ).toThrow(ConfigError);
   });
 
-  it("pins AuthKit JWTs to a configurable HTTPS origin", () => {
+  it("pins AuthKit JWTs to the exact configurable HTTPS issuer", () => {
     const base = {
       HMM_DATABASE_URL: "postgres://hmm:secret@127.0.0.1/hmm_chat",
       WORKOS_API_KEY: "sk_test_example",
@@ -201,11 +201,14 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...base, WORKOS_JWT_ISSUER: "https://auth.example.com" })).toMatchObject({
       workos: { jwtIssuer: "https://auth.example.com" },
     });
+    expect(loadConfig({ ...base, WORKOS_JWT_ISSUER: "https://auth.example.com/" })).toMatchObject({
+      workos: { jwtIssuer: "https://auth.example.com/" },
+    });
 
     for (const issuer of [
       "http://auth.example.com",
-      "https://auth.example.com/",
       "https://auth.example.com/path",
+      "https://auth.example.com//",
       "https://user:secret@auth.example.com",
       "https://auth.example.com?tenant=other",
     ]) {

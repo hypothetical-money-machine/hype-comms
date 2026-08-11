@@ -105,7 +105,7 @@ export interface VerifiedWorkOSAccessToken {
 
 type VerifyWorkOSAccessToken = (accessToken: string) => Promise<VerifiedWorkOSAccessToken>;
 
-export const DEFAULT_WORKOS_JWT_ISSUER = "https://api.workos.com";
+export const DEFAULT_WORKOS_JWT_ISSUER = "https://api.workos.com/";
 
 const authorizationResultSchema = z
   .object({

@@ -79,6 +79,28 @@ const configuredOriginSchema = z
     { message: "Expected an origin without credentials, path, query, or fragment" },
   );
 
+const configuredJwtIssuerSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (issuer) => {
+      try {
+        const url = new URL(issuer);
+        return (
+          url.protocol === "https:" &&
+          url.username === "" &&
+          url.password === "" &&
+          url.search === "" &&
+          url.hash === "" &&
+          (issuer === url.origin || issuer === `${url.origin}/`)
+        );
+      } catch {
+        return false;
+      }
+    },
+    { message: "Expected an exact HTTPS issuer URL without credentials, query, or fragment" },
+  );
+
 const trustedProxySchema = z
   .string()
   .trim()
@@ -370,11 +392,11 @@ export function loadConfig(
       throw new ConfigError(["workosRedirectUri: Expected the configured public API origin"]);
     }
 
-    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com";
-    const jwtIssuerResult = configuredOriginSchema.safeParse(jwtIssuer);
-    if (!jwtIssuerResult.success || new URL(jwtIssuer).protocol !== "https:") {
+    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com/";
+    const jwtIssuerResult = configuredJwtIssuerSchema.safeParse(jwtIssuer);
+    if (!jwtIssuerResult.success) {
       throw new ConfigError([
-        "workosJwtIssuer: Expected an HTTPS origin without credentials, path, query, or fragment",
+        "workosJwtIssuer: Expected an exact HTTPS issuer URL without credentials, path, query, or fragment",
       ]);
     }
 

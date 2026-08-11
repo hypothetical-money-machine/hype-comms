@@ -75,8 +75,9 @@ WORKOS_WEBHOOK_SECRET=replace-me
 HMM_TRUSTED_PROXIES=172.20.0.0/16
 ```
 
-JWT validation defaults to `https://api.workos.com`. If the Application uses a WorkOS custom
-authentication domain, configure its exact HTTPS issuer origin as well:
+JWT validation defaults to WorkOS's canonical `https://api.workos.com/` issuer. If the Application
+uses a WorkOS custom authentication domain, configure the exact HTTPS URL exposed in the token's
+`iss` claim, including its trailing slash when present:
 
 ```dotenv
 WORKOS_JWT_ISSUER=https://auth.example.com
