@@ -2,11 +2,12 @@
  * Evidence capture for the Check for Updates menu item.
  *
  * Builds the same owned, role-based Linux menu as production, opens a real Electron BrowserWindow,
- * asserts the Help submenu order, and captures the live native menu bar. On Wayland, native submenu
- * popups are separate surfaces and are not included in active-window captures.
+ * asserts the Help submenu order, opens the native submenu, and captures both X11 surfaces.
  *
  * Usage:
- *   env -u ELECTRON_RUN_AS_NODE node_modules/.bin/electron scripts/capture-check-for-updates-menu.mjs
+ *   Run an isolated X server, then:
+ *   env -u ELECTRON_RUN_AS_NODE -u WAYLAND_DISPLAY DISPLAY=:99 \
+ *     node_modules/.bin/electron --ozone-platform=x11 scripts/capture-check-for-updates-menu.mjs
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -20,6 +21,15 @@ const OUTPUT = path.join(projectRoot, "docs", "screenshots", "check-for-updates-
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function x11ScreenSize() {
+  const displayInfo = execFileSync("xdpyinfo", [], { encoding: "utf8" });
+  const match = /^\s*dimensions:\s+(\d+)x(\d+)\s+pixels/m.exec(displayInfo);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    throw new Error("Could not read the X11 screen dimensions");
+  }
+  return `${match[1]}x${match[2]}`;
 }
 
 app
@@ -45,7 +55,8 @@ app
     Menu.setApplicationMenu(applicationMenu);
 
     const helpParent = applicationMenu.items.at(-1);
-    const firstHelpLabel = helpParent?.submenu?.items[0]?.label;
+    const helpMenu = helpParent?.submenu;
+    const firstHelpLabel = helpMenu?.items[0]?.label;
     if (firstHelpLabel !== "Check for Updates…") {
       throw new Error(
         `expected Help[0] to be Check for Updates…, got ${JSON.stringify(firstHelpLabel)}`,
@@ -94,15 +105,35 @@ app
     win.moveTop();
     await sleep(700);
 
+    const bounds = win.getBounds();
+    helpMenu.popup({ window: win, x: bounds.x + 390, y: bounds.y + 72 });
+    await sleep(400);
+
     fs.mkdirSync(path.dirname(OUTPUT), { recursive: true });
     execFileSync(
-      "spectacle",
-      ["--background", "--nonotify", "--activewindow", "--output", OUTPUT],
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "x11grab",
+        "-video_size",
+        x11ScreenSize(),
+        "-draw_mouse",
+        "0",
+        "-i",
+        process.env.DISPLAY ?? ":0",
+        "-frames:v",
+        "1",
+        OUTPUT,
+      ],
       { stdio: "inherit" },
     );
+    execFileSync("magick", [OUTPUT, "-trim", "+repage", OUTPUT], { stdio: "inherit" });
+    helpMenu.closePopup(win);
 
-    // Spectacle may return before the file is fully visible to the next stat on some systems.
-    await sleep(200);
     if (!fs.existsSync(OUTPUT) || fs.statSync(OUTPUT).size < 5_000) {
       throw new Error(`screenshot missing or too small: ${OUTPUT}`);
     }

@@ -49,6 +49,7 @@ export function buildApplicationMenu(
         ],
       },
       ...standardMenus,
+      { role: "help", submenu: [] },
     ];
   }
 

@@ -73,6 +73,8 @@ describe("buildApplicationMenu", () => {
       "editMenu",
       "viewMenu",
       "windowMenu",
+      "help",
     ]);
+    expect(submenuItems(template.at(-1))).toEqual([]);
   });
 });
