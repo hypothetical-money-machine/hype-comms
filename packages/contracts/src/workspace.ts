@@ -23,6 +23,7 @@ import {
 import { currentPrincipalSchema, currentUserSchema } from "./identity.js";
 import {
   realtimeEventEnvelopeSchema,
+  realtimeSessionScopeSchema,
   realtimeTicketSchema,
   systemConnectedEventSchema,
 } from "./realtime.js";
@@ -739,6 +740,14 @@ export const productRealtimeEventSchema = z.union([
   systemConnectedEventSchema,
 ]);
 
+/** IPC wrapper that keeps a valid event inseparable from the session generation that received it. */
+export const scopedProductRealtimeEventSchema = z
+  .object({
+    scope: realtimeSessionScopeSchema,
+    event: productRealtimeEventSchema,
+  })
+  .strict();
+
 export type PaginationCursor = z.infer<typeof paginationCursorSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type WorkspaceBootstrapResponse = z.infer<typeof workspaceBootstrapResponseSchema>;
@@ -784,3 +793,4 @@ export type SyncQuery = z.infer<typeof syncQuerySchema>;
 export type SyncResponse = z.infer<typeof syncResponseSchema>;
 export type RealtimeTicketResponse = z.infer<typeof realtimeTicketResponseSchema>;
 export type ProductRealtimeEvent = z.infer<typeof productRealtimeEventSchema>;
+export type ScopedProductRealtimeEvent = z.infer<typeof scopedProductRealtimeEventSchema>;

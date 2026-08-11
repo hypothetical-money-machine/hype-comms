@@ -52,8 +52,9 @@ import {
   notificationCaptureActivationResponseSchema,
   notificationPreferenceSchema,
   notificationStateSchema,
-  productRealtimeEventSchema,
   realtimeConnectionStateSchema,
+  realtimeAcknowledgementSchema,
+  realtimeSessionScopeSchema,
   requestMagicLinkSchema,
   removeReactionResponseSchema,
   sendAttemptResultSchema,
@@ -69,6 +70,7 @@ import {
   upsertChannelMemberRequestSchema,
   upsertChannelMemberOperationSchema,
   humanWorkspaceBootstrapResponseSchema,
+  scopedProductRealtimeEventSchema,
   type ChatSessionState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
@@ -86,7 +88,9 @@ import {
   type NotificationPreference,
   type NotificationState,
   type ReactionEmoji,
-  type ProductRealtimeEvent,
+  type RealtimeAcknowledgement,
+  type RealtimeSessionScope,
+  type ScopedProductRealtimeEvent,
   type SendMessageOperation,
   type ThemePreference,
   type ThemeState,
@@ -538,19 +542,29 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       syncAttemptResultSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceSync, sequenceSchema.parse(after)),
       ),
-    startWorkspaceRealtime: async (after: string) => {
+    startWorkspaceRealtime: async (after: string): Promise<RealtimeSessionScope> =>
+      realtimeSessionScopeSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceRealtimeStart,
+          sequenceSchema.parse(after),
+        ),
+      ),
+    activateWorkspaceRealtime: async (scope: RealtimeSessionScope) => {
       await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceRealtimeStart,
-        sequenceSchema.parse(after),
+        DESKTOP_CHANNELS.workspaceRealtimeActivate,
+        realtimeSessionScopeSchema.parse(scope),
       );
     },
-    stopWorkspaceRealtime: async () => {
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceRealtimeStop);
+    stopWorkspaceRealtime: async (scope?: RealtimeSessionScope) => {
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceRealtimeStop,
+        scope === undefined ? undefined : realtimeSessionScopeSchema.parse(scope),
+      );
     },
-    acknowledgeWorkspaceEvent: async (cursor: string) => {
+    acknowledgeWorkspaceEvent: async (input: RealtimeAcknowledgement) => {
       await ipcRenderer.invoke(
         DESKTOP_CHANNELS.workspaceRealtimeAcknowledge,
-        sequenceSchema.parse(cursor),
+        realtimeAcknowledgementSchema.parse(input),
       );
     },
     getRealtimeState: async () =>
@@ -564,12 +578,12 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         (value): value is RealtimeConnectionState =>
           realtimeConnectionStateSchema.safeParse(value).success,
       ),
-    onWorkspaceEvent: (listener: (event: ProductRealtimeEvent) => void) =>
+    onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) =>
       subscribe(
         DESKTOP_CHANNELS.workspaceEvent,
         listener,
-        (value): value is ProductRealtimeEvent =>
-          productRealtimeEventSchema.safeParse(value).success,
+        (value): value is ScopedProductRealtimeEvent =>
+          scopedProductRealtimeEventSchema.safeParse(value).success,
       ),
   },
 );

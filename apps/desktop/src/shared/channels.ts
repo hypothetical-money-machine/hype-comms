@@ -45,6 +45,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceReadAdvance: "workspace:read-advance",
   workspaceSync: "workspace:sync",
   workspaceRealtimeStart: "workspace:realtime-start",
+  workspaceRealtimeActivate: "workspace:realtime-activate",
   workspaceRealtimeStop: "workspace:realtime-stop",
   workspaceRealtimeAcknowledge: "workspace:realtime-acknowledge",
   workspaceEvent: "workspace:event",

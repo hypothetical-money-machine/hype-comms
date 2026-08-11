@@ -1379,6 +1379,7 @@ export function App({ client, theme, compactMode }: AppProps) {
               notice={workspaceNotice}
               onRetry={() => void startWorkspaceSession(session)}
               onResetCache={() => void rebuildLocalCache(session)}
+              onCheckForUpdates={client.checkForUpdates}
             />
           </div>
           {selectedSummary !== undefined &&

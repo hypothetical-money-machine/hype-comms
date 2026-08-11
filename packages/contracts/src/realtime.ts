@@ -24,7 +24,29 @@ export const realtimeConnectionStateSchema = z.enum([
   "live",
   "offline",
   "reconnecting",
+  "incompatible",
 ]);
+
+/**
+ * Main-process generation stamped onto every renderer-bound realtime frame. The epoch is minted
+ * before a connection is activated, so the renderer can install the whole scope as an immutable
+ * expectation before the first socket callback is possible.
+ */
+export const realtimeSessionScopeSchema = z
+  .object({
+    userId: entityIdSchema,
+    workspaceId: entityIdSchema,
+    epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict()
+  .readonly();
+
+export const realtimeAcknowledgementSchema = z
+  .object({
+    scope: realtimeSessionScopeSchema,
+    cursor: sequenceSchema,
+  })
+  .strict();
 
 export const realtimeEventTypeSchema = z
   .string()
@@ -67,6 +89,8 @@ export const systemErrorEventSchema = realtimeEventEnvelopeSchema.extend({
 });
 
 export type RealtimeConnectionState = z.infer<typeof realtimeConnectionStateSchema>;
+export type RealtimeSessionScope = z.infer<typeof realtimeSessionScopeSchema>;
+export type RealtimeAcknowledgement = z.infer<typeof realtimeAcknowledgementSchema>;
 export type RealtimeEventEnvelope = z.infer<typeof realtimeEventEnvelopeSchema>;
 export type RealtimeDeliverySemantics = z.infer<typeof realtimeDeliverySemanticsSchema>;
 export type RealtimeTicket = z.infer<typeof realtimeTicketSchema>;

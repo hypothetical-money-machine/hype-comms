@@ -11,6 +11,7 @@ import type {
   NotificationActivityUpdate,
   NotificationContext,
   NotificationState,
+  RealtimeSessionScope,
   ThemeState,
   UpdateState,
 } from "@hmm-chat/contracts";
@@ -240,9 +241,15 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
           hasMore: false,
         },
       }) as const,
-    startWorkspaceRealtime: async () => {
+    startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
       realtimeStarts += 1;
+      return Object.freeze({
+        userId: session.userId,
+        workspaceId: session.workspaceId,
+        epoch: realtimeStarts,
+      });
     },
+    activateWorkspaceRealtime: async () => undefined,
     stopWorkspaceRealtime: async () => undefined,
     acknowledgeWorkspaceEvent: async () => undefined,
     onRealtimeStateChanged: () => () => undefined,

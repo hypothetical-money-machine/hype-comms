@@ -780,6 +780,36 @@ button:disabled {
   gap: 5px;
 }
 
+.realtime-incompatible {
+  display: grid;
+  width: min(720px, calc(100vw - 420px));
+  min-width: min(520px, 55vw);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--theme-border-accent);
+  border-radius: 8px;
+  background: var(--theme-accent-surface);
+  color: var(--theme-text-strong);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.realtime-incompatible > div {
+  display: grid;
+  gap: 2px;
+}
+
+.realtime-incompatible span {
+  color: var(--theme-text-secondary);
+}
+
+.realtime-incompatible button {
+  flex: none;
+  white-space: nowrap;
+}
+
 .conversation-health-actions .quiet-button {
   padding: 4px 6px;
   font-size: 10px;
@@ -2840,6 +2870,25 @@ button:disabled {
    passes never re-render the app) slides it back over the conversation pane. */
 html[data-compact] .shell {
   grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-compact] .conversation-health {
+  max-width: calc(100vw - 44px);
+}
+
+html[data-compact] .realtime-incompatible {
+  width: min(720px, calc(100vw - 44px));
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  html[data-compact] .realtime-incompatible {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  html[data-compact] .realtime-incompatible button {
+    justify-self: start;
+  }
 }
 
 html[data-compact] .workspace-rail,

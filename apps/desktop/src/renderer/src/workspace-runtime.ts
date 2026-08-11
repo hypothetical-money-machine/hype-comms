@@ -18,6 +18,8 @@ import {
   type ProductRealtimeEvent,
   type Reaction,
   type ReactionEmoji,
+  type RealtimeSessionScope,
+  type ScopedProductRealtimeEvent,
   type SyncAttemptResult,
   type Task,
   type TaskPriority,
@@ -327,6 +329,14 @@ function syncFailureMessage(
   }
 }
 
+function sameRealtimeScope(left: RealtimeSessionScope, right: RealtimeSessionScope): boolean {
+  return (
+    left.epoch === right.epoch &&
+    left.userId === right.userId &&
+    left.workspaceId === right.workspaceId
+  );
+}
+
 /**
  * Copy for the recovery signal the cache crypto reports when it cannot use the stored key. A
  * missing credential store is already described in the connection line and cannot be repaired from
@@ -443,6 +453,8 @@ export class WorkspaceRuntime {
   readonly #acceptedMembershipRepairs = new Map<string, string>();
   /** Retires frames queued by the realtime session stopped for authoritative membership repair. */
   #realtimeEpoch = 0;
+  /** The immutable main-process scope currently authorized to mutate this renderer cache. */
+  #realtimeScope: RealtimeSessionScope | null = null;
   readonly #historyCursors = new Map<string, string | null>();
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
@@ -537,12 +549,23 @@ export class WorkspaceRuntime {
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#eventQueue = Promise.resolve();
+    this.#realtimeScope = null;
     // A session restart can reuse the same privileged main process. Stop any socket created by
     // the previous renderer generation before a capable bootstrap replaces a legacy projection;
     // otherwise a legacy-projected event could advance the cached cursor during that rebuild.
     await this.#client.stopWorkspaceRealtime();
     if (generation !== this.#generation) return;
-    this.#unsubscribeEvent = this.#client.onWorkspaceEvent((event) => {
+    this.#unsubscribeEvent = this.#client.onWorkspaceEvent((frame: ScopedProductRealtimeEvent) => {
+      if (
+        !this.#isActiveRealtimeScope(frame.scope, generation) ||
+        frame.event.workspaceId !== frame.scope.workspaceId ||
+        (frame.event.type === "system.connected" &&
+          frame.event.payload.userId !== frame.scope.userId)
+      ) {
+        console.error("Dropped a renderer realtime frame from a superseded scope");
+        return;
+      }
+      const event = frame.event;
       const realtimeEpoch = this.#realtimeEpoch;
       if (event.type === "channel.membership_changed") {
         // Abort cache transactions synchronously, before the event queue can wait behind the
@@ -565,7 +588,9 @@ export class WorkspaceRuntime {
         this.#setState({ stale: true });
       }
       this.#eventQueue = this.#eventQueue
-        .then(() => this.#handleRealtimeEvent(event, generation, resyncRequest, realtimeEpoch))
+        .then(() =>
+          this.#handleRealtimeEvent(event, frame.scope, generation, resyncRequest, realtimeEpoch),
+        )
         .catch((error: unknown) => {
           if (generation === this.#generation) {
             this.#setState({
@@ -576,6 +601,7 @@ export class WorkspaceRuntime {
         });
     });
     this.#unsubscribeConnection = this.#client.onRealtimeStateChanged((connection) => {
+      if (generation !== this.#generation || this.#realtimeScope === null) return;
       this.#setState({ connection });
     });
 
@@ -597,6 +623,8 @@ export class WorkspaceRuntime {
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
+      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
+      if (generation !== this.#generation || this.#cache !== cache) return;
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -668,13 +696,33 @@ export class WorkspaceRuntime {
     this.#unsubscribeConnection?.();
     this.#unsubscribeEvent = null;
     this.#unsubscribeConnection = null;
-    await this.#client.stopWorkspaceRealtime();
+    const realtimeScope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
+    else await this.#client.stopWorkspaceRealtime(realtimeScope);
     this.#cache = null;
     this.#syncCursor = null;
     this.#membersDirty = false;
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
+  }
+
+  #isActiveRealtimeScope(candidate: RealtimeSessionScope, generation: number): boolean {
+    return (
+      generation === this.#generation &&
+      this.#scope !== null &&
+      candidate.userId === this.#scope.userId &&
+      candidate.workspaceId === this.#scope.workspaceId &&
+      this.#realtimeScope !== null &&
+      sameRealtimeScope(candidate, this.#realtimeScope)
+    );
+  }
+
+  async #acknowledgeCurrentScope(cursor: string, generation: number): Promise<void> {
+    const scope = this.#realtimeScope;
+    if (scope === null || !this.#isActiveRealtimeScope(scope, generation)) return;
+    await this.#client.acknowledgeWorkspaceEvent({ scope, cursor });
   }
 
   selectConversation(conversationId: string): void {
@@ -1705,7 +1753,10 @@ export class WorkspaceRuntime {
     this.#realtimeEpoch += 1;
     this.#clearReadTargets();
     const scope = this.#scope;
-    await this.#client.stopWorkspaceRealtime();
+    const realtimeScope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
+    else await this.#client.stopWorkspaceRealtime(realtimeScope);
     await this.#cache?.clearAll().catch(() => undefined);
     // Only the signed-in member's database goes. Another member of this OS account can still have
     // an encrypted cache and undelivered outbox on disk, and this runs on every sign-out, so
@@ -2209,7 +2260,7 @@ export class WorkspaceRuntime {
       if (generation !== this.#generation || cache !== this.#cache) return;
       await cache.advanceCursor(result.response.nextCursor);
       if (generation !== this.#generation || cache !== this.#cache) return;
-      await this.#client.acknowledgeWorkspaceEvent(result.response.nextCursor);
+      await this.#acknowledgeCurrentScope(result.response.nextCursor, generation);
       if (generation !== this.#generation || cache !== this.#cache) return;
       if (
         this.#syncCursor === null ||
@@ -2297,26 +2348,35 @@ export class WorkspaceRuntime {
 
   async #handleRealtimeEvent(
     event: ProductRealtimeEvent,
+    realtimeScope: RealtimeSessionScope,
     generation: number,
     resyncRequest: number | null,
     realtimeEpoch: number,
   ): Promise<void> {
     const acceptedMembershipRepair =
       event.type === "channel.membership_changed" && this.#acceptedMembershipRepairs.has(event.id);
+    const sameSessionScope =
+      this.#scope !== null &&
+      realtimeScope.userId === this.#scope.userId &&
+      realtimeScope.workspaceId === this.#scope.workspaceId;
     // Ordinary frames still belong to the socket epoch that delivered them. Membership repairs
     // recorded by the listener are obligations of this renderer generation, even when an earlier
     // repair restarted realtime before their queued turn arrived.
     if (
       generation !== this.#generation ||
       (realtimeEpoch !== this.#realtimeEpoch && !acceptedMembershipRepair) ||
-      this.#cache === null
+      this.#cache === null ||
+      !sameSessionScope
     ) {
       return;
     }
     if (event.type === "system.connected") {
       await this.#cache.advanceCursor(event.workspaceSequence);
       if (generation !== this.#generation || this.#cache === null) return;
-      await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
+      await this.#client.acknowledgeWorkspaceEvent({
+        scope: realtimeScope,
+        cursor: event.workspaceSequence,
+      });
       if (generation !== this.#generation || this.#cache === null) return;
       // A live socket makes a queued resync backoff pointless: the server took this cursor, so
       // dropping the cached workspace again would only cost another full download. A resync whose
@@ -2332,7 +2392,13 @@ export class WorkspaceRuntime {
       if (resyncRequest !== null) await this.#resync(generation, resyncRequest);
       return;
     }
-    await this.#applyWorkspaceEvent(event, generation);
+    await this.#applyWorkspaceEvent(
+      event,
+      realtimeScope,
+      generation,
+      realtimeEpoch,
+      acceptedMembershipRepair,
+    );
   }
 
   /**
@@ -2350,7 +2416,10 @@ export class WorkspaceRuntime {
       return;
     }
     this.#resyncRecoveryPending = true;
-    await this.#client.stopWorkspaceRealtime();
+    const realtimeScope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
+    else await this.#client.stopWorkspaceRealtime(realtimeScope);
     this.#setState({ stale: true });
     const settledAt = this.#resyncSettledAt;
     // A demand that arrives long after the last resync settled is a new problem rather than a
@@ -2508,6 +2577,26 @@ export class WorkspaceRuntime {
     this.#setState({ busy: false });
   }
 
+  async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
+    const prepared = await this.#client.startWorkspaceRealtime(after);
+    if (generation !== this.#generation) {
+      await this.#client.stopWorkspaceRealtime(prepared);
+      return null;
+    }
+    const scope = this.#scope;
+    if (
+      scope === null ||
+      prepared.userId !== scope.userId ||
+      prepared.workspaceId !== scope.workspaceId
+    ) {
+      console.error("Dropped a prepared realtime scope for the wrong renderer session");
+      await this.#client.stopWorkspaceRealtime(prepared);
+      throw new Error("Main prepared realtime for a different signed-in session");
+    }
+    this.#realtimeScope = prepared;
+    return prepared;
+  }
+
   async #restartRealtime(generation: number): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
@@ -2515,7 +2604,25 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
     this.#realtimeEpoch += 1;
-    await this.#client.startWorkspaceRealtime(loaded.syncCursor ?? "0");
+    const prepared =
+      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor ?? "0"));
+    if (prepared === null || generation !== this.#generation) return;
+    try {
+      await this.#client.activateWorkspaceRealtime(prepared);
+    } catch (error) {
+      if (this.#realtimeScope !== null && sameRealtimeScope(prepared, this.#realtimeScope)) {
+        this.#realtimeScope = null;
+      }
+      throw error;
+    }
+    const activeScope = this.#realtimeScope;
+    if (
+      generation !== this.#generation ||
+      activeScope === null ||
+      !sameRealtimeScope(prepared, activeScope)
+    ) {
+      await this.#client.stopWorkspaceRealtime(prepared);
+    }
   }
 
   async #repairMembershipEvent(
@@ -2537,7 +2644,13 @@ export class WorkspaceRuntime {
     // Begin shutdown immediately, but do not await it until the marker and purge have committed.
     // The converted result also prevents an early rejection from becoming unhandled while storage
     // work is still establishing the privacy boundary.
-    const shutdown = this.#client.stopWorkspaceRealtime().then(
+    const realtimeScope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    const shutdown = (
+      realtimeScope === null
+        ? this.#client.stopWorkspaceRealtime()
+        : this.#client.stopWorkspaceRealtime(realtimeScope)
+    ).then(
       () => null,
       (error: unknown) => error,
     );
@@ -2580,9 +2693,12 @@ export class WorkspaceRuntime {
       ([eventId, workspaceSequence]) =>
         eventId !== event.id && compareSequence(workspaceSequence, candidateCursor) <= 0,
     );
-    await this.#client.acknowledgeWorkspaceEvent(
-      crossesAcceptedRepair ? event.workspaceSequence : candidateCursor,
-    );
+    if (realtimeScope !== null) {
+      await this.#client.acknowledgeWorkspaceEvent({
+        scope: realtimeScope,
+        cursor: crossesAcceptedRepair ? event.workspaceSequence : candidateCursor,
+      });
+    }
     this.#acceptedMembershipRepairs.delete(event.id);
     if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
     if (restartRealtime) await this.#restartRealtime(generation);
@@ -2693,9 +2809,26 @@ export class WorkspaceRuntime {
     });
   }
 
-  async #applyWorkspaceEvent(event: WorkspaceEvent, generation: number): Promise<void> {
+  async #applyWorkspaceEvent(
+    event: WorkspaceEvent,
+    realtimeScope: RealtimeSessionScope,
+    generation: number,
+    realtimeEpoch: number,
+    acceptedMembershipRepair: boolean,
+  ): Promise<void> {
     const cache = this.#cache;
-    if (cache === null || generation !== this.#generation) return;
+    const sameSessionScope =
+      this.#scope !== null &&
+      realtimeScope.userId === this.#scope.userId &&
+      realtimeScope.workspaceId === this.#scope.workspaceId;
+    if (
+      cache === null ||
+      generation !== this.#generation ||
+      !sameSessionScope ||
+      (realtimeEpoch !== this.#realtimeEpoch && !acceptedMembershipRepair)
+    ) {
+      return;
+    }
     if (event.type === "channel.membership_changed") {
       await this.#repairMembershipEvent(event, generation, true);
       return;
@@ -2710,7 +2843,10 @@ export class WorkspaceRuntime {
       throw error;
     }
     if (!this.#isProjectionCurrent(projection)) return;
-    await this.#client.acknowledgeWorkspaceEvent(event.workspaceSequence);
+    await this.#client.acknowledgeWorkspaceEvent({
+      scope: realtimeScope,
+      cursor: event.workspaceSequence,
+    });
     if (!this.#isProjectionCurrent(projection)) return;
     if (!applied) return;
     this.#syncCursor = event.workspaceSequence;

@@ -16,6 +16,7 @@ function renderHealth(overrides: Partial<Parameters<typeof ConversationHealth>[0
     notice: null,
     onRetry: vi.fn(),
     onResetCache: vi.fn(),
+    onCheckForUpdates: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     ...overrides,
   };
   return { props, ...render(createElement(ConversationHealth, props)) };

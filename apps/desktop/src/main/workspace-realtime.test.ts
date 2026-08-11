@@ -10,6 +10,7 @@ import {
   WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT,
   WorkspaceRealtime,
   type RealtimeConnectionState,
+  type RealtimeDropReason,
   type WorkspaceRealtimeScope,
 } from "./workspace-realtime";
 
@@ -179,12 +180,14 @@ function createHarness(options?: {
   readonly onEvent?: (event: ProductRealtimeEvent) => boolean;
   readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
   readonly onState?: (state: RealtimeConnectionState) => void;
+  readonly onDrop?: (reason: RealtimeDropReason) => void;
 }) {
   const sockets: FakeSocket[] = [];
   const urls: URL[] = [];
   const origins: string[] = [];
   const maxPayloads: number[] = [];
   const states: RealtimeConnectionState[] = [];
+  const drops: RealtimeDropReason[] = [];
   const ticket = vi.fn<() => Promise<{ ticket: string; expiresAt: string }>>(
     options?.ticket ?? (async () => ticketResponse()),
   );
@@ -206,11 +209,15 @@ function createHarness(options?: {
     apiOrigin: "http://127.0.0.1:3000",
     rendererOrigin: "http://127.0.0.1:5173",
     transport: { ticket },
-    onEvent,
+    onEvent: (frame) => onEvent(frame.event),
     onWindowlessEvent,
     onState: (state) => {
       states.push(state);
       options?.onState?.(state);
+    },
+    onDrop: (reason) => {
+      drops.push(reason);
+      options?.onDrop?.(reason);
     },
     createSocket,
   });
@@ -222,6 +229,7 @@ function createHarness(options?: {
     onEvent,
     onWindowlessEvent,
     states,
+    drops,
     urls,
     origins,
     maxPayloads,
@@ -322,6 +330,7 @@ describe("WorkspaceRealtime", () => {
     first.resolve(ticketResponse("s".repeat(32)));
     await flushMicrotasks();
     expect(harness.createSocket).not.toHaveBeenCalled();
+    expect(harness.drops).toContain("late-ticket");
 
     second.resolve(ticketResponse("u".repeat(32)));
     await flushMicrotasks();
@@ -526,8 +535,8 @@ describe("WorkspaceRealtime", () => {
     socket?.message(membershipEvent({ workspaceId: WORKSPACE_B }));
 
     expect(harness.onEvent).not.toHaveBeenCalled();
-    expect(socket?.close).toHaveBeenCalledWith(1002, "Invalid realtime event");
-    expect(harness.states).toEqual(["connecting", "reconnecting"]);
+    expect(socket?.close).toHaveBeenCalledWith(1002, "Incompatible realtime event");
+    expect(harness.states).toEqual(["connecting", "incompatible"]);
 
     harness.realtime.stop();
   });
@@ -545,8 +554,8 @@ describe("WorkspaceRealtime", () => {
     socket?.message(frame);
 
     expect(harness.onEvent).not.toHaveBeenCalled();
-    expect(socket?.close).toHaveBeenCalledWith(1002, "Invalid realtime event");
-    expect(harness.states).toEqual(["connecting", "reconnecting"]);
+    expect(socket?.close).toHaveBeenCalledWith(1002, "Incompatible realtime event");
+    expect(harness.states).toEqual(["connecting", "incompatible"]);
 
     harness.realtime.stop();
   });
@@ -584,22 +593,6 @@ describe("WorkspaceRealtime", () => {
 
   it.each([
     ["invalid JSON", "not-json-private-canary"],
-    [
-      "an unknown event type",
-      {
-        version: 1,
-        id: EVENT_ID,
-        type: "message.future",
-        occurredAt: NOW,
-        workspaceId: WORKSPACE_A,
-        conversationId: CONVERSATION_ID,
-        workspaceSequence: "11",
-        conversationSequence: "1",
-        entityVersion: 1,
-        delivery: "at_least_once",
-        payload: { privateCanary: "must-not-be-logged" },
-      },
-    ],
     ["an unknown field", { ...membershipEvent(), privateCanary: "must-not-be-logged" }],
   ])("fails closed on %s without logging the frame", async (_name, frame) => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -616,6 +609,34 @@ describe("WorkspaceRealtime", () => {
     expect(consoleError).toHaveBeenCalledWith("Rejected an invalid realtime event");
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain("private-canary");
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain("must-not-be-logged");
+
+    harness.realtime.stop();
+  });
+
+  it("skips a structurally valid unsupported event without killing the stream", async () => {
+    const harness = createHarness();
+
+    harness.realtime.start("10", SCOPE_A);
+    await flushMicrotasks();
+    const socket = harness.sockets[0];
+    socket?.message({
+      version: 1,
+      id: EVENT_ID,
+      type: "message.future",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_A,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: "1",
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { privateCanary: "must-not-be-logged" },
+    });
+    socket?.message(membershipEvent({ workspaceSequence: "12" }));
+
+    expect(socket?.close).not.toHaveBeenCalled();
+    expect(harness.onEvent).not.toHaveBeenCalled();
+    expect(harness.states).toEqual(["connecting"]);
 
     harness.realtime.stop();
   });
