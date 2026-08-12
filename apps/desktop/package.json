@@ -1,6 +1,6 @@
 {
   "name": "@hmm-chat/desktop",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "private": true,
   "description": "Secure Electron desktop client for Hype Comms",
   "author": {
