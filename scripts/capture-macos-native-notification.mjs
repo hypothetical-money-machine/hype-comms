@@ -88,21 +88,55 @@ async function runCommand(command, arguments_, options = {}) {
   return { stdout, stderr };
 }
 
+async function readConsoleSession() {
+  const userResult = await runCommand("/usr/bin/stat", ["-f", "%Su", "/dev/console"]);
+  const user = userResult.stdout.trim();
+  if (!/^[a-zA-Z0-9._-]+$/u.test(user) || user === "root" || user === "loginwindow") {
+    throw new Error(`No safe logged-in macOS console user is available: ${user || "none"}`);
+  }
+  const uidResult = await runCommand("/usr/bin/id", ["-u", user]);
+  const uid = uidResult.stdout.trim();
+  if (!/^\d+$/u.test(uid) || uid === "0") {
+    throw new Error(`The logged-in macOS console user has an invalid uid: ${uid || "none"}`);
+  }
+  return { user, uid };
+}
+
+async function runInConsoleSession(command, arguments_) {
+  const { user, uid } = await readConsoleSession();
+  return runCommand("/usr/bin/sudo", [
+    "-n",
+    "/bin/launchctl",
+    "asuser",
+    uid,
+    "/usr/bin/sudo",
+    "-n",
+    "-u",
+    user,
+    command,
+    ...arguments_,
+  ]);
+}
+
 async function runAppleScript(source, logPath) {
+  const arguments_ = ["-e", `with timeout of 5 seconds\n${source}\nend timeout`];
   try {
-    const result = await runCommand("/usr/bin/osascript", [
-      "-e",
-      `with timeout of 5 seconds\n${source}\nend timeout`,
-    ]);
+    const result = await runCommand("/usr/bin/osascript", arguments_);
     await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
     return result.stdout.trim();
-  } catch (error) {
-    await appendFile(
-      logPath,
-      `${error instanceof Error ? error.message : "Unknown AppleScript failure"}\n`,
-      "utf8",
-    );
-    return "failed";
+  } catch (directError) {
+    try {
+      const result = await runInConsoleSession("/usr/bin/osascript", arguments_);
+      await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
+      return result.stdout.trim();
+    } catch (consoleError) {
+      await appendFile(
+        logPath,
+        `Direct AppleScript: ${directError instanceof Error ? directError.message : "unknown failure"}\nConsole AppleScript: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
+        "utf8",
+      );
+      return "failed";
+    }
   }
 }
 
@@ -216,14 +250,18 @@ async function captureScreen(destination, logPath) {
         "-x",
         destination,
       ]);
-    } catch (guiError) {
-      await appendFile(
-        logPath,
-        `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${guiError instanceof Error ? guiError.message : "unknown failure"}\n`,
-        "utf8",
-      );
-      await appendDisplayDiagnostics(logPath);
-      throw guiError;
+    } catch (launchctlError) {
+      try {
+        await runInConsoleSession("/usr/sbin/screencapture", ["-x", destination]);
+      } catch (consoleError) {
+        await appendFile(
+          logPath,
+          `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${launchctlError instanceof Error ? launchctlError.message : "unknown failure"}\nConsole capture: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
+          "utf8",
+        );
+        await appendDisplayDiagnostics(logPath);
+        throw consoleError;
+      }
     }
   }
   const details = await stat(destination);
