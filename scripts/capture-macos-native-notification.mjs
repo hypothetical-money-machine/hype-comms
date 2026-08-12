@@ -90,7 +90,10 @@ async function runCommand(command, arguments_, options = {}) {
 
 async function runAppleScript(source, logPath) {
   try {
-    const result = await runCommand("/usr/bin/osascript", ["-e", source]);
+    const result = await runCommand("/usr/bin/osascript", [
+      "-e",
+      `with timeout of 5 seconds\n${source}\nend timeout`,
+    ]);
     await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
     return result.stdout.trim();
   } catch (error) {
@@ -159,7 +162,7 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
   const recordPath = path.join(artifactDirectory, `${name}.json`);
   const failedPath = path.join(artifactDirectory, "failed.json");
   let nextPermissionAttempt = Date.now() + 2_000;
-  while (Date.now() < deadline) {
+  while (true) {
     try {
       return JSON.parse(await readFile(recordPath, "utf8"));
     } catch (error) {
@@ -171,6 +174,7 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
     }
+    if (Date.now() >= deadline) break;
     if (options.permissionLog !== undefined && Date.now() >= nextPermissionAttempt) {
       await clickPermissionAllow(options.permissionLog);
       nextPermissionAttempt = Date.now() + 2_000;
