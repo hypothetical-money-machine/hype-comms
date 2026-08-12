@@ -258,7 +258,7 @@ let notificationScope: {
 let notificationActiveGeneration: number | null = null;
 
 function createNotificationCapabilitySource(): NotificationCapabilitySource {
-  if (!__HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__) {
+  if (!__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
     return {
       read: () => ({ nativeSupport: "unsupported", osPermission: "unknown" }),
     };
@@ -754,7 +754,7 @@ function lockDownSession(appSession: Session): void {
       callback({
         responseHeaders: {
           ...details.responseHeaders,
-          "Content-Security-Policy": [__HMM_CHAT_PRODUCTION_CSP__],
+          "Content-Security-Policy": [__HYPE_COMMS_PRODUCTION_CSP__],
         },
       });
     },
@@ -816,7 +816,7 @@ function registerIpcHandlers(): void {
     }
 
     const request = net
-      .fetch(createServerHealthUrl(__HMM_CHAT_API_ORIGIN__), {
+      .fetch(createServerHealthUrl(__HYPE_COMMS_API_ORIGIN__), {
         method: "GET",
         cache: "no-store",
         credentials: "omit",
@@ -1924,7 +1924,7 @@ if (!hasSingleInstanceLock) {
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
 
-      if (__HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__) {
+      if (__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
         notificationController = new NotificationController({
           presenter: createNotificationPresenter(),
           settings: notificationSettingsController,
@@ -1970,19 +1970,19 @@ if (!hasSingleInstanceLock) {
       }
 
       chatSession = new ChatSession({
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
       });
       authKitPendingStore = new SafeStorageAuthKitPendingStore({
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         safeStorage,
         userDataPath: app.getPath("userData"),
       });
       authKitFlow = new AuthKitFlow({
         api: chatSession,
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         openExternal: (url) => shell.openExternal(url),
         store: authKitPendingStore,
       });
@@ -2003,7 +2003,7 @@ if (!hasSingleInstanceLock) {
         authKitCancellationFenced = true;
         scheduleAuthKitCancellationRetry();
       }
-      workspaceTransport = new WorkspaceTransport(__HMM_CHAT_API_ORIGIN__, chatSession);
+      workspaceTransport = new WorkspaceTransport(__HYPE_COMMS_API_ORIGIN__, chatSession);
       if (notificationController !== null) {
         notificationProjectionRepairCoordinator = new NotificationProjectionRepairCoordinator({
           transport: workspaceTransport,
@@ -2013,7 +2013,7 @@ if (!hasSingleInstanceLock) {
         });
       }
       workspaceRealtime = new WorkspaceRealtime({
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
         transport: workspaceTransport,
         onEvent: deliverWorkspaceEvent,
@@ -2021,7 +2021,7 @@ if (!hasSingleInstanceLock) {
         onState: deliverRealtimeState,
       });
       cacheCrypto = new CacheCrypto({
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         safeStorage,
         userDataPath: app.getPath("userData"),
@@ -2030,7 +2030,7 @@ if (!hasSingleInstanceLock) {
       updateController = new UpdateController({
         updater: createUpdateSource(),
         isPackaged: app.isPackaged,
-        apiOrigin: __HMM_CHAT_API_ORIGIN__,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         ...(process.env.APPIMAGE === undefined ? {} : { appImagePath: process.env.APPIMAGE }),
         hasMacDeveloperIdSignature:
@@ -2098,7 +2098,9 @@ if (!hasSingleInstanceLock) {
           : await consumeDevelopmentAuthCallbackFile(developmentAuthCallbackFile);
       const signedOutCallback = callbackForSignedOutSession(developmentCallback, restoredSession);
       if (signedOutCallback !== null && !handleAuthCallback(signedOutCallback)) {
-        throw new Error("HMM_DEVELOPMENT_AUTH_CALLBACK_FILE did not contain a valid auth callback");
+        throw new Error(
+          "HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE did not contain a valid auth callback",
+        );
       }
       authCallbacksReady = true;
       await drainPendingAuthCallbacks();
@@ -2117,7 +2119,7 @@ if (!hasSingleInstanceLock) {
   app.on("window-all-closed", () => {
     handleLastWindowClosed({
       platform: process.platform,
-      windowlessRealtimeEnabled: __HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__,
+      windowlessRealtimeEnabled: __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__,
       continueRealtimeWithoutRenderer: () => {
         const state = chatSession?.state;
         if (state?.status !== "signed-in" || state.method !== "email") {

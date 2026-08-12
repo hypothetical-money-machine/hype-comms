@@ -19,7 +19,7 @@ describe("resolveHeadlessDesktopConfiguration", () => {
 
   it("returns deterministic automation settings for an isolated development profile", () => {
     expect(
-      resolveHeadlessDesktopConfiguration({ HMM_DESKTOP_HEADLESS: "1" }, false, "claire"),
+      resolveHeadlessDesktopConfiguration({ HYPE_COMMS_DESKTOP_HEADLESS: "1" }, false, "claire"),
     ).toEqual({
       contentWidth: HEADLESS_DESKTOP_CONTENT_WIDTH,
       contentHeight: HEADLESS_DESKTOP_CONTENT_HEIGHT,
@@ -32,12 +32,12 @@ describe("resolveHeadlessDesktopConfiguration", () => {
 
   it("rejects unsupported values instead of silently changing the client presentation", () => {
     expect(() =>
-      resolveHeadlessDesktopConfiguration({ HMM_DESKTOP_HEADLESS: "true" }, false, "claire"),
-    ).toThrow("HMM_DESKTOP_HEADLESS must be set to 1");
+      resolveHeadlessDesktopConfiguration({ HYPE_COMMS_DESKTOP_HEADLESS: "true" }, false, "claire"),
+    ).toThrow("HYPE_COMMS_DESKTOP_HEADLESS must be set to 1");
   });
 
   it("allows headless automation only for an unpackaged isolated profile", () => {
-    const environment = { HMM_DESKTOP_HEADLESS: "1" };
+    const environment = { HYPE_COMMS_DESKTOP_HEADLESS: "1" };
     expect(() => resolveHeadlessDesktopConfiguration(environment, true, "claire")).toThrow(
       /unpackaged, isolated development profile/,
     );
@@ -55,7 +55,7 @@ describe("headless window presentation", () => {
 
   it("suppresses native visibility and focus for automation clients", () => {
     const configuration = resolveHeadlessDesktopConfiguration(
-      { HMM_DESKTOP_HEADLESS: "1" },
+      { HYPE_COMMS_DESKTOP_HEADLESS: "1" },
       false,
       "woots",
     );

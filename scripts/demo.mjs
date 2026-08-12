@@ -239,7 +239,7 @@ async function main() {
 
   const desktopEnvironment = {
     ...demo.env,
-    HMM_DEVELOPMENT_USER_DATA_ROOT: demo.paths.desktopUserDataRoot,
+    HYPE_COMMS_DEVELOPMENT_USER_DATA_ROOT: demo.paths.desktopUserDataRoot,
     ...(options.headless ? { ELECTRON_RENDERER_URL: rendererUrl } : {}),
   };
   let headlessManifest = null;
@@ -271,8 +271,8 @@ async function main() {
         headlessManifest === null
           ? {
               ...desktopEnvironment,
-              HMM_DESKTOP_PROFILE: "claire",
-              HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: claire.callbackFile,
+              HYPE_COMMS_DESKTOP_PROFILE: "claire",
+              HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE: claire.callbackFile,
             }
           : deriveHeadlessDesktopEnvironment(desktopEnvironment, {
               profile: "claire",
@@ -288,7 +288,7 @@ async function main() {
       ? spawnManaged(process.execPath, ["scripts/dev-join.mjs", "--profile=woots"], {
           env: {
             ...desktopEnvironment,
-            HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: woots.callbackFile,
+            HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE: woots.callbackFile,
           },
         })
       : spawnManaged(

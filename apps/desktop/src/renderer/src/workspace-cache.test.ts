@@ -258,7 +258,7 @@ describe("PersistentWorkspaceCache", () => {
     const restarted = new PersistentWorkspaceCache({ crypto, scope });
     expect((await restarted.load()).reactions).toEqual([reaction]);
 
-    const name = `hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`;
+    const name = `hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`;
     const database = new Dexie(name);
     await database.open();
     const rows = await database.table("reactions").toArray();
@@ -328,7 +328,7 @@ describe("PersistentWorkspaceCache", () => {
       userId: "10000000-0000-4000-8000-000000000007",
       workspaceId: WORKSPACE_ID,
     };
-    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const name = `hype-comms-cache-v1-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
     const legacy = new Dexie(name);
     legacy.version(1).stores({
       metadata: "&id",
@@ -362,7 +362,7 @@ describe("PersistentWorkspaceCache", () => {
       userId: "10000000-0000-4000-8000-000000000011",
       workspaceId: WORKSPACE_ID,
     };
-    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const name = `hype-comms-cache-v1-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
     const legacy = new Dexie(name);
     legacy.version(4).stores({
       metadata: "&id",

@@ -3,5 +3,5 @@ export function resolveNativeNotificationRollout(value: string | undefined): boo
   const normalized = value?.trim() ?? "";
   if (normalized === "" || normalized === "0") return false;
   if (normalized === "1") return true;
-  throw new Error("HMM_NATIVE_NOTIFICATIONS_ENABLED must be 0 or 1");
+  throw new Error("HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED must be 0 or 1");
 }

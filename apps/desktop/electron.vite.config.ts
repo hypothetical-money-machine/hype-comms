@@ -20,13 +20,13 @@ import {
 const desktopRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const rendererContentSecurityPolicy = (isDevelopment: boolean): Plugin => ({
-  name: "hmm-chat-renderer-content-security-policy",
+  name: "hype-comms-renderer-content-security-policy",
   transformIndexHtml(html) {
     const policy = isDevelopment
       ? DEVELOPMENT_CONTENT_SECURITY_POLICY
       : PRODUCTION_CONTENT_SECURITY_POLICY;
 
-    return html.replace("__HMM_CHAT_CONTENT_SECURITY_POLICY__", policy);
+    return html.replace("__HYPE_COMMS_CONTENT_SECURITY_POLICY__", policy);
   },
 });
 
@@ -35,10 +35,10 @@ export default defineConfig(({ command }) => {
   // Native presentation stays compiled off unless an explicit development/test or native-evidence
   // build opts in. The terminal rollout may change this default only after packaged native proof.
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
-    process.env.HMM_NATIVE_NOTIFICATIONS_ENABLED,
+    process.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED,
   );
   const configuredApiOrigin =
-    process.env.HMM_CHAT_API_ORIGIN ??
+    process.env.HYPE_COMMS_API_ORIGIN ??
     (isDevelopment ? DEFAULT_DEVELOPMENT_API_ORIGIN : DEFAULT_PRODUCTION_API_ORIGIN);
   const apiOrigin = isDevelopment
     ? normalizeDevelopmentApiOrigin(configuredApiOrigin)
@@ -48,15 +48,15 @@ export default defineConfig(({ command }) => {
     const requirement = isDevelopment
       ? "a credential-free loopback HTTP origin without a path"
       : "a credential-free HTTPS origin without a path";
-    throw new Error(`HMM_CHAT_API_ORIGIN must be ${requirement}`);
+    throw new Error(`HYPE_COMMS_API_ORIGIN must be ${requirement}`);
   }
 
   return {
     main: {
       define: {
-        __HMM_CHAT_API_ORIGIN__: JSON.stringify(apiOrigin),
-        __HMM_CHAT_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
-        __HMM_CHAT_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
+        __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
+        __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
+        __HYPE_COMMS_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
       },
       build: {
         outDir: path.join(desktopRoot, "dist/main"),

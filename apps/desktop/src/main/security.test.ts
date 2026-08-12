@@ -80,23 +80,23 @@ describe("isTrustedRendererUrl", () => {
 
 describe("authentication callback validation", () => {
   it("accepts only the dedicated auth callback route", () => {
-    const callback = "hmm-chat://auth/callback?code=opaque&state=opaque";
+    const callback = "hype-comms://auth/callback?code=opaque&state=opaque";
     expect(normalizeAuthCallbackUrl(callback)).toBe(callback);
     expect(findAuthCallbackUrl(["--flag", callback])).toBe(callback);
   });
 
   it.each([
     "https://auth/callback?code=opaque",
-    "hmm-chat://auth/other?code=opaque",
-    "hmm-chat://settings/callback",
-    "hmm-chat://user:secret@auth/callback",
+    "hype-comms://auth/other?code=opaque",
+    "hype-comms://settings/callback",
+    "hype-comms://user:secret@auth/callback",
   ])("rejects unexpected callback URL %s", (url) => {
     expect(normalizeAuthCallbackUrl(url)).toBeNull();
   });
 
   it("keeps route normalization compatible with legacy and AuthKit callback shapes", () => {
-    const magicLink = `hmm-chat://auth/callback?token=${"m".repeat(43)}`;
-    const authKit = `hmm-chat://auth/callback?code=${"c".repeat(43)}&state=${"s".repeat(43)}`;
+    const magicLink = `hype-comms://auth/callback?token=${"m".repeat(43)}`;
+    const authKit = `hype-comms://auth/callback?code=${"c".repeat(43)}&state=${"s".repeat(43)}`;
 
     expect(normalizeAuthCallbackUrl(magicLink)).toBe(magicLink);
     expect(normalizeAuthCallbackUrl(authKit)).toBe(authKit);
@@ -110,14 +110,14 @@ describe("authentication protocol registration", () => {
       createProtocolClientRegistration(true, "/Applications/Hype Comms", [
         "/Applications/Hype Comms",
       ]),
-    ).toEqual({ scheme: "hmm-chat" });
+    ).toEqual({ scheme: "hype-comms" });
   });
 
   it("registers an unpackaged Electron executable with its app script", () => {
     expect(
       createProtocolClientRegistration(false, "/opt/electron", ["/opt/electron", "./apps/desktop"]),
     ).toEqual({
-      scheme: "hmm-chat",
+      scheme: "hype-comms",
       executablePath: "/opt/electron",
       arguments: [path.resolve("./apps/desktop")],
     });

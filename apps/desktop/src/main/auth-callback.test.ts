@@ -14,18 +14,18 @@ describe("magic-link callback processing", () => {
     const exchange = vi.fn(async () => undefined);
 
     await expect(
-      processAuthCallback(`hmm-chat://auth/callback?token=${TOKEN}`, exchange),
+      processAuthCallback(`hype-comms://auth/callback?token=${TOKEN}`, exchange),
     ).resolves.toBe("succeeded");
     expect(exchange).toHaveBeenCalledOnce();
     expect(exchange).toHaveBeenCalledWith(TOKEN);
   });
 
   it.each([
-    "hmm-chat://auth/callback",
-    "hmm-chat://auth/callback?token=malformed",
-    `hmm-chat://auth/callback?token=${"A".repeat(87)}`,
-    `hmm-chat://auth/callback?token=${TOKEN}&token=${TOKEN}`,
-    `hmm-chat://auth/other?token=${TOKEN}`,
+    "hype-comms://auth/callback",
+    "hype-comms://auth/callback?token=malformed",
+    `hype-comms://auth/callback?token=${"A".repeat(87)}`,
+    `hype-comms://auth/callback?token=${TOKEN}&token=${TOKEN}`,
+    `hype-comms://auth/other?token=${TOKEN}`,
     `https://auth/callback?token=${TOKEN}`,
   ])("ignores an invalid callback without attempting an exchange: %s", async (url) => {
     const exchange = vi.fn(async () => undefined);
@@ -40,7 +40,10 @@ describe("magic-link callback processing", () => {
       throw new Error(`Server rejected ${TOKEN}`);
     });
 
-    const outcome = await processAuthCallback(`hmm-chat://auth/callback?token=${TOKEN}`, exchange);
+    const outcome = await processAuthCallback(
+      `hype-comms://auth/callback?token=${TOKEN}`,
+      exchange,
+    );
 
     expect(outcome).toBe("failed");
     expect(outcome).not.toContain(TOKEN);
@@ -49,7 +52,7 @@ describe("magic-link callback processing", () => {
   it("preserves legacy token precedence when unrelated query parameters are present", () => {
     expect(
       parseAuthCallback(
-        `hmm-chat://auth/callback?token=${TOKEN}&code=legacy-metadata&state=legacy-metadata`,
+        `hype-comms://auth/callback?token=${TOKEN}&code=legacy-metadata&state=legacy-metadata`,
       ),
     ).toEqual({ kind: "magic_link", token: TOKEN });
   });
@@ -60,7 +63,7 @@ describe("AuthKit callback parsing", () => {
   const state = "s".repeat(43);
 
   it("parses one strict HMM handoff code and desktop state", () => {
-    const value = `hmm-chat://auth/callback?code=${code}&state=${state}`;
+    const value = `hype-comms://auth/callback?code=${code}&state=${state}`;
 
     expect(parseAuthKitCallback(value)).toEqual({ code, state });
     expect(parseAuthCallback(value)).toEqual({
@@ -70,7 +73,7 @@ describe("AuthKit callback parsing", () => {
   });
 
   it("parses only the fixed credential-free terminal error", () => {
-    const value = `hmm-chat://auth/callback?error=authentication_failed&state=${state}`;
+    const value = `hype-comms://auth/callback?error=authentication_failed&state=${state}`;
 
     expect(parseAuthKitCallback(value)).toEqual({
       error: "authentication_failed",
@@ -83,18 +86,18 @@ describe("AuthKit callback parsing", () => {
   });
 
   it.each([
-    `hmm-chat://auth/callback?code=${code}`,
-    `hmm-chat://auth/callback?state=${state}`,
-    `hmm-chat://auth/callback?code=${code}&state=${state}&extra=value`,
-    `hmm-chat://auth/callback?code=${code}&code=${code}&state=${state}`,
-    `hmm-chat://auth/callback?code=${code}&state=${state}&state=${state}`,
-    `hmm-chat://auth/callback?code=${code}&error=authentication_failed&state=${state}`,
-    `hmm-chat://auth/callback?error=access_denied&state=${state}`,
-    `hmm-chat://auth/callback?error=authentication_failed&error_description=denied&state=${state}`,
-    `hmm-chat://auth/callback?code=workos-provider-code&state=${state}`,
-    `hmm-chat://auth/callback?code=${code}&state=workos-provider-state`,
-    `hmm-chat://auth:8443/callback?code=${code}&state=${state}`,
-    `hmm-chat://auth/callback?code=${code}&state=${state}#fragment`,
+    `hype-comms://auth/callback?code=${code}`,
+    `hype-comms://auth/callback?state=${state}`,
+    `hype-comms://auth/callback?code=${code}&state=${state}&extra=value`,
+    `hype-comms://auth/callback?code=${code}&code=${code}&state=${state}`,
+    `hype-comms://auth/callback?code=${code}&state=${state}&state=${state}`,
+    `hype-comms://auth/callback?code=${code}&error=authentication_failed&state=${state}`,
+    `hype-comms://auth/callback?error=access_denied&state=${state}`,
+    `hype-comms://auth/callback?error=authentication_failed&error_description=denied&state=${state}`,
+    `hype-comms://auth/callback?code=workos-provider-code&state=${state}`,
+    `hype-comms://auth/callback?code=${code}&state=workos-provider-state`,
+    `hype-comms://auth:8443/callback?code=${code}&state=${state}`,
+    `hype-comms://auth/callback?code=${code}&state=${state}#fragment`,
   ])("rejects a malformed, ambiguous, or provider-detail callback: %s", (value) => {
     expect(parseAuthKitCallback(value)).toBeNull();
     expect(parseAuthCallback(value)).toBeNull();

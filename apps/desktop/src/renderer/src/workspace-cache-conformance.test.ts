@@ -1055,7 +1055,7 @@ describe("PersistentWorkspaceCache durability", () => {
     );
     await first.enqueue(queuedAlphaMessage, NOW);
 
-    const database = new Dexie(`hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`);
+    const database = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
     await database.open();
     await database.table("metadata").update("state", {
       repairMarker: {

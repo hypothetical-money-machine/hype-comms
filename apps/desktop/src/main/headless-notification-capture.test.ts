@@ -23,7 +23,7 @@ async function privateArtifactDirectory(): Promise<string> {
 
 function environment(directory: string): Record<string, string> {
   return {
-    HMM_DESKTOP_HEADLESS: "1",
+    HYPE_COMMS_DESKTOP_HEADLESS: "1",
     [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: directory,
   };
 }
@@ -55,7 +55,7 @@ describe("openHeadlessNotificationCaptureArtifact", () => {
     const directory = await privateArtifactDirectory();
     expect(() =>
       openHeadlessNotificationCaptureArtifact({
-        env: { HMM_DESKTOP_HEADLESS: "1" },
+        env: { HYPE_COMMS_DESKTOP_HEADLESS: "1" },
         isPackaged: false,
         profile: "claire",
       }),

@@ -40,8 +40,8 @@ test("derives an isolated loopback database and never inherits the normal databa
     {
       HMM_POSTGRES_PASSWORD: "demo p@ss",
       HMM_DATABASE_URL: "postgres://production.example/important",
-      HMM_DESKTOP_HEADLESS: "1",
-      HMM_NATIVE_NOTIFICATIONS_ENABLED: "1",
+      HYPE_COMMS_DESKTOP_HEADLESS: "1",
+      HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1",
       [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: "/tmp/untrusted-capture-directory",
       ELECTRON_CLI_ARGS: "--remote-debugging-address=0.0.0.0",
       REMOTE_DEBUGGING_PORT: "9222",
@@ -54,8 +54,8 @@ test("derives an isolated loopback database and never inherits the normal databa
   assert.equal(url.port, "54330");
   assert.equal(url.password, "demo%20p%40ss");
   assert.equal(result.env.HMM_OWNER_EMAIL, undefined);
-  assert.equal(result.env.HMM_DESKTOP_HEADLESS, undefined);
-  assert.equal(result.env.HMM_NATIVE_NOTIFICATIONS_ENABLED, undefined);
+  assert.equal(result.env.HYPE_COMMS_DESKTOP_HEADLESS, undefined);
+  assert.equal(result.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED, undefined);
   assert.equal(result.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], undefined);
   assert.equal(result.env.ELECTRON_CLI_ARGS, undefined);
   assert.equal(result.env.REMOTE_DEBUGGING_PORT, undefined);
@@ -117,7 +117,7 @@ test("creates isolated headless artifacts and Electron launch configuration", as
       HMM_DATABASE_URL: "postgres://127.0.0.1/demo",
       ELECTRON_CLI_ARGS: "--unexpected-switch",
       REMOTE_DEBUGGING_PORT: "9999",
-      HMM_NATIVE_NOTIFICATIONS_ENABLED: "0",
+      HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "0",
       [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: "/tmp/inherited-artifacts",
     },
     {
@@ -131,9 +131,9 @@ test("creates isolated headless artifacts and Electron launch configuration", as
   assert.equal(artifactsDirectory, path.join(paths.artifactRootDirectory, runId));
   assert.equal((await stat(paths.artifactRootDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(artifactsDirectory)).mode & 0o777, 0o700);
-  assert.equal(desktopEnvironment.HMM_DESKTOP_HEADLESS, "1");
-  assert.equal(desktopEnvironment.HMM_NATIVE_NOTIFICATIONS_ENABLED, "1");
-  assert.equal(desktopEnvironment.HMM_DESKTOP_PROFILE, "claire");
+  assert.equal(desktopEnvironment.HYPE_COMMS_DESKTOP_HEADLESS, "1");
+  assert.equal(desktopEnvironment.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED, "1");
+  assert.equal(desktopEnvironment.HYPE_COMMS_DESKTOP_PROFILE, "claire");
   assert.equal(desktopEnvironment[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], artifactsDirectory);
   assert.equal(desktopEnvironment.ELECTRON_CLI_ARGS, undefined);
   assert.equal(desktopEnvironment.REMOTE_DEBUGGING_PORT, undefined);

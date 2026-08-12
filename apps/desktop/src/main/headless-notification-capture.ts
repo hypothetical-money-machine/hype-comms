@@ -15,7 +15,7 @@ import { notificationCaptureIdSchema } from "@hype-comms/contracts";
 import type { NotificationEligibilityReason } from "./notification-policy";
 
 export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
-  "HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
+  "HYPE_COMMS_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
 export const HEADLESS_NOTIFICATION_CAPTURE_RECORD_LIMIT = 1_024;
 
 const CAPTURE_RECORD_MAX_BYTES = 256;
@@ -222,7 +222,7 @@ export function openHeadlessNotificationCaptureArtifact({
   profile,
   recordLimit = HEADLESS_NOTIFICATION_CAPTURE_RECORD_LIMIT,
 }: OpenHeadlessNotificationCaptureOptions): HeadlessNotificationCaptureArtifact | null {
-  const headless = env.HMM_DESKTOP_HEADLESS?.trim() ?? "";
+  const headless = env.HYPE_COMMS_DESKTOP_HEADLESS?.trim() ?? "";
   const configuredDirectory = env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]?.trim() ?? "";
   if (headless === "") {
     if (configuredDirectory !== "") {

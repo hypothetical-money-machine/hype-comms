@@ -83,8 +83,8 @@ function createSession(request: SessionFetch, cookies = new MemoryCookies()): Ch
 /** A jar holding a credential that is still valid for the full 30-day window. */
 function storedIdentityCookies(): MemoryCookies {
   const cookies = new MemoryCookies();
-  cookies.values.set("hmm_session", "identity-cookie");
-  cookies.expirations.set("hmm_session", (Date.parse(NOW) + THIRTY_DAYS_MS) / 1000);
+  cookies.values.set("hype_comms_session", "identity-cookie");
+  cookies.expirations.set("hype_comms_session", (Date.parse(NOW) + THIRTY_DAYS_MS) / 1000);
   return cookies;
 }
 
@@ -95,14 +95,14 @@ function rotations(requests: readonly string[]): number {
 /** Anything short of a refusal by the service must leave the stored credential in the jar. */
 function expectPreservedCredential(cookies: MemoryCookies): void {
   expect(cookies.removals).toEqual([]);
-  expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+  expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
 }
 
 describe("ChatSession restore", () => {
   it("restores the invited member identity without exposing its cookie", async () => {
     const requests: string[] = [];
     const cookies = new MemoryCookies();
-    cookies.values.set("hmm_session", "identity-cookie");
+    cookies.values.set("hype_comms_session", "identity-cookie");
     const session = createSession(async (url, init) => {
       requests.push(`${init.method} ${url}`);
       if (url.endsWith("/v1/auth/me")) return jsonResponse(CURRENT_USER);
@@ -123,7 +123,7 @@ describe("ChatSession restore", () => {
   it("clears a rejected identity session only after a single refresh attempt fails", async () => {
     const requests: string[] = [];
     const cookies = new MemoryCookies();
-    cookies.values.set("hmm_session", "expired-identity");
+    cookies.values.set("hype_comms_session", "expired-identity");
     const session = createSession(async (url, init) => {
       requests.push(`${init.method} ${url}`);
       return jsonResponse({ error: "unauthorized" }, 401);
@@ -132,7 +132,7 @@ describe("ChatSession restore", () => {
     await expect(session.restore()).resolves.toEqual({ status: "signed-out" });
     expect(requests).toEqual([`GET ${CURRENT_USER_URL}`, `POST ${SESSION_REFRESH_URL}`]);
     expect(rotations(requests)).toBe(1);
-    expect(cookies.removals).toContain("hmm_session");
+    expect(cookies.removals).toContain("hype_comms_session");
   });
 
   it("recovers an expired credential with one rotation instead of signing out", async () => {
@@ -166,7 +166,7 @@ describe("ChatSession restore", () => {
       message: SESSION_SERVER_ERROR_MESSAGE,
     });
     expect(cookies.removals).toEqual([]);
-    expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
   });
 
   it("keeps the stored credential when an origin or gateway check answers 403", async () => {
@@ -201,7 +201,7 @@ describe("ChatSession restore", () => {
       message: SESSION_UNREACHABLE_MESSAGE,
     });
     expect(cookies.removals).toEqual([]);
-    expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
   });
 
   it("keeps the stored credential when the identity check times out", async () => {
@@ -216,7 +216,7 @@ describe("ChatSession restore", () => {
       message: SESSION_UNREACHABLE_MESSAGE,
     });
     expect(cookies.removals).toEqual([]);
-    expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
   });
 
   it("keeps the stored credential when the identity response fails its schema", async () => {
@@ -232,7 +232,7 @@ describe("ChatSession restore", () => {
       message: SESSION_SERVER_ERROR_MESSAGE,
     });
     expect(cookies.removals).toEqual([]);
-    expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
   });
 });
 
@@ -258,11 +258,11 @@ describe("ChatSession lifecycle", () => {
 
   it("clears the identity cookie on sign-out", async () => {
     const cookies = new MemoryCookies();
-    cookies.values.set("hmm_session", "identity-cookie");
+    cookies.values.set("hype_comms_session", "identity-cookie");
     const session = createSession(async () => emptyResponse(), cookies);
 
     await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
-    expect(cookies.removals).toEqual(["hmm_session"]);
+    expect(cookies.removals).toEqual(["hype_comms_session"]);
     expect(session.consumeLogoutUrl()).toBeNull();
   });
 
@@ -284,7 +284,7 @@ describe("ChatSession lifecycle", () => {
     expect(JSON.stringify(session.state)).not.toContain("session_01ABC");
     expect(session.consumeLogoutUrl()).toBe(logoutUrl);
     expect(session.consumeLogoutUrl()).toBeNull();
-    expect(cookies.removals).toEqual(["hmm_session"]);
+    expect(cookies.removals).toEqual(["hype_comms_session"]);
   });
 
   it("finishes local sign-out while ignoring an invalid provider logout header", async () => {
@@ -302,7 +302,7 @@ describe("ChatSession lifecycle", () => {
 
     await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
     expect(session.consumeLogoutUrl()).toBeNull();
-    expect(cookies.removals).toEqual(["hmm_session"]);
+    expect(cookies.removals).toEqual(["hype_comms_session"]);
   });
 });
 
@@ -348,7 +348,7 @@ describe("ChatSession magic links", () => {
     // The one exchange outcome that is a verdict on the link, and so on the jar.
     await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
     expect(session.state).toEqual({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
-    expect(cookies.removals).toEqual(["hmm_session"]);
+    expect(cookies.removals).toEqual(["hype_comms_session"]);
   });
 
   it("keeps the stored credential when the exchange cannot reach the server", async () => {
@@ -651,7 +651,7 @@ describe("ChatSession renewal", () => {
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
     expect(cookies.removals).toEqual([]);
-    expect(cookies.values.get("hmm_session")).toBe("identity-cookie");
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
     session.stop();
   });
 

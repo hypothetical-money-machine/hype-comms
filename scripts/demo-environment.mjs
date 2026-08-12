@@ -11,7 +11,7 @@ export const DEMO_RENDERER_PORT = 5173;
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
 export const HEADLESS_DEMO_MANIFEST_KIND = "hmm-chat-headless-demo";
 export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
-  "HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
+  "HYPE_COMMS_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
 
 const HEADLESS_DEMO_CLIENT_PROFILES = ["claire", "woots"];
 const TCP_PORT_MAX = 65_535;
@@ -229,10 +229,10 @@ export function deriveHeadlessDesktopEnvironment(
   delete environment.REMOTE_DEBUGGING_PORT;
   return {
     ...environment,
-    HMM_DESKTOP_HEADLESS: "1",
-    HMM_NATIVE_NOTIFICATIONS_ENABLED: "1",
-    HMM_DESKTOP_PROFILE: profile,
-    HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
+    HYPE_COMMS_DESKTOP_HEADLESS: "1",
+    HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1",
+    HYPE_COMMS_DESKTOP_PROFILE: profile,
+    HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
     [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: path.resolve(artifactsDirectory),
   };
 }
@@ -352,8 +352,8 @@ export function deriveDemoEnvironment(baseEnv, projectRoot) {
   delete env.HMM_WORKSPACE_SLUG;
   // A normal demo must remain interactive even when a caller's shell has automation settings.
   // The headless launcher adds its own pinned CDP configuration after this normalization.
-  delete env.HMM_DESKTOP_HEADLESS;
-  delete env.HMM_NATIVE_NOTIFICATIONS_ENABLED;
+  delete env.HYPE_COMMS_DESKTOP_HEADLESS;
+  delete env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED;
   delete env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV];
   delete env.ELECTRON_CLI_ARGS;
   delete env.REMOTE_DEBUGGING_PORT;

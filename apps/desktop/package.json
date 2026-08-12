@@ -9,7 +9,7 @@
   },
   "license": "UNLICENSED",
   "homepage": "https://github.com/hype-comms/hype-comms",
-  "desktopName": "com.hypotheticalmoneymachine.hmmchat.desktop",
+  "desktopName": "com.hypemm.hypecomms.desktop",
   "main": "./dist/main/index.js",
   "repository": {
     "type": "git",
@@ -59,7 +59,7 @@
     "ws": "^8.18.0"
   },
   "build": {
-    "appId": "com.hypotheticalmoneymachine.hmmchat",
+    "appId": "com.hypemm.hypecomms",
     "productName": "Hype Comms",
     "executableName": "hype-comms",
     "artifactName": "hype-comms-${version}-${os}-${arch}.${ext}",
@@ -92,7 +92,7 @@
       {
         "name": "Hype Comms authentication callback",
         "schemes": [
-          "hmm-chat"
+          "hype-comms"
         ]
       }
     ],

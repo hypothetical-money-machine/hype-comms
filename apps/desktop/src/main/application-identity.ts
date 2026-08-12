@@ -1,7 +1,7 @@
 import type { App } from "electron";
 
 /** Must remain identical to electron-builder's build.appId. */
-export const DESKTOP_APPLICATION_ID = "com.hypotheticalmoneymachine.hmmchat";
+export const DESKTOP_APPLICATION_ID = "com.hypemm.hypecomms";
 
 type ApplicationIdentityTarget = Pick<App, "setAppUserModelId">;
 
