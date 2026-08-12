@@ -401,7 +401,10 @@ so the theme designer cannot infer the operating-system foundation from renderer
 preview uses a separate trusted, read-only IPC request. Main serializes that request with appearance
 writes, temporarily removes the explicit native override to sample the OS scheme, restores the
 canonical active source, and returns a validated System state without persisting or publishing it.
-The renderer scopes that result to the draft preview until the user saves.
+The renderer scopes that result to the draft preview. Before saving a System draft over an explicit
+active theme, it resolves the OS foundation again; if the result changed, the designer refreshes
+the preview and requires another explicit save instead of applying an appearance the user did not
+review.
 
 ## Feature behavior
 

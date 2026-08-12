@@ -196,6 +196,62 @@ describe("ThemeDesigner", () => {
     theme.dispose();
   });
 
+  it("refreshes a stale System draft and requires review before applying it", async () => {
+    const client = new DesignerThemeTransport(null, "dark", "light");
+    const { container, onSaved, theme } = await renderDesigner(client);
+
+    fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
+    await waitFor(() => {
+      expect((container.querySelector(".theme-preview") as HTMLElement).style.colorScheme).toBe(
+        "light",
+      );
+    });
+
+    client.systemState = {
+      preference: "system",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: null,
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Your system appearance changed",
+    );
+    expect((container.querySelector(".theme-preview") as HTMLElement).style.colorScheme).toBe(
+      "dark",
+    );
+    expect((screen.getByLabelText("Accent hex value") as HTMLInputElement).value).toBe(
+      getThemeDefinition("dark").tokens.borderAccent,
+    );
+    expect(client.designs).toEqual([]);
+    expect(onSaved).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
+    await waitFor(() => {
+      expect(client.designs).toEqual([{ preference: "system", accentColor: null }]);
+      expect(onSaved).toHaveBeenCalledTimes(1);
+    });
+    theme.dispose();
+  });
+
+  it("does not apply a System draft when its final refresh fails", async () => {
+    const client = new DesignerThemeTransport(null, "dark", "light");
+    const { onSaved, theme } = await renderDesigner(client);
+
+    fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
+    await screen.findByRole("complementary", { name: "System foundation" });
+    client.getSystemState = () => Promise.reject(new Error("native appearance unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not confirm your system appearance",
+    );
+    expect(client.designs).toEqual([]);
+    expect(onSaved).not.toHaveBeenCalled();
+    theme.dispose();
+  });
+
   it("ignores a stale System resolution after another foundation is selected", async () => {
     const client = new DesignerThemeTransport(null, "dark", "light");
     let resolveSystem: ((state: ThemeState) => void) | undefined;

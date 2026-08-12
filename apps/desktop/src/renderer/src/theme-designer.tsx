@@ -88,6 +88,13 @@ function defaultAccentFor(
   return getThemeDefinition(resolvedThemeId).tokens.borderAccent;
 }
 
+function sameResolvedFoundation(left: ThemeState, right: ThemeState): boolean {
+  return (
+    left.resolvedThemeId === right.resolvedThemeId &&
+    left.resolvedColorScheme === right.resolvedColorScheme
+  );
+}
+
 export function ThemeDesigner({
   theme,
   onCancel,
@@ -212,6 +219,25 @@ export function ThemeDesigner({
     onSavingChange(true);
     setError("");
     try {
+      if (design.data.preference === "system" && liveState.preference !== "system") {
+        let refreshedSystemState: ThemeState;
+        try {
+          refreshedSystemState = await theme.getSystemThemeState();
+        } catch {
+          setError("Could not confirm your system appearance. Try again.");
+          return;
+        }
+        if (systemState === null || !sameResolvedFoundation(systemState, refreshedSystemState)) {
+          setSystemState(refreshedSystemState);
+          if (usesDefaultAccentRef.current) {
+            const defaultAccent = defaultAccentFor("system", liveState, refreshedSystemState);
+            setAccentInput(defaultAccent);
+            setLastValidAccent(defaultAccent);
+          }
+          setError("Your system appearance changed. Review the updated preview, then save again.");
+          return;
+        }
+      }
       await theme.setDesign(design.data);
       onSaved();
     } catch {
