@@ -1,4 +1,4 @@
-name: hmm-chat-actions-runner
+name: hype-comms-actions-runner
 
 services:
   linux-x64:
@@ -10,14 +10,14 @@ services:
         RUNNER_VERSION: 2.336.0
         RUNNER_SHA256_AMD64: 04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
         RUNNER_SHA256_ARM64: 58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1
-    image: hmm-chat-actions-runner:2.336.0
-    container_name: hmm-chat-actions-runner-linux-x64
+    image: hype-comms-actions-runner:2.336.0
+    container_name: hype-comms-actions-runner-linux-x64
     init: true
     restart: unless-stopped
     environment:
-      RUNNER_LABELS: hmm-chat-release,docker
-      RUNNER_NAME: hmm-chat-docker-linux-x64
-      RUNNER_URL: https://github.com/hype-comms/hmm-chat
+      RUNNER_LABELS: hype-comms-release,docker
+      RUNNER_NAME: hype-comms-docker-linux-x64
+      RUNNER_URL: https://github.com/hype-comms/hype-comms
     volumes:
       - runner-data:/runner
 
@@ -30,19 +30,19 @@ services:
         RUNNER_VERSION: 2.336.0
         RUNNER_SHA256_AMD64: 04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
         RUNNER_SHA256_ARM64: 58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1
-    image: hmm-chat-actions-runner:2.336.0-arm64
-    container_name: hmm-chat-actions-runner-linux-arm64
+    image: hype-comms-actions-runner:2.336.0-arm64
+    container_name: hype-comms-actions-runner-linux-arm64
     init: true
     restart: unless-stopped
     environment:
-      RUNNER_LABELS: hmm-chat-release,docker
-      RUNNER_NAME: hmm-chat-docker-linux-arm64
-      RUNNER_URL: https://github.com/hype-comms/hmm-chat
+      RUNNER_LABELS: hype-comms-release,docker
+      RUNNER_NAME: hype-comms-docker-linux-arm64
+      RUNNER_URL: https://github.com/hype-comms/hype-comms
     volumes:
       - runner-data-arm64:/runner
 
 volumes:
   runner-data:
-    name: hmm-chat-runner-data
+    name: hype-comms-runner-data
   runner-data-arm64:
-    name: hmm-chat-runner-data-arm64
+    name: hype-comms-runner-data-arm64

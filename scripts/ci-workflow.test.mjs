@@ -42,7 +42,7 @@ test("runs PostgreSQL CI natively on the ARM64 runner", async () => {
   );
   const postgresJob = workflowJob(ciWorkflow, "check");
 
-  assert.match(postgresJob, /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u);
+  assert.match(postgresJob, /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u);
   assert.doesNotMatch(postgresJob, /runs-on: \[[^\]]*X64/u);
   assert.match(runnerDockerfile, /^ {4}postgresql-16 \\$/mu);
   assert.match(postgresJob, /Verify PostgreSQL 16 runner image/u);

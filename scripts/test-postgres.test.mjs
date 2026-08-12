@@ -5,33 +5,34 @@ import test from "node:test";
 import { requireTestDatabaseUrl, waitForPostgres } from "./test-postgres.mjs";
 
 test("requires an explicitly test-named PostgreSQL database", () => {
-  assert.throws(() => requireTestDatabaseUrl({}), /HMM_TEST_DATABASE_URL is required/);
+  assert.throws(() => requireTestDatabaseUrl({}), /HYPE_COMMS_TEST_DATABASE_URL is required/);
   assert.throws(
     () =>
       requireTestDatabaseUrl({
-        HMM_TEST_DATABASE_URL: "postgres://postgres.example/hmm_chat",
+        HYPE_COMMS_TEST_DATABASE_URL: "postgres://postgres.example/hype_comms",
       }),
     /Refusing to run.*non-test database/i,
   );
   assert.throws(
     () =>
       requireTestDatabaseUrl({
-        HMM_TEST_DATABASE_URL: "https://postgres.example/hmm_chat_test",
+        HYPE_COMMS_TEST_DATABASE_URL: "https://postgres.example/hype_comms_test",
       }),
     /PostgreSQL URL/,
   );
   assert.equal(
     requireTestDatabaseUrl({
-      HMM_TEST_DATABASE_URL: "postgresql://hmm:password@postgres:5432/hmm_chat_test",
+      HYPE_COMMS_TEST_DATABASE_URL:
+        "postgresql://hype_comms:password@postgres:5432/hype_comms_test",
     }),
-    "postgresql://hmm:password@postgres:5432/hmm_chat_test",
+    "postgresql://hype_comms:password@postgres:5432/hype_comms_test",
   );
 });
 
 test("waits a bounded number of times for PostgreSQL", async () => {
   let attempts = 0;
   const sleeps = [];
-  await waitForPostgres("postgres://postgres/hmm_chat_test", {
+  await waitForPostgres("postgres://postgres/hype_comms_test", {
     attempts: 3,
     delayMs: 25,
     connect: async () => {
@@ -47,7 +48,7 @@ test("waits a bounded number of times for PostgreSQL", async () => {
 
   attempts = 0;
   await assert.rejects(
-    waitForPostgres("postgres://postgres/hmm_chat_test", {
+    waitForPostgres("postgres://postgres/hype_comms_test", {
       attempts: 2,
       delayMs: 0,
       connect: async () => {
@@ -74,7 +75,7 @@ test("gates every promotion path through the guarded PostgreSQL entrypoint", asy
   assert.match(github, /run: npm run test:postgres/);
   assert.match(woodpecker, /image: postgres:16-alpine/);
   assert.match(woodpecker, /limit: 1/);
-  assert.match(woodpecker, /HMM_TEST_DATABASE_URL=.*npm run test:postgres/);
+  assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run test:postgres/);
   assert.match(woodpecker, /name: build-push[\s\S]*?depends_on:\n\s+- check/);
   assert.match(woodpecker, /name: promote-gitops[\s\S]*?depends_on:\n\s+- build-push/);
 

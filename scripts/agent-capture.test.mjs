@@ -327,7 +327,7 @@ test("disconnects a CDP connection that resolves after readiness is cancelled", 
 });
 
 test("writes deterministic private PNG and WebM artifacts", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-agent-capture-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-agent-capture-"));
   try {
     const pngPath = path.join(directory, "nested", "workspace.png");
     const webmPath = path.join(directory, "nested", "round-trip.webm");

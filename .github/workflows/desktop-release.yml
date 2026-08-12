@@ -18,7 +18,7 @@ permissions:
 jobs:
   validate:
     name: Validate release version
-    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
+    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
@@ -63,7 +63,7 @@ jobs:
     needs: validate
     # GitHub-hosted jobs are unavailable while organization billing is blocked. Keep metadata work
     # on the release runner and install the pinned GitHub CLI instead of relying on its host image.
-    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
+    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
     timeout-minutes: 5
     permissions:
       contents: write
@@ -106,7 +106,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
-              --title "HMM Chat ${DESKTOP_VERSION}" \
+              --title "Hype Comms ${DESKTOP_VERSION}" \
               --generate-notes \
               --notes-start-tag "$notes_start_tag"
           fi
@@ -131,7 +131,7 @@ jobs:
             manifest: latest.yml
             package_script: package:desktop:win
           - platform: Linux
-            runner: '["self-hosted", "Linux", "ARM64", "hmm-chat-release", "docker"]'
+            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
             artifact_os: linux
             manifest: latest-linux.yml
             package_script: package:desktop:linux
@@ -140,9 +140,9 @@ jobs:
     env:
       # Endpoint, bucket, and region are not secret and live as repository variables. Only the
       # key pair is a secret, and it is scoped to write this one bucket.
-      HMM_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
-      HMM_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
-      HMM_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
+      HYPE_COMMS_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
+      HYPE_COMMS_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
+      HYPE_COMMS_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
       UPDATE_ARTIFACT_OS: ${{ matrix.artifact_os }}
       UPDATE_MANIFEST: ${{ matrix.manifest }}
       AWS_REGION: ${{ vars.GARAGE_S3_REGION }}
@@ -198,36 +198,36 @@ jobs:
         if: matrix.platform == 'macOS'
         shell: bash
         env:
-          HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
-          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
-          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
-          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
-          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
+          HYPE_COMMS_MACOS_CSC_LINK: ${{ secrets.HYPE_COMMS_MACOS_CSC_LINK }}
+          HYPE_COMMS_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HYPE_COMMS_MACOS_CSC_KEY_PASSWORD }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
+          HYPE_COMMS_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
           EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
         run: |
-          if [[ -z "$HMM_MACOS_CSC_LINK" ||
-                -z "$HMM_MACOS_CSC_KEY_PASSWORD" ||
-                -z "$HMM_MACOS_APPLE_API_KEY_BASE64" ||
-                -z "$HMM_MACOS_APPLE_API_KEY_ID" ||
-                -z "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
+          if [[ -z "$HYPE_COMMS_MACOS_CSC_LINK" ||
+                -z "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_ID" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_ISSUER" ]]; then
             echo "The macOS release requires signing and all notarization secrets." >&2
             exit 1
           fi
 
           umask 077
-          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
+          certificate_path="${RUNNER_TEMP}/hype-comms-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hype-comms-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
-          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          original_keychains_path="${RUNNER_TEMP}/hype-comms-original-keychains.txt"
           original_keychains_pending_path="${original_keychains_path}.pending"
           root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
-          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+          api_key_path="${RUNNER_TEMP}/hype-comms-notary-api-key.p8"
 
           # electron-builder's implicit keychain setup can pass the PKCS#12 password to
           # set-key-partition-list instead of its generated keychain password. Own the keychain
           # lifecycle here so signing works consistently on a clean self-hosted runner.
-          printf '%s' "${HMM_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
-          printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+          printf '%s' "${HYPE_COMMS_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
           security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
           rm -f "$original_keychains_path" "$original_keychains_pending_path"
@@ -238,7 +238,7 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain_path"
           security import "$certificate_path" \
             -k "$keychain_path" \
-            -P "$HMM_MACOS_CSC_KEY_PASSWORD" \
+            -P "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/productbuild
           security set-key-partition-list \
@@ -290,8 +290,8 @@ jobs:
             echo "CSC_KEYCHAIN=${keychain_path}"
             echo "CSC_NAME=${expected_identity_hashes[0]}"
             echo "APPLE_API_KEY=${api_key_path}"
-            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
-            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
+            echo "APPLE_API_KEY_ID=${HYPE_COMMS_MACOS_APPLE_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${HYPE_COMMS_MACOS_APPLE_API_ISSUER}"
           } >> "$GITHUB_ENV"
 
       - name: Package desktop application
@@ -440,11 +440,11 @@ jobs:
         if: always() && matrix.platform == 'macOS'
         shell: bash
         run: |
-          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
-          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
+          certificate_path="${RUNNER_TEMP}/hype-comms-signing-certificate.p12"
+          keychain_path="${RUNNER_TEMP}/hype-comms-signing.keychain-db"
+          original_keychains_path="${RUNNER_TEMP}/hype-comms-original-keychains.txt"
           original_keychains_pending_path="${original_keychains_path}.pending"
-          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
+          api_key_path="${RUNNER_TEMP}/hype-comms-notary-api-key.p8"
           cleanup_status=0
           set +e
           if [[ -f "$original_keychains_path" ]]; then
@@ -486,7 +486,7 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    runs-on: [self-hosted, Linux, ARM64, hmm-chat-release, docker]
+    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
     timeout-minutes: 10
     permissions:
       contents: write
@@ -529,6 +529,6 @@ jobs:
           done
           gh release edit "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "HMM Chat ${DESKTOP_VERSION}" \
+            --title "Hype Comms ${DESKTOP_VERSION}" \
             --draft=false \
             --latest

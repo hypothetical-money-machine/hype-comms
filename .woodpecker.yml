@@ -7,7 +7,7 @@ concurrency:
   limit: 1
 
 variables:
-  app: &app hmm-chat
+  app: &app hype-comms
   registry: &registry registry.example.invalid
   project: &project example-project
   deploy_repo: &deploy_repo hype-comms/deployment-repository
@@ -18,9 +18,9 @@ services:
   - name: postgres
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: hmm
-      POSTGRES_PASSWORD: hmm-test-password
-      POSTGRES_DB: hmm_chat_test
+      POSTGRES_USER: hype_comms
+      POSTGRES_PASSWORD: hype-comms-test-password
+      POSTGRES_DB: hype_comms_test
       POSTGRES_INITDB_ARGS: --locale-provider=icu --icu-locale=und-x-icu
 
 steps:
@@ -29,7 +29,7 @@ steps:
     commands:
       - npm ci
       - npm run check
-      - HMM_TEST_DATABASE_URL=postgres://hmm:hmm-test-password@postgres:5432/hmm_chat_test npm run test:postgres
+      - HYPE_COMMS_TEST_DATABASE_URL=postgres://hype_comms:hype-comms-test-password@postgres:5432/hype_comms_test npm run test:postgres
 
   - name: build-push
     image: gcr.io/kaniko-project/executor:v1.23.2-debug

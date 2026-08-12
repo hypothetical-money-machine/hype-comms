@@ -59,9 +59,9 @@ RUN case "${TARGETARCH}" in \
   && cp --archive /opt/actions-runner/. /runner/ \
   && chown --recursive runner:runner /runner
 
-COPY --chmod=755 entrypoint.sh /usr/local/bin/hmm-chat-runner
+COPY --chmod=755 entrypoint.sh /usr/local/bin/hype-comms-runner
 
 USER runner
 WORKDIR /runner
 
-ENTRYPOINT ["/usr/local/bin/hmm-chat-runner"]
+ENTRYPOINT ["/usr/local/bin/hype-comms-runner"]

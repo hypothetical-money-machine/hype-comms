@@ -158,7 +158,7 @@ off until packaged rollout gates pass; message-body preview defaults disabled an
 separate explicit opt-in. Native support is `supported` or `unsupported`; OS permission is
 `granted`, `denied`, or `unknown`. Do-not-disturb and sound remain operating-system policy.
 
-Native notification code is also guarded at build time. `HMM_NATIVE_NOTIFICATIONS_ENABLED` accepts
+Native notification code is also guarded at build time. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` accepts
 only `0` or `1`; unset and `0` compile presentation off, report unsupported capability, and do not
 construct a notification controller or presenter. `1` includes the controller for explicit
 development, headless, or packaged native-evidence builds, but does not override the persisted
@@ -220,7 +220,7 @@ store and contains no notification labels, target IDs, or body. Packaged and ord
 sessions cannot invoke the activation bridge.
 
 On Windows, main calls `app.setAppUserModelId` with Electron Builder's exact
-`com.hypotheticalmoneymachine.hmmchat` application ID before constructing the first
+`com.hypemm.hypecomms` application ID before constructing the first
 `BrowserWindow`. A deterministic
 [identity test](../../apps/desktop/src/main/application-identity.test.ts) prevents the source and
 package identity from drifting. Installed NSIS attribution and click handling still require the

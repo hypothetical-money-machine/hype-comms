@@ -36,7 +36,7 @@ Validate every external, IPC, and realtime boundary with strict schemas.
 
 Vitest is the unit-test framework. Add regression tests with behavior changes, especially
 for IPC validation, authorization, configuration, and wire contracts. Target a workspace
-with `npm test --workspace @hmm-chat/server -- config.test.ts`. Run `npm run check` before
+with `npm test --workspace @hype-comms/server -- config.test.ts`. Run `npm run check` before
 every pull request; desktop packaging changes also require the relevant native smoke job.
 
 ## Version Control (Git)

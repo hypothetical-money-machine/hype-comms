@@ -21,7 +21,7 @@ function assertTestDatabaseName(name) {
 function databaseName(databaseUrl) {
   const parsed = new URL(databaseUrl);
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    throw new Error("HMM_TEST_DATABASE_URL must be a PostgreSQL URL");
+    throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL");
   }
   const name = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
   assertTestDatabaseName(name);
@@ -29,13 +29,13 @@ function databaseName(databaseUrl) {
 }
 
 export function requireTestDatabaseUrl(environment) {
-  const databaseUrl = environment.HMM_TEST_DATABASE_URL?.trim() ?? "";
-  if (databaseUrl === "") throw new Error("HMM_TEST_DATABASE_URL is required");
+  const databaseUrl = environment.HYPE_COMMS_TEST_DATABASE_URL?.trim() ?? "";
+  if (databaseUrl === "") throw new Error("HYPE_COMMS_TEST_DATABASE_URL is required");
   try {
     databaseName(databaseUrl);
   } catch (error) {
     if (error instanceof TypeError) {
-      throw new Error("HMM_TEST_DATABASE_URL must be a PostgreSQL URL", { cause: error });
+      throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL", { cause: error });
     }
     throw error;
   }

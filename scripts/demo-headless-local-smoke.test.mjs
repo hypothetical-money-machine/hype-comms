@@ -31,7 +31,7 @@ function launcher() {
 test("parses the self-contained local smoke command options", () => {
   assert.deepEqual(parseLocalHeadlessSmokeArguments([]), {
     cdpBasePort: 9222,
-    messagePrefix: "HMM headless automation smoke",
+    messagePrefix: "Hype Comms headless automation smoke",
     timeoutMs: DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
     flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   });
@@ -61,7 +61,7 @@ test("parses the self-contained local smoke command options", () => {
 
 test("waits for the versioned ready record and ignores normal launcher output", async () => {
   const child = launcher();
-  const manifestPath = path.resolve("/tmp/hmm-headless-session.json");
+  const manifestPath = path.resolve("/tmp/hype-comms-headless-session.json");
   const output = [];
   const ready = waitForHeadlessDemoReady(child, {
     expectedManifestPath: manifestPath,
@@ -85,7 +85,7 @@ test("waits for the versioned ready record and ignores normal launcher output", 
 });
 
 test("launches, attaches through the ready manifest, runs the smoke, and always stops the launcher", async () => {
-  const projectRoot = path.resolve("/repo/hmm-chat");
+  const projectRoot = path.resolve("/repo/hype-comms");
   const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
   const child = launcher();
   const calls = [];
@@ -93,7 +93,7 @@ test("launches, attaches through the ready manifest, runs the smoke, and always 
 
   const resultPromise = runLocalHeadlessSmoke({
     projectRoot,
-    environment: { HMM_POSTGRES_PASSWORD: "local-only" },
+    environment: { HYPE_COMMS_POSTGRES_PASSWORD: "local-only" },
     cdpBasePort: 9410,
     messagePrefix: "Round trip",
     timeoutMs: 5000,
@@ -139,7 +139,7 @@ test("launches, attaches through the ready manifest, runs the smoke, and always 
       {
         cwd: projectRoot,
         detached: process.platform !== "win32",
-        env: { HMM_POSTGRES_PASSWORD: "local-only" },
+        env: { HYPE_COMMS_POSTGRES_PASSWORD: "local-only" },
         stdio: ["ignore", "pipe", "inherit"],
       },
     ],
@@ -157,7 +157,7 @@ test("launches, attaches through the ready manifest, runs the smoke, and always 
 });
 
 test("selects the isolated participated-thread smoke without changing the default flow", async () => {
-  const projectRoot = path.resolve("/repo/hmm-chat");
+  const projectRoot = path.resolve("/repo/hype-comms");
   const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
   const child = launcher();
   const selected = [];
@@ -181,7 +181,7 @@ test("selects the isolated participated-thread smoke without changing the defaul
   assert.deepEqual(selected, [
     {
       manifest: { private: "manifest-only" },
-      messagePrefix: "HMM headless automation smoke",
+      messagePrefix: "Hype Comms headless automation smoke",
       timeoutMs: DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
     },
   ]);
@@ -193,7 +193,7 @@ test("selects the isolated participated-thread smoke without changing the defaul
 });
 
 test("stops the launcher when the attached smoke fails", async () => {
-  const projectRoot = path.resolve("/repo/hmm-chat");
+  const projectRoot = path.resolve("/repo/hype-comms");
   const child = launcher();
   let stopped = false;
 

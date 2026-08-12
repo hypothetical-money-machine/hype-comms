@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 import * as agentCapture from "./agent-capture.mjs";
 
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
-export const HEADLESS_DEMO_MANIFEST_KIND = "hmm-chat-headless-demo";
+export const HEADLESS_DEMO_MANIFEST_KIND = "hype-comms-headless-demo";
 export const DEFAULT_MANIFEST_RELATIVE_PATH = path.join(
   ".dev-data",
   "demo",
   "headless-session.json",
 );
-export const DEFAULT_SMOKE_MESSAGE = "HMM headless automation smoke";
+export const DEFAULT_SMOKE_MESSAGE = "Hype Comms headless automation smoke";
 export const HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE = "direct-message";
 export const HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD = "participated-thread";
 export const HEADLESS_NOTIFICATION_CAPTURE_KEYS = ["captureId", "reason", "version"];
@@ -104,7 +104,7 @@ function parsePositiveInteger(value, label) {
 
 /** Parse the intentionally small opt-in smoke command surface. */
 export function parseSmokeArguments(arguments_, environment, projectRoot) {
-  let manifestPath = environment.HMM_HEADLESS_DEMO_MANIFEST;
+  let manifestPath = environment.HYPE_COMMS_HEADLESS_DEMO_MANIFEST;
   let messagePrefix = DEFAULT_SMOKE_MESSAGE;
   let timeoutMs = agentCapture.DEFAULT_TIMEOUT_MS;
   let flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE;

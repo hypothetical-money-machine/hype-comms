@@ -119,7 +119,7 @@ export async function waitForGithubReleaseAssets({
           accept: "application/vnd.github+json",
           authorization: `Bearer ${token}`,
           "cache-control": "no-cache",
-          "user-agent": "hmm-chat-desktop-release",
+          "user-agent": "hype-comms-desktop-release",
           "x-github-api-version": "2022-11-28",
         },
         redirect: "error",
@@ -206,7 +206,7 @@ export async function assertVersionCanPublish({
   fetchImplementation = fetch,
 } = {}) {
   const updateManifest = requireEnvironment("UPDATE_MANIFEST", environment);
-  const publicRoot = requireEnvironment("HMM_UPDATE_PUBLIC_ROOT", environment);
+  const publicRoot = requireEnvironment("HYPE_COMMS_UPDATE_PUBLIC_ROOT", environment);
   const desktopVersion = requireEnvironment("DESKTOP_VERSION", environment);
   // A lane that publishes several manifests commits one of them last as the release marker. Only
   // that marker is immutable; the manifests published before it may be replaced so that a run
@@ -251,7 +251,7 @@ function awsEnvironment(environment) {
     ...environment,
     AWS_CONFIG_FILE: path.join(
       requireEnvironment("RUNNER_TEMP", environment),
-      "hmm-chat-aws-config",
+      "hype-comms-aws-config",
     ),
     AWS_MAX_ATTEMPTS: environment.AWS_MAX_ATTEMPTS ?? "5",
     AWS_RETRY_MODE: environment.AWS_RETRY_MODE ?? "standard",
@@ -303,7 +303,7 @@ export function configureBucketByPath(options = {}) {
 function uploadArguments(environment, source, destination, ...arguments_) {
   return [
     "--endpoint-url",
-    requireEnvironment("HMM_UPDATE_S3_ENDPOINT", environment),
+    requireEnvironment("HYPE_COMMS_UPDATE_S3_ENDPOINT", environment),
     "s3",
     "cp",
     source,
@@ -320,7 +320,7 @@ export async function uploadPlatformArtifacts({
 } = {}) {
   const desktopVersion = requireEnvironment("DESKTOP_VERSION", environment);
   const artifactOs = requireEnvironment("UPDATE_ARTIFACT_OS", environment);
-  const bucket = requireEnvironment("HMM_UPDATE_S3_BUCKET", environment);
+  const bucket = requireEnvironment("HYPE_COMMS_UPDATE_S3_BUCKET", environment);
   const entries = await readdir(releaseDirectory, { withFileTypes: true });
   const artifactNames = selectArtifactNames(entries, desktopVersion, artifactOs);
 
@@ -349,7 +349,7 @@ export async function uploadPlatformManifest({
 } = {}) {
   const updateManifest = requireEnvironment("UPDATE_MANIFEST", environment);
   const desktopVersion = requireEnvironment("DESKTOP_VERSION", environment);
-  const bucket = requireEnvironment("HMM_UPDATE_S3_BUCKET", environment);
+  const bucket = requireEnvironment("HYPE_COMMS_UPDATE_S3_BUCKET", environment);
   const manifestPath = path.join(releaseDirectory, updateManifest);
   const manifestVersion = parseManifestVersion(await readFile(manifestPath, "utf8"));
 
@@ -376,7 +376,7 @@ export async function publishDownloadPage({
   source = path.join("downloads", "index.html"),
   spawn = spawnSync,
 } = {}) {
-  const bucket = requireEnvironment("HMM_UPDATE_S3_BUCKET", environment);
+  const bucket = requireEnvironment("HYPE_COMMS_UPDATE_S3_BUCKET", environment);
   await runAwsWithRetry(
     uploadArguments(
       environment,

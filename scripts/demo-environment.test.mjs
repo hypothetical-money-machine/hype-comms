@@ -35,17 +35,17 @@ import {
 } from "./demo-environment.mjs";
 
 test("derives an isolated loopback database and never inherits the normal database", () => {
-  const root = path.resolve("/tmp/hmm-chat");
+  const root = path.resolve("/tmp/hype-comms");
   const result = deriveDemoEnvironment(
     {
-      HMM_POSTGRES_PASSWORD: "demo p@ss",
-      HMM_DATABASE_URL: "postgres://production.example/important",
+      HYPE_COMMS_POSTGRES_PASSWORD: "demo p@ss",
+      HYPE_COMMS_DATABASE_URL: "postgres://production.example/important",
       HYPE_COMMS_DESKTOP_HEADLESS: "1",
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1",
       [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: "/tmp/untrusted-capture-directory",
       ELECTRON_CLI_ARGS: "--remote-debugging-address=0.0.0.0",
       REMOTE_DEBUGGING_PORT: "9222",
-      HMM_OWNER_EMAIL: "owner@example.com",
+      HYPE_COMMS_OWNER_EMAIL: "owner@example.com",
     },
     root,
   );
@@ -53,7 +53,7 @@ test("derives an isolated loopback database and never inherits the normal databa
   assert.equal(url.hostname, "127.0.0.1");
   assert.equal(url.port, "54330");
   assert.equal(url.password, "demo%20p%40ss");
-  assert.equal(result.env.HMM_OWNER_EMAIL, undefined);
+  assert.equal(result.env.HYPE_COMMS_OWNER_EMAIL, undefined);
   assert.equal(result.env.HYPE_COMMS_DESKTOP_HEADLESS, undefined);
   assert.equal(result.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED, undefined);
   assert.equal(result.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], undefined);
@@ -94,11 +94,11 @@ test("parses the headless demo mode and validates the paired CDP ports", () => {
 });
 
 test("creates private state and credential files", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-env-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-env-"));
   const paths = demoPaths(root);
   await ensurePrivateDemoDirectories(paths);
   const callback = path.join(paths.callbackDirectory, "claire.callback");
-  await writePrivateFile(callback, "hmm-chat://auth/callback?token=secret\n");
+  await writePrivateFile(callback, "hype-comms://auth/callback?token=secret\n");
   assert.equal((await stat(paths.stateDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(callback)).mode & 0o777, 0o600);
   assert.match(await readFile(callback, "utf8"), /token=secret/);
@@ -106,7 +106,7 @@ test("creates private state and credential files", async () => {
 });
 
 test("creates isolated headless artifacts and Electron launch configuration", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-headless-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-headless-"));
   const paths = demoPaths(root);
   const startedAt = "2026-08-07T01:02:03.456Z";
   const runId = createHeadlessDemoRunId(startedAt, 4321);
@@ -114,7 +114,7 @@ test("creates isolated headless artifacts and Electron launch configuration", as
   const artifactsDirectory = await ensurePrivateHeadlessArtifactDirectory(paths, runId);
   const desktopEnvironment = deriveHeadlessDesktopEnvironment(
     {
-      HMM_DATABASE_URL: "postgres://127.0.0.1/demo",
+      HYPE_COMMS_DATABASE_URL: "postgres://127.0.0.1/demo",
       ELECTRON_CLI_ARGS: "--unexpected-switch",
       REMOTE_DEBUGGING_PORT: "9999",
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "0",
@@ -163,7 +163,7 @@ test("creates isolated headless artifacts and Electron launch configuration", as
 });
 
 test("keeps CDP endpoint metadata private while active and removes it on cleanup", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-cdp-metadata-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-cdp-metadata-"));
   const paths = demoPaths(root);
   await ensurePrivateDemoDirectories(paths);
   await ensurePrivateHeadlessProfileDirectories(paths);
@@ -189,7 +189,7 @@ test("keeps CDP endpoint metadata private while active and removes it on cleanup
 });
 
 test("serializes a versioned, secret-free headless session manifest", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-manifest-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-manifest-"));
   const paths = demoPaths(root);
   const startedAt = "2026-08-07T01:02:03.456Z";
   await ensurePrivateDemoDirectories(paths);
@@ -202,7 +202,7 @@ test("serializes a versioned, secret-free headless session manifest", async () =
     startedAt,
     artifactsDirectory,
   });
-  manifest.callbackUrl = "hmm-chat://auth/callback?token=secret";
+  manifest.callbackUrl = "hype-comms://auth/callback?token=secret";
   manifest.clients[0].cookie = "secret";
 
   const serialized = serializeHeadlessDemoManifest(manifest);
@@ -252,7 +252,7 @@ test("waits for child close so captured stdout is complete", async () => {
 });
 
 test("reset refuses an active marker and validates only the exact demo target", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-reset-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-reset-"));
   const paths = demoPaths(root);
   await ensurePrivateDemoDirectories(paths);
   await writeFile(paths.runMarker, JSON.stringify({ pid: process.pid }), { mode: 0o600 });

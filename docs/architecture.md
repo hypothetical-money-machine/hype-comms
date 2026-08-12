@@ -79,14 +79,18 @@ Cloudflare DNS/WAF/TLS  --->  AWS ALB  --->  Fastify on ECS Fargate
 The packaged client API is `https://chat-api.example.invalid`; realtime uses
 `wss://chat-api.example.invalid/v1/realtime`. The email landing page is
 `https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
-`hmm-chat://auth/callback`.
+`hype-comms://auth/callback`.
 
-User-facing desktop executables and release artifacts use the `hype-comms` name. Stable
-technical identifiers retain their original names for compatibility: the application ID,
-`hmm-chat://` protocol, `@hmm-chat/*` package scope, `HMM_*` environment variables,
-`X-HMM-Chat-Capabilities` header, and existing cache/database names. Renaming those identifiers
-would break installed-client upgrades, sign-in links, deployments, or local encrypted state and
-requires a separately versioned migration.
+The product rebranded from HMM Chat to Hype Comms in two stages. The first stage (July) changed
+only user-visible strings. This repository has since completed a second, hard-cutover stage that
+renamed every remaining technical identifier: the application ID (`com.hypemm.hypecomms`), the
+`hype-comms://` protocol, the `@hype-comms/*` package scope, `HYPE_COMMS_*` environment variables,
+the `X-Hype-Comms-Capabilities` header, session cookie, token prefixes, and cache/database names.
+That migration was a one-time, self-hosted-only cutover: existing sessions and issued
+agent/bot tokens were invalidated, and installed desktop clients required one manual reinstall
+because the application ID change breaks auto-update continuity. There is no ongoing freeze on
+these identifiers; future renames are an ordinary versioned change like any other, evaluated for
+their own compatibility impact when proposed.
 
 | Component      | Responsibility                                                                                                                                                       | Must not do                                                                                                               |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -173,7 +177,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v1/auth/capabilities`                                                   | Discover the additive AuthKit and self-service magic-link methods without exposing configuration.                                         |
 | `POST /v1/auth/magic-link`                                                    | Uniformly accept an invited/active email when self-service delivery is enabled; never reveal membership.                                  |
 | `POST /v1/auth/desktop-authorizations`, `GET /v1/auth/workos/callback`        | Start dual-PKCE AuthKit in the system browser, then return a credential-free Hype Comms handoff to the fixed desktop scheme.              |
-| `POST /v1/auth/exchange`                                                      | Exchange a five-minute desktop-PKCE handoff once, set the existing HttpOnly `hmm_session` cookie, and return the current local user.       |
+| `POST /v1/auth/exchange`                                                      | Exchange a five-minute desktop-PKCE handoff once, set the existing HttpOnly `hype_comms_session` cookie, and return the current local user.       |
 | `POST /v1/auth/session/refresh`, `DELETE /v1/auth/session`                    | Rotate the local device credential or revoke the current device session.                                                                  |
 | `POST /v1/auth/workos/webhook`                                                | Verify the exact signed raw WorkOS event and idempotently apply upstream session revocation.                                               |
 | `GET /v1/sessions`, `DELETE /v1/sessions/:id`                                 | List and revoke the caller's other device sessions.                                                                                       |
@@ -205,7 +209,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 
 The app requests a magic link only after generating a verifier and challenge. The emailed
 HTTPS URL lands at `https://chat.hypemm.com/auth/verify`, consumes the hashed single-use
-token, and redirects to `hmm-chat://auth/callback?code=...`; that code expires after 60
+token, and redirects to `hype-comms://auth/callback?code=...`; that code expires after 60
 seconds and is useless without the verifier retained by the requesting app. If the app is
 not installed, the landing page gives signed installer links and instructions without
 creating a browser session. The first owner invitation is created by a one-time deployment
@@ -243,7 +247,7 @@ for both WebSocket and HTTP sync before either path can reach the encrypted repl
 
 Reaction, task, and read-state events are capability-gated for rolling compatibility. A client
 advertises `reaction-events-v1`, `task-events-v1`, and `read-state-events-v1` through
-`X-HMM-Chat-Capabilities` on both
+`X-Hype-Comms-Capabilities` on both
 `GET /v1/sync` and `POST /v1/realtime/tickets`. Clients without a capability do not receive its
 events, but the server still advances their scanned cursor past those events so released clients
 neither fail strict parsing nor loop on an unsupported event.
@@ -422,7 +426,7 @@ shared focus treatment before it can be added to the built-in registry.
   in that order: verified mention, direct message, then participated-thread reply. It never infers
   participation from local thread state.
 - The implementation is compiled off unless the build-time
-  `HMM_NATIVE_NOTIFICATIONS_ENABLED=1` switch is explicit; unset and `0` fail closed, and the
+  `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED=1` switch is explicit; unset and `0` fail closed, and the
   device preference also defaults disabled. Notification bookkeeping is ephemeral and never
   advances or delays the renderer replica, sync cursor, read cursor, unread count, or mention
   count.
@@ -449,7 +453,7 @@ shared focus treatment before it can be added to the built-in registry.
   loop; a fully quit desktop receives no push. Headless automation uses a body-free opaque-ID
   capture/activation path and never constructs a native presenter.
 - On Windows, main sets the exact Electron Builder AppUserModelID
-  `com.hypotheticalmoneymachine.hmmchat` before creating a `BrowserWindow`; a
+  `com.hypemm.hypecomms` before creating a `BrowserWindow`; a
   [deterministic identity test](../apps/desktop/src/main/application-identity.test.ts) prevents
   source/package drift. Stable installed NSIS attribution and click handling remain part of the
   native evidence gate.
@@ -487,7 +491,7 @@ the fixed server callback. The server consumes state before code exchange, verif
 access JWT against WorkOS JWKS and this Application's exact `client_id`, rejects unverified email
 and impersonation, discards upstream tokens, and applies the existing local invitation/capacity
 transaction. A fresh five-minute Hype Comms handoff is bound to desktop PKCE and is the only code
-sent through `hmm-chat://auth/callback`. A one-use handoff creates the same `hmm_session` cookie and
+sent through `hype-comms://auth/callback`. A one-use handoff creates the same `hype_comms_session` cookie and
 device-session lineage as magic-link sign-in; protected routes, realtime tickets, cache scopes,
 and rolling clients therefore keep one authorization model.
 
@@ -578,7 +582,7 @@ deletes active data and objects within 30 days; encrypted backups age out within
 - JSON logs carry request, session, user, workspace, conversation, and event IDs where relevant.
   The current service exposes bearer-protected Prometheus metrics for HTTP request count/duration,
   authenticated WebSocket connections, and PostgreSQL pool total/idle/waiting connections when
-  `HMM_METRICS_TOKEN` is configured. Event lag, mutation/auth outcomes, search latency, email,
+  `HYPE_COMMS_METRICS_TOKEN` is configured. Event lag, mutation/auth outcomes, search latency, email,
   attachment scanning, and desktop crash/update metrics remain target coverage.
 - Page the operator for sustained availability/error-budget burn, database or event-log
   capacity, event lag above 30 seconds, backup failure, scan backlog above five minutes,

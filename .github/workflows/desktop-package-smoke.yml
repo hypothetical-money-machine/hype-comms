@@ -54,7 +54,7 @@ jobs:
           - platform: Linux
             # Smoke packages do not need release credentials. Run the Linux lane on the native
             # ARM64 runner so package tooling is exercised on the architecture it targets.
-            runner: '["self-hosted", "Linux", "ARM64", "hmm-chat-release", "docker"]'
+            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:

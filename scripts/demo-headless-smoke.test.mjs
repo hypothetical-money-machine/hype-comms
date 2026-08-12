@@ -19,7 +19,7 @@ import {
   waitForNewHeadlessNotificationCapture,
 } from "./demo-headless-smoke.mjs";
 
-const artifactDirectory = path.resolve("/tmp/hmm-headless-demo-artifacts");
+const artifactDirectory = path.resolve("/tmp/hype-comms-headless-demo-artifacts");
 
 function manifest() {
   return {
@@ -41,7 +41,7 @@ test("accepts the versioned, secret-free headless manifest shape", () => {
   });
   assert.deepEqual(parsed, {
     version: 1,
-    kind: "hmm-chat-headless-demo",
+    kind: "hype-comms-headless-demo",
     startedAt: "2026-08-07T00:00:00.000Z",
     artifactsDirectory: artifactDirectory,
     clients: [
@@ -79,17 +79,17 @@ test("accepts the versioned, secret-free headless manifest shape", () => {
 });
 
 test("reads the local manifest default and constrains smoke CLI options", () => {
-  const root = path.resolve("/repo/hmm-chat");
+  const root = path.resolve("/repo/hype-comms");
   assert.deepEqual(parseSmokeArguments([], {}, root), {
     manifestPath: path.join(root, DEFAULT_MANIFEST_RELATIVE_PATH),
-    messagePrefix: "HMM headless automation smoke",
+    messagePrefix: "Hype Comms headless automation smoke",
     timeoutMs: 30_000,
     flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   });
   assert.deepEqual(
     parseSmokeArguments(
       ["--message=Visible receipt", "--timeout-ms=5000"],
-      { HMM_HEADLESS_DEMO_MANIFEST: "/tmp/session.json" },
+      { HYPE_COMMS_HEADLESS_DEMO_MANIFEST: "/tmp/session.json" },
       root,
     ),
     {
