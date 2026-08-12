@@ -382,6 +382,54 @@ describe("AiChannelController", () => {
     expect(harness.controller.state.status).toBe("ready");
   });
 
+  it("redacts paths split across streamed chunks and home-relative paths", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<PromptResponse>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Inspect paths",
+    });
+    const callbacks = harness.callbacks();
+
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", "Opened /home/", "split-path"),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", "alice/secret.txt", "split-path"),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", "See ~/private.txt now", "home-path"),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate(
+        "new-session",
+        "agent_message_chunk",
+        'Path {"path":"/home/alice/file.txt","mode":"safe"}',
+        "json-path",
+      ),
+    );
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "assistant", body: "Opened [path]" }),
+        expect.objectContaining({ role: "assistant", body: "See [path] now" }),
+        expect.objectContaining({
+          role: "assistant",
+          body: 'Path {"path":"[path]","mode":"safe"}',
+        }),
+      ]),
+    );
+    expect(
+      harness.controller.state.entries.filter(
+        (entry) => entry.type === "message" && entry.body === "Opened [path]",
+      ),
+    ).toHaveLength(1);
+    expect(JSON.stringify(harness.controller.state)).not.toMatch(
+      /home|alice|secret\.txt|private\.txt/u,
+    );
+  });
+
   it("does not retry a rejected prompt and publishes a sanitized error", async () => {
     const harness = createHarness();
     harness.host.promptGate = deferred<PromptResponse>();
@@ -542,6 +590,7 @@ describe("AiChannelController", () => {
     expect(harness.controller.state.status).toBe("running");
     harness.host.cancelGate?.resolve(undefined);
     await flushPromises();
+    expect(harness.host.closeCalls).toEqual(["new-session"]);
     expect(harness.host.disposeCalls).toBe(1);
     harness.host.disposeGate.resolve(undefined);
     await expect(cancellation).resolves.toMatchObject({ status: "configured" });
@@ -587,6 +636,40 @@ describe("AiChannelController", () => {
       generation: harness.controller.state.generation,
     });
     await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+  });
+
+  it("keeps streamed message chunks joined after stale identifier mappings are evicted", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<PromptResponse>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Stream many messages",
+    });
+    const callbacks = harness.callbacks();
+
+    for (let index = 0; index < 1_001; index += 1) {
+      callbacks.onSessionUpdate(
+        textUpdate(
+          "new-session",
+          "agent_message_chunk",
+          `Message ${String(index)}`,
+          `raw-message-${String(index)}`,
+        ),
+      );
+    }
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", "Hello ", "after-eviction"),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", "world", "after-eviction"),
+    );
+
+    expect(
+      harness.controller.state.entries.filter(
+        (entry) => entry.type === "message" && entry.body === "Hello world",
+      ),
+    ).toHaveLength(1);
   });
 
   it("fences a slow suspend so it cannot overwrite a newer start", async () => {

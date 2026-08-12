@@ -139,9 +139,14 @@ function sanitizeDisplayText(
 
   // ACP text is untrusted display data. Redact filesystem-shaped values after any punctuation.
   result = result
+    .replace(
+      /(["'])(?:(?:file:\/\/)|(?:\\\\)|(?:[A-Za-z]:[\\/])|(?:~[\\/])|\/)[^"'\r\n]*\1/giu,
+      "$1[path]$1",
+    )
     .replace(/file:\/\/[^\s<>"']+/giu, "[path]")
     .replace(/\\\\[^\s<>"']+/gu, "[path]")
     .replace(/\b[A-Za-z]:[\\/][^\s<>"']+/gu, "[path]")
+    .replace(/(^|[\s([{'"])~[\\/][^\s<>"']+/gmu, "$1[path]")
     .replace(/\/(?:[^/\s<>"'`]+\/)*[^/\s<>"'`]*/gu, (candidate, offset: number, source: string) => {
       const preceding = source[offset - 1];
       if (preceding !== undefined && /[A-Za-z0-9_/+~-]/u.test(preceding)) return candidate;
@@ -205,6 +210,7 @@ export class AiChannelController {
   readonly #reportListenerError: (error: unknown) => void;
   readonly #listeners = new Set<StateListener>();
   readonly #messageIds = new Map<string, string>();
+  readonly #messageBodies = new Map<string, string>();
   readonly #toolIds = new Map<string, string>();
 
   #preference: AiChannelPreference = { workspacePath: null, sessionId: null };
@@ -484,6 +490,8 @@ export class AiChannelController {
     this.#activePrompt = activePrompt;
     this.#messageIds.delete("assistant:anonymous");
     this.#messageIds.delete("thought:anonymous");
+    this.#messageBodies.delete("assistant:anonymous");
+    this.#messageBodies.delete("thought:anonymous");
     const body = sanitizeDisplayText(
       request.prompt,
       this.#preference.workspacePath,
@@ -536,14 +544,12 @@ export class AiChannelController {
     this.#hostToken = null;
     this.#replaceState({ generation, status: "running", permissionRequest: null, error: null });
 
-    // Deliver the bounded cancellation request before disposal. The utility process can launch
-    // Claude tools as child processes, so killing only the worker is not a sufficient stop signal.
-    try {
-      await host.cancel(activePrompt.sessionId);
-    } catch {
-      // Disposal below remains the hard lifecycle fence when cancellation cannot be delivered.
-    }
-    const retirement = this.#trackHostRetirement(this.#disposeHostBestEffort(host));
+    // Deliver bounded cancellation and session teardown before disposal. The utility process can
+    // launch Claude tools as child processes, so killing only the worker is not a sufficient stop
+    // signal, while close lets the adapter abort and release its live query explicitly.
+    const retirement = this.#trackHostRetirement(
+      this.#retireDetachedHost(host, activePrompt.sessionId, activePrompt),
+    );
     await retirement;
     if (!this.#isCurrentLifecycleOperation(lifecycleOperation)) return this.#requireState();
     return this.#replaceState({ status: "configured", permissionRequest: null, error: null });
@@ -722,13 +728,7 @@ export class AiChannelController {
     update: Extract<SessionNotification["update"], { sessionUpdate: `${string}_chunk` }>,
   ): void {
     if (update.content.type !== "text") return;
-    const body = sanitizeDisplayText(
-      update.content.text,
-      this.#preference.workspacePath,
-      MAX_MESSAGE_BYTES,
-      this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
-    );
-    if (body === "") return;
+    if (update.content.text === "") return;
     const rawMessageId = update.messageId;
     const messageKey =
       rawMessageId !== null && rawMessageId !== undefined && isAcpIdentifier(rawMessageId)
@@ -740,12 +740,29 @@ export class AiChannelController {
       publicId === undefined
         ? -1
         : state.entries.findIndex((entry) => entry.type === "message" && entry.id === publicId);
+    const priorEntry = entryIndex < 0 ? null : state.entries[entryIndex];
+    const priorRawBody =
+      entryIndex < 0
+        ? ""
+        : (this.#messageBodies.get(messageKey) ??
+          (priorEntry?.type === "message" ? priorEntry.body : ""));
+    const rawBody = truncateUtf8(`${priorRawBody}${update.content.text}`, MAX_MESSAGE_BYTES);
+    const body = sanitizeDisplayText(
+      rawBody,
+      this.#preference.workspacePath,
+      MAX_MESSAGE_BYTES,
+      this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
+    );
+    if (body === "") return;
     if (entryIndex < 0) {
       if (publicId === undefined && this.#messageIds.size < MAX_TRACKED_ACP_IDENTIFIERS) {
         publicId = this.#createIdentifier("message");
         this.#messageIds.set(messageKey, publicId);
       }
       publicId ??= this.#createIdentifier("message");
+      if (this.#messageIds.get(messageKey) === publicId) {
+        this.#messageBodies.set(messageKey, rawBody);
+      }
       const message: AiChannelMessage = {
         type: "message",
         id: publicId,
@@ -759,14 +776,10 @@ export class AiChannelController {
 
     const current = state.entries[entryIndex];
     if (current === undefined || current.type !== "message") return;
+    this.#messageBodies.set(messageKey, rawBody);
     const message: AiChannelMessage = {
       ...current,
-      body: sanitizeDisplayText(
-        `${current.body}${body}`,
-        this.#preference.workspacePath,
-        MAX_MESSAGE_BYTES,
-        this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
-      ),
+      body,
     };
     const entries = [...state.entries];
     entries[entryIndex] = message;
@@ -1114,7 +1127,10 @@ export class AiChannelController {
   #pruneTrackedIdentifiers(entries: readonly AiChannelEntry[]): void {
     const retainedEntryIds = new Set(entries.map((entry) => entry.id));
     for (const [rawId, publicId] of this.#messageIds) {
-      if (!retainedEntryIds.has(publicId)) this.#messageIds.delete(rawId);
+      if (!retainedEntryIds.has(publicId)) {
+        this.#messageIds.delete(rawId);
+        this.#messageBodies.delete(rawId);
+      }
     }
     for (const [rawId, publicId] of this.#toolIds) {
       if (!retainedEntryIds.has(publicId)) this.#toolIds.delete(rawId);
@@ -1123,6 +1139,7 @@ export class AiChannelController {
 
   #clearConversation(): void {
     this.#messageIds.clear();
+    this.#messageBodies.clear();
     this.#toolIds.clear();
   }
 

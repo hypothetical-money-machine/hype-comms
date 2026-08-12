@@ -113,7 +113,7 @@ const AI_CHANNEL_STATE = {
   version: 1,
   generation: 4,
   status: "ready",
-  workspaceName: "hmm-chat",
+  workspaceName: "hype-comms",
   entries: [],
   plan: [],
   permissionRequest: null,

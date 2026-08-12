@@ -701,6 +701,11 @@ function projectNotificationBootstrap(
 }
 
 function deliverSessionState(state: ChatSessionState): void {
+  if (state.status !== "signed-in") {
+    // Workspace requests can end the session on a passive 401 without going through the explicit
+    // sign-out handler. Retire local Claude work before the renderer hides the authenticated UI.
+    suspendAiChannel();
+  }
   if (!sessionStateMatchesNotificationScope(state, notificationScope)) {
     macWindowlessRealtimeActive = false;
     workspaceRealtime?.resetSession();

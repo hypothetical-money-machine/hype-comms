@@ -152,7 +152,7 @@ const aiChannelState: AiChannelState = {
   version: 1,
   generation: 1,
   status: "configured",
-  workspaceName: "hmm-chat",
+  workspaceName: "hype-comms",
   entries: [],
   plan: [],
   permissionRequest: null,
@@ -523,6 +523,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -551,6 +552,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
       }),
     );
 
