@@ -83,6 +83,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
   const releasePackageJob = workflowJob(releaseWorkflow, "package");
   const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
+  const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
   const targetArchitectures = (platform) =>
     desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
 
@@ -152,6 +153,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
     2,
   );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/capture-macos-native-notification\.mjs$/gmu)
+      ?.length,
+    2,
+  );
   assert.match(matrixEntry(smokePackageJob, "macOS"), /^ {12}native_notifications_enabled: "1"$/mu);
   assert.match(
     matrixEntry(smokePackageJob, "Windows"),
@@ -162,6 +168,22 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     smokePackageJob,
     /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
   );
+  assert.match(
+    packageSmokeWorkflow,
+    /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
+  );
+  assert.match(
+    nativeEvidenceJob,
+    /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.native_notification_evidence$/mu,
+  );
+  assert.match(
+    nativeEvidenceJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
+  );
+  assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
+  assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
+  assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
+  assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);

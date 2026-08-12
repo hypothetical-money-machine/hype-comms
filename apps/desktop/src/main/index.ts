@@ -114,6 +114,11 @@ import {
 } from "./headless-notification-capture";
 import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
+import {
+  resolveMacosNativeNotificationEvidenceConfiguration,
+  startMacosNativeNotificationEvidence,
+  type MacosNativeNotificationEvidenceSession,
+} from "./macos-native-notification-evidence";
 import { NotificationController } from "./notification-controller";
 import { NotificationPreferenceStore } from "./notification-preference-store";
 import {
@@ -198,6 +203,14 @@ let drainingAuthCallbacks = false;
 let authCallbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authIntentGeneration = 0;
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
+const macosNativeNotificationEvidenceConfiguration =
+  resolveMacosNativeNotificationEvidenceConfiguration({
+    compiledIn: __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    argv: process.argv,
+    env: process.env,
+  });
 const headlessDesktopConfiguration = resolveHeadlessDesktopConfiguration(
   process.env,
   app.isPackaged,
@@ -218,12 +231,13 @@ const developmentAuthCallbackFile = resolveDevelopmentAuthCallbackFile(
 );
 app.setPath(
   "userData",
-  resolveDevelopmentUserDataPath(
-    process.env,
-    app.isPackaged,
-    developmentProfile,
-    app.getPath("userData"),
-  ),
+  macosNativeNotificationEvidenceConfiguration?.userDataPath ??
+    resolveDevelopmentUserDataPath(
+      process.env,
+      app.isPackaged,
+      developmentProfile,
+      app.getPath("userData"),
+    ),
 );
 let chatSession: ChatSession | null = null;
 let authKitFlow: AuthKitFlow | null = null;
@@ -257,6 +271,7 @@ let notificationScope: {
   readonly workspaceId: string;
 } | null = null;
 let notificationActiveGeneration: number | null = null;
+let macosNativeNotificationEvidenceSession: MacosNativeNotificationEvidenceSession | null = null;
 
 function createNotificationCapabilitySource(): NotificationCapabilitySource {
   if (!__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
@@ -1889,7 +1904,7 @@ function handleAuthCallback(value: string): boolean {
 }
 
 let userDataMigrationFailed = false;
-if (app.isPackaged) {
+if (app.isPackaged && macosNativeNotificationEvidenceConfiguration === null) {
   try {
     migrateLegacyUserData({
       currentPath: app.getPath("userData"),
@@ -2114,6 +2129,35 @@ if (!hasSingleInstanceLock) {
 
       await createMainWindow();
 
+      if (macosNativeNotificationEvidenceConfiguration !== null) {
+        mainWindow?.hide();
+        app.hide();
+        Notification.removeAll();
+        macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
+          configuration: macosNativeNotificationEvidenceConfiguration,
+          presenter: new ElectronNotificationPresenter(Notification),
+          getHistory: () => Notification.getHistory(),
+          onClick: async () => {
+            app.show();
+            await showOrRecreateMainWindow();
+            const window = mainWindow;
+            if (window === null || window.isDestroyed()) {
+              throw new Error("Native notification evidence could not restore the main window");
+            }
+            void dialog.showMessageBox(window, {
+              type: "info",
+              message: "Native notification click received",
+              detail:
+                "Hype Comms restored its installed window through the native notification callback.",
+              buttons: ["Done"],
+            });
+          },
+        });
+        void macosNativeNotificationEvidenceSession.delivery.catch((error: unknown) => {
+          reportMainProcessError("Native notification evidence delivery failed", error);
+        });
+      }
+
       // Restores a session left over from a previous run; the cookie outlives the process.
       const restoredSession = await chatSession.restore();
       if (restoredSession.status !== "signed-out") {
@@ -2177,6 +2221,8 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
+    macosNativeNotificationEvidenceSession?.handle.close();
+    macosNativeNotificationEvidenceSession = null;
     if (authCallbackRetryTimer !== null) {
       clearTimeout(authCallbackRetryTimer);
       authCallbackRetryTimer = null;
