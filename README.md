@@ -280,17 +280,26 @@ cannot hold a secret.
 
 To cut a release:
 
-1. Change `apps/desktop/package.json` to the intended version and update the lockfile, without
-   creating a tag yet.
-2. Run `npm run check` and the native package verification appropriate to the machine.
-3. Land that focused version change, then create and push `v<version>` at the exact revision. The
-   release workflow rejects a tag whose value does not exactly match the desktop package version.
+1. Fetch and update from `origin/main`, make sure the checkout has no unrelated changes, then run
+   `npm run release -- <version>` (for example, `npm run release -- 0.1.25`). The command first
+   rejects unrelated worktree changes, then updates the desktop manifest and matching lockfile entry
+   and creates `docs/releases/v<version>.md`. It never commits, tags, pushes, or publishes. Omitting
+   the version is an error that prints the locally suggested next patch without changing files.
+2. Review the generated notes scaffold, replace its instructional text, and remove its review
+   marker, following the [release-notes guide](docs/releases/README.md). Re-running the command for
+   the same version preserves the edited notes.
+3. Run `npm run check` and the native package verification appropriate to the machine.
+4. Land that focused version change, then create and push `v<version>` at the exact revision. The
+   release workflow rejects a tag whose value does not exactly match the desktop package version or
+   whose release notes still contain the review marker.
 
 The workflow packages x64 and ARM64 clients on macOS, Windows ARM64, and Ubuntu ARM64 runners with
 `--publish never`, verifies the ASAR, update configuration, and Electron fuses, and then copies the
-results to the S3-compatible bucket described below. It also creates or updates a GitHub Release for
-the tag with the versioned installers, blockmaps, and generated updater manifests. Those GitHub
-Release assets are a manual-download archive; installed clients continue to use the public feed.
+results to the S3-compatible bucket described below. It also creates or updates a Hype Comms GitHub
+Release for the tag, prepending the reviewed notes to GitHub's generated pull-request history and
+attaching the versioned installers, blockmaps, and generated updater manifests. Publication fails
+if the release body does not contain the reviewed notes. Those GitHub Release assets are a
+manual-download archive; installed clients continue to use the public feed.
 Only the ARM64 clients are built natively:
 there is no longer an x64 runner in the release path, so the x64 Windows and Linux artifacts are
 cross-built and fuse-verified on those same ARM64 hosts and no x64 machine exercises them before
