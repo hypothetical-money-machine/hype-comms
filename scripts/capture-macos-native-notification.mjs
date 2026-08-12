@@ -184,8 +184,48 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
   throw new Error(`Timed out waiting for ${name}.json`);
 }
 
-async function captureScreen(destination) {
-  await runCommand("/usr/sbin/screencapture", ["-x", destination]);
+async function appendDisplayDiagnostics(logPath) {
+  const commands = [
+    ["/usr/bin/stat", ["-f", "console-user=%Su", "/dev/console"]],
+    ["/usr/sbin/system_profiler", ["SPDisplaysDataType", "-detailLevel", "mini"]],
+  ];
+  for (const [command, arguments_] of commands) {
+    try {
+      const result = await runCommand(command, arguments_);
+      await appendFile(logPath, `${result.stdout.trim()}\n${result.stderr.trim()}\n`, "utf8");
+    } catch (error) {
+      await appendFile(
+        logPath,
+        `${error instanceof Error ? error.message : "Unknown display diagnostic failure"}\n`,
+        "utf8",
+      );
+    }
+  }
+}
+
+async function captureScreen(destination, logPath) {
+  await runCommand("/usr/bin/caffeinate", ["-u", "-t", "1"]);
+  try {
+    await runCommand("/usr/sbin/screencapture", ["-x", destination]);
+  } catch (directError) {
+    try {
+      await runCommand("/bin/launchctl", [
+        "asuser",
+        String(process.getuid()),
+        "/usr/sbin/screencapture",
+        "-x",
+        destination,
+      ]);
+    } catch (guiError) {
+      await appendFile(
+        logPath,
+        `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${guiError instanceof Error ? guiError.message : "unknown failure"}\n`,
+        "utf8",
+      );
+      await appendDisplayDiagnostics(logPath);
+      throw guiError;
+    }
+  }
   const details = await stat(destination);
   if (!details.isFile() || details.size < 10_000) {
     throw new Error(`macOS screenshot is missing or too small: ${destination}`);
@@ -233,7 +273,10 @@ async function main() {
     if (delivered.version !== 1 || delivered.status !== "delivered") {
       throw new Error("Installed application wrote an invalid delivery record");
     }
-    await captureScreen(path.join(artifactDirectory, "macos-native-notification.png"));
+    await captureScreen(
+      path.join(artifactDirectory, "macos-native-notification.png"),
+      automationLog,
+    );
 
     const clickResult = await clickSyntheticNotification(automationLog);
     if (clickResult !== "notification-clicked") {
@@ -244,7 +287,10 @@ async function main() {
       throw new Error("Installed application wrote an invalid click record");
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    await captureScreen(path.join(artifactDirectory, "macos-native-notification-clicked.png"));
+    await captureScreen(
+      path.join(artifactDirectory, "macos-native-notification-clicked.png"),
+      automationLog,
+    );
   } finally {
     await terminate(child);
   }
