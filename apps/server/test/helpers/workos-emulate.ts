@@ -23,11 +23,11 @@ export interface WorkOSEmulateFixture {
   readonly clientId: string;
   readonly redirectUri: string;
   readonly provider: WorkOSAuthKitIdentityProvider;
-  /** Completes the emulator's auto-redirect authorize flow and returns the callback code. */
-  authorizeCode(options?: {
-    readonly loginHint?: string;
-    readonly codeVerifier?: string;
-  }): Promise<{
+  /**
+   * Completes the emulator's auto-redirect authorize flow and returns the callback code together
+   * with the PKCE verifier that produced its challenge. Callers must not invent a verifier.
+   */
+  authorizeCode(options?: { readonly loginHint?: string }): Promise<{
     readonly code: string;
     readonly state: string;
     readonly codeVerifier: string;
@@ -47,9 +47,9 @@ function toSeedUsers(users: readonly WorkOSEmulateUserSeed[]): EmulatorSeedConfi
 /**
  * Starts WorkOS Emulate and builds the production AuthKit provider against it.
  *
- * Authorization and logout URLs from the SDK are rewritten to the production
- * `https://api.workos.com` host so they satisfy Hype Comms' credential-free HTTPS contracts,
- * while authenticate/listSessions/JWKS traffic still hits the local emulator.
+ * The official SDK (and factory) talk to the local emulator over HTTP. Authorization URLs from
+ * that SDK are `http://localhost…` and still fail Hype Comms' credential-free HTTPS contracts;
+ * exchange, session listing, and JWKS verification use the emulator end to end.
  */
 export async function startWorkOSEmulateFixture(options: {
   readonly users: readonly WorkOSEmulateUserSeed[];
@@ -115,7 +115,7 @@ export async function startWorkOSEmulateFixture(options: {
       return {
         code,
         state,
-        codeVerifier: authorizeOptions.codeVerifier ?? authorization.codeVerifier,
+        codeVerifier: authorization.codeVerifier,
       };
     },
     async close() {

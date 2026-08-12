@@ -11,10 +11,7 @@ import {
   validateWorkOSAccessTokenClaims,
   WorkOSAuthKitIdentityProvider,
 } from "../src/modules/identity/authkit-provider.js";
-import {
-  startWorkOSEmulateFixture,
-  type WorkOSEmulateFixture,
-} from "./helpers/workos-emulate.js";
+import { startWorkOSEmulateFixture, type WorkOSEmulateFixture } from "./helpers/workos-emulate.js";
 
 const PROVIDER_STATE = "p".repeat(43);
 const PROVIDER_CODE_VERIFIER = "v".repeat(43);
