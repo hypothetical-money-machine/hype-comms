@@ -324,7 +324,7 @@ describe("theme token contract", () => {
     expect(() => parseInitialThemeStateArgument([])).toThrow(/missing/u);
     expect(() =>
       parseInitialThemeStateArgument([
-        "--hmm-chat-initial-theme-state=%7B%22preference%22%3A%22dim%22%7D",
+        "--hype-comms-initial-theme-state=%7B%22preference%22%3A%22dim%22%7D",
       ]),
     ).toThrow(/invalid/u);
   });
@@ -333,7 +333,7 @@ describe("theme token contract", () => {
     expect(resolveInitialThemeStateArgument([])).toBe(FALLBACK_INITIAL_THEME_STATE);
     expect(
       resolveInitialThemeStateArgument([
-        "--hmm-chat-initial-theme-state=%7B%22preference%22%3A%22dim%22%7D",
+        "--hype-comms-initial-theme-state=%7B%22preference%22%3A%22dim%22%7D",
       ]),
     ).toBe(FALLBACK_INITIAL_THEME_STATE);
     expect(FALLBACK_INITIAL_THEME_STATE).toEqual({

@@ -260,7 +260,7 @@ function bootstrapAt(
     workspace: {
       id: WORKSPACE_ID,
       name: "Hype Comms",
-      slug: "hmm-chat",
+      slug: "hype-comms",
       createdBy: USER_ID,
       createdAt: NOW,
       updatedAt: NOW,

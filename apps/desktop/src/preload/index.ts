@@ -599,4 +599,4 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
   },
 );
 
-contextBridge.exposeInMainWorld("hmmChat", desktopApi);
+contextBridge.exposeInMainWorld("hypeComms", desktopApi);

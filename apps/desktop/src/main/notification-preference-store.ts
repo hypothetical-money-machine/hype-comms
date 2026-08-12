@@ -37,7 +37,7 @@ export class NotificationPreferenceStore {
   #saveTail: Promise<void> = Promise.resolve();
 
   constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hmm-chat-settings", "notifications.json");
+    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "notifications.json");
     this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
   }
 

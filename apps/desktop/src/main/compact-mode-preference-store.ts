@@ -55,7 +55,7 @@ export class CompactModePreferenceStore {
   #saveTail: Promise<void> = Promise.resolve();
 
   constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hmm-chat-settings", "compact-mode.json");
+    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "compact-mode.json");
     this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
   }
 

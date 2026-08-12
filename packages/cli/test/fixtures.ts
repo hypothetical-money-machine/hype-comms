@@ -67,8 +67,8 @@ export function bootstrap(): WorkspaceBootstrapResponse {
     currentUser: agentPrincipal(),
     workspace: {
       id: WORKSPACE_ID,
-      name: "HMM",
-      slug: "hmm",
+      name: "Hype Comms",
+      slug: "hype-comms",
       createdBy: USER_ID,
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,

@@ -83,7 +83,7 @@ export interface ThemeDefinition {
   readonly tokens: ThemeTokens;
 }
 
-const INITIAL_THEME_STATE_ARGUMENT_PREFIX = "--hmm-chat-initial-theme-state=";
+const INITIAL_THEME_STATE_ARGUMENT_PREFIX = "--hype-comms-initial-theme-state=";
 
 export function themeCssVariable(token: ThemeTokenName): `--theme-${string}` {
   return `--theme-${token.replaceAll(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;

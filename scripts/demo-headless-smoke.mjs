@@ -285,13 +285,13 @@ export async function enableHeadlessNotificationCapture(page) {
     throw new Error("A Playwright Page is required to enable headless notification capture");
   }
   const state = await page.evaluate(async () => {
-    if (globalThis.hmmChat.isHeadless !== true) {
+    if (globalThis.hypeComms.isHeadless !== true) {
       throw new Error("Notification capture proof requires a headless desktop client");
     }
-    if (typeof globalThis.hmmChat.setNotificationPreference !== "function") {
+    if (typeof globalThis.hypeComms.setNotificationPreference !== "function") {
       throw new Error("Notification preferences are unavailable");
     }
-    return globalThis.hmmChat.setNotificationPreference({
+    return globalThis.hypeComms.setNotificationPreference({
       version: 1,
       devicePreference: "enabled",
       contentPreviewPreference: "disabled",
@@ -350,7 +350,7 @@ async function assertExactThreadTarget(page, message, messageId, timeoutMs) {
 
 async function activateCapturedNotification(page, captureId) {
   const activated = await page.evaluate(
-    async (opaqueId) => globalThis.hmmChat.activateCapturedNotification(opaqueId),
+    async (opaqueId) => globalThis.hypeComms.activateCapturedNotification(opaqueId),
     captureId,
   );
   if (activated !== true) {
@@ -378,7 +378,7 @@ export async function assertHeadlessReadCursorIsBlocked(page) {
   }
   const result = await page.evaluate(async () => {
     try {
-      await globalThis.hmmChat.advanceReadCursor(
+      await globalThis.hypeComms.advanceReadCursor(
         "00000000-0000-4000-8000-000000000000",
         "00000000-0000-4000-8000-000000000000",
       );

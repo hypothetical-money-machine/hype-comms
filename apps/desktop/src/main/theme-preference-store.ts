@@ -59,7 +59,7 @@ export class ThemePreferenceStore {
   #saveTail: Promise<void> = Promise.resolve();
 
   constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hmm-chat-settings", "theme.json");
+    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "theme.json");
     this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
   }
 

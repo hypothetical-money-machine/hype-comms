@@ -434,6 +434,47 @@ describeWithPostgres("runMigrations", () => {
     });
   });
 
+  it("leaves the legacy slug alone when the renamed slug already exists", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const legacyWorkspaceId = randomUUID();
+      const renamedWorkspaceId = randomUUID();
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'slug-collision@example.test', 'collision', 'Collision')`,
+        [userId],
+      );
+      // workspaces.slug is UNIQUE, so an unguarded rename would abort the migration and
+      // crash-loop the server on every boot.
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES
+           ($1, 'Legacy', 'hmm-chat', $3),
+           ($2, 'Hype Comms', 'hype-comms', $3)`,
+        [legacyWorkspaceId, renamedWorkspaceId, userId],
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      const slugs = await pool.query<{ id: string; slug: string }>(
+        "SELECT id, slug FROM workspaces",
+      );
+      expect(new Map(slugs.rows.map((row) => [row.id, row.slug]))).toEqual(
+        new Map([
+          [legacyWorkspaceId, "hmm-chat"],
+          [renamedWorkspaceId, "hype-comms"],
+        ]),
+      );
+    });
+  });
+
   it("keeps previous-server task creates compatible while seeding their actor", async () => {
     await withFreshSchema(async (pool) => {
       await runMigrations(pool);

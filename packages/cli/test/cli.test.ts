@@ -50,13 +50,13 @@ describe("CLI output and exit contracts", () => {
     });
     const observed: string[] = [];
     const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
-      const token = new Headers(init?.headers).get("cookie")?.replace("hmm_session=", "");
+      const token = new Headers(init?.headers).get("cookie")?.replace("hype_comms_session=", "");
       observed.push(token ?? "");
       const next = observed.length === 1 ? "b".repeat(43) : "c".repeat(43);
       await new Promise((resolve) => setTimeout(resolve, 10));
       return new Response(null, {
         status: 204,
-        headers: { "set-cookie": `hmm_session=${next}; Path=/; HttpOnly` },
+        headers: { "set-cookie": `hype_comms_session=${next}; Path=/; HttpOnly` },
       });
     });
     const first = testRuntime({ homeDirectory, env, fetch });

@@ -144,7 +144,8 @@ export function parseStoredAuthKitPendingAuthorization(
 
 /**
  * Owns only the short-lived native authorization transaction. Session exchange and persistence
- * deliberately remain with the caller so this can be integrated with the existing HMM session.
+ * deliberately remain with the caller so this can be integrated with the existing Hype Comms
+ * session.
  */
 export class AuthKitFlow {
   readonly #api: AuthKitAuthorizationApi;

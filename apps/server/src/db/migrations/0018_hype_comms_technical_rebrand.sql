@@ -14,4 +14,5 @@ ALTER TABLE messages
 UPDATE workspaces
    SET slug = 'hype-comms',
        updated_at = clock_timestamp()
- WHERE slug = 'hmm-chat';
+ WHERE slug = 'hmm-chat'
+   AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = 'hype-comms');

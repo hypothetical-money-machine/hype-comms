@@ -12,8 +12,8 @@ if (rootElement === null) {
   throw new Error("Renderer root element was not found");
 }
 
-const theme = new ThemeRuntime(window.hmmChat, document.documentElement);
-const compactMode = new CompactModeRuntime(window.hmmChat, document.documentElement);
+const theme = new ThemeRuntime(window.hypeComms, document.documentElement);
+const compactMode = new CompactModeRuntime(window.hypeComms, document.documentElement);
 const sidebarPosition = new SidebarPositionRuntime(document.documentElement);
 
 void theme.start();
@@ -21,7 +21,7 @@ void compactMode.start();
 createRoot(rootElement).render(
   <StrictMode>
     <App
-      client={window.hmmChat}
+      client={window.hypeComms}
       theme={theme}
       compactMode={compactMode}
       sidebarPosition={sidebarPosition}
