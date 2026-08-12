@@ -26,6 +26,15 @@ class SelectorThemeTransport implements ThemeTransport {
     return this.state;
   }
 
+  async getSystemThemeState(): Promise<ThemeState> {
+    return {
+      preference: "system",
+      resolvedThemeId: this.state.resolvedThemeId,
+      resolvedColorScheme: this.state.resolvedColorScheme,
+      accentColor: this.state.accentColor ?? null,
+    };
+  }
+
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
     this.preferences.push(preference);
     if (this.error !== null) throw this.error;

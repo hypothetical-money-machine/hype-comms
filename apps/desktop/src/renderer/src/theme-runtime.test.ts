@@ -33,6 +33,15 @@ class FakeThemeTransport implements ThemeTransport {
     return this.getState();
   }
 
+  getSystemThemeState(): Promise<ThemeState> {
+    return Promise.resolve({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: this.state.accentColor ?? null,
+    });
+  }
+
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
     this.setPreferences.push(preference);
     if (this.setError !== null) throw this.setError;
@@ -224,6 +233,32 @@ describe("ThemeRuntime", () => {
     expect(root.dataset.theme).toBe("dark");
     expect(root.style.getPropertyValue(themeCssVariable("actionPrimary"))).toBe("#2563eb");
     expect(listener).toHaveBeenCalledTimes(1);
+    runtime.dispose();
+  });
+
+  it("resolves a system preview without applying or publishing it", async () => {
+    const root = createRoot();
+    const client = new FakeThemeTransport({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "#be123c",
+    });
+    const runtime = new ThemeRuntime(client, root);
+    await runtime.start();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+
+    await expect(runtime.getSystemThemeState()).resolves.toEqual({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: "#be123c",
+    });
+
+    expect(runtime.state.preference).toBe("dark");
+    expect(root.dataset.theme).toBe("dark");
+    expect(listener).not.toHaveBeenCalled();
     runtime.dispose();
   });
 });

@@ -54,8 +54,10 @@ function resolvedThemeState(
   preference: ThemeFoundation,
   accentColor: string | null,
   current: ThemeState,
+  systemState: ThemeState | null,
 ): ThemeState {
-  const resolvedThemeId = preference === "system" ? current.resolvedThemeId : preference;
+  const resolvedThemeId =
+    preference === "system" ? (systemState ?? current).resolvedThemeId : preference;
   const definition = getThemeDefinition(resolvedThemeId);
   return {
     preference,
@@ -76,8 +78,13 @@ function previewStyle(state: ThemeState): CSSProperties {
   } as CSSProperties;
 }
 
-function defaultAccentFor(preference: ThemeFoundation, current: ThemeState): string {
-  const resolvedThemeId = preference === "system" ? current.resolvedThemeId : preference;
+function defaultAccentFor(
+  preference: ThemeFoundation,
+  current: ThemeState,
+  systemState: ThemeState | null = null,
+): string {
+  const resolvedThemeId =
+    preference === "system" ? (systemState ?? current).resolvedThemeId : preference;
   return getThemeDefinition(resolvedThemeId).tokens.borderAccent;
 }
 
@@ -95,6 +102,11 @@ export function ThemeDesigner({
   const initialState = useRef(liveState).current;
   const initialPreference = asFoundation(initialState.preference);
   const [preference, setPreference] = useState<ThemeFoundation>(initialPreference);
+  const [systemState, setSystemState] = useState<ThemeState | null>(
+    initialPreference === "system" ? initialState : null,
+  );
+  const systemResolutionRequest = useRef(0);
+  const [resolvingSystem, setResolvingSystem] = useState(false);
   const [usesDefaultAccent, setUsesDefaultAccent] = useState(
     initialState.accentColor === null || initialState.accentColor === undefined,
   );
@@ -107,6 +119,8 @@ export function ThemeDesigner({
   const [mobilePanel, setMobilePanel] = useState<"edit" | "preview">("edit");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const usesDefaultAccentRef = useRef(usesDefaultAccent);
+  usesDefaultAccentRef.current = usesDefaultAccent;
 
   const parsedAccent = themeAccentColorSchema.safeParse(accentInput);
   const accentColor = usesDefaultAccent ? null : parsedAccent.success ? parsedAccent.data : null;
@@ -116,7 +130,7 @@ export function ThemeDesigner({
       ? parsedAccent.data
       : lastValidAccent;
   const design = themeDesignSchema.safeParse({ preference, accentColor });
-  const canSave = !saving && parsedAccent.success && design.success;
+  const canSave = !saving && !resolvingSystem && parsedAccent.success && design.success;
   const dirtyAccent = usesDefaultAccent
     ? null
     : parsedAccent.success
@@ -125,8 +139,8 @@ export function ThemeDesigner({
   const dirty =
     preference !== initialPreference || dirtyAccent !== (initialState.accentColor ?? null);
   const previewState = useMemo(
-    () => resolvedThemeState(preference, previewAccentColor, liveState),
-    [liveState, preference, previewAccentColor],
+    () => resolvedThemeState(preference, previewAccentColor, liveState, systemState),
+    [liveState, preference, previewAccentColor, systemState],
   );
   const style = useMemo(() => previewStyle(previewState), [previewState]);
 
@@ -134,14 +148,54 @@ export function ThemeDesigner({
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
+  useEffect(() => {
+    if (liveState.preference === "system") setSystemState(liveState);
+  }, [liveState]);
+
+  useEffect(
+    () => () => {
+      systemResolutionRequest.current += 1;
+    },
+    [],
+  );
+
   const chooseFoundation = (next: ThemeFoundation): void => {
-    setPreference(next);
+    const request = systemResolutionRequest.current + 1;
+    systemResolutionRequest.current = request;
     setError("");
-    if (usesDefaultAccent) {
-      const defaultAccent = defaultAccentFor(next, liveState);
-      setAccentInput(defaultAccent);
-      setLastValidAccent(defaultAccent);
+    if (next !== "system" || liveState.preference === "system") {
+      setResolvingSystem(false);
+      const resolvedSystemState = next === "system" ? liveState : systemState;
+      if (next === "system") setSystemState(liveState);
+      setPreference(next);
+      if (usesDefaultAccent) {
+        const defaultAccent = defaultAccentFor(next, liveState, resolvedSystemState);
+        setAccentInput(defaultAccent);
+        setLastValidAccent(defaultAccent);
+      }
+      return;
     }
+
+    setResolvingSystem(true);
+    void theme
+      .getSystemThemeState()
+      .then((resolvedSystemState) => {
+        if (systemResolutionRequest.current !== request) return;
+        setSystemState(resolvedSystemState);
+        setPreference("system");
+        if (usesDefaultAccentRef.current) {
+          const defaultAccent = defaultAccentFor("system", liveState, resolvedSystemState);
+          setAccentInput(defaultAccent);
+          setLastValidAccent(defaultAccent);
+        }
+      })
+      .catch(() => {
+        if (systemResolutionRequest.current !== request) return;
+        setError("Could not match your system appearance. Try again.");
+      })
+      .finally(() => {
+        if (systemResolutionRequest.current === request) setResolvingSystem(false);
+      });
   };
 
   const chooseAccent = (color: string): void => {
@@ -169,7 +223,11 @@ export function ThemeDesigner({
   };
 
   return (
-    <form className="theme-designer" aria-busy={saving} onSubmit={(event) => void submit(event)}>
+    <form
+      className="theme-designer"
+      aria-busy={saving || resolvingSystem}
+      onSubmit={(event) => void submit(event)}
+    >
       <div className="theme-designer-mobile-tabs" role="group" aria-label="Designer view">
         <button
           type="button"
@@ -206,11 +264,16 @@ export function ThemeDesigner({
                   name="theme-foundation"
                   value={foundation.id}
                   checked={preference === foundation.id}
+                  aria-busy={foundation.id === "system" && resolvingSystem}
                   onChange={() => chooseFoundation(foundation.id)}
                 />
                 <span>
                   <strong>{foundation.label}</strong>
-                  <small>{foundation.description}</small>
+                  <small>
+                    {foundation.id === "system" && resolvingSystem
+                      ? "Matching this device…"
+                      : foundation.description}
+                  </small>
                 </span>
               </label>
             ))}
@@ -287,7 +350,7 @@ export function ThemeDesigner({
             className="theme-default-accent"
             aria-pressed={usesDefaultAccent}
             onClick={() => {
-              const defaultAccent = defaultAccentFor(preference, liveState);
+              const defaultAccent = defaultAccentFor(preference, liveState, systemState);
               setUsesDefaultAccent(true);
               setAccentInput(defaultAccent);
               setLastValidAccent(defaultAccent);
@@ -387,7 +450,7 @@ export function ThemeDesigner({
         <button
           type="submit"
           className="primary"
-          disabled={!parsedAccent.success || !design.success}
+          disabled={!parsedAccent.success || !design.success || resolvingSystem}
           aria-disabled={saving ? true : undefined}
           aria-busy={saving}
         >

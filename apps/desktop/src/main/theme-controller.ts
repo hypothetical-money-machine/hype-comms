@@ -168,7 +168,24 @@ export class ThemeController {
     }
   }
 
-  #enqueueSet(operation: () => Promise<ThemeState>): Promise<ThemeState> {
+  /**
+   * Resolves the operating-system foundation without changing the saved design or canonical app
+   * state. Electron applies an explicit theme source to both `shouldUseDarkColors` and renderer
+   * media queries, so main must briefly remove that override to read the actual system choice.
+   */
+  resolveSystemState(): Promise<ThemeState> {
+    try {
+      this.#assertReady();
+      if (!this.#acceptingChanges) {
+        throw new Error("ThemeController is shutting down");
+      }
+      return this.#enqueueSet(() => this.#resolveSystemState());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  #enqueueSet(operation: () => ThemeState | Promise<ThemeState>): Promise<ThemeState> {
     const request = this.#setTail.then(operation);
     this.#setTail = request.then(
       () => undefined,
@@ -262,6 +279,58 @@ export class ThemeController {
     }
 
     return this.#setState(canonicalThemeState(design, this.#nativeTheme.shouldUseDarkColors));
+  }
+
+  #resolveSystemState(): ThemeState {
+    this.#assertReady();
+    const current = this.state;
+    if (current.preference === "system") {
+      return current;
+    }
+
+    const expectedSource = nativeThemeSourceForPreference(current.preference);
+    let shouldRestoreSource = false;
+    let shouldUseDarkColors = false;
+    let failure: unknown;
+    this.#suppressNativeUpdates = true;
+    try {
+      // A setter can fail after partially changing a native adapter, so restoration is required
+      // from the moment the probe is attempted, not only after it returns successfully.
+      shouldRestoreSource = true;
+      this.#nativeTheme.themeSource = "system";
+      shouldUseDarkColors = this.#nativeTheme.shouldUseDarkColors;
+    } catch (error) {
+      failure = error;
+    } finally {
+      if (shouldRestoreSource) {
+        try {
+          // Derive this from canonical state rather than the adapter's observed source. If an
+          // earlier restoration failed and left nativeTheme on System, a retry must repair it.
+          this.#nativeTheme.themeSource = expectedSource;
+        } catch (restoreError) {
+          failure =
+            failure === undefined
+              ? restoreError
+              : new AggregateError(
+                  [failure, restoreError],
+                  "System appearance resolution failed and the native appearance could not be restored",
+                );
+        }
+      }
+      this.#suppressNativeUpdates = false;
+    }
+
+    if (failure !== undefined) {
+      throw failure;
+    }
+    this.#assertReady();
+    return canonicalThemeState(
+      {
+        preference: "system",
+        accentColor: current.accentColor ?? null,
+      },
+      shouldUseDarkColors,
+    );
   }
 
   #setState(state: ThemeState): ThemeState {

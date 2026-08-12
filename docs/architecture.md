@@ -396,6 +396,13 @@ explicit built-in choices remain fixed. Every theme must meet the tested
 text/action/status/control contrast pairs and use the shared focus treatment before it can be added
 to the built-in registry.
 
+An explicit Electron `nativeTheme.themeSource` also overrides renderer color-scheme media queries,
+so the theme designer cannot infer the operating-system foundation from renderer state. Its System
+preview uses a separate trusted, read-only IPC request. Main serializes that request with appearance
+writes, temporarily removes the explicit native override to sample the OS scheme, restores the
+canonical active source, and returns a validated System state without persisting or publishing it.
+The renderer scopes that result to the draft preview until the user saves.
+
 ## Feature behavior
 
 - Channel names use a unique lowercase hyphenated slug; all active members can create either a

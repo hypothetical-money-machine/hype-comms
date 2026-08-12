@@ -39,6 +39,15 @@ class PreferencesThemeTransport implements ThemeTransport {
     return this.state;
   }
 
+  async getSystemThemeState(): Promise<ThemeState> {
+    return {
+      preference: "system",
+      resolvedThemeId: this.state.resolvedThemeId,
+      resolvedColorScheme: this.state.resolvedColorScheme,
+      accentColor: this.state.accentColor ?? null,
+    };
+  }
+
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
     const definition = preference === "system" ? null : getThemeDefinition(preference);
     this.state = {

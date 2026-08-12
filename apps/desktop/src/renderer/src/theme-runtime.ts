@@ -78,6 +78,11 @@ export class ThemeRuntime {
     return state;
   }
 
+  /** Resolves a System preview without applying it to the document or publishing runtime state. */
+  getSystemThemeState(): Promise<ThemeState> {
+    return this.#client.getSystemThemeState();
+  }
+
   async setDesign(design: ThemeDesign): Promise<ThemeState> {
     const state = await this.#client.setThemeDesign(design);
     this.#accept(state);

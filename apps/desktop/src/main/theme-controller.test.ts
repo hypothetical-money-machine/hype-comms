@@ -16,7 +16,7 @@ class FakeNativeTheme implements NativeThemeAdapter {
   readonly #listeners = new Set<() => void>();
   #themeSource: "system" | ResolvedColorScheme = "system";
   #systemUsesDarkColors: boolean;
-  #throwOnNextSource = false;
+  #successfulSourceChangesBeforeFailure: number | null = null;
   sourceAssignments = 0;
 
   constructor(systemUsesDarkColors = false) {
@@ -28,9 +28,12 @@ class FakeNativeTheme implements NativeThemeAdapter {
   }
 
   set themeSource(value: "system" | ResolvedColorScheme) {
-    if (this.#throwOnNextSource) {
-      this.#throwOnNextSource = false;
+    if (this.#successfulSourceChangesBeforeFailure === 0) {
+      this.#successfulSourceChangesBeforeFailure = null;
       throw new Error("native theme unavailable");
+    }
+    if (this.#successfulSourceChangesBeforeFailure !== null) {
+      this.#successfulSourceChangesBeforeFailure -= 1;
     }
     this.sourceAssignments += 1;
     this.#themeSource = value;
@@ -67,7 +70,11 @@ class FakeNativeTheme implements NativeThemeAdapter {
   }
 
   failNextSourceChange(): void {
-    this.#throwOnNextSource = true;
+    this.#successfulSourceChangesBeforeFailure = 0;
+  }
+
+  failSourceChangeAfter(successfulChanges: number): void {
+    this.#successfulSourceChangesBeforeFailure = successfulChanges;
   }
 }
 
@@ -124,6 +131,7 @@ describe("ThemeController", () => {
     expect(() => controller.state).toThrow(/initialized/);
     expect(() => controller.subscribe(() => undefined)).toThrow(/initialized/);
     await expect(controller.setPreference("dark")).rejects.toThrow(/initialized/);
+    await expect(controller.resolveSystemState()).rejects.toThrow(/initialized/);
   });
 
   it("initializes once from persistence before exposing canonical system state", async () => {
@@ -157,6 +165,93 @@ describe("ThemeController", () => {
       accentColor: null,
     });
     expect(nativeTheme.themeSource).toBe("light");
+  });
+
+  it("resolves the system foundation behind an explicit theme without changing app state", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence({
+      preference: "dark",
+      accentColor: "#be123c",
+    });
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+    const states: ThemeState[] = [];
+    controller.subscribe((state) => states.push(state));
+    const activeState = controller.state;
+
+    await expect(controller.resolveSystemState()).resolves.toEqual({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: "#be123c",
+    });
+
+    expect(nativeTheme.themeSource).toBe("dark");
+    expect(controller.state).toBe(activeState);
+    expect(persistence.saves).toEqual([]);
+    expect(states).toEqual([]);
+  });
+
+  it("serializes system resolution behind an in-flight design write", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence("dark");
+    let releaseSave: (() => void) | undefined;
+    persistence.nextSaveGate = new Promise((resolve) => {
+      releaseSave = resolve;
+    });
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+
+    const designRequest = controller.setDesign({ preference: "light", accentColor: "#2563eb" });
+    const systemRequest = controller.resolveSystemState();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(persistence.activeSaves).toBe(1);
+
+    releaseSave?.();
+    await expect(designRequest).resolves.toMatchObject({ preference: "light" });
+    await expect(systemRequest).resolves.toMatchObject({
+      preference: "system",
+      resolvedThemeId: "light",
+    });
+    expect(nativeTheme.themeSource).toBe("light");
+    expect(controller.state).toMatchObject({ preference: "light", accentColor: "#2563eb" });
+  });
+
+  it("rejects system resolution cleanly when the native adapter cannot remove its override", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence("dark");
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+    const activeState = controller.state;
+    nativeTheme.failNextSourceChange();
+
+    await expect(controller.resolveSystemState()).rejects.toThrow("native theme unavailable");
+
+    expect(nativeTheme.themeSource).toBe("dark");
+    expect(controller.state).toBe(activeState);
+    expect(persistence.saves).toEqual([]);
+  });
+
+  it("repairs an explicit source on retry after probe restoration fails", async () => {
+    const nativeTheme = new FakeNativeTheme(false);
+    const persistence = new FakePreferencePersistence("dark");
+    const controller = controllerWith(nativeTheme, persistence);
+    await controller.initialize();
+    const activeState = controller.state;
+    nativeTheme.failSourceChangeAfter(1);
+
+    await expect(controller.resolveSystemState()).rejects.toThrow("native theme unavailable");
+    expect(nativeTheme.themeSource).toBe("system");
+    expect(controller.state).toBe(activeState);
+
+    await expect(controller.resolveSystemState()).resolves.toMatchObject({
+      preference: "system",
+      resolvedThemeId: "light",
+    });
+    expect(nativeTheme.themeSource).toBe("dark");
+    expect(controller.state).toBe(activeState);
+    expect(persistence.saves).toEqual([]);
   });
 
   it("reacts to system changes and suppresses duplicate states", async () => {
@@ -487,5 +582,6 @@ describe("ThemeController", () => {
     });
     expect(() => controller.subscribe(() => undefined)).toThrow(/disposed/);
     await expect(controller.setPreference("dark")).rejects.toThrow(/disposed/);
+    await expect(controller.resolveSystemState()).rejects.toThrow(/disposed/);
   });
 });

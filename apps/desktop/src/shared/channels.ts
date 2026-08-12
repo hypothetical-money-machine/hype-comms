@@ -7,6 +7,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   updateInstall: "desktop:update-install",
   updateChanged: "desktop:update-changed",
   themeState: "theme:state",
+  themeSystemState: "theme:system-state",
   themeSet: "theme:set",
   themeDesignSet: "theme:design-set",
   themeChanged: "theme:changed",

@@ -14,28 +14,46 @@ import { ThemeRuntime } from "./theme-runtime";
 class DesignerThemeTransport implements ThemeTransport {
   state: ThemeState;
   readonly initialThemeState: ThemeState;
+  systemState: ThemeState;
+  getSystemState: () => Promise<ThemeState>;
   readonly designs: ThemeDesign[] = [];
   readonly listeners = new Set<(state: ThemeState) => void>();
   error: Error | null = null;
 
-  constructor(accentColor: string | null = null) {
+  constructor(
+    accentColor: string | null = null,
+    preference: "system" | "light" | "dark" = "system",
+    systemThemeId: "light" | "dark" = "dark",
+  ) {
+    const activeThemeId = preference === "system" ? systemThemeId : preference;
     this.state = {
-      preference: "system",
-      resolvedThemeId: "dark",
-      resolvedColorScheme: "dark",
+      preference,
+      resolvedThemeId: activeThemeId,
+      resolvedColorScheme: activeThemeId,
       accentColor,
     };
     this.initialThemeState = this.state;
+    this.systemState = {
+      preference: "system",
+      resolvedThemeId: systemThemeId,
+      resolvedColorScheme: systemThemeId,
+      accentColor,
+    };
+    this.getSystemState = () => Promise.resolve(this.systemState);
   }
 
   async getThemeState(): Promise<ThemeState> {
     return this.state;
   }
 
+  getSystemThemeState(): Promise<ThemeState> {
+    return this.getSystemState();
+  }
+
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
     const definition =
       preference === "system"
-        ? getThemeDefinition(this.state.resolvedThemeId)
+        ? getThemeDefinition(this.systemState.resolvedThemeId)
         : getThemeDefinition(preference);
     this.state = {
       preference,
@@ -52,7 +70,7 @@ class DesignerThemeTransport implements ThemeTransport {
     if (this.error !== null) throw this.error;
     const definition =
       design.preference === "system"
-        ? getThemeDefinition(this.state.resolvedThemeId)
+        ? getThemeDefinition(this.systemState.resolvedThemeId)
         : getThemeDefinition(design.preference);
     this.state = {
       preference: design.preference,
@@ -60,6 +78,7 @@ class DesignerThemeTransport implements ThemeTransport {
       resolvedColorScheme: definition.colorScheme,
       accentColor: design.accentColor,
     };
+    if (design.preference === "system") this.systemState = this.state;
     this.emit();
     return this.state;
   }
@@ -143,6 +162,61 @@ describe("ThemeDesigner", () => {
     expect(document.documentElement.style.getPropertyValue(themeCssVariable("actionPrimary"))).toBe(
       "#0f766e",
     );
+    theme.dispose();
+  });
+
+  it("previews the OS foundation when System differs from the active explicit theme", async () => {
+    const client = new DesignerThemeTransport(null, "dark", "light");
+    const { container, onSaved, theme } = await renderDesigner(client);
+    const rootAction = document.documentElement.style.getPropertyValue(
+      themeCssVariable("actionPrimary"),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("complementary", { name: "System foundation" })).toBeTruthy();
+      expect((screen.getByLabelText("Accent hex value") as HTMLInputElement).value).toBe(
+        getThemeDefinition("light").tokens.borderAccent,
+      );
+    });
+    const preview = container.querySelector(".theme-preview") as HTMLElement;
+    expect(preview.style.colorScheme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.style.getPropertyValue(themeCssVariable("actionPrimary"))).toBe(
+      rootAction,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
+    await waitFor(() => {
+      expect(client.designs).toEqual([{ preference: "system", accentColor: null }]);
+      expect(onSaved).toHaveBeenCalledTimes(1);
+    });
+    expect(document.documentElement.dataset.theme).toBe("light");
+    theme.dispose();
+  });
+
+  it("ignores a stale System resolution after another foundation is selected", async () => {
+    const client = new DesignerThemeTransport(null, "dark", "light");
+    let resolveSystem: ((state: ThemeState) => void) | undefined;
+    client.getSystemState = () =>
+      new Promise((resolve) => {
+        resolveSystem = resolve;
+      });
+    const { theme } = await renderDesigner(client);
+
+    fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
+    expect(screen.getByText("Matching this device…")).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: /Light Bright and crisp/ }));
+    resolveSystem?.(client.systemState);
+
+    await waitFor(() => {
+      expect(
+        (screen.getByRole("radio", { name: /Light Bright and crisp/ }) as HTMLInputElement).checked,
+      ).toBe(true);
+    });
+    expect(screen.queryByText("Matching this device…")).toBeNull();
+    expect(screen.getByRole("complementary", { name: "light foundation" })).toBeTruthy();
     theme.dispose();
   });
 

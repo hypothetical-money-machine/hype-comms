@@ -869,6 +869,21 @@ function registerIpcHandlers(): void {
     return themeController.state;
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.themeSystemState);
+  ipcMain.handle(DESKTOP_CHANNELS.themeSystemState, async (event): Promise<ThemeState> => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted theme-system-state IPC sender");
+    }
+    if (themeController === null) {
+      throw new Error("Appearance is unavailable");
+    }
+    try {
+      return await themeController.resolveSystemState();
+    } catch (error) {
+      throw new Error("Could not resolve the system appearance", { cause: error });
+    }
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.themeSet);
   ipcMain.handle(DESKTOP_CHANNELS.themeSet, async (event, preference: unknown) => {
     if (!isTrustedIpcSender(event)) {
