@@ -1,6 +1,17 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { access, appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  access,
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -102,6 +113,86 @@ async function readConsoleSession() {
   return { user, uid };
 }
 
+function escapePlistString(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+async function runInConsoleLaunchAgent(command, arguments_) {
+  const { uid } = await readConsoleSession();
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-notification-agent-"));
+  const identifier = `com.hypemm.hmm-chat.notification-evidence.${process.pid}.${randomUUID()}`;
+  const helperPath = path.join(temporaryDirectory, "run.mjs");
+  const plistPath = path.join(temporaryDirectory, "agent.plist");
+  const stdoutPath = path.join(temporaryDirectory, "stdout.log");
+  const stderrPath = path.join(temporaryDirectory, "stderr.log");
+  const statusPath = path.join(temporaryDirectory, "status.txt");
+  const helperSource = `import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const result = spawnSync(process.argv[2], process.argv.slice(3), { encoding: "utf8" });
+writeFileSync(${JSON.stringify(stdoutPath)}, result.stdout ?? "", { encoding: "utf8", mode: 0o600 });
+writeFileSync(${JSON.stringify(stderrPath)}, result.stderr ?? "", { encoding: "utf8", mode: 0o600 });
+writeFileSync(${JSON.stringify(statusPath)}, String(result.status ?? 1), { encoding: "utf8", mode: 0o600 });
+`;
+  const programArguments = [process.execPath, helperPath, command, ...arguments_]
+    .map((value) => `    <string>${escapePlistString(value)}</string>`)
+    .join("\n");
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapePlistString(identifier)}</string>
+  <key>ProgramArguments</key>
+  <array>
+${programArguments}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+`;
+  await writeFile(helperPath, helperSource, { encoding: "utf8", mode: 0o600 });
+  await writeFile(plistPath, plist, { encoding: "utf8", mode: 0o600 });
+
+  let bootstrapped = false;
+  try {
+    await runCommand("/bin/launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+    bootstrapped = true;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      try {
+        const status = Number.parseInt((await readFile(statusPath, "utf8")).trim(), 10);
+        const stdout = await readFile(stdoutPath, "utf8");
+        const stderr = await readFile(stderrPath, "utf8");
+        if (status !== 0) {
+          throw new Error(
+            `${command} failed with code ${String(status)}${stderr.trim() === "" ? "" : `:\n${stderr.trim()}`}`,
+          );
+        }
+        return { stdout, stderr };
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`Timed out waiting for ${command} in the macOS GUI launch domain`);
+  } finally {
+    if (bootstrapped) {
+      try {
+        await runCommand("/bin/launchctl", ["bootout", `gui/${uid}/${identifier}`]);
+      } catch {
+        // The one-shot agent may already have exited and been removed.
+      }
+    }
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
 async function runInConsoleSession(command, arguments_) {
   const { user, uid } = await readConsoleSession();
   return runCommand("/usr/bin/sudo", [
@@ -126,16 +217,22 @@ async function runAppleScript(source, logPath) {
     return result.stdout.trim();
   } catch (directError) {
     try {
-      const result = await runInConsoleSession("/usr/bin/osascript", arguments_);
+      const result = await runInConsoleLaunchAgent("/usr/bin/osascript", arguments_);
       await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
       return result.stdout.trim();
-    } catch (consoleError) {
-      await appendFile(
-        logPath,
-        `Direct AppleScript: ${directError instanceof Error ? directError.message : "unknown failure"}\nConsole AppleScript: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
-        "utf8",
-      );
-      return "failed";
+    } catch (agentError) {
+      try {
+        const result = await runInConsoleSession("/usr/bin/osascript", arguments_);
+        await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
+        return result.stdout.trim();
+      } catch (consoleError) {
+        await appendFile(
+          logPath,
+          `Direct AppleScript: ${directError instanceof Error ? directError.message : "unknown failure"}\nLaunchAgent AppleScript: ${agentError instanceof Error ? agentError.message : "unknown failure"}\nConsole AppleScript: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
+          "utf8",
+        );
+        return "failed";
+      }
     }
   }
 }
@@ -252,15 +349,19 @@ async function captureScreen(destination, logPath) {
       ]);
     } catch (launchctlError) {
       try {
-        await runInConsoleSession("/usr/sbin/screencapture", ["-x", destination]);
-      } catch (consoleError) {
-        await appendFile(
-          logPath,
-          `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${launchctlError instanceof Error ? launchctlError.message : "unknown failure"}\nConsole capture: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
-          "utf8",
-        );
-        await appendDisplayDiagnostics(logPath);
-        throw consoleError;
+        await runInConsoleLaunchAgent("/usr/sbin/screencapture", ["-x", destination]);
+      } catch (agentError) {
+        try {
+          await runInConsoleSession("/usr/sbin/screencapture", ["-x", destination]);
+        } catch (consoleError) {
+          await appendFile(
+            logPath,
+            `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${launchctlError instanceof Error ? launchctlError.message : "unknown failure"}\nLaunchAgent capture: ${agentError instanceof Error ? agentError.message : "unknown failure"}\nConsole capture: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
+            "utf8",
+          );
+          await appendDisplayDiagnostics(logPath);
+          throw consoleError;
+        }
       }
     }
   }
