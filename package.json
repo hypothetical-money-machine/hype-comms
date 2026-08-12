@@ -42,6 +42,7 @@
     "package:desktop:mac": "npm run package:mac --workspace @hmm-chat/desktop",
     "package:desktop:win": "npm run package:win --workspace @hmm-chat/desktop",
     "package:desktop:win:arm64": "npm run package:win:arm64 --workspace @hmm-chat/desktop",
+    "release": "node scripts/prepare-desktop-release.mjs",
     "seed:demo": "node --env-file-if-exists=.env.local scripts/demo.mjs --seed-only",
     "start:server": "npm run start --workspace @hmm-chat/server",
     "test": "npm run test:scripts && npm run test:hermes-plugin && npm run test --workspaces --if-present",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,19 @@ import {
   uploadPlatformManifest,
   waitForGithubReleaseAssets,
 } from "./desktop-release-helpers.mjs";
+import { releaseBodyStartsWithReviewedNotes } from "./desktop-release-notes.mjs";
+
+const workflowJob = (workflow, jobName) => {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `Expected workflow job ${jobName}`);
+
+  const remainingWorkflow = workflow.slice(start + marker.length);
+  const nextJob = remainingWorkflow.search(/^ {2}[a-zA-Z0-9_-]+:\n/mu);
+  return nextJob === -1
+    ? workflow.slice(start)
+    : workflow.slice(start, start + marker.length + nextJob);
+};
 
 const environment = {
   DESKTOP_VERSION: "1.2.3",
@@ -112,10 +126,6 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.doesNotMatch(releaseWorkflow, /\$\(\s*seq\b/u);
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
-  assert.match(
-    releaseWorkflow,
-    /RELEASE_NOTES_FALLBACK_TAG: v0\.1\.11[\s\S]*gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
-  );
   assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
   assert.match(
     releaseWorkflow,
@@ -127,6 +137,101 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.doesNotMatch(releaseWorkflow, /hmm-chat-\$\{(?:DESKTOP_VERSION|\{)/u);
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
+});
+
+test("requires reviewed Hype Comms notes before publishing a desktop release", async () => {
+  const [releaseWorkflow, releaseNotesGuide] = await Promise.all([
+    readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"),
+    readFile(new URL("../docs/releases/README.md", import.meta.url), "utf8"),
+  ]);
+  const validateJob = workflowJob(releaseWorkflow, "validate");
+  const prepareJob = workflowJob(releaseWorkflow, "prepare-github-release");
+  const publishJob = workflowJob(releaseWorkflow, "github-release");
+
+  assert.match(validateJob, /release_notes_path="docs\/releases\/\$\{GITHUB_REF_NAME\}\.md"/u);
+  const missingNotesFileGuard = validateJob.indexOf('[[ ! -f "$release_notes_path" ]]');
+  const emptyNotesFileGuard = validateJob.indexOf(`! grep -q '[^[:space:]]' "$release_notes_path"`);
+  assert.match(validateJob, /\[\[ -L "\$release_notes_path" \]\]/u);
+  assert.ok(missingNotesFileGuard >= 0, "release notes file must exist");
+  assert.ok(emptyNotesFileGuard > missingNotesFileGuard, "release notes file must not be empty");
+  assert.match(validateJob, /grep -Fq '<!-- release-notes:todo' "\$release_notes_path"/u);
+  assert.match(
+    prepareJob,
+    /RELEASE_NOTES_FALLBACK_TAG: v0\.1\.11[\s\S]*gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--title "Hype Comms \$\{DESKTOP_VERSION\}"[\s\S]*--notes-file "\$release_notes_path"[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
+  );
+  assert.match(prepareJob, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
+  const prepareNotesCheck = prepareJob.indexOf("node scripts/desktop-release-notes.mjs");
+  const repairRelease = prepareJob.indexOf("gh release edit");
+  assert.ok(prepareNotesCheck >= 0, "existing release notes must be checked");
+  assert.ok(repairRelease > prepareNotesCheck, "an invalid existing body must be repaired");
+  assert.match(
+    prepareJob,
+    /printf '%s\\n' "\$release_notes"[\s\S]*cat "\$release_body_path"[\s\S]*--notes-file "\$combined_notes_path"/u,
+  );
+  assert.doesNotMatch(prepareJob, /printf [^\n]*\|[ ]*grep -q/u);
+  assert.doesNotMatch(prepareJob, /HMM Chat/u);
+
+  assert.match(publishJob, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
+  assert.match(publishJob, /node scripts\/desktop-release-notes\.mjs/u);
+  assert.doesNotMatch(publishJob, /printf [^\n]*\|[ ]*grep -q/u);
+  const reviewedNotesGuard = publishJob.indexOf("node scripts/desktop-release-notes.mjs");
+  const publishRelease = publishJob.indexOf("--draft=false");
+  assert.ok(reviewedNotesGuard >= 0, "GitHub Release publication must require reviewed notes");
+  assert.ok(
+    publishRelease > reviewedNotesGuard,
+    "GitHub Release notes must be checked before the draft is published",
+  );
+  assert.match(publishJob, /--title "Hype Comms \$\{DESKTOP_VERSION\}"/u);
+  assert.doesNotMatch(publishJob, /HMM Chat/u);
+  assert.match(releaseNotesGuide, /docs\/releases\/v<version>\.md/u);
+  assert.match(releaseNotesGuide, /user-facing notes/u);
+});
+
+test("requires the reviewed notes to end at a release-body boundary", () => {
+  const reviewedNotes = "## Fix";
+
+  assert.equal(releaseBodyStartsWithReviewedNotes(reviewedNotes, reviewedNotes), true);
+  assert.equal(
+    releaseBodyStartsWithReviewedNotes(`${reviewedNotes}\n`, `${reviewedNotes}\n`),
+    true,
+  );
+  assert.equal(
+    releaseBodyStartsWithReviewedNotes(reviewedNotes, `${reviewedNotes}\n\n## What's Changed`),
+    true,
+  );
+  assert.equal(releaseBodyStartsWithReviewedNotes(reviewedNotes, "## Fixes\n"), false);
+  assert.equal(releaseBodyStartsWithReviewedNotes(" \n", " \n"), false);
+});
+
+test("checks reviewed release notes without installed package dependencies", async () => {
+  const isolatedRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-release-notes-"));
+  try {
+    const isolatedScript = path.join(isolatedRoot, "desktop-release-notes.mjs");
+    const reviewedNotesPath = path.join(isolatedRoot, "reviewed.md");
+    const releaseBodyPath = path.join(isolatedRoot, "release-body.md");
+    await Promise.all([
+      writeFile(
+        isolatedScript,
+        await readFile(new URL("./desktop-release-notes.mjs", import.meta.url), "utf8"),
+      ),
+      writeFile(reviewedNotesPath, "## Highlights\n\n- Reviewed.\n"),
+      writeFile(releaseBodyPath, "## Highlights\n\n- Reviewed.\n\n## What's Changed\n"),
+    ]);
+
+    const result = spawnSync(process.execPath, [isolatedScript], {
+      encoding: "utf8",
+      env: {
+        GITHUB_RELEASE_BODY_PATH: releaseBodyPath,
+        RELEASE_NOTES_PATH: reviewedNotesPath,
+      },
+      shell: false,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(isolatedRoot, { force: true, recursive: true });
+  }
 });
 
 test("parses quoted and unquoted manifest versions", () => {
