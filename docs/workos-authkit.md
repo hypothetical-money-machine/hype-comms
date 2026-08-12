@@ -189,3 +189,26 @@ state exists. A normal application rollback is not safe without the gate, upstre
 and local revoke-and-purge sequence above. The local command intentionally requires only
 `HMM_DATABASE_URL` (and the optional bounded `HMM_DATABASE_POOL_SIZE`), so provider credential loss
 cannot block the emergency rollback boundary.
+
+## Provider tests with WorkOS Emulate
+
+Server AuthKit provider tests use [`@workos/emulate`](https://github.com/workos/emulate) as a local
+WorkOS API. The helper at `apps/server/test/helpers/workos-emulate.ts` starts an in-process emulator
+with a pinned `https://api.workos.com/` issuer, seeds users, and points the official
+`@workos-inc/node` client (and `createWorkOSAuthKitIdentityProvider`) at that host via
+`apiHostname` / `port` / `https: false`.
+
+Covered against the emulator:
+
+- authorization-code exchange with real RS256 access tokens and JWKS verification
+- active-session listing after login
+- deleted-user session reconciliation (`404` → empty active set)
+- unverified email, invalid/reused codes, and PKCE verifier mismatches
+
+Still unit-tested with fixtures (not the emulator):
+
+- authorization/logout URL contract validation (production requires credential-free HTTPS on
+  `api.workos.com`; the emulator serves `http://localhost`)
+- pagination edge cases, impersonation signals, and secret-sanitized error classification
+- webhook envelope validation (`event_*` ids and `context.client_id`), which the emulator currently
+  shapes differently from production WorkOS
