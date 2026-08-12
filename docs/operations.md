@@ -128,11 +128,20 @@ This flag is the rollback boundary for the current slice: rebuild a platform wit
 presentation while leaving server state, encrypted replicas, unread/mention state, outboxes, and
 device preference files untouched. Keep the device default off until that platform's installed
 Milestone 4 evidence in [the native-notifications roadmap](native-notifications-roadmap.md) passes.
-No existing workflow installs and launches the applications or captures/clicks a native OS toast;
-package smoke verifies build contents only. The missing external matrix is current and previous
-supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from
-both AppImage and Debian packages. A platform may enter an opt-in pilot and complete its gate
-without waiting for other platforms; the overall roadmap remains open until every platform passes.
+Ordinary package smoke verifies build contents only. The same workflow also has an opt-in
+`native_notification_evidence=true` macOS lane: on an unlocked self-hosted Mac, it builds a
+synthetic-only helper with a stable signed identity, requires that helper to own Screen Recording
+and Accessibility, establishes notification authorization through a signed preflight bundle with
+Hype Comms' production identifier, signs and notarizes Hype Comms, verifies an exact native delivery
+record, captures the OS toast, activates only that synthetic notification, and captures the restored
+app. The helpers may prompt the console user; authorize notifications for **Hype Comms** and grant
+Screen Recording and Accessibility to **Hype Comms Evidence**, then rerun the lane after macOS
+applies them. Neither helper nor the evidence build is a release artifact, and the evidence
+directory must never contain real message content. The missing external
+matrix is current and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu
+24.04 on x64/ARM64 installed from both AppImage and Debian packages. A platform may enter an opt-in
+pilot and complete its gate without waiting for other platforms; the overall roadmap remains open
+until every platform passes.
 
 macOS signing/notarization is configured. Windows Authenticode is blocked on procuring a Windows
 code-signing certificate and publisher identity; no matching repository secrets or variables exist

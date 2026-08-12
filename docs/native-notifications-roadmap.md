@@ -438,8 +438,9 @@ Milestone 3 boundary without local participation inference.
 
 ### Milestone 4: packaged rollout gate for each platform
 
-Status: open. No installed operating-system toast/click evidence exists in this repository today,
-and existing CI does not run the required installed native matrix.
+Status: open. No installed operating-system toast/click evidence exists in this repository today.
+An opt-in workflow lane can capture one signed/notarized macOS arm64 synthetic toast/click run on an
+unlocked self-hosted Mac; it does not run the required installed native matrix.
 
 Goal: prove the native behavior on the artifacts people actually install.
 

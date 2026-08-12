@@ -475,13 +475,14 @@ review.
   [deterministic identity test](../apps/desktop/src/main/application-identity.test.ts) prevents
   source/package drift. Stable installed NSIS attribution and click handling remain part of the
   native evidence gate.
-- No installed operating-system notification evidence exists yet. The signed/notarized macOS
+- No installed operating-system notification evidence is committed yet. The signed/notarized macOS
   release artifact includes the controller as an opt-in pilot while its device preference remains
   disabled by default; Windows and Linux release artifacts remain compiled off. Milestone 4 is
   evaluated per platform so one platform can advance without weakening another's gate. The overall
   roadmap still covers current and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64,
-  and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and Debian packages. Existing package
-  smoke only verifies build contents; it does not install, launch, display, or click a native toast.
+  and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and Debian packages. Ordinary package
+  smoke only verifies build contents. Its separate, manually dispatched macOS evidence lane signs,
+  installs, launches, displays, captures, and clicks a synthetic native toast on an unlocked host.
 
 ## Security, privacy, and operations
 

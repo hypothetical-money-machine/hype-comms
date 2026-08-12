@@ -20,6 +20,7 @@ on:
       - scripts/verify-desktop-package.mjs
       - scripts/capture-macos-native-notification.mjs
       - scripts/capture-macos-native-notification.test.mjs
+      - scripts/macos-native-notification-evidence-helper.swift
       - scripts/verify-vite-stack.mjs
       - scripts/verify-vite-stack.test.mjs
       - .github/dependabot.yml
@@ -36,6 +37,7 @@ on:
       - scripts/verify-desktop-package.mjs
       - scripts/capture-macos-native-notification.mjs
       - scripts/capture-macos-native-notification.test.mjs
+      - scripts/macos-native-notification-evidence-helper.swift
       - scripts/verify-vite-stack.mjs
       - scripts/verify-vite-stack.test.mjs
       - .github/dependabot.yml
@@ -253,6 +255,118 @@ jobs:
             echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
           } >> "$GITHUB_ENV"
 
+      - name: Build and authorize signed macOS evidence helper
+        shell: bash
+        run: |
+          helper_bundle="${RUNNER_TEMP}/Hype Comms Evidence.app"
+          helper_executable="${helper_bundle}/Contents/MacOS/hmm-native-notification-evidence"
+          notification_helper_bundle="${RUNNER_TEMP}/Hype Comms Authorization.app"
+          notification_helper_executable="${notification_helper_bundle}/Contents/MacOS/hmm-native-notification-evidence"
+          mkdir -p "${helper_bundle}/Contents/MacOS"
+          mkdir -p "${notification_helper_bundle}/Contents/MacOS"
+          /usr/bin/xcrun swiftc \
+            -parse-as-library \
+            -O \
+            -framework AppKit \
+            -framework ApplicationServices \
+            -framework CoreGraphics \
+            -framework Foundation \
+            -framework ImageIO \
+            -framework ScreenCaptureKit \
+            -framework UniformTypeIdentifiers \
+            -framework UserNotifications \
+            scripts/macos-native-notification-evidence-helper.swift \
+            -o "$helper_executable"
+          /bin/cp "$helper_executable" "$notification_helper_executable"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string hmm-native-notification-evidence' \
+            -c 'Add :CFBundleIdentifier string com.hypotheticalmoneymachine.hmmchat.notification-evidence' \
+            -c 'Add :CFBundleName string Hype Comms Evidence' \
+            -c 'Add :CFBundlePackageType string APPL' \
+            -c 'Add :CFBundleShortVersionString string 1' \
+            -c 'Add :CFBundleVersion string 1' \
+            -c 'Add :LSUIElement bool true' \
+            -c 'Add :NSScreenCaptureUsageDescription string Capture synthetic Hype Comms notification evidence.' \
+            "${helper_bundle}/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string hmm-native-notification-evidence' \
+            -c 'Add :CFBundleIdentifier string com.hypotheticalmoneymachine.hmmchat' \
+            -c 'Add :CFBundleName string Hype Comms' \
+            -c 'Add :CFBundlePackageType string APPL' \
+            -c 'Add :CFBundleShortVersionString string 1' \
+            -c 'Add :CFBundleVersion string 1' \
+            -c 'Add :LSUIElement bool true' \
+            "${notification_helper_bundle}/Contents/Info.plist"
+          /usr/bin/codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$CSC_NAME" \
+            --keychain "$CSC_KEYCHAIN" \
+            "$helper_bundle"
+          /usr/bin/codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$CSC_NAME" \
+            --keychain "$CSC_KEYCHAIN" \
+            "$notification_helper_bundle"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$helper_bundle"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$notification_helper_bundle"
+
+          console_state="$(/usr/sbin/ioreg -n Root -d 1)"
+          if [[ "$console_state" =~ \"CGSSessionScreenIsLocked\"[[:space:]]*=[[:space:]]*Yes ||
+                "$console_state" =~ \"IOConsoleLocked\"[[:space:]]*=[[:space:]]*Yes ]]; then
+            echo "The macOS console is locked. Unlock it before dispatching native notification evidence." >&2
+            exit 1
+          fi
+
+          "$notification_helper_executable" notification-request &
+          notification_request_pid=$!
+          permission_deadline=$((SECONDS + 300))
+          until "$notification_helper_executable" notification-preflight; do
+            if [[ -n "$notification_request_pid" ]] &&
+              ! kill -0 "$notification_request_pid" 2>/dev/null; then
+              wait "$notification_request_pid"
+              notification_request_pid=""
+            fi
+            if (( SECONDS >= permission_deadline )); then
+              if [[ -n "$notification_request_pid" ]]; then
+                kill "$notification_request_pid" 2>/dev/null || true
+                wait "$notification_request_pid" 2>/dev/null || true
+              fi
+              echo "Authorize notifications for Hype Comms in System Settings, then rerun this workflow." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ -n "$notification_request_pid" ]]; then
+            wait "$notification_request_pid"
+          fi
+
+          "$helper_executable" request &
+          helper_request_pid=$!
+          permission_deadline=$((SECONDS + 300))
+          until "$helper_executable" preflight; do
+            if [[ -n "$helper_request_pid" ]] &&
+              ! kill -0 "$helper_request_pid" 2>/dev/null; then
+              wait "$helper_request_pid"
+              helper_request_pid=""
+            fi
+            if (( SECONDS >= permission_deadline )); then
+              if [[ -n "$helper_request_pid" ]]; then
+                kill "$helper_request_pid" 2>/dev/null || true
+                wait "$helper_request_pid" 2>/dev/null || true
+              fi
+              echo "Grant Screen Recording and Accessibility to Hype Comms Evidence, then rerun this workflow." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ -n "$helper_request_pid" ]]; then
+            wait "$helper_request_pid"
+          fi
+          echo "HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
+          echo "HMM_MACOS_NATIVE_NOTIFICATION_AUTHORIZATION_HELPER=${notification_helper_bundle}" >> "$GITHUB_ENV"
+
       - name: Package signed and notarized macOS application
         shell: sh
         run: npm run package:desktop:mac
@@ -281,6 +395,8 @@ jobs:
           echo "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY=${evidence_directory}" >> "$GITHUB_ENV"
           node scripts/capture-macos-native-notification.mjs \
             --app="${install_directory}/Hype Comms.app" \
+            --helper="$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER" \
+            --notification-helper="$HMM_MACOS_NATIVE_NOTIFICATION_AUTHORIZATION_HELPER" \
             --artifacts="$evidence_directory"
 
       - name: Upload macOS notification evidence
