@@ -43,6 +43,7 @@
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "8.20.4",
     "@types/ws": "^8.18.0",
+    "@workos/emulate": "0.7.0",
     "tsx": "4.23.8",
     "typescript": "6.0.3",
     "vitest": "4.1.10",
