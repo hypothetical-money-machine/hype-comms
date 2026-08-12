@@ -90,6 +90,22 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
+  assert.match(
+    releaseWorkflow,
+    /platform: macOS[\s\S]*?native_notifications_enabled: "1"[\s\S]*?platform: Windows/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /platform: Windows[\s\S]*?native_notifications_enabled: "0"[\s\S]*?platform: Linux/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /platform: Linux[\s\S]*?native_notifications_enabled: "0"[\s\S]*?runs-on:/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}/u,
+  );
   assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
   assert.match(
     releaseWorkflow,

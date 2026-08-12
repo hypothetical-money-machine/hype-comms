@@ -46,9 +46,10 @@ The controller/presenter integration required all of these prerequisites before 
   replica cursor.
 
 The implementation now satisfies all four prerequisites, and Milestones 0 through 3 have
-deterministic coverage. This does not prove native operating-system behavior. Ordinary builds still
-compile presentation off and the device preference still defaults disabled until installed
-Milestone 4 evidence passes on the complete supported host matrix.
+deterministic coverage. This does not prove native operating-system behavior. Platform release
+artifacts advance independently: a signed platform may include an opt-in pilot while its device
+preference remains disabled by default, and other platforms remain compiled off until their own
+Milestone 4 gates are ready.
 
 ### Freshness, scope, and deduplication
 

@@ -1,10 +1,11 @@
 # Native notifications roadmap
 
-Status: implementation Milestones 0 through 3 are complete behind default-off build and device
-settings. Deterministic suites cover the DM, verified-mention, and participated-thread reasons;
-replica-first macOS window recreation; strict click-through; preferences; and headless capture.
-Milestone 4 remains open: no installed operating-system notification evidence exists, and neither
-the build nor device default may flip before the complete external host matrix passes.
+Status: implementation Milestones 0 through 3 are complete. Deterministic suites cover the DM,
+verified-mention, and participated-thread reasons; replica-first macOS window recreation; strict
+click-through; preferences; and headless capture. The signed/notarized macOS release artifact now
+includes the controller behind its default-off device preference; Windows and Linux release
+artifacts remain compiled off. Milestone 4 remains open and is evaluated per platform, so one
+platform can complete its pilot without waiting for the others.
 [architecture.md](architecture.md) and [ADR 0002](adr/0002-native-notification-boundary.md) are the
 implementation and security contract. This roadmap sequences the remaining proof and rollout work
 and does not override those documents.
@@ -60,11 +61,12 @@ The default-off notification implementation now includes:
 - Windows AppUserModelID configuration matching the packaged application ID before the first
   `BrowserWindow` is created.
 
-This is not a user rollout or a completed roadmap item. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is a
-build-time switch: unset or `0` compiles presentation off and `1` includes the controller. Even in
-an enabled build, the persisted device preference defaults to disabled and body preview defaults
-off. Ordinary demos clear the switch; the isolated headless demo pins it on and selects capture,
-never the Electron native presenter.
+This is not a completed cross-platform rollout. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is a
+build-time switch: unset or `0` compiles presentation off and `1` includes the controller. The macOS
+release job sets `1` for an opt-in pilot; Windows and Linux release jobs set `0`. Even in an enabled
+build, the persisted device preference defaults to disabled and body preview defaults off. Ordinary
+demos clear the switch; the isolated headless demo pins it on and selects capture, never the Electron
+native presenter.
 
 In a flag-enabled macOS build, closing the last window keeps only notification observation alive;
 it does not deliver or buffer renderer events or advance the renderer-owned cursor. A recreated
@@ -72,9 +74,10 @@ renderer catches up from its encrypted replica cursor before an authoritative sn
 sync, and a new realtime epoch. Default-off macOS builds retain the conservative realtime-stop
 fallback. Windows and Linux retain last-window stop-and-quit behavior.
 
-The remaining gate is installed native behavior across current and previous supported macOS on
-arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and
-Debian packages. Existing package smoke and headless screenshots do not satisfy that gate.
+The remaining per-platform gates cover installed native behavior on current and previous supported
+macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both
+AppImage and Debian packages. Existing package smoke and headless screenshots do not satisfy those
+gates. Passing or piloting one platform does not change another platform's release flag.
 
 ## Product policy
 
@@ -433,7 +436,7 @@ Evidence: the [strict wire-contract tests](../packages/contracts/test/contracts.
 [controller exact-reply tests](../apps/desktop/src/main/notification-controller.test.ts) cover the
 Milestone 3 boundary without local participation inference.
 
-### Milestone 4: packaged rollout gate for each slice
+### Milestone 4: packaged rollout gate for each platform
 
 Status: open. No installed operating-system toast/click evidence exists in this repository today,
 and existing CI does not run the required installed native matrix.
@@ -445,9 +448,9 @@ Deliverables:
 - capture a real notification with synthetic identities/content plus its click-through result under
   `docs/screenshots/`; use an OS-level/manual capture for the native toast and renderer capture for
   the resulting target;
-- exercise supported, denied where observable, disabled, focused, minimized, and click cases across
-  the complete native matrix: current and previous supported macOS on arm64/x64, Windows 11 on
-  x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from AppImage and Debian packages;
+- exercise supported, denied where observable, disabled, focused, minimized, and click cases on
+  each applicable platform matrix: current and previous supported macOS on arm64/x64, Windows 11
+  on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from AppImage and Debian packages;
 - include install, launch, logout, relaunch, offline restart, update teardown, and uninstall rather
   than treating a notification-only run as the architecture's Native E2E gate;
 - treat the existing package smoke as a build/content prerequisite only; it does not launch an
@@ -458,8 +461,9 @@ Deliverables:
   verify minimized-window behavior on Windows/Linux; and
 - document any platform-specific limitation in the user-facing setting and release notes.
 
-Exit gate: the feature-integration and native-E2E rows in `docs/architecture.md` are satisfied for
-notifications, and the normal release gate contains no notification-specific waiver.
+Per-platform exit gate: the applicable feature-integration and native-E2E rows in
+`docs/architecture.md` are satisfied for notifications before that platform leaves its opt-in
+pilot or changes its device default. The roadmap completes when every supported platform passes.
 
 ## Verification matrix
 
@@ -544,10 +548,11 @@ The deterministic suites also cover:
 
 - Keep the feature device-local; the initial DM/mention slice adds no database migration, push
   token, hosted worker, or server-side delivery queue.
-- Every Milestone 0 prerequisite is present in the implementation, but keep ordinary presentation
-  compiled off until Milestone 4 passes.
-- The enabled preference is present and still defaults disabled. The terminal rollout change may
-  flip build or device defaults only after the installed packaged gates pass.
+- Every Milestone 0 prerequisite is present. The macOS release artifact is the first opt-in pilot;
+  Windows and Linux remain compiled off until their platform rollout begins.
+- The enabled preference is present and still defaults disabled. A platform may include the
+  controller to collect installed pilot evidence without waiting for other platforms; changing its
+  device default still requires that platform's installed packaged gate.
 - A rollback disables native presentation while preserving existing unread, mention, sync, cache,
   and outbox state. It must not require a server rollback.
 - Treat presenter errors as local capability failures. They do not reconnect realtime, replay
@@ -572,8 +577,9 @@ native presenter or generic IPC.
 ## Completion gates
 
 The implementation may now enter explicit installed native-evidence runs because Milestones 0
-through 3 and their deterministic tests pass. Ordinary builds and the device preference remain
-default-off until the applicable Milestone 4 platform evidence passes.
+through 3 and their deterministic tests pass. The macOS release artifact supplies that opt-in
+pilot; ordinary development, Windows, and Linux builds remain compiled off, and every platform's
+device preference remains default-off until its applicable Milestone 4 evidence passes.
 
 The contract, DM/mention/thread behavior, privacy defaults, scope invalidation, replay suppression,
 and replica-first windowless recovery are implemented and proven deterministically. The
@@ -583,4 +589,5 @@ and replica-first windowless recovery are implemented and proven deterministical
 - `npm run check`, `npm run test:db`, relevant package verification, and native smoke lanes pass;
 - `ROADMAP.md`, `docs/architecture.md`, operations/release notes, and issue references agree; and
 - the installed application—not a mocked renderer alone—has demonstrated display and exact
-  click-through on every supported desktop platform.
+  click-through on every supported desktop platform, with each platform allowed to pass and ship
+  independently.

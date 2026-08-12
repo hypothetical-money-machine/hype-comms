@@ -86,14 +86,18 @@ A successful backup job without a tested restore is not a completed durability c
 
 ### Native notification rollout controls
 
-Native notifications are not enabled in ordinary development, package, or release builds.
-`HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is read by Electron Vite at build time and accepts only `0` or
-`1`; unset and `0` compile the controller off, report native support as unsupported, and never
-construct a presenter. Use `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED=1` only for an explicit development,
-headless, or packaged native-evidence build. It does not turn notifications on for a device: the
-versioned main-process preference still defaults disabled, and message-body preview remains a
+Native notifications are not enabled in ordinary development or ad hoc package builds. The
+signed/notarized macOS release build is the first platform-scoped, opt-in pilot: its build includes
+the controller, while Windows and Linux release builds explicitly compile presentation off.
+`HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is read by Electron Vite at build time and accepts only `0`
+or `1`; unset and `0` compile the controller off, report native support as unsupported, and never
+construct a presenter. Use `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED=1` only for an explicit
+development, headless, native-evidence, or platform-pilot build. It does not turn notifications on
+for a device: the versioned main-process preference still defaults disabled, and message-body
+preview remains a
 separate default-off preference. The variable has no effect when set only at runtime for an
-already-built artifact.
+already-built artifact. Release platforms advance independently: enabling the macOS artifact does
+not weaken the Windows or Linux evidence gates.
 
 The ordinary interactive demo deliberately removes notification and headless automation variables.
 The headless demo instead pins the build flag to `1`, sets `HYPE_COMMS_DESKTOP_HEADLESS=1`, uses isolated
@@ -120,16 +124,15 @@ detection but no portable OS permission query; keep permission `unknown` where t
 expose it and test denial only where observable. Do not derive `denied` from lack of support or
 retry a failed presenter without an explicit capability refresh.
 
-This flag is the rollback boundary for the current slice: rebuild without the flag (or with `0`)
-to remove presentation while leaving server state, encrypted replicas, unread/mention state,
-outboxes, and device preference files untouched. Do not set a release default until the
-installed-platform Milestone 4 evidence in
-[the native-notifications roadmap](native-notifications-roadmap.md) passes. No existing workflow
-installs and launches the applications or captures/clicks a native OS toast; package smoke verifies
-build contents only. The missing external matrix is current and previous supported macOS on
-arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and
-Debian packages. Keep ordinary build and device defaults off until every applicable display,
-suppression, attribution, click, lifecycle, and cleanup case passes on that matrix.
+This flag is the rollback boundary for the current slice: rebuild a platform with `0` to remove
+presentation while leaving server state, encrypted replicas, unread/mention state, outboxes, and
+device preference files untouched. Keep the device default off until that platform's installed
+Milestone 4 evidence in [the native-notifications roadmap](native-notifications-roadmap.md) passes.
+No existing workflow installs and launches the applications or captures/clicks a native OS toast;
+package smoke verifies build contents only. The missing external matrix is current and previous
+supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from
+both AppImage and Debian packages. A platform may enter an opt-in pilot and complete its gate
+without waiting for other platforms; the overall roadmap remains open until every platform passes.
 
 macOS signing/notarization is configured. Windows Authenticode is blocked on procuring a Windows
 code-signing certificate and publisher identity; no matching repository secrets or variables exist
