@@ -123,9 +123,14 @@ export async function startMacosNativeNotificationEvidence(options: {
       },
       {
         onClick: () => {
-          void writeRecord(artifactDirectory, { version: 1, status: "clicked" })
-            .then(options.onClick)
-            .catch(() => undefined);
+          void (async () => {
+            try {
+              await options.onClick();
+              await writeRecord(artifactDirectory, { version: 1, status: "clicked" });
+            } catch {
+              await writeRecord(artifactDirectory, { version: 1, status: "failed" });
+            }
+          })().catch(() => undefined);
         },
         onClose: () => undefined,
         onFailure: () => {

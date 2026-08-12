@@ -2109,22 +2109,24 @@ if (!hasSingleInstanceLock) {
 
       registerIpcHandlers();
 
-      const protocolRegistration = createProtocolClientRegistration(
-        app.isPackaged,
-        process.execPath,
-        process.argv,
-      );
-      if (
-        protocolRegistration.executablePath === undefined ||
-        protocolRegistration.arguments === undefined
-      ) {
-        app.setAsDefaultProtocolClient(protocolRegistration.scheme);
-      } else {
-        app.setAsDefaultProtocolClient(
-          protocolRegistration.scheme,
-          protocolRegistration.executablePath,
-          [...protocolRegistration.arguments],
+      if (macosNativeNotificationEvidenceConfiguration === null) {
+        const protocolRegistration = createProtocolClientRegistration(
+          app.isPackaged,
+          process.execPath,
+          process.argv,
         );
+        if (
+          protocolRegistration.executablePath === undefined ||
+          protocolRegistration.arguments === undefined
+        ) {
+          app.setAsDefaultProtocolClient(protocolRegistration.scheme);
+        } else {
+          app.setAsDefaultProtocolClient(
+            protocolRegistration.scheme,
+            protocolRegistration.executablePath,
+            [...protocolRegistration.arguments],
+          );
+        }
       }
 
       await createMainWindow();

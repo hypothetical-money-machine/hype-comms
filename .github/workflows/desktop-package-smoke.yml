@@ -268,8 +268,14 @@ jobs:
           install_directory="${RUNNER_TEMP}/hmm-macos-native-notification-install-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -m 700 "$evidence_directory"
           mkdir -m 700 "$install_directory"
+          shopt -s nullglob
+          source_bundles=("${GITHUB_WORKSPACE}/apps/desktop/release/mac-arm64/"*.app)
+          if [[ "${#source_bundles[@]}" -ne 1 || ! -d "${source_bundles[0]}" ]]; then
+            echo "Expected exactly one packaged ARM64 macOS application bundle." >&2
+            exit 1
+          fi
           /usr/bin/ditto \
-            "${GITHUB_WORKSPACE}/apps/desktop/release/mac-arm64/hype-comms.app" \
+            "${source_bundles[0]}" \
             "${install_directory}/Hype Comms.app"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "${install_directory}/Hype Comms.app"
           echo "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY=${evidence_directory}" >> "$GITHUB_ENV"

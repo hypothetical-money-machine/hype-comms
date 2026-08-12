@@ -193,72 +193,42 @@ ${programArguments}
   }
 }
 
-async function runInConsoleSession(command, arguments_) {
-  const { user, uid } = await readConsoleSession();
-  return runCommand("/usr/bin/sudo", [
-    "-n",
-    "/bin/launchctl",
-    "asuser",
-    uid,
-    "/usr/bin/sudo",
-    "-n",
-    "-u",
-    user,
-    command,
-    ...arguments_,
-  ]);
-}
-
 async function runAppleScript(source, logPath) {
   const arguments_ = ["-e", `with timeout of 5 seconds\n${source}\nend timeout`];
+  const semanticMisses = new Set([
+    "accessibility-disabled",
+    "notification-not-found",
+    "permission-not-found",
+  ]);
+  let directDetail;
   try {
     const result = await runCommand("/usr/bin/osascript", arguments_);
-    await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
-    return result.stdout.trim();
-  } catch (directError) {
-    try {
-      const result = await runInConsoleLaunchAgent("/usr/bin/osascript", arguments_);
-      await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
-      return result.stdout.trim();
-    } catch (agentError) {
-      try {
-        const result = await runInConsoleSession("/usr/bin/osascript", arguments_);
-        await appendFile(logPath, `${result.stdout.trim()}\n`, "utf8");
-        return result.stdout.trim();
-      } catch (consoleError) {
-        await appendFile(
-          logPath,
-          `Direct AppleScript: ${directError instanceof Error ? directError.message : "unknown failure"}\nLaunchAgent AppleScript: ${agentError instanceof Error ? agentError.message : "unknown failure"}\nConsole AppleScript: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
-          "utf8",
-        );
-        return "failed";
-      }
+    const value = result.stdout.trim();
+    if (!semanticMisses.has(value)) {
+      await appendFile(logPath, `${value}\n`, "utf8");
+      return value;
     }
+    directDetail = `Direct AppleScript returned ${value}.`;
+  } catch (directError) {
+    directDetail = `Direct AppleScript: ${directError instanceof Error ? directError.message : "unknown failure"}`;
   }
-}
-
-async function clickPermissionAllow(logPath) {
-  return runAppleScript(
-    `tell application "System Events"
-  if UI elements enabled is false then return "accessibility-disabled"
-  repeat with candidateProcess in application processes
-    try
-      repeat with candidateWindow in windows of candidateProcess
-        repeat with candidateElement in entire contents of candidateWindow
-          try
-            if role of candidateElement is "AXButton" and name of candidateElement is "Allow" then
-              click candidateElement
-              return "permission-allowed"
-            end if
-          end try
-        end repeat
-      end repeat
-    end try
-  end repeat
-end tell
-return "permission-not-found"`,
-    logPath,
-  );
+  try {
+    const result = await runInConsoleLaunchAgent("/usr/bin/osascript", arguments_);
+    const value = result.stdout.trim();
+    await appendFile(
+      logPath,
+      `${directDetail}\nLaunchAgent AppleScript returned ${value}.\n`,
+      "utf8",
+    );
+    return value;
+  } catch (agentError) {
+    await appendFile(
+      logPath,
+      `${directDetail}\nLaunchAgent AppleScript: ${agentError instanceof Error ? agentError.message : "unknown failure"}\n`,
+      "utf8",
+    );
+    return "failed";
+  }
 }
 
 async function clickSyntheticNotification(logPath) {
@@ -292,7 +262,6 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
   const deadline = Date.now() + (options.timeoutMs ?? RECORD_TIMEOUT_MS);
   const recordPath = path.join(artifactDirectory, `${name}.json`);
   const failedPath = path.join(artifactDirectory, "failed.json");
-  let nextPermissionAttempt = Date.now() + 2_000;
   while (true) {
     try {
       return JSON.parse(await readFile(recordPath, "utf8"));
@@ -306,10 +275,6 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
     }
     if (Date.now() >= deadline) break;
-    if (options.permissionLog !== undefined && Date.now() >= nextPermissionAttempt) {
-      await clickPermissionAllow(options.permissionLog);
-      nextPermissionAttempt = Date.now() + 2_000;
-    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Timed out waiting for ${name}.json`);
@@ -351,17 +316,13 @@ async function captureScreen(destination, logPath) {
       try {
         await runInConsoleLaunchAgent("/usr/sbin/screencapture", ["-x", destination]);
       } catch (agentError) {
-        try {
-          await runInConsoleSession("/usr/sbin/screencapture", ["-x", destination]);
-        } catch (consoleError) {
-          await appendFile(
-            logPath,
-            `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${launchctlError instanceof Error ? launchctlError.message : "unknown failure"}\nLaunchAgent capture: ${agentError instanceof Error ? agentError.message : "unknown failure"}\nConsole capture: ${consoleError instanceof Error ? consoleError.message : "unknown failure"}\n`,
-            "utf8",
-          );
-          await appendDisplayDiagnostics(logPath);
-          throw consoleError;
-        }
+        await appendFile(
+          logPath,
+          `Direct capture: ${directError instanceof Error ? directError.message : "unknown failure"}\nGUI bootstrap capture: ${launchctlError instanceof Error ? launchctlError.message : "unknown failure"}\nLaunchAgent capture: ${agentError instanceof Error ? agentError.message : "unknown failure"}\n`,
+          "utf8",
+        );
+        await appendDisplayDiagnostics(logPath);
+        throw agentError;
       }
     }
   }
@@ -406,9 +367,7 @@ async function main() {
   child.stderr.pipe(createWriteStream(appLog, { flags: "a", mode: 0o600 }));
 
   try {
-    const delivered = await waitForRecord(artifactDirectory, "delivered", {
-      permissionLog: automationLog,
-    });
+    const delivered = await waitForRecord(artifactDirectory, "delivered");
     if (delivered.version !== 1 || delivered.status !== "delivered") {
       throw new Error("Installed application wrote an invalid delivery record");
     }

@@ -87,12 +87,40 @@ describe("macOS native notification evidence", () => {
     ).toEqual({ version: 1, status: "delivered" });
 
     presenter.callbacks?.onClick();
-    await vi.waitFor(() => expect(onClick).toHaveBeenCalledOnce());
-    expect(
-      JSON.parse(await readFile(path.join(artifactDirectory, "clicked.json"), "utf8")),
-    ).toEqual({
-      version: 1,
-      status: "clicked",
+    await vi.waitFor(async () => {
+      expect(onClick).toHaveBeenCalledOnce();
+      expect(
+        JSON.parse(await readFile(path.join(artifactDirectory, "clicked.json"), "utf8")),
+      ).toEqual({
+        version: 1,
+        status: "clicked",
+      });
     });
+  });
+
+  it("records click success only after the installed interaction state is ready", async () => {
+    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const presenter = new EvidencePresenter();
+    const session = await startMacosNativeNotificationEvidence({
+      configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
+      presenter,
+      getHistory: async () => [],
+      onClick: async () => {
+        throw new Error("window restore failed");
+      },
+      timeoutMs: 100,
+      pollIntervalMs: 1,
+    });
+    void session.delivery.catch(() => undefined);
+
+    presenter.callbacks?.onClick();
+    await vi.waitFor(async () =>
+      expect(
+        JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8")),
+      ).toEqual({ version: 1, status: "failed" }),
+    );
+    await expect(
+      readFile(path.join(artifactDirectory, "clicked.json"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
