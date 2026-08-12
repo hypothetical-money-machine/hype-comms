@@ -45,6 +45,29 @@ const environment = {
   UPDATE_MANIFEST: "latest.yml",
 };
 
+const workflowJob = (workflow, jobName) => {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `Expected workflow job ${jobName}`);
+  const remainingWorkflow = workflow.slice(start + marker.length);
+  const nextJob = remainingWorkflow.search(/^ {2}[a-zA-Z0-9_-]+:\n/mu);
+  return nextJob === -1
+    ? workflow.slice(start)
+    : workflow.slice(start, start + marker.length + nextJob);
+};
+
+const matrixEntry = (job, platform) => {
+  const marker = `          - platform: ${platform}\n`;
+  const start = job.indexOf(marker);
+  assert.notEqual(start, -1, `Expected matrix entry for ${platform}`);
+  const remainingJob = job.slice(start + marker.length);
+  const nextEntry = remainingJob.search(/^ {10}- platform: /mu);
+  const matrixEnd = remainingJob.search(/^ {4}runs-on:/mu);
+  const endCandidates = [nextEntry, matrixEnd].filter((index) => index >= 0);
+  assert.ok(endCandidates.length > 0, `Expected matrix entry boundary for ${platform}`);
+  return job.slice(start, start + marker.length + Math.min(...endCandidates));
+};
+
 test("configures native ARM64 and x64 desktop release targets", async () => {
   const desktopPackage = JSON.parse(
     await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
@@ -58,6 +81,8 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     "utf8",
   );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
+  const releasePackageJob = workflowJob(releaseWorkflow, "package");
+  const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
   const targetArchitectures = (platform) =>
     desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
 
@@ -91,20 +116,20 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.match(
-    releaseWorkflow,
-    /platform: macOS[\s\S]*?native_notifications_enabled: "1"[\s\S]*?platform: Windows/u,
+    matrixEntry(releasePackageJob, "macOS"),
+    /^ {12}native_notifications_enabled: "1"$/mu,
   );
   assert.match(
-    releaseWorkflow,
-    /platform: Windows[\s\S]*?native_notifications_enabled: "0"[\s\S]*?platform: Linux/u,
+    matrixEntry(releasePackageJob, "Windows"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
   );
   assert.match(
-    releaseWorkflow,
-    /platform: Linux[\s\S]*?native_notifications_enabled: "0"[\s\S]*?runs-on:/u,
+    matrixEntry(releasePackageJob, "Linux"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
   );
   assert.match(
-    releaseWorkflow,
-    /HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}/u,
+    releasePackageJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
   );
   assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
   assert.match(
@@ -122,6 +147,20 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(
     packageSmokeWorkflow,
     /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
+    2,
+  );
+  assert.match(matrixEntry(smokePackageJob, "macOS"), /^ {12}native_notifications_enabled: "1"$/mu);
+  assert.match(
+    matrixEntry(smokePackageJob, "Windows"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
+  );
+  assert.match(matrixEntry(smokePackageJob, "Linux"), /^ {12}native_notifications_enabled: "0"$/mu);
+  assert.match(
+    smokePackageJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
   );
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
