@@ -103,7 +103,7 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
         ? { code: completion.handoffCode, state: completion.desktopState }
         : { error: "authentication_failed", state: completion.desktopState },
     );
-    const callbackUrl = new URL("hmm-chat://auth/callback");
+    const callbackUrl = new URL("hype-comms://auth/callback");
     if ("code" in parameters) {
       callbackUrl.searchParams.set("code", parameters.code);
     } else {

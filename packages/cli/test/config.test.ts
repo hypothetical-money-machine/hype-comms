@@ -96,7 +96,7 @@ describe("profile storage", () => {
     const value = runtime(home, { HMM_CHAT_CONFIG_DIR: configDir });
     await saveProfile(value, "work", {
       apiOrigin: "https://chat.example.test",
-      credential: { kind: "agent", token: `hmm_agent_${"b".repeat(43)}` },
+      credential: { kind: "agent", token: `hype_comms_agent_${"b".repeat(43)}` },
     });
 
     const saved = await saveProfile(value, "work", { apiOrigin: "https://other.example.test" });
@@ -114,7 +114,7 @@ describe("profile storage", () => {
       apiOrigin: "https://stored.example.test",
       credential: { kind: "human", sessionToken: "a".repeat(43) },
     });
-    const agentToken = `hmm_agent_${"b".repeat(43)}`;
+    const agentToken = `hype_comms_agent_${"b".repeat(43)}`;
     const resolved = await resolveProfile(
       {
         env: {
@@ -143,7 +143,7 @@ describe("profile storage", () => {
     const configDir = join(home, "config");
     await saveProfile(runtime(home, { HMM_CHAT_CONFIG_DIR: configDir }), "work", {
       apiOrigin: "https://stored.example.test",
-      credential: { kind: "agent", token: `hmm_agent_${"c".repeat(43)}` },
+      credential: { kind: "agent", token: `hype_comms_agent_${"c".repeat(43)}` },
     });
 
     const resolved = await resolveProfile(

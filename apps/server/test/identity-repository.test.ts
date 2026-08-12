@@ -7,7 +7,7 @@ import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const later = "2026-07-25T12:00:00.000Z";

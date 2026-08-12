@@ -157,7 +157,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   app.get("/bootstrap", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectBootstrap(
       await repository.bootstrap(identity),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
@@ -175,7 +175,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const query = listConversationsQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectConversationList(
       await repository.listConversations(identity, query.data.after, query.data.limit),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
@@ -187,7 +187,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "conversations:write");
     const result = createChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     const capable = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
     const created = await repository.createChannel(
       identity,
@@ -205,7 +205,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const result = archiveChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel update");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectConversationMutation(
       await repository.archiveChannel(identity, id),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
@@ -242,7 +242,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
     }
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return reply
       .code(201)
       .send(
@@ -259,7 +259,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     const supportsThreads = supported.includes(THREADS_CAPABILITY);
     const history = await repository.history(
       identity,
@@ -409,7 +409,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (typeof idempotencyKey !== "string" || idempotencyKey !== body.data.clientMessageId) {
       throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
     }
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return reply
       .code(201)
       .send(
@@ -459,7 +459,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return repository.sync(
       identity,
       query.data.after,
@@ -475,7 +475,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   app.post("/realtime/tickets", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    const supported = capabilities(request.headers["x-hmm-chat-capabilities"]);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return repository.issueRealtimeTicket(
       identity,
       supported.includes(REACTION_EVENTS_CAPABILITY),

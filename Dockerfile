@@ -19,12 +19,12 @@ COPY packages/contracts/package.json ./packages/contracts/
 COPY apps/server/package.json ./apps/server/
 COPY apps/desktop/package.json ./apps/desktop/
 RUN npm ci --include-workspace-root \
-  --workspace @hmm-chat/contracts \
-  --workspace @hmm-chat/server
+  --workspace @hype-comms/contracts \
+  --workspace @hype-comms/server
 
 COPY packages/contracts ./packages/contracts
 COPY apps/server ./apps/server
-RUN npm run build --workspace @hmm-chat/server
+RUN npm run build --workspace @hype-comms/server
 
 # ---------------------------------------------------------------------------
 # Production dependencies: the same install without dev dependencies.
@@ -35,16 +35,16 @@ COPY packages/contracts/package.json ./packages/contracts/
 COPY apps/server/package.json ./apps/server/
 COPY apps/desktop/package.json ./apps/desktop/
 RUN npm ci --omit=dev --include-workspace-root \
-  --workspace @hmm-chat/contracts \
-  --workspace @hmm-chat/server
+  --workspace @hype-comms/contracts \
+  --workspace @hype-comms/server
 
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
 FROM base AS runtime
 ENV NODE_ENV=production \
-    HMM_HOST=0.0.0.0 \
-    HMM_PORT=3000
+    HYPE_COMMS_HOST=0.0.0.0 \
+    HYPE_COMMS_PORT=3000
 
 COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=production-deps /app/package.json ./package.json

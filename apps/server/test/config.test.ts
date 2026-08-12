@@ -20,8 +20,8 @@ describe("loadConfig", () => {
     expect(
       loadConfig({
         NODE_ENV: "production",
-        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
-        HMM_EMAIL_DELIVERY: "manual",
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+        HYPE_COMMS_EMAIL_DELIVERY: "manual",
       }),
     ).toMatchObject({
       allowedOrigins: ["app://bundle"],
@@ -35,17 +35,17 @@ describe("loadConfig", () => {
     expect(
       loadConfig({
         NODE_ENV: "production",
-        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
-        HMM_EMAIL_DELIVERY: "manual",
-        HMM_AGENT_PROVISIONING_ENABLED: "true",
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+        HYPE_COMMS_EMAIL_DELIVERY: "manual",
+        HYPE_COMMS_AGENT_PROVISIONING_ENABLED: "true",
       }),
     ).toMatchObject({ agentProvisioningEnabled: true });
-    expect(() => loadConfig({ HMM_AGENT_PROVISIONING_ENABLED: "yes" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HYPE_COMMS_AGENT_PROVISIONING_ENABLED: "yes" })).toThrow(ConfigError);
   });
 
   it("rejects malformed ports and origins", () => {
-    expect(() => loadConfig({ HMM_PORT: "70000" })).toThrow(ConfigError);
-    expect(() => loadConfig({ HMM_ALLOWED_ORIGINS: "https://chat.example/path" })).toThrow(
+    expect(() => loadConfig({ HYPE_COMMS_PORT: "70000" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HYPE_COMMS_ALLOWED_ORIGINS: "https://chat.example/path" })).toThrow(
       ConfigError,
     );
   });
@@ -53,7 +53,7 @@ describe("loadConfig", () => {
   it("accepts only explicit proxy IP addresses and CIDRs", () => {
     expect(
       loadConfig({
-        HMM_TRUSTED_PROXIES: " 172.16.0.0/12,127.0.0.1,fd00::/8,172.16.0.0/12 ",
+        HYPE_COMMS_TRUSTED_PROXIES: " 172.16.0.0/12,127.0.0.1,fd00::/8,172.16.0.0/12 ",
       }),
     ).toMatchObject({
       trustedProxies: ["172.16.0.0/12", "127.0.0.1", "fd00::/8"],
@@ -69,23 +69,23 @@ describe("loadConfig", () => {
       "10.0.0.0/not-a-prefix",
       "10.0.0.0/8,,127.0.0.1",
     ]) {
-      expect(() => loadConfig({ HMM_TRUSTED_PROXIES: trustedProxies })).toThrow(ConfigError);
+      expect(() => loadConfig({ HYPE_COMMS_TRUSTED_PROXIES: trustedProxies })).toThrow(ConfigError);
     }
   });
 
   it("requires an unguessable metrics token", () => {
-    expect(() => loadConfig({ HMM_METRICS_TOKEN: "too-short" })).toThrow(ConfigError);
-    expect(loadConfig({ HMM_METRICS_TOKEN: "m".repeat(32) })).toMatchObject({
+    expect(() => loadConfig({ HYPE_COMMS_METRICS_TOKEN: "too-short" })).toThrow(ConfigError);
+    expect(loadConfig({ HYPE_COMMS_METRICS_TOKEN: "m".repeat(32) })).toMatchObject({
       metricsToken: "m".repeat(32),
     });
   });
 
   it("requires a safe, environment-appropriate public API origin", () => {
     expect(() =>
-      loadConfig({ HMM_PUBLIC_API_URL: "http://example.com/path?secret=value" }),
+      loadConfig({ HYPE_COMMS_PUBLIC_API_URL: "http://example.com/path?secret=value" }),
     ).toThrow(ConfigError);
     expect(() =>
-      loadConfig({ NODE_ENV: "production", HMM_PUBLIC_API_URL: "http://api.example.com" }),
+      loadConfig({ NODE_ENV: "production", HYPE_COMMS_PUBLIC_API_URL: "http://api.example.com" }),
     ).toThrow(ConfigError);
   });
 
@@ -94,13 +94,13 @@ describe("loadConfig", () => {
     expect(
       loadConfig({
         NODE_ENV: "production",
-        HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
-        HMM_DATABASE_POOL_SIZE: "7",
-        HMM_EMAIL_DELIVERY: "manual",
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+        HYPE_COMMS_DATABASE_POOL_SIZE: "7",
+        HYPE_COMMS_EMAIL_DELIVERY: "manual",
       }),
     ).toMatchObject({
       database: {
-        url: "postgres://hmm:secret@postgres/hmm_chat",
+        url: "postgres://hype_comms:secret@postgres/hype_comms",
         poolSize: 7,
       },
     });
@@ -109,11 +109,11 @@ describe("loadConfig", () => {
   it("loads SMTP and owner seed settings only when configured", () => {
     expect(
       loadConfig({
-        HMM_SMTP_URL: "smtp://mail.example.com:2525",
-        HMM_EMAIL_FROM: "Hype Comms <chat@example.com>",
-        HMM_OWNER_EMAIL: "OWNER@EXAMPLE.COM",
-        HMM_WORKSPACE_NAME: "Pilot",
-        HMM_WORKSPACE_SLUG: "pilot",
+        HYPE_COMMS_SMTP_URL: "smtp://mail.example.com:2525",
+        HYPE_COMMS_EMAIL_FROM: "Hype Comms <chat@example.com>",
+        HYPE_COMMS_OWNER_EMAIL: "OWNER@EXAMPLE.COM",
+        HYPE_COMMS_WORKSPACE_NAME: "Pilot",
+        HYPE_COMMS_WORKSPACE_SLUG: "pilot",
       }),
     ).toMatchObject({
       smtp: {
@@ -129,18 +129,20 @@ describe("loadConfig", () => {
   });
 
   it("requires SMTP URL and sender address together", () => {
-    expect(() => loadConfig({ HMM_SMTP_URL: "smtp://mail.example.com:2525" })).toThrow(ConfigError);
-    expect(() => loadConfig({ HMM_EMAIL_FROM: "chat@example.com" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HYPE_COMMS_SMTP_URL: "smtp://mail.example.com:2525" })).toThrow(
+      ConfigError,
+    );
+    expect(() => loadConfig({ HYPE_COMMS_EMAIL_FROM: "chat@example.com" })).toThrow(ConfigError);
   });
 
   it("loads an all-or-none staging AuthKit configuration", () => {
     expect(
       loadConfig({
-        HMM_DATABASE_URL: "postgres://hmm:secret@127.0.0.1/hmm_chat",
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@127.0.0.1/hype_comms",
         WORKOS_API_KEY: "sk_test_example",
         WORKOS_CLIENT_ID: "client_example",
         WORKOS_REDIRECT_URI: "http://127.0.0.1:3000/v1/auth/workos/callback",
-        HMM_AUTH_ENCRYPTION_KEY: "A".repeat(43),
+        HYPE_COMMS_AUTH_ENCRYPTION_KEY: "A".repeat(43),
       }),
     ).toMatchObject({
       authKitAdmissionEnabled: false,
@@ -159,22 +161,22 @@ describe("loadConfig", () => {
         WORKOS_API_KEY: "sk_live_example",
         WORKOS_CLIENT_ID: "client_example",
         WORKOS_REDIRECT_URI: "http://127.0.0.1:3000/v1/auth/workos/callback",
-        HMM_AUTH_ENCRYPTION_KEY: "A".repeat(43),
+        HYPE_COMMS_AUTH_ENCRYPTION_KEY: "A".repeat(43),
       }),
     ).toThrow(ConfigError);
 
-    expect(() => loadConfig({ HMM_AUTHKIT_ADMISSION_ENABLED: "yes" })).toThrow(ConfigError);
-    expect(() => loadConfig({ HMM_AUTHKIT_ADMISSION_ENABLED: "true" })).toThrow(
+    expect(() => loadConfig({ HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "yes" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "true" })).toThrow(
       /WorkOS provider settings/,
     );
   });
 
   it("binds the AuthKit callback to the configured public origin", () => {
     const base = {
-      HMM_DATABASE_URL: "postgres://hmm:secret@127.0.0.1/hmm_chat",
+      HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@127.0.0.1/hype_comms",
       WORKOS_API_KEY: "sk_test_example",
       WORKOS_CLIENT_ID: "client_example",
-      HMM_AUTH_ENCRYPTION_KEY: "A".repeat(43),
+      HYPE_COMMS_AUTH_ENCRYPTION_KEY: "A".repeat(43),
     };
     expect(() =>
       loadConfig({
@@ -192,11 +194,11 @@ describe("loadConfig", () => {
 
   it("pins AuthKit JWTs to the exact configurable HTTPS issuer", () => {
     const base = {
-      HMM_DATABASE_URL: "postgres://hmm:secret@127.0.0.1/hmm_chat",
+      HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@127.0.0.1/hype_comms",
       WORKOS_API_KEY: "sk_test_example",
       WORKOS_CLIENT_ID: "client_example",
       WORKOS_REDIRECT_URI: "http://127.0.0.1:3000/v1/auth/workos/callback",
-      HMM_AUTH_ENCRYPTION_KEY: "A".repeat(43),
+      HYPE_COMMS_AUTH_ENCRYPTION_KEY: "A".repeat(43),
     };
     expect(loadConfig({ ...base, WORKOS_JWT_ISSUER: "https://auth.example.com" })).toMatchObject({
       workos: { jwtIssuer: "https://auth.example.com" },
@@ -222,12 +224,12 @@ describe("loadConfig", () => {
   it("stages production WorkOS configuration while admission remains fail-closed", () => {
     const environment = {
       NODE_ENV: "production",
-      HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
-      HMM_EMAIL_DELIVERY: "manual",
+      HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+      HYPE_COMMS_EMAIL_DELIVERY: "manual",
       WORKOS_API_KEY: "sk_live_example",
       WORKOS_CLIENT_ID: "client_example",
       WORKOS_REDIRECT_URI: "https://chat-api.example.invalid/v1/auth/workos/callback",
-      HMM_AUTH_ENCRYPTION_KEY: "A".repeat(43),
+      HYPE_COMMS_AUTH_ENCRYPTION_KEY: "A".repeat(43),
     };
     expect(loadConfig(environment)).toMatchObject({
       authKitAdmissionEnabled: false,
@@ -235,15 +237,15 @@ describe("loadConfig", () => {
       workos: { clientId: "client_example" },
     });
 
-    expect(() => loadConfig({ ...environment, HMM_AUTHKIT_ADMISSION_ENABLED: "true" })).toThrow(
-      /WORKOS_WEBHOOK_SECRET/,
-    );
+    expect(() =>
+      loadConfig({ ...environment, HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "true" }),
+    ).toThrow(/WORKOS_WEBHOOK_SECRET/);
     expect(
       loadConfig({
         ...environment,
-        HMM_AUTHKIT_ADMISSION_ENABLED: "true",
+        HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "true",
         WORKOS_WEBHOOK_SECRET: "whsec_example_secret",
-        HMM_TRUSTED_PROXIES: "172.16.0.0/12",
+        HYPE_COMMS_TRUSTED_PROXIES: "172.16.0.0/12",
       }),
     ).toMatchObject({
       authKitAdmissionEnabled: true,
@@ -254,9 +256,9 @@ describe("loadConfig", () => {
     expect(() =>
       loadConfig({
         ...environment,
-        HMM_AUTHKIT_ADMISSION_ENABLED: "true",
+        HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "true",
         WORKOS_WEBHOOK_SECRET: "whsec_example_secret",
       }),
-    ).toThrow(/HMM_TRUSTED_PROXIES/);
+    ).toThrow(/HYPE_COMMS_TRUSTED_PROXIES/);
   });
 });

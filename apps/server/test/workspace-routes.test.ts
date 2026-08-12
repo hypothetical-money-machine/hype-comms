@@ -23,7 +23,7 @@ const taskId = "10000000-0000-4000-8000-000000000006";
 const conversationId = "10000000-0000-4000-8000-000000000007";
 const replyId = "10000000-0000-4000-8000-000000000008";
 const sessionToken = "a".repeat(43);
-const botToken = `hmm_bot_${"b".repeat(43)}`;
+const botToken = `hype_comms_bot_${"b".repeat(43)}`;
 
 const currentUser: CurrentUser = {
   user: {
@@ -156,7 +156,7 @@ class FakeWorkspaceRepository {
         authorId: userId,
         threadRootId: null,
         body: "Root",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: now,
@@ -176,7 +176,7 @@ class FakeWorkspaceRepository {
           authorId: userId,
           threadRootId: messageId,
           body: "Reply",
-          bodyFormat: "hmm_markdown_v1",
+          bodyFormat: "hype_comms_markdown_v1",
           editedAt: null,
           deletedAt: null,
           createdAt: now,
@@ -197,7 +197,7 @@ class FakeWorkspaceRepository {
       authorId: userId,
       threadRootId: null,
       body: "Root",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       editedAt: null,
       deletedAt: null,
       createdAt: now,
@@ -216,7 +216,7 @@ class FakeWorkspaceRepository {
       authorId: userId,
       threadRootId: null,
       body: "Root",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       editedAt: null,
       deletedAt: null,
       createdAt: now,
@@ -233,7 +233,7 @@ class FakeWorkspaceRepository {
       authorId: userId,
       threadRootId: messageId,
       body: "Reply",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       editedAt: null,
       deletedAt: null,
       createdAt: now,
@@ -319,14 +319,14 @@ describe("event capability routes", () => {
     const legacy = await app.inject({
       method: "GET",
       url: "/v1/bootstrap",
-      headers: { cookie: `hmm_session=${sessionToken}` },
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
     const capable = await app.inject({
       method: "GET",
       url: "/v1/bootstrap",
       headers: {
-        cookie: `hmm_session=${sessionToken}`,
-        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+        cookie: `hype_comms_session=${sessionToken}`,
+        "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
       },
     });
 
@@ -341,10 +341,10 @@ describe("event capability routes", () => {
   it("strips channel mode from every legacy conversation response surface", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const legacyHeaders = { cookie: `hmm_session=${sessionToken}` };
+    const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
     const capableHeaders = {
       ...legacyHeaders,
-      "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+      "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
     };
     const requests = [
       { method: "GET", url: "/v1/conversations?limit=50" },
@@ -389,8 +389,8 @@ describe("event capability routes", () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = {
-      cookie: `hmm_session=${sessionToken}`,
-      "x-hmm-chat-capabilities":
+      cookie: `hype_comms_session=${sessionToken}`,
+      "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
         PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
     };
@@ -427,7 +427,7 @@ describe("event capability routes", () => {
   it("keeps legacy clients opted out and rejects malformed capability headers", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const headers = { cookie: `hmm_session=${sessionToken}` };
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const legacy = await app.inject({
       method: "GET",
@@ -437,7 +437,7 @@ describe("event capability routes", () => {
     const malformed = await app.inject({
       method: "POST",
       url: "/v1/realtime/tickets",
-      headers: { ...headers, "x-hmm-chat-capabilities": "reaction events" },
+      headers: { ...headers, "x-hype-comms-capabilities": "reaction events" },
     });
 
     expect(legacy.statusCode).toBe(200);
@@ -462,7 +462,7 @@ describe("event capability routes", () => {
       method: "POST",
       url: "/v1/reactions/query",
       headers: {
-        cookie: `hmm_session=${sessionToken}`,
+        cookie: `hype_comms_session=${sessionToken}`,
         "content-type": "application/json",
       },
       payload: { messageIds: [messageId] },
@@ -480,7 +480,7 @@ describe("event capability routes", () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const path = `/v1/messages/${messageId}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
-    const headers = { cookie: `hmm_session=${sessionToken}` };
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const added = await app.inject({ method: "PUT", url: path, headers });
     const removed = await app.inject({ method: "DELETE", url: path, headers });
@@ -504,7 +504,7 @@ describe("event capability routes", () => {
   it("rejects text and multiple emoji before calling the repository", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const headers = { cookie: `hmm_session=${sessionToken}` };
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     for (const emoji of ["shipit", "👍 🎉"]) {
       const response = await app.inject({
@@ -525,7 +525,7 @@ describe("event capability routes", () => {
       method: "POST",
       url: "/v1/reactions/query",
       headers: {
-        cookie: `hmm_session=${sessionToken}`,
+        cookie: `hype_comms_session=${sessionToken}`,
         "content-type": "application/json",
       },
       payload: { messageIds: [messageId, messageId] },
@@ -540,7 +540,7 @@ describe("task routes", () => {
   it("validates paging and requires idempotency for every task mutation", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const headers = { cookie: `hmm_session=${sessionToken}` };
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const listed = await app.inject({
       method: "GET",
@@ -689,7 +689,7 @@ describe("task routes", () => {
       method: "GET",
       url: `/v1/conversations/${messageId}/tasks`,
       headers: {
-        cookie: `hmm_session=${sessionToken}`,
+        cookie: `hype_comms_session=${sessionToken}`,
         authorization: "Bearer malformed",
       },
     });
@@ -827,7 +827,7 @@ describe("message thread routes", () => {
     const response = await app.inject({
       method: "GET",
       url: `/v1/messages/${messageId}`,
-      headers: { cookie: `hmm_session=${sessionToken}` },
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
     expect(response.statusCode).toBe(200);
@@ -847,7 +847,7 @@ describe("message thread routes", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/messages/not-a-uuid",
-      headers: { cookie: `hmm_session=${sessionToken}` },
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
     expect(response.statusCode).toBe(400);
@@ -857,7 +857,7 @@ describe("message thread routes", () => {
   it("gates thread summaries while accepting legacy and capable history clients", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const headers = { cookie: `hmm_session=${sessionToken}` };
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const legacy = await app.inject({
       method: "GET",
@@ -867,7 +867,7 @@ describe("message thread routes", () => {
     const capable = await app.inject({
       method: "GET",
       url: `/v1/conversations/${conversationId}/messages`,
-      headers: { ...headers, "x-hmm-chat-capabilities": THREADS_CAPABILITY },
+      headers: { ...headers, "x-hype-comms-capabilities": THREADS_CAPABILITY },
     });
 
     expect(legacy.statusCode).toBe(200);
@@ -907,10 +907,10 @@ describe("message thread routes", () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = {
-      cookie: `hmm_session=${sessionToken}`,
+      cookie: `hype_comms_session=${sessionToken}`,
       "content-type": "application/json",
       "idempotency-key": replyId,
-      "x-hmm-chat-capabilities": `${THREADS_CAPABILITY},${ANNOUNCEMENT_CHANNELS_CAPABILITY}`,
+      "x-hype-comms-capabilities": `${THREADS_CAPABILITY},${ANNOUNCEMENT_CHANNELS_CAPABILITY}`,
     };
 
     const thread = await app.inject({
@@ -925,7 +925,7 @@ describe("message thread routes", () => {
       payload: {
         threadRootId: messageId,
         body: "Reply",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: replyId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -955,7 +955,7 @@ describe("message thread routes", () => {
     const response = await app.inject({
       method: "GET",
       url: `/v1/messages/${messageId}/thread?limit=101`,
-      headers: { cookie: `hmm_session=${sessionToken}` },
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
     expect(response.statusCode).toBe(400);
@@ -974,7 +974,7 @@ describe("channel mutation routes", () => {
       access: "workspace",
     };
     const headers = {
-      cookie: `hmm_session=${sessionToken}`,
+      cookie: `hype_comms_session=${sessionToken}`,
       "content-type": "application/json",
       "idempotency-key": messageId,
     };

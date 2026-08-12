@@ -274,7 +274,7 @@ describe("ChatSession lifecycle", () => {
       async () =>
         new Response(null, {
           status: 204,
-          headers: { "x-hmm-authkit-logout-url": logoutUrl },
+          headers: { "x-hype-comms-authkit-logout-url": logoutUrl },
         }),
       cookies,
     );
@@ -294,7 +294,7 @@ describe("ChatSession lifecycle", () => {
         new Response(null, {
           status: 204,
           headers: {
-            "x-hmm-authkit-logout-url": "https://evil.example/logout?access_token=secret",
+            "x-hype-comms-authkit-logout-url": "https://evil.example/logout?access_token=secret",
           },
         }),
       cookies,

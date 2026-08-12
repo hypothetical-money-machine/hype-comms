@@ -33,6 +33,6 @@ describe("identity tokens", () => {
 
     expect(agentTokenSecretSchema.parse(issued.token)).toBe(issued.token);
     expect(issued.hash).toEqual(hashToken(issued.token));
-    expect(issued.hash).not.toEqual(hashToken(issued.token.slice("hmm_agent_".length)));
+    expect(issued.hash).not.toEqual(hashToken(issued.token.slice("hype_comms_agent_".length)));
   });
 });

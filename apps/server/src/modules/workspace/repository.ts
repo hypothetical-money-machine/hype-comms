@@ -173,7 +173,7 @@ interface MessageRow extends QueryResultRow {
   author_id: string;
   thread_root_id: string | null;
   body: string;
-  body_format: "hmm_markdown_v1";
+  body_format: "hype_comms_markdown_v1";
   edited_at: Date | string | null;
   deleted_at: Date | string | null;
   created_at: Date | string;

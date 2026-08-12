@@ -121,7 +121,7 @@ const notificationMessage: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Recovered notification target",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,

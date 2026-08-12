@@ -21,7 +21,7 @@ function message(id: string, sequence: string): Message {
     authorId: USER_ID,
     threadRootId: null,
     body: `Message ${sequence}`,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,

@@ -33,7 +33,7 @@ import {
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
-const COOKIE_NAME = "hmm_session";
+const COOKIE_NAME = "hype_comms_session";
 const MAGIC_LINK_PAGE_HEADERS = {
   "cache-control": "no-store, no-cache, must-revalidate",
   pragma: "no-cache",
@@ -193,7 +193,7 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send(invalidMagicLinkPage());
     }
 
-    const target = new URL("hmm-chat://auth/callback");
+    const target = new URL("hype-comms://auth/callback");
     target.searchParams.set("token", result.data);
     return reply.code(200).send(magicLinkPage(target.toString()));
   });

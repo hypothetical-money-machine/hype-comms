@@ -77,11 +77,11 @@ describe("AuthKit revoke-all CLI", () => {
       runAuthKitRevokeAllCli(
         ["--confirm", AUTHKIT_REVOKE_ALL_CONFIRMATION],
         {
-          HMM_DATABASE_URL: "postgres://hmm:secret@postgres/hmm_chat",
-          HMM_DATABASE_POOL_SIZE: "3",
+          HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+          HYPE_COMMS_DATABASE_POOL_SIZE: "3",
           // Deliberately incomplete unrelated settings must not block the emergency path.
           WORKOS_API_KEY: "unavailable-provider-credential",
-          HMM_SMTP_URL: "not-a-valid-smtp-url",
+          HYPE_COMMS_SMTP_URL: "not-a-valid-smtp-url",
         },
         output.streams,
         { createDatabasePool, now: () => now },
@@ -89,7 +89,7 @@ describe("AuthKit revoke-all CLI", () => {
     ).resolves.toBe(0);
 
     expect(createDatabasePool).toHaveBeenCalledWith({
-      url: "postgres://hmm:secret@postgres/hmm_chat",
+      url: "postgres://hype_comms:secret@postgres/hype_comms",
       poolSize: 3,
     });
     expect(query.mock.calls.map(([statement]) => statement)).toEqual([
@@ -109,10 +109,19 @@ describe("AuthKit revoke-all CLI", () => {
 
   it("validates only a PostgreSQL URL and bounded pool size before connecting", async () => {
     for (const environment of [
-      { HMM_DATABASE_URL: "https://database.example/hmm" },
-      { HMM_DATABASE_URL: "postgres://hmm@postgres/hmm", HMM_DATABASE_POOL_SIZE: "0" },
-      { HMM_DATABASE_URL: "postgres://hmm@postgres/hmm", HMM_DATABASE_POOL_SIZE: "101" },
-      { HMM_DATABASE_URL: "postgres://hmm@postgres/hmm", HMM_DATABASE_POOL_SIZE: "1.5" },
+      { HYPE_COMMS_DATABASE_URL: "https://database.example/hype_comms" },
+      {
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms@postgres/hype_comms",
+        HYPE_COMMS_DATABASE_POOL_SIZE: "0",
+      },
+      {
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms@postgres/hype_comms",
+        HYPE_COMMS_DATABASE_POOL_SIZE: "101",
+      },
+      {
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms@postgres/hype_comms",
+        HYPE_COMMS_DATABASE_POOL_SIZE: "1.5",
+      },
     ]) {
       const createDatabasePool = vi.fn();
       const output = new TestOutput();

@@ -136,7 +136,7 @@ export const conversationMembershipSchema = z
   })
   .strict();
 
-export const messageBodyFormatSchema = z.literal("hmm_markdown_v1");
+export const messageBodyFormatSchema = z.literal("hype_comms_markdown_v1");
 export const messageBodySchema = z
   .string()
   .max(4_000)

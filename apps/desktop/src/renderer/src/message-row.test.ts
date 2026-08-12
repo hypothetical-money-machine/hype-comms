@@ -36,7 +36,7 @@ const message: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Root message",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,
@@ -50,7 +50,7 @@ const pendingMessage: OutboxItem = {
     message: {
       threadRootId: null,
       body: "Pending message",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       clientMessageId: message.clientMessageId,
       mentionedUserIds: [],
       attachmentIds: [],

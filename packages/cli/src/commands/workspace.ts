@@ -244,7 +244,7 @@ export async function messagesCommand(
           ? {}
           : { file: stringOption(parsed, "file")! }),
       }),
-      bodyFormat: "hmm_markdown_v1" as const,
+      bodyFormat: "hype_comms_markdown_v1" as const,
       clientMessageId: clientMessageId.data,
       mentionedUserIds: [...new Set(mentionedUserIds)],
       attachmentIds: [],

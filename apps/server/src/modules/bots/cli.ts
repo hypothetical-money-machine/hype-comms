@@ -211,12 +211,12 @@ export async function runBotCli(
 ): Promise<number> {
   let pool: ReturnType<typeof createPool> | undefined;
   try {
-    if (env.HMM_DATABASE_URL === undefined || env.HMM_DATABASE_URL === "") {
-      throw new Error("HMM_DATABASE_URL is required");
+    if (env.HYPE_COMMS_DATABASE_URL === undefined || env.HYPE_COMMS_DATABASE_URL === "") {
+      throw new Error("HYPE_COMMS_DATABASE_URL is required");
     }
     const command = parseCommand(argv);
     const config = loadConfig(env);
-    if (config.database === undefined) throw new Error("HMM_DATABASE_URL is required");
+    if (config.database === undefined) throw new Error("HYPE_COMMS_DATABASE_URL is required");
     pool = createPool(config.database);
     await runMigrations(pool);
     const identityRepository = new IdentityRepository(pool);
@@ -225,7 +225,7 @@ export async function runBotCli(
       workspace === null ? null : await identityRepository.findActiveOwnerMembership(workspace.id);
     if (workspace === null || owner === null) {
       throw new Error(
-        "No seeded workspace owner was found. Set HMM_OWNER_EMAIL and start the server once to seed it.",
+        "No seeded workspace owner was found. Set HYPE_COMMS_OWNER_EMAIL and start the server once to seed it.",
       );
     }
     const now = new Date();

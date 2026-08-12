@@ -13,7 +13,7 @@ export function createPool(config: DatabasePoolConfig): Pool {
     max: config.poolSize,
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 30_000,
-    application_name: "hmm-chat-server",
+    application_name: "hype-comms-server",
   });
 
   // A Pool without an error listener turns an idle-client network error into an uncaught event.

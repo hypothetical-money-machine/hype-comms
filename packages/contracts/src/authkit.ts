@@ -54,7 +54,7 @@ export const authKitProviderSessionIdSchema = z
   .regex(/^session_[A-Za-z0-9]+$/, "Expected a WorkOS session ID");
 
 /** Additive response header used by new desktop clients; older clients safely ignore it. */
-export const authKitLogoutUrlHeaderName = "x-hmm-authkit-logout-url";
+export const authKitLogoutUrlHeaderName = "x-hype-comms-authkit-logout-url";
 
 /**
  * The SDK-generated URL is deliberately pinned to WorkOS' HTTPS session-revocation endpoint and

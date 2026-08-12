@@ -13,7 +13,7 @@ import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = new Date("2026-08-05T12:00:00.000Z");
 const expiresAt = "2026-11-03T12:00:00.000Z";
@@ -85,7 +85,7 @@ describeWithPostgres("BotService", () => {
     );
     await pool.query(
       `INSERT INTO workspaces (id, name, slug, created_by)
-       VALUES ($1, 'Hype Comms', 'hmm-chat', $2)`,
+       VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
     await pool.query(

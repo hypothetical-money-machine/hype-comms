@@ -32,7 +32,7 @@ const result: MessageSearchResult = {
     authorId: USER_ID,
     threadRootId: null,
     body: "Quarterly avalanche review",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,

@@ -28,7 +28,7 @@ export const agentScopesSchema = z
 /** A non-expiring agent credential. The prefixed plaintext is revealed only when it is created. */
 export const agentTokenSecretSchema = z
   .string()
-  .regex(/^hmm_agent_[A-Za-z0-9_-]{43}$/, "Expected an HMM Chat agent token");
+  .regex(/^hype_comms_agent_[A-Za-z0-9_-]{43}$/, "Expected a Hype Comms agent token");
 
 /**
  * The authenticated agent's own identity. Human `/auth/me` responses retain `currentUserSchema`

@@ -11,7 +11,7 @@ import { seedDevelopmentDemo, writeDevelopmentDemoCallbacks } from "../src/dev-s
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
@@ -32,7 +32,7 @@ describeWithPostgres("development demo seed", () => {
     await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
     pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
     await runMigrations(pool);
-    callbackDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-demo-callbacks-"));
+    callbackDirectory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-callbacks-"));
   });
 
   afterAll(async () => {
@@ -46,8 +46,8 @@ describeWithPostgres("development demo seed", () => {
   it("seeds two sign-in-ready clients and stable conversation data", async () => {
     const config = loadConfig({
       NODE_ENV: "test",
-      HMM_DATABASE_URL: schemaScopedUrl(testDatabaseUrl ?? "", schemaName),
-      HMM_PUBLIC_API_URL: "http://127.0.0.1:3000",
+      HYPE_COMMS_DATABASE_URL: schemaScopedUrl(testDatabaseUrl ?? "", schemaName),
+      HYPE_COMMS_PUBLIC_API_URL: "http://127.0.0.1:3000",
     });
 
     const first = await seedDevelopmentDemo(pool, config);
@@ -62,7 +62,7 @@ describeWithPostgres("development demo seed", () => {
     ]);
     for (const client of [...first.clients, ...second.clients]) {
       const callback = new URL(client.authCallbackUrl);
-      expect(callback.protocol).toBe("hmm-chat:");
+      expect(callback.protocol).toBe("hype-comms:");
       expect(callback.hostname).toBe("auth");
       expect(callback.pathname).toBe("/callback");
       expect(callback.searchParams.get("token")).not.toBeNull();

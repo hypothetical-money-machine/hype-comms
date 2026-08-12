@@ -17,6 +17,6 @@ export function issueToken(): IssuedToken {
 }
 
 export function issueAgentToken(): IssuedToken {
-  const token = `hmm_agent_${randomBytes(32).toString("base64url")}`;
+  const token = `hype_comms_agent_${randomBytes(32).toString("base64url")}`;
   return { token, hash: hashToken(token) };
 }

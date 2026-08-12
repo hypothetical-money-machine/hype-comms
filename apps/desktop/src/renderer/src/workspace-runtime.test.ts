@@ -321,7 +321,7 @@ function message(
     authorId,
     threadRootId: null,
     body: authorId === USER_ID ? "Mine" : "Theirs",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,
@@ -1463,7 +1463,7 @@ function queuedOperation(
     message: {
       threadRootId: null,
       body,
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       clientMessageId,
       mentionedUserIds: [],
       attachmentIds: [],

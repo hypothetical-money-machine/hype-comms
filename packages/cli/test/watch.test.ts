@@ -68,7 +68,7 @@ describe("watch", () => {
                 authorId: USER_ID,
                 threadRootId: null,
                 body: "hello",
-                bodyFormat: "hmm_markdown_v1",
+                bodyFormat: "hype_comms_markdown_v1",
                 editedAt: null,
                 deletedAt: null,
                 createdAt: TIMESTAMP,
@@ -116,7 +116,7 @@ describe("watch", () => {
       homeDirectory: await mkdtemp(join(tmpdir(), "hmm-chat-watch-")),
       env: {
         HMM_CHAT_API_ORIGIN: `http://127.0.0.1:${address.port}`,
-        HMM_CHAT_TOKEN: `hmm_agent_${"a".repeat(43)}`,
+        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch,
     });

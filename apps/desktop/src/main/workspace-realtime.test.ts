@@ -125,7 +125,7 @@ function messageEvent(
         authorId: USER_B,
         threadRootId: null,
         body,
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,

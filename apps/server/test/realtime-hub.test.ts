@@ -73,7 +73,7 @@ class FakePoolClient extends EventEmitter {
 
   notify(workspace: string, sequence: number): boolean {
     return this.emit("notification", {
-      channel: "hmm_chat_events",
+      channel: "hype_comms_events",
       payload: `${workspace}:${sequence}`,
     });
   }

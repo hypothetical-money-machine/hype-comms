@@ -163,7 +163,9 @@ function mapBot(row: BotUserRow): User {
 }
 
 function issueBotToken(): { readonly token: BotAccessToken; readonly hash: Buffer } {
-  const token = botAccessTokenSchema.parse(`hmm_bot_${randomBytes(32).toString("base64url")}`);
+  const token = botAccessTokenSchema.parse(
+    `hype_comms_bot_${randomBytes(32).toString("base64url")}`,
+  );
   return { token, hash: hashToken(token) };
 }
 

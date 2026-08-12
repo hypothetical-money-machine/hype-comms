@@ -75,10 +75,10 @@ describe("operational routes", () => {
     expect(authorized.statusCode).toBe(200);
     expect(authorized.headers["cache-control"]).toBe("no-store");
     expect(authorized.body).toContain(
-      'hmm_chat_http_requests_total{method="GET",route="/livez",status_code="200"} 1',
+      'hype_comms_http_requests_total{method="GET",route="/livez",status_code="200"} 1',
     );
-    expect(authorized.body).toContain('hmm_chat_postgres_pool_connections{state="waiting"} 1');
-    expect(authorized.body).toMatch(/^hmm_chat_refresh_token_reuse_total 1$/m);
+    expect(authorized.body).toContain('hype_comms_postgres_pool_connections{state="waiting"} 1');
+    expect(authorized.body).toMatch(/^hype_comms_refresh_token_reuse_total 1$/m);
   });
 
   it("answers malformed bodies with 400 rather than an internal error", async () => {
@@ -137,7 +137,7 @@ describe("operational routes", () => {
 
 describe("static web client", () => {
   it("serves the browser client without exposing server files", async () => {
-    const webRoot = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-web-"));
+    const webRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-web-"));
     await writeFile(path.join(webRoot, "index.html"), "<!doctype html><title>Hype Comms</title>");
     const app = await buildApp({ webRoot });
     apps.push(app);
@@ -176,7 +176,7 @@ describe("realtime route", () => {
     expect(consumeTicket).not.toHaveBeenCalled();
   });
 
-  // `hmm-chat-cli watch` runs on `ws`, which sends no Origin, and the CLI supports human
+  // `hype-comms-cli watch` runs on `ws`, which sends no Origin, and the CLI supports human
   // profiles as well as agent tokens. Requiring an Origin for device-session tickets made that
   // flow redeem-then-403, burning a ticket per attempt.
   it("accepts an originless client holding a device-session ticket", async () => {

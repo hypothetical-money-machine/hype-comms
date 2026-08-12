@@ -862,7 +862,7 @@ export class WorkspaceRuntime {
       message: {
         threadRootId,
         body,
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId,
         mentionedUserIds: [...mentionedUserIds],
         attachmentIds: [],

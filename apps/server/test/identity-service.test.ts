@@ -20,7 +20,7 @@ import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const initialNow = Date.parse("2026-07-24T12:00:00.000Z");
 
@@ -241,7 +241,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const invitationResponse = await app.inject({
       method: "POST",
       url: "/v1/auth/invitations",
-      headers: { cookie: `hmm_session=${ownerSession.token}` },
+      headers: { cookie: `hype_comms_session=${ownerSession.token}` },
       payload: { email: "invitee@example.com", role: "member" },
     });
     await service.requestMagicLink(emailSchema.parse("invitee@example.com"), "127.0.0.2");
@@ -251,11 +251,11 @@ describeWithPostgres("IdentityService and identity routes", () => {
       headers: { "user-agent": "Vitest browser" },
       payload: { token: sender.latestTokenFor(emailSchema.parse("invitee@example.com")) },
     });
-    const cookie = redemption.cookies.find(({ name }) => name === "hmm_session");
+    const cookie = redemption.cookies.find(({ name }) => name === "hype_comms_session");
     const me = await app.inject({
       method: "GET",
       url: "/v1/auth/me",
-      headers: { cookie: `hmm_session=${cookie?.value ?? ""}` },
+      headers: { cookie: `hype_comms_session=${cookie?.value ?? ""}` },
     });
     await app.close();
 
@@ -297,7 +297,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     await app.close();
 
     expect(landing.statusCode).toBe(200);
-    expect(landing.body).toContain(`hmm-chat://auth/callback?token=${token}`);
+    expect(landing.body).toContain(`hype-comms://auth/callback?token=${token}`);
     expect(landing.headers["referrer-policy"]).toBe("no-referrer");
     expect(landing.headers["cache-control"]).toContain("no-store");
     expect(landing.headers.pragma).toBe("no-cache");
@@ -506,10 +506,10 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/auth/session/refresh",
-      headers: { cookie: `hmm_session=${session.token}` },
+      headers: { cookie: `hype_comms_session=${session.token}` },
     });
     await app.close();
-    const cookie = response.cookies.find(({ name }) => name === "hmm_session");
+    const cookie = response.cookies.find(({ name }) => name === "hype_comms_session");
 
     expect(response.statusCode).toBe(204);
     expect(cookie?.value).not.toBe(session.token);
@@ -570,30 +570,30 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const listed = await app.inject({
       method: "GET",
       url: "/v1/auth/devices",
-      headers: { cookie: `hmm_session=${first.token}` },
+      headers: { cookie: `hype_comms_session=${first.token}` },
     });
     const refreshed = await app.inject({
       method: "POST",
       url: "/v1/auth/session/refresh",
-      headers: { cookie: `hmm_session=${first.token}` },
+      headers: { cookie: `hype_comms_session=${first.token}` },
     });
-    const refreshedCookie = refreshed.cookies.find(({ name }) => name === "hmm_session");
+    const refreshedCookie = refreshed.cookies.find(({ name }) => name === "hype_comms_session");
     const oldToken = await app.inject({
       method: "GET",
       url: "/v1/auth/me",
-      headers: { cookie: `hmm_session=${first.token}` },
+      headers: { cookie: `hype_comms_session=${first.token}` },
     });
     const secondRecord = await repository.findDeviceSessionByTokenHash(hashToken(second.token));
     if (secondRecord === null) throw new Error("Second session was not created");
     const revoked = await app.inject({
       method: "DELETE",
       url: `/v1/auth/devices/${secondRecord.id}`,
-      headers: { cookie: `hmm_session=${refreshedCookie?.value ?? ""}` },
+      headers: { cookie: `hype_comms_session=${refreshedCookie?.value ?? ""}` },
     });
     const signedOut = await app.inject({
       method: "DELETE",
       url: "/v1/auth/session",
-      headers: { cookie: `hmm_session=${refreshedCookie?.value ?? ""}` },
+      headers: { cookie: `hype_comms_session=${refreshedCookie?.value ?? ""}` },
     });
     await app.close();
 
@@ -605,7 +605,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(revoked.statusCode).toBe(204);
     expect(await service.authenticate(second.token)).toBeNull();
     expect(signedOut.statusCode).toBe(204);
-    expect(signedOut.cookies.find(({ name }) => name === "hmm_session")).toMatchObject({
+    expect(signedOut.cookies.find(({ name }) => name === "hype_comms_session")).toMatchObject({
       value: "",
       maxAge: 0,
       httpOnly: true,
@@ -654,7 +654,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/auth/invitations",
-      headers: { cookie: `hmm_session=${memberSession.token}` },
+      headers: { cookie: `hype_comms_session=${memberSession.token}` },
       payload: { email: "other@example.com", role: "member" },
     });
     await app.close();

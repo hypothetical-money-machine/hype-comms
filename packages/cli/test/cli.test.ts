@@ -79,7 +79,7 @@ describe("CLI output and exit contracts", () => {
       homeDirectory: await home(),
       env: {
         HMM_CHAT_API_ORIGIN: "https://chat.example.test",
-        HMM_CHAT_TOKEN: `hmm_agent_${"a".repeat(43)}`,
+        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch: vi.fn<typeof globalThis.fetch>(async (_url, init) => {
         const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
@@ -164,7 +164,7 @@ describe("CLI output and exit contracts", () => {
       homeDirectory: await home(),
       env: {
         HMM_CHAT_API_ORIGIN: "https://chat.example.test",
-        HMM_CHAT_TOKEN: `hmm_agent_${"a".repeat(43)}`,
+        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch: vi.fn<typeof globalThis.fetch>(async () => response.clone()),
     });
@@ -176,7 +176,7 @@ describe("CLI output and exit contracts", () => {
   it("privately saves a piped agent token after validating it", async () => {
     const homeDirectory = await home();
     const configDirectory = join(homeDirectory, "config");
-    const token = `hmm_agent_${"p".repeat(43)}`;
+    const token = `hype_comms_agent_${"p".repeat(43)}`;
     const runtime = testRuntime({
       homeDirectory,
       env: {
@@ -199,7 +199,7 @@ describe("CLI output and exit contracts", () => {
   it("uses an environment agent token without persisting it", async () => {
     const homeDirectory = await home();
     const configDirectory = join(homeDirectory, "config");
-    const token = `hmm_agent_${"e".repeat(43)}`;
+    const token = `hype_comms_agent_${"e".repeat(43)}`;
     const runtime = testRuntime({
       homeDirectory,
       env: {
@@ -223,7 +223,7 @@ describe("CLI output and exit contracts", () => {
       kind: "agent" as const,
       credential: {
         kind: "agent" as const,
-        token: `hmm_agent_${"a".repeat(43)}`,
+        token: `hype_comms_agent_${"a".repeat(43)}`,
       },
       override: "environment" as const,
     },
@@ -265,7 +265,7 @@ describe("CLI output and exit contracts", () => {
   it("allows an environment token to replace a saved credential at an overridden origin", async () => {
     const homeDirectory = await home();
     const configDirectory = join(homeDirectory, "config");
-    const token = `hmm_agent_${"r".repeat(43)}`;
+    const token = `hype_comms_agent_${"r".repeat(43)}`;
     await saveProfile(
       {
         env: { HMM_CHAT_CONFIG_DIR: configDirectory },

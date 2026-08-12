@@ -159,7 +159,7 @@ function historyMessage(id: string, clientMessageId: string, sequence: string): 
     authorId: ALICE_ID,
     threadRootId: null,
     body: `Message ${sequence}`,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,
@@ -314,7 +314,7 @@ const queuedAlphaMessage: SendMessageOperation = {
   message: {
     threadRootId: MESSAGE_SEQUENCE_2_ID,
     body: "Must not cross a membership repair",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: "10000000-0000-4000-8000-000000000069",
     mentionedUserIds: [],
     attachmentIds: [],
@@ -327,7 +327,7 @@ const queuedDirectMessage: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "Must survive an unrelated membership repair",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: "10000000-0000-4000-8000-000000000070",
     mentionedUserIds: [],
     attachmentIds: [],

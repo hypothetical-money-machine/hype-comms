@@ -105,7 +105,7 @@ const SEND_OPERATION: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "hello",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: CLIENT_MESSAGE_ID,
     mentionedUserIds: [],
     attachmentIds: [],
@@ -131,7 +131,7 @@ const SEARCH_RESPONSE = {
         authorId: CURRENT_USER.user.id,
         threadRootId: null,
         body: "Quarterly avalanche review",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,

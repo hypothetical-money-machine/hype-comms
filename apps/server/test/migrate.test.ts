@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
@@ -35,14 +35,18 @@ async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void>
   }
 }
 
-async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-agent-migrations-"));
+/** Materializes the migration directory minus one file, so its own effect can be observed. */
+async function withoutMigration(
+  excludedFilename: string,
+  fn: (migrationsDirectory: URL) => Promise<void>,
+): Promise<void> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-partial-migrations-"));
   const source = new URL("../src/db/migrations/", import.meta.url);
   try {
     const filenames = await readdir(source);
     await Promise.all(
       filenames
-        .filter((filename) => filename.endsWith(".sql") && filename !== "0013_agents.sql")
+        .filter((filename) => filename.endsWith(".sql") && filename !== excludedFilename)
         .map(async (filename) => {
           await writeFile(
             path.join(directory, filename),
@@ -56,28 +60,16 @@ async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<v
   }
 }
 
+async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  await withoutMigration("0013_agents.sql", fn);
+}
+
 async function withoutTokenLineageMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-token-lineage-migrations-"));
-  const source = new URL("../src/db/migrations/", import.meta.url);
-  try {
-    const filenames = await readdir(source);
-    await Promise.all(
-      filenames
-        .filter(
-          (filename) =>
-            filename.endsWith(".sql") && filename !== "0015_device_session_token_history.sql",
-        )
-        .map(async (filename) => {
-          await writeFile(
-            path.join(directory, filename),
-            await readFile(new URL(filename, source)),
-          );
-        }),
-    );
-    await fn(pathToFileURL(`${directory}${path.sep}`));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await withoutMigration("0015_device_session_token_history.sql", fn);
+}
+
+async function withoutTechnicalRebrandMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  await withoutMigration("0018_hype_comms_technical_rebrand.sql", fn);
 }
 
 describeWithPostgres("runMigrations", () => {
@@ -103,6 +95,7 @@ describeWithPostgres("runMigrations", () => {
           "0015_device_session_token_history.sql",
           "0016_announcement_channels.sql",
           "0017_workos_authkit.sql",
+          "0018_hype_comms_technical_rebrand.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -129,6 +122,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0015_device_session_token_history.sql" },
         { filename: "0016_announcement_channels.sql" },
         { filename: "0017_workos_authkit.sql" },
+        { filename: "0018_hype_comms_technical_rebrand.sql" },
       ]);
 
       const userId = randomUUID();
@@ -197,7 +191,7 @@ describeWithPostgres("runMigrations", () => {
            id, workspace_id, conversation_id, conversation_sequence,
            committed_workspace_sequence, client_message_id, request_fingerprint,
            author_id, thread_root_id, body, body_format
-         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Root', 'hmm_markdown_v1')`,
+         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Root', 'hype_comms_markdown_v1')`,
         [threadRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
       );
       const replyId = randomUUID();
@@ -207,7 +201,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, $7, 'Reply', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, $7, 'Reply', 'hype_comms_markdown_v1')`,
           [
             replyId,
             workspaceId,
@@ -225,7 +219,7 @@ describeWithPostgres("runMigrations", () => {
            id, workspace_id, conversation_id, conversation_sequence,
            committed_workspace_sequence, client_message_id, request_fingerprint,
            author_id, thread_root_id, body, body_format
-         ) VALUES ($1, $2, $3, 10, 3, $4, $5, $6, NULL, 'Other root', 'hmm_markdown_v1')`,
+         ) VALUES ($1, $2, $3, 10, 3, $4, $5, $6, NULL, 'Other root', 'hype_comms_markdown_v1')`,
         [alternateRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
       );
       await expect(
@@ -240,7 +234,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 1, 3, $4, $5, $6, $7, 'Cross thread', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 1, 3, $4, $5, $6, $7, 'Cross thread', 'hype_comms_markdown_v1')`,
           [
             randomUUID(),
             workspaceId,
@@ -258,7 +252,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 3, 4, $4, $5, $6, $7, 'Nested reply', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 3, 4, $4, $5, $6, $7, 'Nested reply', 'hype_comms_markdown_v1')`,
           [
             randomUUID(),
             workspaceId,
@@ -277,7 +271,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hype_comms_markdown_v1')`,
           [selfReplyId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
@@ -329,6 +323,114 @@ describeWithPostgres("runMigrations", () => {
           defaultWorkspaceId,
         ]),
       ).resolves.toMatchObject({ rows: [{ name: "Morgan and Dan" }] });
+    });
+  });
+
+  it("rewrites legacy body formats, the default slug, and the body-format constraint", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const defaultWorkspaceId = randomUUID();
+      const customWorkspaceId = randomUUID();
+      const conversationId = randomUUID();
+      const legacyMessageId = randomUUID();
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'technical-rebrand@example.test', 'technical', 'Technical')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES
+           ($1, 'Hype Comms', 'hmm-chat', $3),
+           ($2, 'Custom', 'custom-workspace', $3)`,
+        [defaultWorkspaceId, customWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [defaultWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by)
+         VALUES ($1, $2, 'channel', 'General', 'general', 'workspace', $3)`,
+        [conversationId, defaultWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO messages (
+           id, workspace_id, conversation_id, conversation_sequence,
+           committed_workspace_sequence, client_message_id, request_fingerprint,
+           author_id, thread_root_id, body, body_format
+         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Legacy', 'hmm_markdown_v1')`,
+        [
+          legacyMessageId,
+          defaultWorkspaceId,
+          conversationId,
+          randomUUID(),
+          Buffer.alloc(32),
+          userId,
+        ],
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      await expect(
+        pool.query<{ body_format: string }>("SELECT body_format FROM messages WHERE id = $1", [
+          legacyMessageId,
+        ]),
+      ).resolves.toMatchObject({ rows: [{ body_format: "hype_comms_markdown_v1" }] });
+      const slugs = await pool.query<{ id: string; slug: string }>(
+        "SELECT id, slug FROM workspaces",
+      );
+      expect(new Map(slugs.rows.map((row) => [row.id, row.slug]))).toEqual(
+        new Map([
+          [defaultWorkspaceId, "hype-comms"],
+          [customWorkspaceId, "custom-workspace"],
+        ]),
+      );
+
+      // The recreated CHECK has to accept the new literal and keep rejecting the old one.
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, NULL, 'Current', 'hype_comms_markdown_v1')`,
+          [
+            randomUUID(),
+            defaultWorkspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+          ],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 3, 3, $4, $5, $6, NULL, 'Legacy again', 'hmm_markdown_v1')`,
+          [
+            randomUUID(),
+            defaultWorkspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+          ],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
     });
   });
 
@@ -626,7 +728,7 @@ describeWithPostgres("runMigrations", () => {
 
   it("fails loudly when an applied migration file changes", async () => {
     await withFreshSchema(async (pool) => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-migrations-"));
+      const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-migrations-"));
       const migrationUrl = new URL("../src/db/migrations/0001_identity.sql", import.meta.url);
       const copiedMigration = path.join(directory, "0001_identity.sql");
       try {

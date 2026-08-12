@@ -97,7 +97,7 @@ const operation: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "Survive restart",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: CLIENT_MESSAGE_ID,
     mentionedUserIds: [],
     attachmentIds: [],
@@ -113,7 +113,7 @@ const message: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Survive restart",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,

@@ -287,7 +287,7 @@ describe("entity contracts", () => {
         authorId: USER_ID,
         threadRootId: null,
         body: "Hello",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,
@@ -330,7 +330,7 @@ describe("entity contracts", () => {
   });
 
   it("accepts only prefixed 256-bit bot tokens and unique task scopes", () => {
-    expect(botAccessTokenSchema.parse(`hmm_bot_${"a".repeat(43)}`)).toHaveLength(51);
+    expect(botAccessTokenSchema.parse(`hype_comms_bot_${"a".repeat(43)}`)).toHaveLength(58);
     expect(() => botAccessTokenSchema.parse("a".repeat(43))).toThrow();
     expect(botScopesSchema.parse(["tasks:read", "tasks:write"])).toEqual([
       "tasks:read",
@@ -432,7 +432,7 @@ describe("agent contracts", () => {
   });
 
   it("validates prefixed secrets, default scopes, unique scopes, and secret-free metadata", () => {
-    const secret = `hmm_agent_${"a".repeat(43)}`;
+    const secret = `hype_comms_agent_${"a".repeat(43)}`;
     expect(agentTokenSecretSchema.parse(secret)).toBe(secret);
     expect(() => agentTokenSecretSchema.parse("a".repeat(43))).toThrow();
     expect(createAgentTokenRequestSchema.parse({ label: "Gateway" })).toEqual({
@@ -726,7 +726,7 @@ describe("transport contracts", () => {
       authorId: USER_ID,
       threadRootId: null,
       body: "Root",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       editedAt: null,
       deletedAt: null,
       createdAt: NOW,
@@ -880,7 +880,7 @@ describe("transport contracts", () => {
       authorId: USER_ID,
       threadRootId: null,
       body: "Envelope consistency",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       editedAt: null,
       deletedAt: null,
       createdAt: NOW,
@@ -1126,7 +1126,7 @@ describe("transport contracts", () => {
         authorId: USER_ID,
         threadRootId: null,
         body: "   ",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,
@@ -1141,7 +1141,7 @@ describe("transport contracts", () => {
         conversationId: CONVERSATION_ID,
         threadRootId: null,
         body: "Hello",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: MESSAGE_ID,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -1153,7 +1153,7 @@ describe("transport contracts", () => {
         conversationId: CONVERSATION_ID,
         threadRootId: null,
         body: "Hello",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: "message-1",
         mentionedUserIds: [],
         attachmentIds: [],
@@ -1167,7 +1167,7 @@ describe("transport contracts", () => {
         message: {
           threadRootId: null,
           body: "Hello",
-          bodyFormat: "hmm_markdown_v1",
+          bodyFormat: "hype_comms_markdown_v1",
           clientMessageId: MESSAGE_ID,
           mentionedUserIds: [],
           attachmentIds: [],
@@ -1182,7 +1182,7 @@ describe("transport contracts", () => {
         message: {
           threadRootId: null,
           body: "Hello",
-          bodyFormat: "hmm_markdown_v1",
+          bodyFormat: "hype_comms_markdown_v1",
           clientMessageId: MESSAGE_ID,
           mentionedUserIds: [],
           attachmentIds: [],

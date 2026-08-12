@@ -154,7 +154,7 @@ function messageEvent(options: {
         authorId: options.authorId === undefined ? AUTHOR_ID : options.authorId,
         threadRootId: options.threadRootId ?? null,
         body: options.body ?? `message-${String(options.eventNumber)}`,
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,
