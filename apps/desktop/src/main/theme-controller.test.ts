@@ -1,4 +1,4 @@
-import type { ResolvedColorScheme, ThemePreference, ThemeState } from "@hmm-chat/contracts";
+import type { ResolvedColorScheme, ThemePreference, ThemeState } from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import {

@@ -1,4 +1,4 @@
-import { emailSchema } from "@hmm-chat/contracts";
+import { emailSchema } from "@hype-comms/contracts";
 import nodemailer, { type Transporter } from "nodemailer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

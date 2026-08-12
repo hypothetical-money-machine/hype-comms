@@ -16,7 +16,7 @@ import {
   systemConnectedEventSchema,
   userSchema,
   workspaceBootstrapResponseSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";

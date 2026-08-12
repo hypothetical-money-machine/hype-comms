@@ -5,7 +5,7 @@ import {
   sequenceSchema,
   type SyncResponse,
   type SystemConnectedEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";

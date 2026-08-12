@@ -13,7 +13,7 @@ import {
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { agentTokenSecretSchema, sessionTokenSchema } from "@hmm-chat/contracts";
+import { agentTokenSecretSchema, sessionTokenSchema } from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { UsageError } from "./errors.js";

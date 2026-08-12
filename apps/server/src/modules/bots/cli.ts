@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { botScopeSchema, type BotScope } from "@hmm-chat/contracts";
+import { botScopeSchema, type BotScope } from "@hype-comms/contracts";
 
 import { loadConfig } from "../../config.js";
 import { runMigrations } from "../../db/migrate.js";
@@ -12,11 +12,11 @@ import { BotService, botDisplayNameSchema, botUsernameSchema } from "./service.j
 const DEFAULT_EXPIRY_DAYS = 90;
 const DEFAULT_SCOPES = ["tasks:read", "tasks:write"] as const satisfies readonly BotScope[];
 const USAGE = `Usage:
-  npm run bot --workspace @hmm-chat/server -- create --username <handle> --display-name <name> --channel <slug> [--channel <slug>] [--scope tasks:read|tasks:write] [--expires-in-days 90]
-  npm run bot --workspace @hmm-chat/server -- grant --username <handle> --channel <slug> [--channel <slug>]
-  npm run bot --workspace @hmm-chat/server -- rotate --username <handle> [--scope tasks:read|tasks:write] [--expires-in-days 90]
-  npm run bot --workspace @hmm-chat/server -- revoke --username <handle>
-  npm run bot --workspace @hmm-chat/server -- list`;
+  npm run bot --workspace @hype-comms/server -- create --username <handle> --display-name <name> --channel <slug> [--channel <slug>] [--scope tasks:read|tasks:write] [--expires-in-days 90]
+  npm run bot --workspace @hype-comms/server -- grant --username <handle> --channel <slug> [--channel <slug>]
+  npm run bot --workspace @hype-comms/server -- rotate --username <handle> [--scope tasks:read|tasks:write] [--expires-in-days 90]
+  npm run bot --workspace @hype-comms/server -- revoke --username <handle>
+  npm run bot --workspace @hype-comms/server -- list`;
 
 export interface BotCliOutput {
   readonly stdout: Pick<NodeJS.WritableStream, "write">;

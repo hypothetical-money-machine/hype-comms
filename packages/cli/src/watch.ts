@@ -9,7 +9,7 @@ import {
   sequenceSchema,
   workspaceBootstrapResponseSchema,
   type ProductRealtimeEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
 
 import { parseCommandArguments, requirePositionals, stringOption } from "./argv.js";

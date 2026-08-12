@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 
 import { z } from "zod";
 
-import { emailSchema, type Email } from "@hmm-chat/contracts";
+import { emailSchema, type Email } from "@hype-comms/contracts";
 
 const optionalString = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());

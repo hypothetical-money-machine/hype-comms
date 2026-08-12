@@ -2,7 +2,7 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 

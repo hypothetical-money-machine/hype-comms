@@ -1,4 +1,4 @@
-import type { NotificationActivityView } from "@hmm-chat/contracts";
+import type { NotificationActivityView } from "@hype-comms/contracts";
 
 export function createNotificationActivityView(input: {
   readonly pane: "chat" | "tasks";

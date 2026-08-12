@@ -3,7 +3,7 @@ import {
   authCapabilitiesSchema,
   currentUserSchema,
   type CurrentUser,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";

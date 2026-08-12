@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 
-import type { ConversationSummary } from "@hmm-chat/contracts";
+import type { ConversationSummary } from "@hype-comms/contracts";
 
 /**
  * Calls `onNewActivity` when unread or mention counts grow in a conversation other than the

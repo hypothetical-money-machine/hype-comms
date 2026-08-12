@@ -4,7 +4,7 @@ import {
   type AgentScope,
   type AgentTokenSecret,
   type SessionToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";

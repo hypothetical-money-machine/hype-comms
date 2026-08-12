@@ -27,7 +27,7 @@ import {
   type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
 import {

@@ -12,7 +12,7 @@ import type {
   Task,
   UpdateState,
   User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { ChannelCreatePopover } from "./channel-create-popover";

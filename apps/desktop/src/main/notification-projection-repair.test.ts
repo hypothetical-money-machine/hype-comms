@@ -3,7 +3,7 @@ import type {
   ListConversationsResponse,
   ListMembersResponse,
   User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import {

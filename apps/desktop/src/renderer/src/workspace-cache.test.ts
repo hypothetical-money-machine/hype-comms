@@ -13,7 +13,7 @@ import {
   type SendMessageOperation,
   type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   clearPersistentWorkspaceCache,

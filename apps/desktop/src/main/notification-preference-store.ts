@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { notificationPreferenceSchema, type NotificationPreference } from "@hmm-chat/contracts";
+import { notificationPreferenceSchema, type NotificationPreference } from "@hype-comms/contracts";
 
 import {
   atomicWrite,

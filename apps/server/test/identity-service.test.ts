@@ -7,7 +7,7 @@ import {
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
   type Email,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 

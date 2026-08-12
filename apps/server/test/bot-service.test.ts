@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
-import type { CurrentUser } from "@hmm-chat/contracts";
+import type { CurrentUser } from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";

@@ -1,4 +1,4 @@
-import type { ChannelAccess, ChannelMode } from "@hmm-chat/contracts";
+import type { ChannelAccess, ChannelMode } from "@hype-comms/contracts";
 
 export function ChannelIcon({
   access,

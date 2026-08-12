@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, render, renderHook, screen } from "@testing-library/react";
-import type { ConversationSummary, Message } from "@hmm-chat/contracts";
+import type { ConversationSummary, Message } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 

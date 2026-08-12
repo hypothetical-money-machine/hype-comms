@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import type { HealthResponse, ReadinessResponse } from "@hmm-chat/contracts";
+import type { HealthResponse, ReadinessResponse } from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
 import type { Lifecycle } from "../../lifecycle.js";

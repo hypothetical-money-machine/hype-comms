@@ -6,7 +6,7 @@ import type {
   NotificationContext,
   NotificationPreference,
   NotificationState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import type { DesktopApi, NotificationTransport } from "../../shared/desktop-api";

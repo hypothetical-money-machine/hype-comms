@@ -11,7 +11,7 @@ import {
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";

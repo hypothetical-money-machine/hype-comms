@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "
 import os from "node:os";
 import path from "node:path";
 
-import type { CacheEncryptBatchRequest, CacheScope } from "@hmm-chat/contracts";
+import type { CacheEncryptBatchRequest, CacheScope } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {

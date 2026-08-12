@@ -11,7 +11,7 @@ import {
   type BotScope,
   type EntityId,
   type User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { z } from "zod";
 

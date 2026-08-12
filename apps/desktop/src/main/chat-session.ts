@@ -19,7 +19,7 @@ import {
   type ExchangeAuthHandoffRequest,
   type MagicLinkDeliveryState,
   type MagicLinkToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   createAuthCapabilitiesUrl,

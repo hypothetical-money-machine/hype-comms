@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 
-import { botAccessTokenSchema, emailSchema } from "@hmm-chat/contracts";
+import { botAccessTokenSchema, emailSchema } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 

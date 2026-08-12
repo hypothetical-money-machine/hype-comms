@@ -10,7 +10,7 @@ import {
   listAgentTokensResponseSchema,
   listAgentsResponseSchema,
   listInvitationsResponseSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   multipleOption,

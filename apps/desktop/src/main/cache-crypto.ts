@@ -14,7 +14,7 @@ import {
   type CacheEncryptBatchResponse,
   type CacheRecordContext,
   type CacheScope,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 const CACHE_KEY_BYTES = 32;
 const GCM_NONCE_BYTES = 12;

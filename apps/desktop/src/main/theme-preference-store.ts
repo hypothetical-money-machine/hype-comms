@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { themePreferenceSchema, type ThemePreference } from "@hmm-chat/contracts";
+import { themePreferenceSchema, type ThemePreference } from "@hype-comms/contracts";
 
 import { isBuiltInThemeId } from "../shared/theme";
 import {

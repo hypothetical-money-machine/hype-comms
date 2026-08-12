@@ -98,7 +98,7 @@ import {
   type TaskListQuery,
   type UpdateState,
   type UpdateTaskOperation,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { resolveInitialCompactModeArgument } from "../shared/compact-mode";

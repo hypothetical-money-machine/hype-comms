@@ -1,6 +1,6 @@
 import { once } from "node:events";
 
-import { systemConnectedEventSchema, type SyncResponse } from "@hmm-chat/contracts";
+import { systemConnectedEventSchema, type SyncResponse } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 

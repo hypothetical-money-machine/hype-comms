@@ -54,7 +54,7 @@ import {
   type ScopedProductRealtimeEvent,
   type ThemeState,
   type UpdateState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import {
   app,
   BrowserWindow,

@@ -32,7 +32,7 @@ The following environment variables override a stored profile:
 
 An `HMM_CHAT_TOKEN` value is used only from the process environment and is never persisted.
 
-The distributable CLI bundles the private `@hmm-chat/contracts` implementation from this
+The distributable CLI bundles the private `@hype-comms/contracts` implementation from this
 workspace while leaving the public `ws` and `zod` packages as runtime dependencies. This keeps the
 wire schemas sourced from the shared package without requiring consumers to install a private
 workspace package.

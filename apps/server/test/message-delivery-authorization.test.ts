@@ -7,7 +7,7 @@ import type {
   AgentCurrentPrincipal,
   CurrentUser,
   SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";

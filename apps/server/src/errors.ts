@@ -1,4 +1,4 @@
-import type { ApiErrorCode, ApiErrorDetail, ApiErrorEnvelope } from "@hmm-chat/contracts";
+import type { ApiErrorCode, ApiErrorDetail, ApiErrorEnvelope } from "@hype-comms/contracts";
 import type { FastifyError, FastifyInstance } from "fastify";
 
 export class ApiError extends Error {

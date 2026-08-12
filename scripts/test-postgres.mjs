@@ -85,7 +85,7 @@ export async function waitForPostgres(
 
 async function runServerSuite(arguments_) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(npm, ["test", "--workspace", "@hmm-chat/server", "--", ...arguments_], {
+  const child = spawn(npm, ["test", "--workspace", "@hype-comms/server", "--", ...arguments_], {
     cwd: new URL("..", import.meta.url),
     env: process.env,
     stdio: "inherit",

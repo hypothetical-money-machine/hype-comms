@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { emailSchema, type Email, type Invitation } from "@hmm-chat/contracts";
+import { emailSchema, type Email, type Invitation } from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { loadConfig } from "../../config.js";
@@ -14,7 +14,7 @@ import { IdentityRepository } from "./repository.js";
 import { IdentityService } from "./service.js";
 
 const USAGE =
-  "Usage: npm run invite --workspace @hmm-chat/server -- --email <address> [--role member]";
+  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member]";
 const CLI_CLIENT_IP = "invite-cli";
 
 export interface InviteCliOutput {

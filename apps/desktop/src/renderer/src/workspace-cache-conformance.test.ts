@@ -15,7 +15,7 @@ import {
   type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   clearPersistentWorkspaceCaches,

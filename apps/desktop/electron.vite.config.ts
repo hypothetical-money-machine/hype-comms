@@ -74,7 +74,7 @@ export default defineConfig(({ command }) => {
       // validators used at the IPC boundary instead of externalizing them.
       build: {
         externalizeDeps: {
-          exclude: ["@hmm-chat/contracts", "zod"],
+          exclude: ["@hype-comms/contracts", "zod"],
         },
         outDir: path.join(desktopRoot, "dist/preload"),
         rolldownOptions: {

@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import { notificationCaptureIdSchema } from "@hmm-chat/contracts";
+import { notificationCaptureIdSchema } from "@hype-comms/contracts";
 
 import type { NotificationEligibilityReason } from "./notification-policy";
 

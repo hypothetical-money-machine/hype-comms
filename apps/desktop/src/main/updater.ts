@@ -4,7 +4,7 @@ import {
   UPDATE_INSTALL_ERROR_MESSAGE,
   updateVersionSchema,
   type UpdateState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { DEFAULT_PRODUCTION_API_ORIGIN } from "../shared/api-origin";
 
@@ -20,7 +20,7 @@ export {
   UPDATE_CHECK_ERROR_MESSAGE,
   UPDATE_DOWNLOAD_ERROR_MESSAGE,
   UPDATE_INSTALL_ERROR_MESSAGE,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 export interface UpdateSourceConfiguration {
   readonly autoDownload: true;

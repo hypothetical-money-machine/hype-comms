@@ -1,4 +1,4 @@
-import type { ChannelMode, ConversationKind } from "@hmm-chat/contracts";
+import type { ChannelMode, ConversationKind } from "@hype-comms/contracts";
 
 export function ConversationEmptyState({
   conversationName,

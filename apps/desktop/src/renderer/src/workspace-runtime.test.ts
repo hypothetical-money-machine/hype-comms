@@ -49,7 +49,7 @@ import type {
   UpdateTaskOperation,
   WorkspaceEvent,
   ScopedProductRealtimeEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type {
   DesktopApi,

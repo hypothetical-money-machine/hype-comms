@@ -1,6 +1,10 @@
 import { useCallback, useId, useState, useSyncExternalStore } from "react";
 
-import { themePreferenceSchema, type ThemePreference, type ThemeState } from "@hmm-chat/contracts";
+import {
+  themePreferenceSchema,
+  type ThemePreference,
+  type ThemeState,
+} from "@hype-comms/contracts";
 
 import { BUILT_IN_THEME_OPTIONS, getThemeDefinition } from "../../shared/theme";
 import type { ThemeRuntime } from "./theme-runtime";

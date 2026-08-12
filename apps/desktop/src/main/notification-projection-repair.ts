@@ -5,7 +5,7 @@ import {
   type ListConversationsResponse,
   type ListMembersResponse,
   type User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   NOTIFICATION_CONVERSATION_LIMIT,

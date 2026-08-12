@@ -186,7 +186,7 @@ function requestShutdown(signal) {
 }
 
 async function seed(demo) {
-  await runChecked(npmCommand, ["run", "build", "--workspace", "@hmm-chat/contracts"], {
+  await runChecked(npmCommand, ["run", "build", "--workspace", "@hype-comms/contracts"], {
     env: demo.env,
   });
   const seedOutput = await runChecked(
@@ -262,7 +262,7 @@ async function main() {
           "run",
           "dev",
           "--workspace",
-          "@hmm-chat/desktop",
+          "@hype-comms/desktop",
           "--",
           ...headlessElectronViteArguments(options.cdpBasePort),
         ],

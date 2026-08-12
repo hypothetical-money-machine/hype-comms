@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { CompactModePreference } from "@hmm-chat/contracts";
+import type { CompactModePreference } from "@hype-comms/contracts";
 
 import {
   atomicWrite,

@@ -4,7 +4,7 @@ import {
   type ResolvedColorScheme,
   type ThemeId,
   type ThemeState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 /**
  * Semantic presentation roles understood by every bundled theme. Components consume these roles

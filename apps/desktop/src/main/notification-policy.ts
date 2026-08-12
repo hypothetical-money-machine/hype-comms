@@ -3,7 +3,7 @@ import type {
   NotificationActivityUpdate,
   NotificationState,
   UserKind,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 export type NotificationEligibilityReason =
   "verified_mention" | "direct_message" | "participated_thread_reply";

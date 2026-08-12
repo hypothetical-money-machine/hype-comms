@@ -4,7 +4,7 @@ import {
   agentTokenSecretSchema,
   magicLinkTokenSchema,
   sessionTokenSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import { hashToken, issueAgentToken, issueToken } from "../src/modules/identity/tokens.js";

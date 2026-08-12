@@ -3,7 +3,7 @@ import {
   type ResolvedColorScheme,
   type ThemePreference,
   type ThemeState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { getThemeDefinition, parseBuiltInThemeState, SYSTEM_THEME_IDS } from "../shared/theme";
 import { reportMainProcessError } from "./main-process-log";

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { workspaceEventSchema, type WorkspaceEvent } from "@hmm-chat/contracts";
+import { workspaceEventSchema, type WorkspaceEvent } from "@hype-comms/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
 
 /**

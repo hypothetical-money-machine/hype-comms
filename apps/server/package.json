@@ -1,12 +1,12 @@
 {
-  "name": "@hmm-chat/server",
+  "name": "@hype-comms/server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "prebuild": "npm run build --workspace @hmm-chat/contracts",
+    "prebuild": "npm run build --workspace @hype-comms/contracts",
     "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs",
-    "predev": "npm run build --workspace @hmm-chat/contracts",
+    "predev": "npm run build --workspace @hype-comms/contracts",
     "dev": "tsx watch src/main.ts",
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
@@ -18,9 +18,9 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",
-    "pretest": "npm run build --workspace @hmm-chat/contracts",
+    "pretest": "npm run build --workspace @hype-comms/contracts",
     "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hmm-chat/contracts",
+    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
@@ -30,7 +30,7 @@
     "@fastify/cors": "11.3.0",
     "@fastify/static": "10.1.2",
     "@fastify/websocket": "11.3.0",
-    "@hmm-chat/contracts": "*",
+    "@hype-comms/contracts": "*",
     "@workos-inc/node": "10.9.0",
     "fastify": "5.11.0",
     "jose": "6.2.8",

@@ -14,7 +14,7 @@ import type {
   RealtimeSessionScope,
   ThemeState,
   UpdateState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 

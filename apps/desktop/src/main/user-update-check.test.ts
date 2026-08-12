@@ -1,4 +1,4 @@
-import { UPDATE_CHECK_ERROR_MESSAGE, type UpdateState } from "@hmm-chat/contracts";
+import { UPDATE_CHECK_ERROR_MESSAGE, type UpdateState } from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import {

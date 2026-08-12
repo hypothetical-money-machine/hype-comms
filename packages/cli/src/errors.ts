@@ -1,4 +1,4 @@
-import { apiErrorEnvelopeSchema, type ApiErrorCode } from "@hmm-chat/contracts";
+import { apiErrorEnvelopeSchema, type ApiErrorCode } from "@hype-comms/contracts";
 
 export const EXIT_SUCCESS = 0;
 export const EXIT_USAGE = 2;

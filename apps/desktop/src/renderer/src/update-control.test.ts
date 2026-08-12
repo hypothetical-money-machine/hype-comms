@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { UpdateState } from "@hmm-chat/contracts";
+import type { UpdateState } from "@hype-comms/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { UpdateControl } from "./App";

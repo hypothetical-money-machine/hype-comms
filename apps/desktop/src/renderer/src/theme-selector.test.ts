@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { ThemePreference, ThemeState } from "@hmm-chat/contracts";
+import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
 import { getThemeDefinition } from "../../shared/theme";

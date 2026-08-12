@@ -19,7 +19,7 @@ import {
   sequenceSchema,
   syncResponseSchema,
   workspaceBootstrapResponseSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   booleanOption,

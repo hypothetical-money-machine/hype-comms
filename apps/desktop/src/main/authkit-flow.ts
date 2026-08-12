@@ -12,7 +12,7 @@ import {
   type CreateDesktopAuthorizationRequest,
   type CreateDesktopAuthorizationResponse,
   type DesktopAuthCallbackParameters,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { normalizeDevelopmentApiOrigin } from "../shared/api-origin";
 import { normalizeExternalHttpsUrl } from "./security";

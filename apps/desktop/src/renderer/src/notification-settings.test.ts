@@ -10,7 +10,7 @@ import type {
   NotificationContext,
   NotificationPreference,
   NotificationState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

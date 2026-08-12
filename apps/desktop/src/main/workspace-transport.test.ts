@@ -9,7 +9,7 @@ import {
   THREADS_CAPABILITY,
   type SendMessageOperation,
   type Task,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport } from "./workspace-transport";

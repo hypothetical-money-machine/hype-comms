@@ -9,7 +9,7 @@ import {
   type Email,
   type EntityId,
   type SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, QueryResultRow } from "pg";
 
 import { loadConfig, type ServerConfig } from "./config.js";

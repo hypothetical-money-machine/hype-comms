@@ -26,13 +26,13 @@ import {
   taskNumberSchema,
   updateTaskRequestSchema,
   upsertChannelMemberRequestSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type {
   ConversationMutationResponse,
   ConversationSummary,
   ListConversationsResponse,
   WorkspaceBootstrapResponse,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { createElement, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Task, User } from "@hmm-chat/contracts";
+import type { Task, User } from "@hype-comms/contracts";
 
 import { TasksView } from "./tasks-view";
 

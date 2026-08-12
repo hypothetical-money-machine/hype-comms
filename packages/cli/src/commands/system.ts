@@ -1,4 +1,4 @@
-import { healthResponseSchema, readinessResponseSchema } from "@hmm-chat/contracts";
+import { healthResponseSchema, readinessResponseSchema } from "@hype-comms/contracts";
 
 import { clientFromContext } from "../context.js";
 import { writeResult } from "../output.js";

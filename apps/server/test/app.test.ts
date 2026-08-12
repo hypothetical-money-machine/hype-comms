@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { apiErrorEnvelopeSchema, systemConnectedEventSchema } from "@hmm-chat/contracts";
+import { apiErrorEnvelopeSchema, systemConnectedEventSchema } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 

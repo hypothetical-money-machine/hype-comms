@@ -81,7 +81,7 @@ import {
   type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";

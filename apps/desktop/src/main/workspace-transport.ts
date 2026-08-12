@@ -61,7 +61,7 @@ import {
   type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
   type HumanWorkspaceBootstrapResponse,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { ChatSession } from "./chat-session";
 

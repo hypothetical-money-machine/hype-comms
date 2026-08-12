@@ -9,7 +9,7 @@ import { prepareAuthKitRollback } from "./authkit-repository.js";
 export const AUTHKIT_REVOKE_ALL_CONFIRMATION = "REVOKE-AUTHKIT-SESSIONS";
 
 const USAGE =
-  "Usage: npm run authkit:revoke-all --workspace @hmm-chat/server -- " +
+  "Usage: npm run authkit:revoke-all --workspace @hype-comms/server -- " +
   `--confirm ${AUTHKIT_REVOKE_ALL_CONFIRMATION}`;
 
 export interface AuthKitRevokeAllCliOutput {

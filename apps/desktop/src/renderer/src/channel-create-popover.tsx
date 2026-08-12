@@ -1,4 +1,4 @@
-import { channelSlugFromName, type ChannelAccess, type ChannelMode } from "@hmm-chat/contracts";
+import { channelSlugFromName, type ChannelAccess, type ChannelMode } from "@hype-comms/contracts";
 import {
   useCallback,
   useEffect,

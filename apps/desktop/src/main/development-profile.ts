@@ -1,7 +1,7 @@
 import { lstat, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import type { ChatSessionState } from "@hmm-chat/contracts";
+import type { ChatSessionState } from "@hype-comms/contracts";
 
 const PROFILE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_CALLBACK_FILE_BYTES = 16_384;

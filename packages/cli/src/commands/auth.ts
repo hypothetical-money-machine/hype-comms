@@ -7,7 +7,7 @@ import {
   requestMagicLinkSchema,
   sessionTokenSchema,
   verifyMagicLinkSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { parseCommandArguments, requirePositionals } from "../argv.js";
 import { ApiClient, sessionTokenFromHeaders } from "../client.js";

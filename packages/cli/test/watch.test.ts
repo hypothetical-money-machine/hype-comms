@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
-import { REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY } from "@hmm-chat/contracts";
+import { REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY } from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
 import {

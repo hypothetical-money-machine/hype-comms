@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 
-import type { ProductRealtimeEvent } from "@hmm-chat/contracts";
+import type { ProductRealtimeEvent } from "@hype-comms/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 
