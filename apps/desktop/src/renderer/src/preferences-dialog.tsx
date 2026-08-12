@@ -11,6 +11,8 @@ import type { DesktopPlatform, NotificationTransport } from "../../shared/deskto
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CompactModeToggle } from "./compact-mode-toggle";
 import { NotificationSettings } from "./notification-settings";
+import { SidebarPositionControl } from "./sidebar-position-control";
+import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
@@ -19,6 +21,7 @@ interface PreferencesDialogProps {
   readonly open: boolean;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
   readonly triggerRef: RefObject<HTMLButtonElement | null>;
@@ -33,6 +36,7 @@ export function PreferencesDialog({
   open,
   theme,
   compactMode,
+  sidebarPosition,
   notifications,
   platform,
   triggerRef,
@@ -118,6 +122,7 @@ export function PreferencesDialog({
         </section>
         <section aria-labelledby="preferences-layout-title">
           <h3 id="preferences-layout-title">Layout</h3>
+          <SidebarPositionControl sidebarPosition={sidebarPosition} />
           <CompactModeToggle compactMode={compactMode} platform={platform} />
         </section>
         <section aria-labelledby="preferences-notifications-title">

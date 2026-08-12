@@ -21,6 +21,7 @@ import type {
 import { getThemeDefinition } from "../../shared/theme";
 import { CompactModeRuntime } from "./compact-mode-runtime";
 import { PreferencesDialog } from "./preferences-dialog";
+import { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeRuntime } from "./theme-runtime";
 
 class PreferencesThemeTransport implements ThemeTransport {
@@ -141,6 +142,7 @@ class PreferencesNotificationTransport implements NotificationTransport {
 interface PreferencesHarnessProps {
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
   readonly onOpenChange: (open: boolean) => void;
@@ -149,6 +151,7 @@ interface PreferencesHarnessProps {
 function PreferencesHarness({
   theme,
   compactMode,
+  sidebarPosition,
   notifications,
   platform,
   onOpenChange,
@@ -173,6 +176,7 @@ function PreferencesHarness({
       open,
       theme,
       compactMode,
+      sidebarPosition,
       notifications,
       platform,
       triggerRef,
@@ -187,6 +191,7 @@ async function renderPreferences(notifications?: NotificationTransport) {
   const compactModeClient = new PreferencesCompactModeTransport();
   const theme = new ThemeRuntime(themeClient, document.documentElement);
   const compactMode = new CompactModeRuntime(compactModeClient, document.documentElement);
+  const sidebarPosition = new SidebarPositionRuntime(document.documentElement, null);
   await theme.start();
   await compactMode.start();
   const onOpenChange = vi.fn();
@@ -194,17 +199,27 @@ async function renderPreferences(notifications?: NotificationTransport) {
     createElement(PreferencesHarness, {
       theme,
       compactMode,
+      sidebarPosition,
       notifications,
       platform: "linux",
       onOpenChange,
     }),
   );
-  return { ...rendered, compactMode, compactModeClient, onOpenChange, theme, themeClient };
+  return {
+    ...rendered,
+    compactMode,
+    compactModeClient,
+    onOpenChange,
+    sidebarPosition,
+    theme,
+    themeClient,
+  };
 }
 
 afterEach(() => {
   cleanup();
   delete document.documentElement.dataset.compact;
+  delete document.documentElement.dataset.sidebarPosition;
   delete document.documentElement.dataset.theme;
   vi.restoreAllMocks();
 });
@@ -287,12 +302,14 @@ describe("PreferencesDialog", () => {
   });
 
   it("renders every preference section and reflects live runtime changes", async () => {
-    const { compactModeClient, themeClient } = await renderPreferences();
+    const { compactModeClient, sidebarPosition, themeClient } = await renderPreferences();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
 
     expect(screen.getByRole("heading", { name: "Appearance", level: 3 })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Layout", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Sidebar position" })).toBeTruthy();
+    expect((screen.getByRole("radio", { name: "Left" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("checkbox", { name: "Compact mode" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Notifications", level: 3 })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe(
@@ -305,6 +322,7 @@ describe("PreferencesDialog", () => {
       resolvedColorScheme: "light",
     });
     compactModeClient.emit(true);
+    sidebarPosition.setPosition("right");
 
     await waitFor(() => {
       expect(
@@ -313,6 +331,7 @@ describe("PreferencesDialog", () => {
       expect(
         (screen.getByRole("checkbox", { name: "Compact mode" }) as HTMLInputElement).checked,
       ).toBe(true);
+      expect((screen.getByRole("radio", { name: "Right" }) as HTMLInputElement).checked).toBe(true);
     });
   });
 

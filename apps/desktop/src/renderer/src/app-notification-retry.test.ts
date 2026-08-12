@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
 
 const USER_ID = "20000000-0000-4000-8000-000000000001";
@@ -343,6 +344,14 @@ function createCompactMode(): CompactModeRuntime {
   } as unknown as CompactModeRuntime;
 }
 
+function createSidebarPosition(): SidebarPositionRuntime {
+  return {
+    position: "left",
+    subscribe: () => () => undefined,
+    setPosition: () => undefined,
+  } as unknown as SidebarPositionRuntime;
+}
+
 afterEach(() => cleanup());
 
 describe("App notification session recovery", () => {
@@ -353,6 +362,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -400,6 +410,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -446,6 +457,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
       }),
     );
 
