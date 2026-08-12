@@ -102,7 +102,7 @@ describe("watch", () => {
       const url = new URL(String(input));
       if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
       if (url.pathname === "/v1/realtime/tickets") {
-        expect(new Headers(init?.headers).get("x-hmm-chat-capabilities")).toBe(
+        expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
           `${REACTION_EVENTS_CAPABILITY},${READ_STATE_EVENTS_CAPABILITY}`,
         );
         return jsonResponse({
@@ -113,10 +113,10 @@ describe("watch", () => {
       throw new Error("Unexpected route");
     });
     const runtime = testRuntime({
-      homeDirectory: await mkdtemp(join(tmpdir(), "hmm-chat-watch-")),
+      homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-watch-")),
       env: {
-        HMM_CHAT_API_ORIGIN: `http://127.0.0.1:${address.port}`,
-        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+        HYPE_COMMS_API_ORIGIN: `http://127.0.0.1:${address.port}`,
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch,
     });

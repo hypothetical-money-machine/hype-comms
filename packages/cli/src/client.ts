@@ -117,7 +117,7 @@ export class ApiClient {
     if (includeCredential === false || this.#credential === undefined) return {};
     if (this.#credentialOrigin !== this.#origin) {
       throw new UsageError(
-        "The saved credential belongs to a different API origin; select its profile or provide HMM_CHAT_TOKEN",
+        "The saved credential belongs to a different API origin; select its profile or provide HYPE_COMMS_TOKEN",
         "CREDENTIAL_ORIGIN_MISMATCH",
       );
     }

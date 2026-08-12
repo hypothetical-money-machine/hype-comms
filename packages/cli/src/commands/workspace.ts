@@ -66,7 +66,7 @@ export async function workspaceCommand(
     );
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli workspace <bootstrap|members>");
+  throw new UsageError("Usage: hype-comms-cli workspace <bootstrap|members>");
 }
 
 export async function conversationsCommand(
@@ -76,7 +76,7 @@ export async function conversationsCommand(
 ): Promise<void> {
   if (subcommand !== "list") {
     throw new UsageError(
-      "Usage: hmm-chat-cli conversations list [--after CURSOR] [--limit N] [--all]",
+      "Usage: hype-comms-cli conversations list [--after CURSOR] [--limit N] [--all]",
     );
   }
   const parsed = parseCommandArguments(args, {
@@ -158,7 +158,7 @@ export async function channelsCommand(
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli channels <create|archive>");
+  throw new UsageError("Usage: hype-comms-cli channels <create|archive>");
 }
 
 export async function dmsCommand(
@@ -166,7 +166,7 @@ export async function dmsCommand(
   subcommand: string | undefined,
   args: readonly string[],
 ): Promise<void> {
-  if (subcommand !== "create") throw new UsageError("Usage: hmm-chat-cli dms create <member>");
+  if (subcommand !== "create") throw new UsageError("Usage: hype-comms-cli dms create <member>");
   const parsed = parseCommandArguments(args, {});
   const [member] = requirePositionals(parsed, 1);
   const client = await clientFromContext(context);
@@ -261,7 +261,7 @@ export async function messagesCommand(
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli messages <history|send>");
+  throw new UsageError("Usage: hype-comms-cli messages <history|send>");
 }
 
 export async function readCursorsCommand(
@@ -270,7 +270,7 @@ export async function readCursorsCommand(
   args: readonly string[],
 ): Promise<void> {
   if (subcommand !== "advance") {
-    throw new UsageError("Usage: hmm-chat-cli read-cursors advance <conversation> <message-id>");
+    throw new UsageError("Usage: hype-comms-cli read-cursors advance <conversation> <message-id>");
   }
   const parsed = parseCommandArguments(args, {});
   const [conversation, message] = requirePositionals(parsed, 2);

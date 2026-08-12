@@ -247,7 +247,7 @@ export async function watchCommand(
           method: "POST",
           path: "/v1/realtime/tickets",
           responseSchema: realtimeTicketResponseSchema,
-          headers: { "x-hmm-chat-capabilities": WATCH_CAPABILITIES },
+          headers: { "x-hype-comms-capabilities": WATCH_CAPABILITIES },
         });
         const result = await streamOneConnection({
           origin: profile.apiOrigin,

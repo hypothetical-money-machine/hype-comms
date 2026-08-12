@@ -16,7 +16,7 @@ import type { Runtime } from "../src/types.js";
 const directories: string[] = [];
 
 async function directory(): Promise<string> {
-  const value = await mkdtemp(join(tmpdir(), "hmm-chat-cli-test-"));
+  const value = await mkdtemp(join(tmpdir(), "hype-comms-cli-test-"));
   directories.push(value);
   return value;
 }
@@ -55,7 +55,7 @@ describe("profile storage", () => {
   it("stores profiles atomically with private permissions", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    const value = runtime(home, { HMM_CHAT_CONFIG_DIR: configDir });
+    const value = runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir });
     await saveProfile(value, "work", {
       apiOrigin: "https://chat.example.test",
       credential: { kind: "human", sessionToken: "a".repeat(43) },
@@ -76,7 +76,7 @@ describe("profile storage", () => {
   it("keeps a stored credential when only the origin is re-asserted", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    const value = runtime(home, { HMM_CHAT_CONFIG_DIR: configDir });
+    const value = runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir });
     await saveProfile(value, "work", {
       apiOrigin: "https://chat.example.test",
       credential: { kind: "human", sessionToken: "a".repeat(43) },
@@ -93,7 +93,7 @@ describe("profile storage", () => {
   it("drops a stored credential when the profile moves to another origin", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    const value = runtime(home, { HMM_CHAT_CONFIG_DIR: configDir });
+    const value = runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir });
     await saveProfile(value, "work", {
       apiOrigin: "https://chat.example.test",
       credential: { kind: "agent", token: `hype_comms_agent_${"b".repeat(43)}` },
@@ -110,7 +110,7 @@ describe("profile storage", () => {
   it("applies environment overrides without persisting the environment token", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    await saveProfile(runtime(home, { HMM_CHAT_CONFIG_DIR: configDir }), "work", {
+    await saveProfile(runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir }), "work", {
       apiOrigin: "https://stored.example.test",
       credential: { kind: "human", sessionToken: "a".repeat(43) },
     });
@@ -118,10 +118,10 @@ describe("profile storage", () => {
     const resolved = await resolveProfile(
       {
         env: {
-          HMM_CHAT_CONFIG_DIR: configDir,
-          HMM_CHAT_PROFILE: "work",
-          HMM_CHAT_API_ORIGIN: "https://environment.example.test",
-          HMM_CHAT_TOKEN: agentToken,
+          HYPE_COMMS_CONFIG_DIR: configDir,
+          HYPE_COMMS_PROFILE: "work",
+          HYPE_COMMS_API_ORIGIN: "https://environment.example.test",
+          HYPE_COMMS_TOKEN: agentToken,
         },
         homeDirectory: home,
       },
@@ -141,7 +141,7 @@ describe("profile storage", () => {
   it("keeps a saved credential bound to its stored origin when only the origin is overridden", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    await saveProfile(runtime(home, { HMM_CHAT_CONFIG_DIR: configDir }), "work", {
+    await saveProfile(runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir }), "work", {
       apiOrigin: "https://stored.example.test",
       credential: { kind: "agent", token: `hype_comms_agent_${"c".repeat(43)}` },
     });
@@ -149,9 +149,9 @@ describe("profile storage", () => {
     const resolved = await resolveProfile(
       {
         env: {
-          HMM_CHAT_CONFIG_DIR: configDir,
-          HMM_CHAT_PROFILE: "work",
-          HMM_CHAT_API_ORIGIN: "https://override.example.test",
+          HYPE_COMMS_CONFIG_DIR: configDir,
+          HYPE_COMMS_PROFILE: "work",
+          HYPE_COMMS_API_ORIGIN: "https://override.example.test",
         },
         homeDirectory: home,
       },
@@ -168,7 +168,7 @@ describe("profile storage", () => {
   it("serializes concurrent profile mutations without losing updates", async () => {
     const home = await directory();
     const configDir = join(home, "config");
-    const value = runtime(home, { HMM_CHAT_CONFIG_DIR: configDir });
+    const value = runtime(home, { HYPE_COMMS_CONFIG_DIR: configDir });
     await Promise.all(
       Array.from({ length: 8 }, (_, index) =>
         updateProfileStore(value, (store) => {

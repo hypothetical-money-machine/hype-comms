@@ -2,10 +2,10 @@
   "name": "@hype-comms/cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Machine-readable command-line client for HMM Chat.",
+  "description": "Machine-readable command-line client for Hype Comms.",
   "type": "module",
   "bin": {
-    "hmm-chat-cli": "./dist/bin.js"
+    "hype-comms-cli": "./dist/bin.js"
   },
   "files": [
     "dist",

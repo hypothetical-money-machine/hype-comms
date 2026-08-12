@@ -1,6 +1,6 @@
-# HMM Chat CLI
+# Hype Comms CLI
 
-`hmm-chat-cli` is the Node 24 command-line client for HMM Chat. It is designed for both people and
+`hype-comms-cli` is the Node 24 command-line client for Hype Comms. It is designed for both people and
 automation: ordinary commands print readable output, `--json` prints one validated JSON value, and
 `watch --json` prints validated NDJSON events.
 
@@ -9,28 +9,28 @@ automation: ordinary commands print readable output, `--json` prints one validat
 Build or install the workspace package, then save an API origin:
 
 ```sh
-hmm-chat-cli profiles set work --api-origin https://chat.example.com --default
+hype-comms-cli profiles set work --api-origin https://chat.example.com --default
 ```
 
 Only HTTPS origins are accepted outside local development. Loopback HTTP (`localhost`, `127/8`, or
 `::1`) is supported for development. Redirects, origins containing credentials, and origins with a
 path, query, or fragment are rejected.
 
-Profiles are kept in `~/.config/hmm-chat/profiles.json` by default. The directory is mode `0700`,
+Profiles are kept in `~/.config/hype-comms/profiles.json` by default. The directory is mode `0700`,
 the file is mode `0600`, and updates use a private temporary file, `fsync`, and atomic rename.
 Credential rotations take an interprocess lock so concurrent refreshes cannot overwrite each other.
 Saved credentials stay bound to the profile's saved API origin, so an origin override cannot carry
-one to another server. `HMM_CHAT_TOKEN` is an explicit process-only replacement bound to the
+one to another server. `HYPE_COMMS_TOKEN` is an explicit process-only replacement bound to the
 selected origin.
 
 The following environment variables override a stored profile:
 
-- `HMM_CHAT_PROFILE`
-- `HMM_CHAT_API_ORIGIN`
-- `HMM_CHAT_TOKEN`
-- `HMM_CHAT_CONFIG_DIR`
+- `HYPE_COMMS_PROFILE`
+- `HYPE_COMMS_API_ORIGIN`
+- `HYPE_COMMS_TOKEN`
+- `HYPE_COMMS_CONFIG_DIR`
 
-An `HMM_CHAT_TOKEN` value is used only from the process environment and is never persisted.
+An `HYPE_COMMS_TOKEN` value is used only from the process environment and is never persisted.
 
 The distributable CLI bundles the private `@hype-comms/contracts` implementation from this
 workspace while leaving the public `ws` and `zod` packages as runtime dependencies. This keeps the
@@ -42,9 +42,9 @@ workspace package.
 Human sign-in uses a magic link:
 
 ```sh
-hmm-chat-cli auth request-magic-link person@example.com
-printf '%s\n' "$MAGIC_LINK_TOKEN" | hmm-chat-cli auth exchange
-hmm-chat-cli auth whoami --json
+hype-comms-cli auth request-magic-link person@example.com
+printf '%s\n' "$MAGIC_LINK_TOKEN" | hype-comms-cli auth exchange
+hype-comms-cli auth whoami --json
 ```
 
 `auth exchange` reads the single-use token from private stdin or a hidden terminal prompt and saves
@@ -55,16 +55,16 @@ Use `auth devices list` and `auth devices revoke DEVICE_ID` to manage device ses
 Agent tokens are never accepted as command arguments. Inject one for a process:
 
 ```sh
-HMM_CHAT_API_ORIGIN=https://chat.example.com \
-HMM_CHAT_TOKEN="$AGENT_TOKEN" \
-hmm-chat-cli auth whoami --json
+HYPE_COMMS_API_ORIGIN=https://chat.example.com \
+HYPE_COMMS_TOKEN="$AGENT_TOKEN" \
+hype-comms-cli auth whoami --json
 ```
 
 Or explicitly save a token read from private stdin:
 
 ```sh
 printf '%s\n' "$AGENT_TOKEN" |
-  hmm-chat-cli --profile work auth login-agent --save
+  hype-comms-cli --profile work auth login-agent --save
 ```
 
 The server stores only an agent token hash and reveals the plaintext once, in the successful
@@ -73,7 +73,7 @@ the old token.
 
 ## Commands
 
-Run `hmm-chat-cli --help` for the complete tree. Main product commands include:
+Run `hype-comms-cli --help` for the complete tree. Main product commands include:
 
 ```text
 workspace bootstrap|members

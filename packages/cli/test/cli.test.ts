@@ -11,7 +11,7 @@ import { agentPrincipal, CLIENT_MESSAGE_ID, CONVERSATION_ID } from "./fixtures.j
 import { jsonResponse, testRuntime } from "./helpers.js";
 
 async function home(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "hmm-chat-cli-run-"));
+  return mkdtemp(join(tmpdir(), "hype-comms-cli-run-"));
 }
 
 describe("CLI output and exit contracts", () => {
@@ -28,7 +28,7 @@ describe("CLI output and exit contracts", () => {
   it("keeps successful JSON on stdout with no diagnostics", async () => {
     const runtime = testRuntime({
       homeDirectory: await home(),
-      env: { HMM_CHAT_API_ORIGIN: "https://chat.example.test" },
+      env: { HYPE_COMMS_API_ORIGIN: "https://chat.example.test" },
       fetch: vi.fn<typeof globalThis.fetch>(async () => jsonResponse({ status: "ok" })),
     });
     const exitCode = await executeCli(["health", "--json"], runtime);
@@ -41,8 +41,8 @@ describe("CLI output and exit contracts", () => {
     const homeDirectory = await home();
     const configDirectory = join(homeDirectory, "config");
     const env = {
-      HMM_CHAT_CONFIG_DIR: configDirectory,
-      HMM_CHAT_PROFILE: "work",
+      HYPE_COMMS_CONFIG_DIR: configDirectory,
+      HYPE_COMMS_PROFILE: "work",
     };
     await saveProfile({ env, homeDirectory, now: Date.now }, "work", {
       apiOrigin: "https://chat.example.test",
@@ -78,8 +78,8 @@ describe("CLI output and exit contracts", () => {
     const runtime = testRuntime({
       homeDirectory: await home(),
       env: {
-        HMM_CHAT_API_ORIGIN: "https://chat.example.test",
-        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch: vi.fn<typeof globalThis.fetch>(async (_url, init) => {
         const body = JSON.parse(String(init?.body)) as { clientMessageId: string };
@@ -163,8 +163,8 @@ describe("CLI output and exit contracts", () => {
     const runtime = testRuntime({
       homeDirectory: await home(),
       env: {
-        HMM_CHAT_API_ORIGIN: "https://chat.example.test",
-        HMM_CHAT_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
       },
       fetch: vi.fn<typeof globalThis.fetch>(async () => response.clone()),
     });
@@ -180,8 +180,8 @@ describe("CLI output and exit contracts", () => {
     const runtime = testRuntime({
       homeDirectory,
       env: {
-        HMM_CHAT_CONFIG_DIR: configDirectory,
-        HMM_CHAT_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_CONFIG_DIR: configDirectory,
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
       },
       stdin: `${token}\n`,
       fetch: vi.fn<typeof globalThis.fetch>(async (_url, init) => {
@@ -203,9 +203,9 @@ describe("CLI output and exit contracts", () => {
     const runtime = testRuntime({
       homeDirectory,
       env: {
-        HMM_CHAT_CONFIG_DIR: configDirectory,
-        HMM_CHAT_API_ORIGIN: "https://chat.example.test",
-        HMM_CHAT_TOKEN: token,
+        HYPE_COMMS_CONFIG_DIR: configDirectory,
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: token,
       },
       fetch: vi.fn<typeof globalThis.fetch>(async () => jsonResponse(agentPrincipal())),
     });
@@ -233,8 +233,8 @@ describe("CLI output and exit contracts", () => {
       const homeDirectory = await home();
       const configDirectory = join(homeDirectory, "config");
       const baseEnv = {
-        HMM_CHAT_CONFIG_DIR: configDirectory,
-        HMM_CHAT_PROFILE: "work",
+        HYPE_COMMS_CONFIG_DIR: configDirectory,
+        HYPE_COMMS_PROFILE: "work",
       };
       await saveProfile({ env: baseEnv, homeDirectory, now: Date.now }, "work", {
         apiOrigin: "https://stored.example.test",
@@ -245,7 +245,7 @@ describe("CLI output and exit contracts", () => {
         homeDirectory,
         env:
           override === "environment"
-            ? { ...baseEnv, HMM_CHAT_API_ORIGIN: "https://override.example.test" }
+            ? { ...baseEnv, HYPE_COMMS_API_ORIGIN: "https://override.example.test" }
             : baseEnv,
         fetch,
       });
@@ -268,7 +268,7 @@ describe("CLI output and exit contracts", () => {
     const token = `hype_comms_agent_${"r".repeat(43)}`;
     await saveProfile(
       {
-        env: { HMM_CHAT_CONFIG_DIR: configDirectory },
+        env: { HYPE_COMMS_CONFIG_DIR: configDirectory },
         homeDirectory,
         now: Date.now,
       },
@@ -287,10 +287,10 @@ describe("CLI output and exit contracts", () => {
     const runtime = testRuntime({
       homeDirectory,
       env: {
-        HMM_CHAT_CONFIG_DIR: configDirectory,
-        HMM_CHAT_PROFILE: "work",
-        HMM_CHAT_API_ORIGIN: "https://override.example.test",
-        HMM_CHAT_TOKEN: token,
+        HYPE_COMMS_CONFIG_DIR: configDirectory,
+        HYPE_COMMS_PROFILE: "work",
+        HYPE_COMMS_API_ORIGIN: "https://override.example.test",
+        HYPE_COMMS_TOKEN: token,
       },
       fetch,
     });
@@ -305,9 +305,9 @@ describe("CLI output and exit contracts", () => {
       const homeDirectory = await home();
       const configDirectory = join(homeDirectory, "config");
       const env = {
-        HMM_CHAT_CONFIG_DIR: configDirectory,
-        HMM_CHAT_PROFILE: "work",
-        HMM_CHAT_API_ORIGIN: "https://override.example.test",
+        HYPE_COMMS_CONFIG_DIR: configDirectory,
+        HYPE_COMMS_PROFILE: "work",
+        HYPE_COMMS_API_ORIGIN: "https://override.example.test",
       };
       const credential = { kind: "human" as const, sessionToken: "s".repeat(43) };
       await saveProfile({ env, homeDirectory, now: Date.now }, "work", {

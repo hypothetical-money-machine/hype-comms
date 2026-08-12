@@ -83,7 +83,7 @@ export async function invitationsCommand(
     writeResult(context.runtime.io, { revoked: invitationId.data }, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli invitations <list|create|revoke>");
+  throw new UsageError("Usage: hype-comms-cli invitations <list|create|revoke>");
 }
 
 export async function agentsCommand(
@@ -126,7 +126,7 @@ export async function agentsCommand(
     writeResult(context.runtime.io, { disabled: id }, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli agents <list|create|disable>");
+  throw new UsageError("Usage: hype-comms-cli agents <list|create|disable>");
 }
 
 export async function agentTokensCommand(
@@ -187,5 +187,5 @@ export async function agentTokensCommand(
     writeResult(context.runtime.io, { agentId, revoked: tokenId.data }, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hmm-chat-cli agent-tokens <list|create|revoke>");
+  throw new UsageError("Usage: hype-comms-cli agent-tokens <list|create|revoke>");
 }
