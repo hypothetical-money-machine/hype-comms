@@ -9,8 +9,11 @@ const expectedUpdateProvider = "generic";
 const expectedUpdateUrl = "https://updates.hypemm.com/desktop";
 const requiredAsarEntries = [
   "/dist/main/index.js",
+  "/dist/main/claude-acp-worker.js",
   "/dist/preload/index.js",
   "/dist/renderer/index.html",
+  "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+  "/node_modules/@agentclientprotocol/sdk/package.json",
   "/node_modules/electron-updater/package.json",
   "/node_modules/electron-updater/out/main.js",
 ];
@@ -112,6 +115,15 @@ for (const asarPath of asarPaths) {
     throw new Error(`${asarPath} has no bundled renderer assets`);
   }
 
+  const packagedClaudeExecutables = [...entries].filter((entry) =>
+    entry.startsWith("/node_modules/@anthropic-ai/claude-agent-sdk-"),
+  );
+  if (packagedClaudeExecutables.length > 0) {
+    throw new Error(
+      `${asarPath} contains host-specific Claude executables; AI Channel must use the user-installed Claude Code binary`,
+    );
+  }
+
   await verifyUpdateConfiguration(asarPath);
 
   const executablePath = await executableForAsar(asarPath);
@@ -126,5 +138,5 @@ for (const asarPath of asarPaths) {
 }
 
 console.log(
-  `Verified updater configuration, ASAR contents, and Electron fuses in ${asarPaths.length} packaged app(s).`,
+  `Verified updater configuration, AI Channel worker contents, and Electron fuses in ${asarPaths.length} packaged app(s).`,
 );

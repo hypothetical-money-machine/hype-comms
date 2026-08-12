@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
+  AiChannelState,
   CacheCryptoStatus,
   CacheDecryptBatchResponse,
   CacheEncryptBatchResponse,
@@ -1057,6 +1058,38 @@ class FakeDesktopApi implements DesktopApi {
 
   onCompactModeChanged(): () => void {
     throw new Error("The runtime test does not observe compact mode");
+  }
+
+  async getAiChannelState(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not read AI Channel state");
+  }
+
+  async startAiChannel(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not start AI Channel");
+  }
+
+  async chooseAiChannelWorkspace(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not choose an AI Channel folder");
+  }
+
+  async newAiChannelSession(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not create an AI Channel session");
+  }
+
+  async sendAiChannelPrompt(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not send AI Channel prompts");
+  }
+
+  async cancelAiChannelPrompt(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not cancel AI Channel prompts");
+  }
+
+  async respondAiChannelPermission(): Promise<AiChannelState> {
+    throw new Error("The workspace runtime test does not answer AI Channel permissions");
+  }
+
+  onAiChannelStateChanged(): () => void {
+    throw new Error("The workspace runtime test does not observe AI Channel state");
   }
 
   onNotificationAction(listener: (action: NotificationAction) => void): () => void {

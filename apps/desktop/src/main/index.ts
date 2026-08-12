@@ -1,8 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+  AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
+  AI_CHANNEL_STATE_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -13,6 +17,10 @@ import {
   NOTIFICATION_STATE_IPC_MAX_BYTES,
   authAppVersionSchema,
   authDevicePlatformSchema,
+  aiChannelGenerationRequestSchema,
+  aiChannelPermissionResponseSchema,
+  aiChannelPromptRequestSchema,
+  aiChannelStateSchema,
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
   cacheScopeSchema,
@@ -47,6 +55,7 @@ import {
   themePreferenceSchema,
   updateTaskOperationSchema,
   upsertChannelMemberOperationSchema,
+  type AiChannelState,
   type ChatSessionState,
   type HumanWorkspaceBootstrapResponse,
   type NotificationContext,
@@ -71,7 +80,7 @@ import {
   session,
   shell,
 } from "electron";
-import type { Event, IpcMainInvokeEvent, Session, WebContents } from "electron";
+import type { Event, IpcMainInvokeEvent, OpenDialogOptions, Session, WebContents } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
@@ -88,8 +97,11 @@ import {
 } from "./authkit-pending-store";
 import { configureWindowsApplicationIdentity } from "./application-identity";
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
+import { AiChannelController } from "./ai-channel-controller";
+import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
+import { createClaudeAcpHost } from "./claude-acp-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
 import {
@@ -275,6 +287,8 @@ let stopThemeSubscription: (() => void) | null = null;
 let userUpdateCheckInFlight = false;
 let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
+let aiChannelController: AiChannelController | null = null;
+let stopAiChannelSubscription: (() => void) | null = null;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
 let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
@@ -434,6 +448,22 @@ function parseBoundedNotificationIpc<T>(
   return schema.parse(value);
 }
 
+function boundedAiChannelState(value: unknown): AiChannelState {
+  return parseBoundedNotificationIpc(aiChannelStateSchema, value, AI_CHANNEL_STATE_IPC_MAX_BYTES);
+}
+
+function deliverAiChannelState(state: AiChannelState): void {
+  sendToRenderer(DESKTOP_CHANNELS.aiChannelChanged, boundedAiChannelState(state));
+}
+
+function suspendAiChannel(): void {
+  const controller = aiChannelController;
+  if (controller === null) return;
+  void controller.suspend().catch(() => {
+    reportMainProcessError("Failed to suspend the local AI Channel");
+  });
+}
+
 function inactiveNotificationContext(): NotificationContext {
   return notificationContextSchema.parse({
     version: 1,
@@ -526,6 +556,7 @@ function sessionStateMatchesNotificationScope(
 function beginSessionReplacement(): void {
   macWindowlessRealtimeActive = false;
   workspaceRealtime?.resetSession();
+  suspendAiChannel();
   notificationScope = null;
   notificationActiveGeneration = null;
   notificationController?.markReplacing();
@@ -991,6 +1022,124 @@ function registerIpcHandlers(): void {
     } catch (error) {
       throw new Error("Could not save the compact mode preference", { cause: error });
     }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelState);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelState, (event): AiChannelState => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel state sender");
+    }
+    if (aiChannelController === null) {
+      throw new Error("AI Channel is unavailable");
+    }
+    return boundedAiChannelState(aiChannelController.state);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelStart);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelStart, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel start sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const request = parseBoundedNotificationIpc(
+      aiChannelGenerationRequestSchema,
+      value,
+      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+    );
+    return boundedAiChannelState(await controller.start(request));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelWorkspaceChoose);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelWorkspaceChoose, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel workspace sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const window = mainWindow;
+    const options: OpenDialogOptions = {
+      title: "Choose a folder for AI Channel",
+      buttonLabel: "Use this folder",
+      properties: ["openDirectory"],
+    };
+    const selection =
+      window === null || window.isDestroyed()
+        ? await dialog.showOpenDialog(options)
+        : await dialog.showOpenDialog(window, options);
+    const selectedPath = selection.filePaths[0];
+    if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
+      return boundedAiChannelState(controller.state);
+    }
+    try {
+      const workspacePath = await realpath(selectedPath);
+      if (!(await stat(workspacePath)).isDirectory()) {
+        throw new Error("Not a directory");
+      }
+      return boundedAiChannelState(await controller.chooseWorkspace(workspacePath));
+    } catch {
+      throw new Error("The selected AI Channel folder is unavailable");
+    }
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelSessionNew);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelSessionNew, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel session sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const request = parseBoundedNotificationIpc(
+      aiChannelGenerationRequestSchema,
+      value,
+      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+    );
+    return boundedAiChannelState(await controller.newSession(request));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPromptSend);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPromptSend, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel prompt sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const request = parseBoundedNotificationIpc(
+      aiChannelPromptRequestSchema,
+      value,
+      AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
+    );
+    return boundedAiChannelState(await controller.sendPrompt(request));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPromptCancel);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPromptCancel, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel cancellation sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const request = parseBoundedNotificationIpc(
+      aiChannelGenerationRequestSchema,
+      value,
+      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+    );
+    return boundedAiChannelState(await controller.cancelPrompt(request));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPermissionRespond);
+  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPermissionRespond, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted AI Channel permission sender");
+    }
+    const controller = aiChannelController;
+    if (controller === null) throw new Error("AI Channel is unavailable");
+    const request = parseBoundedNotificationIpc(
+      aiChannelPermissionResponseSchema,
+      value,
+      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+    );
+    return boundedAiChannelState(await controller.respondPermission(request));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
@@ -1671,7 +1820,10 @@ async function createMainWindow(): Promise<BrowserWindow> {
       },
       setRendererReady: (ready) => {
         rendererReady = ready;
-        if (!ready) workspaceRealtime?.rendererUnavailable();
+        if (!ready) {
+          workspaceRealtime?.rendererUnavailable();
+          suspendAiChannel();
+        }
       },
       advanceRendererSessionGeneration: () => {
         rendererSessionGeneration += 1;
@@ -1991,6 +2143,13 @@ if (!hasSingleInstanceLock) {
       compactModeController = new CompactModeController({
         persistence: new CompactModePreferenceStore({ userDataPath: app.getPath("userData") }),
       });
+      aiChannelController = new AiChannelController({
+        preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
+        hostFactory: createClaudeAcpHost,
+        reportListenerError: () => {
+          reportMainProcessError("AI Channel state listener failed");
+        },
+      });
       notificationSettingsController = new NotificationSettingsController({
         persistence: new NotificationPreferenceStore({ userDataPath: app.getPath("userData") }),
         capability: createNotificationCapabilitySource(),
@@ -2000,11 +2159,16 @@ if (!hasSingleInstanceLock) {
       await Promise.all([
         themeController.initialize(),
         compactModeController.initialize(),
+        aiChannelController.initialize().catch(() => {
+          reportMainProcessError("Failed to restore the local AI Channel preference");
+          return aiChannelController?.state;
+        }),
         notificationSettingsController.initialize(),
       ]);
       const initializedNotificationSettings = notificationSettingsController;
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
+      stopAiChannelSubscription = aiChannelController.subscribe(deliverAiChannelState);
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
 
@@ -2322,5 +2486,12 @@ if (!hasSingleInstanceLock) {
     stopCompactModeSubscription?.();
     stopCompactModeSubscription = null;
     compactModeController?.dispose();
+    stopAiChannelSubscription?.();
+    stopAiChannelSubscription = null;
+    const localAiChannel = aiChannelController;
+    aiChannelController = null;
+    void localAiChannel?.dispose().catch(() => {
+      reportMainProcessError("Failed to stop the local AI Channel");
+    });
   });
 }

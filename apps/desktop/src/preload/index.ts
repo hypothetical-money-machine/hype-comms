@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import {
+  AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+  AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
+  AI_CHANNEL_STATE_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -13,6 +16,10 @@ import {
   advanceReadCursorResponseSchema,
   addReactionResponseSchema,
   authCapabilitiesSchema,
+  aiChannelGenerationRequestSchema,
+  aiChannelPermissionResponseSchema,
+  aiChannelPromptRequestSchema,
+  aiChannelStateSchema,
   cacheCryptoStatusSchema,
   cacheDecryptBatchRequestSchema,
   cacheDecryptBatchResponseSchema,
@@ -74,6 +81,10 @@ import {
   humanWorkspaceBootstrapResponseSchema,
   scopedProductRealtimeEventSchema,
   type ChatSessionState,
+  type AiChannelGenerationRequest,
+  type AiChannelPermissionResponse,
+  type AiChannelPromptRequest,
+  type AiChannelState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
   type CacheScope,
@@ -248,6 +259,90 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         DESKTOP_CHANNELS.compactModeChanged,
         listener,
         (value): value is boolean => compactModePreferenceSchema.safeParse(value).success,
+      ),
+    getAiChannelState: async () =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelState),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    startAiChannel: async (input: AiChannelGenerationRequest) =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.aiChannelStart,
+          parseBoundedNotificationPayload(
+            aiChannelGenerationRequestSchema,
+            input,
+            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+          ),
+        ),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    chooseAiChannelWorkspace: async () =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelWorkspaceChoose),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    newAiChannelSession: async (input: AiChannelGenerationRequest) =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.aiChannelSessionNew,
+          parseBoundedNotificationPayload(
+            aiChannelGenerationRequestSchema,
+            input,
+            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+          ),
+        ),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    sendAiChannelPrompt: async (input: AiChannelPromptRequest) =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.aiChannelPromptSend,
+          parseBoundedNotificationPayload(
+            aiChannelPromptRequestSchema,
+            input,
+            AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
+          ),
+        ),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    cancelAiChannelPrompt: async (input: AiChannelGenerationRequest) =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.aiChannelPromptCancel,
+          parseBoundedNotificationPayload(
+            aiChannelGenerationRequestSchema,
+            input,
+            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+          ),
+        ),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    respondAiChannelPermission: async (input: AiChannelPermissionResponse) =>
+      parseBoundedNotificationPayload(
+        aiChannelStateSchema,
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.aiChannelPermissionRespond,
+          parseBoundedNotificationPayload(
+            aiChannelPermissionResponseSchema,
+            input,
+            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
+          ),
+        ),
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+      ),
+    onAiChannelStateChanged: (listener: (state: AiChannelState) => void) =>
+      subscribeToBoundedNotificationPayload(
+        DESKTOP_CHANNELS.aiChannelChanged,
+        aiChannelStateSchema,
+        AI_CHANNEL_STATE_IPC_MAX_BYTES,
+        listener,
       ),
     getServerStatus: () =>
       ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,

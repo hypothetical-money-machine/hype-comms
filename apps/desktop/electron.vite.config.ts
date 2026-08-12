@@ -71,9 +71,12 @@ export default defineConfig(({ command }) => {
       build: {
         outDir: path.join(desktopRoot, "dist/main"),
         rolldownOptions: {
-          input: path.join(desktopRoot, "src/main/index.ts"),
+          input: {
+            index: path.join(desktopRoot, "src/main/index.ts"),
+            "claude-acp-worker": path.join(desktopRoot, "src/main/claude-acp-worker.ts"),
+          },
           output: {
-            entryFileNames: "index.js",
+            entryFileNames: "[name].js",
             format: "cjs",
           },
         },
