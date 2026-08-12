@@ -11,6 +11,8 @@
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
     "invite:dist": "node dist/modules/identity/invite-cli.js",
+    "authkit:revoke-all": "tsx src/modules/identity/authkit-revoke-all-cli.ts",
+    "authkit:revoke-all:dist": "node dist/modules/identity/authkit-revoke-all-cli.js",
     "bot": "tsx src/modules/bots/cli.ts",
     "bot:dist": "node dist/modules/bots/cli.js",
     "migrate": "tsx src/db/migrate.ts",
@@ -29,7 +31,9 @@
     "@fastify/static": "10.1.2",
     "@fastify/websocket": "11.3.0",
     "@hmm-chat/contracts": "*",
+    "@workos-inc/node": "10.9.0",
     "fastify": "5.11.0",
+    "jose": "6.2.8",
     "nodemailer": "^9.0.3",
     "pg": "8.22.0",
     "zod": "4.4.3"

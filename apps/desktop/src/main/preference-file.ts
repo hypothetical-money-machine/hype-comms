@@ -4,16 +4,19 @@ import path from "node:path";
 
 export type SyncDirectory = (directory: string) => Promise<void>;
 
-export async function syncDirectoryBestEffort(directory: string): Promise<void> {
-  let directoryHandle: FileHandle | undefined;
+export async function syncDirectoryStrict(directory: string): Promise<void> {
+  const directoryHandle = await open(directory, "r");
   try {
-    directoryHandle = await open(directory, "r");
     await directoryHandle.sync();
-  } catch {
-    // The preference is already committed by rename; directory durability is best effort.
   } finally {
-    await directoryHandle?.close().catch(() => undefined);
+    await directoryHandle.close();
   }
+}
+
+export async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  await syncDirectoryStrict(directory).catch(() => {
+    // The preference is already committed by rename; directory durability is best effort.
+  });
 }
 
 /**
@@ -58,6 +61,7 @@ export async function atomicWrite(
   filePath: string,
   value: string,
   syncDirectory: SyncDirectory,
+  options: { readonly requireDirectorySync?: boolean } = {},
 ): Promise<void> {
   const directory = path.dirname(filePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -78,7 +82,11 @@ export async function atomicWrite(
     isOpen = false;
     await rename(temporaryPath, filePath);
     if (process.platform !== "win32") {
-      await syncDirectory(directory).catch(() => undefined);
+      if (options.requireDirectorySync === true) {
+        await syncDirectory(directory);
+      } else {
+        await syncDirectory(directory).catch(() => undefined);
+      }
     }
   } catch (error) {
     if (isOpen) {

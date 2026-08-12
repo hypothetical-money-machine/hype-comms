@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import type {
+  AuthCapabilities,
   ChannelAccess,
   ChannelMode,
   ChatSessionState,
@@ -189,12 +190,51 @@ function SignIn({
   sessionMessage?: string;
 }) {
   const [email, setEmail] = useState("");
+  const [capabilities, setCapabilities] = useState<AuthCapabilities>({
+    authKit: false,
+    magicLink: true,
+  });
+  const [authKitStarting, setAuthKitStarting] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [status, setStatus] = useState(sessionMessage ?? "");
 
+  useEffect(() => {
+    let active = true;
+    if (client.getAuthCapabilities === undefined) return () => undefined;
+    void client
+      .getAuthCapabilities()
+      .then((nextCapabilities) => {
+        if (active) setCapabilities(nextCapabilities);
+      })
+      .catch(() => {
+        // A pre-AuthKit or temporarily unavailable server retains the existing magic-link UI.
+      });
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  useEffect(() => {
+    if (sessionMessage !== undefined) setStatus(sessionMessage);
+  }, [sessionMessage]);
+
+  const startAuthKit = async (): Promise<void> => {
+    if (authKitStarting || requesting || client.startAuthKitSignIn === undefined) return;
+    setAuthKitStarting(true);
+    setStatus("");
+    try {
+      await client.startAuthKitSignIn();
+      setStatus("Finish signing in in the browser. You can return here when it completes.");
+    } catch (error) {
+      setStatus(errorMessage(error, "Could not start WorkOS sign-in"));
+    } finally {
+      setAuthKitStarting(false);
+    }
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (requesting || email.trim() === "") return;
+    if (requesting || authKitStarting || email.trim() === "") return;
     setRequesting(true);
     setStatus("");
     try {
@@ -220,21 +260,42 @@ function SignIn({
         <p className="eyebrow">Hypothetical Money Machine</p>
         <h1>Private workspace chat</h1>
         <p className="signin-lede">Sign in with the email address invited to this workspace.</p>
-        <form onSubmit={(event) => void submit(event)}>
-          <label htmlFor="email">Email address</label>
-          <input
-            id="email"
-            type="email"
-            autoComplete="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="you@example.com"
-            required
-          />
-          <button type="submit" disabled={requesting || email.trim() === ""}>
-            {requesting ? "Requesting link…" : "Email me a sign-in link"}
+        {capabilities.authKit && (
+          <button
+            className="authkit-button"
+            type="button"
+            disabled={authKitStarting || requesting}
+            onClick={() => void startAuthKit()}
+          >
+            {authKitStarting ? "Opening secure sign-in…" : "Sign in with WorkOS"}
           </button>
-        </form>
+        )}
+        {capabilities.authKit && capabilities.magicLink && (
+          <div className="signin-divider" aria-hidden="true">
+            <span>or</span>
+          </div>
+        )}
+        {capabilities.magicLink && (
+          <form onSubmit={(event) => void submit(event)}>
+            <label htmlFor="email">Email address</label>
+            <input
+              id="email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+              disabled={authKitStarting}
+              required
+            />
+            <button type="submit" disabled={requesting || authKitStarting || email.trim() === ""}>
+              {requesting ? "Requesting link…" : "Email me a sign-in link"}
+            </button>
+          </form>
+        )}
+        {!capabilities.authKit && !capabilities.magicLink && (
+          <p className="signin-status">No sign-in method is currently available.</p>
+        )}
         {status !== "" && <p className="signin-status">{status}</p>}
 
         <ThemeSelector theme={theme} />

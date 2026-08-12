@@ -11,9 +11,9 @@ The implementation contract and security boundaries live in
 
 ## Built and working
 
-- Invite-only access: email-bound invitations, single-use magic links, rotating revocable
-  device sessions with pre-expiry renewal, and credentials confined to Electron main behind
-  validated IPC.
+- Invite-only access: optional WorkOS AuthKit plus email-bound single-use magic links, rotating
+  revocable device sessions with pre-expiry renewal, signed upstream-session revocation plus
+  active-session reconciliation, and credentials confined to Electron main behind validated IPC.
 - A PostgreSQL-authoritative conversation core: workspace channels, unique 1:1 DMs,
   paginated history, and server-authoritative unread/mention counters.
 - Workspace-visible and members-only channels with owner-managed membership, server-enforced

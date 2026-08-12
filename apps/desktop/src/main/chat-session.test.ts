@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MagicLinkToken } from "@hmm-chat/contracts";
 
 import {
+  AUTHKIT_FAILED_MESSAGE,
   ChatSession,
   ChatSessionError,
   INVALID_MAGIC_LINK_MESSAGE,
@@ -20,6 +21,11 @@ const SESSION_REFRESH_URL = "https://chat.example/v1/auth/session/refresh";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const FIVE_MINUTES_MS = 5 * 60_000;
+const AUTHKIT_CODE = "C".repeat(43);
+const AUTHKIT_VERIFIER = "V".repeat(43);
+const AUTHKIT_STATE = "S".repeat(43);
+const AUTHKIT_CHALLENGE = "H".repeat(43);
+const INSTALLATION_ID = "10000000-0000-4000-8000-000000000003";
 
 const CURRENT_USER = {
   user: {
@@ -257,6 +263,46 @@ describe("ChatSession lifecycle", () => {
 
     await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
     expect(cookies.removals).toEqual(["hmm_session"]);
+    expect(session.consumeLogoutUrl()).toBeNull();
+  });
+
+  it("captures a validated AuthKit logout URL once without changing public session state", async () => {
+    const logoutUrl =
+      "https://api.workos.com/user_management/sessions/logout?session_id=session_01ABC";
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async () =>
+        new Response(null, {
+          status: 204,
+          headers: { "x-hmm-authkit-logout-url": logoutUrl },
+        }),
+      cookies,
+    );
+
+    await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
+    expect(session.state).toEqual({ status: "signed-out" });
+    expect(JSON.stringify(session.state)).not.toContain("session_01ABC");
+    expect(session.consumeLogoutUrl()).toBe(logoutUrl);
+    expect(session.consumeLogoutUrl()).toBeNull();
+    expect(cookies.removals).toEqual(["hmm_session"]);
+  });
+
+  it("finishes local sign-out while ignoring an invalid provider logout header", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async () =>
+        new Response(null, {
+          status: 204,
+          headers: {
+            "x-hmm-authkit-logout-url": "https://evil.example/logout?access_token=secret",
+          },
+        }),
+      cookies,
+    );
+
+    await expect(session.signOut()).resolves.toEqual({ status: "signed-out" });
+    expect(session.consumeLogoutUrl()).toBeNull();
+    expect(cookies.removals).toEqual(["hmm_session"]);
   });
 });
 
@@ -437,6 +483,98 @@ describe("ChatSession magic links", () => {
     await expect(session.requestMagicLink({ email: "morgan@example.com" })).resolves.toEqual({
       status: "email-sent",
     });
+  });
+});
+
+describe("ChatSession AuthKit", () => {
+  it("discovers AuthKit while retaining a legacy-server magic-link fallback", async () => {
+    const capable = createSession(async () => jsonResponse({ authKit: true, magicLink: false }));
+    await expect(capable.getAuthCapabilities()).resolves.toEqual({
+      authKit: true,
+      magicLink: false,
+    });
+
+    const legacy = createSession(async () => jsonResponse({ error: "not found" }, 404));
+    await expect(legacy.getAuthCapabilities()).resolves.toEqual({
+      authKit: false,
+      magicLink: true,
+    });
+  });
+
+  it("starts only with a strict desktop challenge and state", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const session = createSession(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse(
+        { authorizationUrl: "https://api.workos.com/user_management/authorize" },
+        201,
+      );
+    });
+
+    await expect(
+      session.beginDesktopAuthorization({
+        codeChallenge: AUTHKIT_CHALLENGE,
+        state: AUTHKIT_STATE,
+      }),
+    ).resolves.toEqual({
+      authorizationUrl: "https://api.workos.com/user_management/authorize",
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("https://chat.example/v1/auth/desktop-authorizations");
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      codeChallenge: AUTHKIT_CHALLENGE,
+      state: AUTHKIT_STATE,
+    });
+  });
+
+  it("exchanges a one-use handoff into the existing cookie identity", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const session = createSession(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse(CURRENT_USER);
+    });
+
+    await expect(
+      session.exchangeAuthKitHandoff({
+        code: AUTHKIT_CODE,
+        codeVerifier: AUTHKIT_VERIFIER,
+        installationId: INSTALLATION_ID,
+        platform: "linux",
+        appVersion: "0.1.23",
+      }),
+    ).resolves.toMatchObject({ status: "signed-in", email: "morgan@example.com" });
+    expect(requests[0]?.url).toBe("https://chat.example/v1/auth/exchange");
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      code: AUTHKIT_CODE,
+      codeVerifier: AUTHKIT_VERIFIER,
+      installationId: INSTALLATION_ID,
+      platform: "linux",
+      appVersion: "0.1.23",
+    });
+    expect(JSON.stringify(session.state)).not.toContain(AUTHKIT_CODE);
+    session.stop();
+  });
+
+  it("collapses an indeterminate handoff into a credential-free terminal state", async () => {
+    const session = createSession(async () => {
+      throw new Error(`lost after ${AUTHKIT_CODE}`);
+    });
+
+    await expect(
+      session.exchangeAuthKitHandoff({
+        code: AUTHKIT_CODE,
+        codeVerifier: AUTHKIT_VERIFIER,
+        installationId: INSTALLATION_ID,
+        platform: "linux",
+        appVersion: "0.1.23",
+      }),
+    ).rejects.toThrow(AUTHKIT_FAILED_MESSAGE);
+    expect(session.state).toEqual({
+      status: "signed-out",
+      message: AUTHKIT_FAILED_MESSAGE,
+    });
+    expect(JSON.stringify(session.state)).not.toContain(AUTHKIT_CODE);
+    expect(JSON.stringify(session.state)).not.toContain(AUTHKIT_VERIFIER);
   });
 });
 

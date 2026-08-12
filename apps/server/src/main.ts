@@ -14,6 +14,13 @@ import {
   SmtpEmailSender,
   type EmailSender,
 } from "./modules/identity/email.js";
+import { createWorkOSAuthKitIdentityProvider } from "./modules/identity/authkit-provider.js";
+import {
+  AuthKitRepository,
+  deleteExpiredAuthKitState,
+} from "./modules/identity/authkit-repository.js";
+import { AuthKitService } from "./modules/identity/authkit-service.js";
+import { createWorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { IdentityRepository } from "./modules/identity/repository.js";
 import { IdentityService } from "./modules/identity/service.js";
 import { installGracefulShutdown } from "./shutdown.js";
@@ -33,6 +40,9 @@ async function main(): Promise<void> {
         readonly botService: BotService;
         readonly selfServiceMagicLink: boolean;
         readonly agentProvisioningEnabled: boolean;
+        readonly authKitAdmissionEnabled: boolean;
+        readonly authKitService?: AuthKitService;
+        readonly workosWebhookProcessor?: ReturnType<typeof createWorkOSWebhookProcessor>;
       }
     | undefined;
   let workspace:
@@ -68,11 +78,34 @@ async function main(): Promise<void> {
           : { tokenReuseDetected: () => metricsRegistry?.refreshTokenReuseDetected() },
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
+      const authKitRepository =
+        config.workos === undefined
+          ? undefined
+          : new AuthKitRepository(databasePool, config.workos.encryptionKey);
+      const authKitService =
+        config.workos === undefined || authKitRepository === undefined
+          ? undefined
+          : new AuthKitService({
+              provider: createWorkOSAuthKitIdentityProvider(config.workos),
+              repository: authKitRepository,
+            });
+      const workosWebhookProcessor =
+        config.workos?.webhookSecret === undefined || authKitRepository === undefined
+          ? undefined
+          : createWorkOSWebhookProcessor({
+              apiKey: config.workos.apiKey,
+              clientId: config.workos.clientId,
+              webhookSecret: config.workos.webhookSecret,
+              store: authKitRepository,
+            });
       identity = {
         service,
         botService: new BotService(databasePool),
         selfServiceMagicLink: config.emailDelivery !== "manual",
         agentProvisioningEnabled: config.agentProvisioningEnabled,
+        authKitAdmissionEnabled: config.authKitAdmissionEnabled,
+        ...(authKitService === undefined ? {} : { authKitService }),
+        ...(workosWebhookProcessor === undefined ? {} : { workosWebhookProcessor }),
       };
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
@@ -105,6 +138,7 @@ async function main(): Promise<void> {
       lifecycle,
       allowedOrigins: config.allowedOrigins,
       cookieSecure: config.cookieSecure,
+      trustedProxies: config.trustedProxies,
       ...(metrics === undefined ? {} : { metrics }),
       ...(identity === undefined ? {} : { identity }),
       ...(workspace === undefined ? {} : { workspace }),
@@ -113,6 +147,17 @@ async function main(): Promise<void> {
     if (pool !== undefined) {
       const databasePool = pool;
       app.addHook("onClose", async () => databasePool.end());
+      const cleanAuthKitState = () => {
+        void deleteExpiredAuthKitState(databasePool, new Date()).catch((error: unknown) => {
+          app.log.error({ err: error }, "AuthKit state cleanup failed");
+        });
+      };
+      // Retention must survive provider-secret removal and rollback. Migration 0017 exists on every
+      // database-backed release that can execute this code, so cleanup needs no WorkOS client.
+      cleanAuthKitState();
+      const authKitStateMaintenance = setInterval(cleanAuthKitState, 60 * 60 * 1_000);
+      authKitStateMaintenance.unref();
+      app.addHook("onClose", async () => clearInterval(authKitStateMaintenance));
     }
     if (workspace !== undefined) {
       const repository = workspace.repository;
@@ -139,6 +184,41 @@ async function main(): Promise<void> {
       );
       tokenHistoryMaintenance.unref();
       app.addHook("onClose", async () => clearInterval(tokenHistoryMaintenance));
+
+      const authKitService = identity.authKitService;
+      if (authKitService !== undefined) {
+        let reconciliationInFlight = false;
+        const reconcileAuthKitSessions = () => {
+          if (reconciliationInFlight) return;
+          reconciliationInFlight = true;
+          void authKitService
+            .reconcileActiveSessions()
+            .then((result) => {
+              if (result.revoked > 0) {
+                app.log.info(
+                  { checked: result.checked, revoked: result.revoked },
+                  "AuthKit session reconciliation revoked inactive local sessions",
+                );
+              }
+              if (result.unavailableSubjects > 0) {
+                app.log.warn(
+                  { unavailableSubjects: result.unavailableSubjects },
+                  "AuthKit session reconciliation preserved subjects with unavailable state",
+                );
+              }
+            })
+            .catch((error: unknown) => {
+              app.log.error({ err: error }, "AuthKit session reconciliation failed");
+            })
+            .finally(() => {
+              reconciliationInFlight = false;
+            });
+        };
+        reconcileAuthKitSessions();
+        const authKitSessionReconciliation = setInterval(reconcileAuthKitSessions, 60 * 60 * 1_000);
+        authKitSessionReconciliation.unref();
+        app.addHook("onClose", async () => clearInterval(authKitSessionReconciliation));
+      }
     }
   } catch (error) {
     await startedRealtimeHub?.close();
@@ -155,7 +235,13 @@ async function main(): Promise<void> {
   try {
     await app.listen({ host: config.host, port: config.port });
     app.log.info(
-      { publicApiUrl: config.publicApiUrl, allowedOrigins: config.allowedOrigins },
+      {
+        publicApiUrl: config.publicApiUrl,
+        allowedOrigins: config.allowedOrigins,
+        trustedProxies: config.trustedProxies,
+        authKitConfigured: config.workos !== undefined,
+        authKitAdmissionEnabled: config.authKitAdmissionEnabled,
+      },
       "Server listening",
     );
   } catch (error) {

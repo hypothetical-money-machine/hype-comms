@@ -117,6 +117,33 @@ button {
   margin-top: 28px;
 }
 
+.signin-card > .authkit-button {
+  width: 100%;
+  margin-top: 28px;
+}
+
+.signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  color: var(--theme-text-subtle);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.signin-divider::before,
+.signin-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--theme-border-subtle);
+  content: "";
+}
+
+.signin-divider + form {
+  margin-top: 0;
+}
+
 .signin-card label {
   color: var(--theme-text-secondary);
   font-size: 13px;

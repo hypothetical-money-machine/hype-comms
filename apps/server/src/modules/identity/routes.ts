@@ -1,4 +1,6 @@
 import {
+  authKitLogoutUrlHeaderName,
+  authKitLogoutUrlSchema,
   createAgentRequestSchema,
   createAgentResponseSchema,
   createAgentTokenRequestSchema,
@@ -28,6 +30,7 @@ import {
   requireAuthenticatedIdentity,
   requireHumanIdentity,
 } from "./request-auth.js";
+import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
 const COOKIE_NAME = "hmm_session";
@@ -41,6 +44,7 @@ const MAGIC_LINK_PAGE_HEADERS = {
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
+  readonly authKitService?: AuthKitService;
   readonly cookieSecure: boolean;
   /**
    * When false, sign-in links are issued by an administrator with the invite command. Requesting
@@ -107,14 +111,18 @@ async function requireCurrentUser(
  * contracts default the missing value back to `"human"`, so both generations accept this wire
  * shape while internal identity objects remain discriminated.
  */
-function desktopCurrentUserResponse(currentUser: CurrentUser) {
+export function desktopCurrentUserResponse(currentUser: CurrentUser) {
   const parsed = currentUserSchema.parse(currentUser);
   const { kind, ...user } = parsed.user;
   void kind;
   return { ...parsed, user };
 }
 
-function setSessionCookie(reply: FastifyReply, session: RedeemedSession, secure: boolean): void {
+export function setSessionCookie(
+  reply: FastifyReply,
+  session: RedeemedSession,
+  secure: boolean,
+): void {
   void reply.header(
     "set-cookie",
     sessionCookie(session.token, secure, { expiresAt: session.expiresAt }),
@@ -193,7 +201,13 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
 
 export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app,
-  { service, cookieSecure, selfServiceMagicLink = true, agentProvisioningEnabled = true },
+  {
+    service,
+    authKitService,
+    cookieSecure,
+    selfServiceMagicLink = true,
+    agentProvisioningEnabled = true,
+  },
 ) => {
   app.post("/auth/magic-link", async (request, reply) => {
     if (!selfServiceMagicLink) {
@@ -238,9 +252,16 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   });
 
   app.delete("/auth/session", async (request, reply) => {
+    void reply.header("cache-control", "no-store");
     rejectAmbiguousCredentials(request);
     const result = sessionTokenSchema.safeParse(cookieValue(request));
-    if (result.success) await service.signOut(result.data);
+    const providerSessionId = result.success ? await service.signOut(result.data) : null;
+    if (providerSessionId !== null && authKitService !== undefined) {
+      const logoutUrl = authKitLogoutUrlSchema.safeParse(
+        authKitService.createLogoutUrl(providerSessionId),
+      );
+      if (logoutUrl.success) void reply.header(authKitLogoutUrlHeaderName, logoutUrl.data);
+    }
     void reply.header("set-cookie", sessionCookie("", cookieSecure, { clear: true }));
     return reply.code(204).send();
   });

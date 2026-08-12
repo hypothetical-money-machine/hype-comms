@@ -1,6 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import { SignInThrottle } from "../src/throttle.js";
+import { FixedWindowAttemptThrottle, SignInThrottle } from "../src/throttle.js";
+
+describe("fixed-window attempt throttle", () => {
+  it("counts every attempt, isolates keys, and resets at the window boundary", () => {
+    let now = 1_000;
+    const throttle = new FixedWindowAttemptThrottle({
+      maxAttempts: 2,
+      windowMs: 60_000,
+      now: () => now,
+    });
+
+    expect(throttle.recordAttempt("1.2.3.4")).toBe(0);
+    expect(throttle.recordAttempt("1.2.3.4")).toBe(0);
+    expect(throttle.recordAttempt("1.2.3.4")).toBe(60_000);
+    expect(throttle.recordAttempt("5.6.7.8")).toBe(0);
+
+    now += 60_000;
+    expect(throttle.recordAttempt("1.2.3.4")).toBe(0);
+  });
+});
 
 describe("sign-in throttle", () => {
   it("allows attempts until the failure budget is spent", () => {

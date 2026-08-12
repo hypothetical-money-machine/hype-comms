@@ -2,9 +2,9 @@
 
 Hype Comms is a private, desktop-first team chat. We build it as our own daily communication
 tool, designed so it can grow into something other small teams can use. The current
-implementation combines invited-member magic-link access, first-class scoped agent identities,
-a PostgreSQL-backed conversation core, reconnecting realtime delivery, and a restart-safe
-encrypted desktop outbox.
+implementation combines optional WorkOS AuthKit and invited-member magic-link access,
+first-class scoped agent identities, a PostgreSQL-backed conversation core, reconnecting realtime
+delivery, and a restart-safe encrypted desktop outbox.
 
 Product strategy and delivery work are tracked in
 [Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
@@ -16,12 +16,17 @@ SQLite-to-PostgreSQL cutover boundary.
 ## Joining a workspace
 
 If you only want to use Hype Comms, you do not need Docker, PostgreSQL, Node, or a local server.
-Install the desktop build provided by the workspace owner, open it, enter your invited email
-address, and follow the sign-in link. The link creates or restores your per-person identity and
-revocable device session.
+Install the desktop build provided by the workspace owner and open it. When the deployment has
+WorkOS AuthKit enabled, choose **Sign in with WorkOS** and finish in the system browser. You can
+also enter your invited email address and follow a magic link when that rollout-compatible method
+is enabled. Either method creates or restores the same local identity and revocable device session.
 
 The shared access code has been retired. Ask the workspace owner for an invitation if your email
 address has not been admitted yet.
+
+A valid WorkOS identity is not registration: its exact verified email must already belong to an
+active Hype Comms member or an unexpired local invitation. See
+[the AuthKit setup and security guide](docs/workos-authkit.md) for deployment configuration.
 
 ## Repository layout
 
@@ -74,6 +79,12 @@ server log. An owner can also issue a manual invitation:
 ```bash
 npm run invite --workspace @hmm-chat/server -- --email member@example.com
 ```
+
+To exercise AuthKit locally, register
+`http://127.0.0.1:3000/v1/auth/workos/callback` for a WorkOS test Application and add the optional
+values documented in [docs/workos-authkit.md](docs/workos-authkit.md) to `.env.local`. The WorkOS
+API key and both PKCE verifiers remain outside the renderer. Explicitly set
+`HMM_AUTHKIT_ADMISSION_ENABLED=true` only for the local AuthKit exercise; admission defaults off.
 
 Owners can provision task-only bot members with scoped, expiring credentials and explicit channel
 grants. Tokens are printed once and never enter the desktop renderer:
@@ -238,6 +249,11 @@ runtime volume or shared access-code mode.
 `HMM_EMAIL_DELIVERY=manual` permits an administrator to issue links without an SMTP provider.
 Self-service requests return a uniform refusal in that mode. Configure `HMM_SMTP_URL` and
 `HMM_EMAIL_FROM`, then select `smtp`, for delivered mail.
+
+AuthKit is optional and additive. Stage its provider, webhook, and trusted-proxy values from
+[docs/workos-authkit.md](docs/workos-authkit.md), then use the explicit admission gate after every
+serving instance is compatible; leaving the provider unset preserves the current magic-link
+deployment. Partial configuration fails startup instead of exposing a broken sign-in button.
 
 ## Reliable delivery model
 

@@ -12,6 +12,7 @@ import {
   NOTIFICATION_STATE_IPC_MAX_BYTES,
   advanceReadCursorResponseSchema,
   addReactionResponseSchema,
+  authCapabilitiesSchema,
   cacheCryptoStatusSchema,
   cacheDecryptBatchRequestSchema,
   cacheDecryptBatchResponseSchema,
@@ -237,6 +238,16 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
     getSessionState: async () =>
       chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
+    getAuthCapabilities: async () =>
+      authCapabilitiesSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionAuthCapabilities),
+      ),
+    startAuthKitSignIn: async () => {
+      const response: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionStartAuthKit);
+      if (response !== undefined) {
+        throw new TypeError("AuthKit sign-in returned an unexpected payload");
+      }
+    },
     requestMagicLink: async (email: string) => {
       const request = requestMagicLinkSchema.parse({ email });
       return magicLinkDeliveryStateSchema.parse(
