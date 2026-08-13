@@ -257,6 +257,12 @@ jobs:
             echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
           } >> "$GITHUB_ENV"
 
+      - name: Keep macOS evidence console awake
+        shell: bash
+        run: |
+          /usr/bin/caffeinate -dims &
+          echo "HMM_MACOS_EVIDENCE_CAFFEINATE_PID=$!" >> "$GITHUB_ENV"
+
       - name: Build and authorize signed macOS capture helper
         shell: bash
         run: |
@@ -375,6 +381,9 @@ jobs:
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
           cleanup_status=0
           set +e
+          if [[ -n "$HMM_MACOS_EVIDENCE_CAFFEINATE_PID" ]]; then
+            kill "$HMM_MACOS_EVIDENCE_CAFFEINATE_PID" 2>/dev/null || true
+          fi
           if [[ -f "$original_keychains_path" ]]; then
             original_keychains=()
             parsed_keychain_count=0

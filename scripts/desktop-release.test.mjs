@@ -205,6 +205,9 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
   assert.match(nativeEvidenceJob, /name: Build and authorize signed macOS capture helper/u);
+  assert.match(nativeEvidenceJob, /name: Keep macOS evidence console awake/u);
+  assert.match(nativeEvidenceJob, /\/usr\/bin\/caffeinate -dims &/u);
+  assert.match(nativeEvidenceJob, /kill "\$HMM_MACOS_EVIDENCE_CAFFEINATE_PID"/u);
   for (const secret of [
     "HYPE_COMMS_MACOS_CSC_LINK",
     "HYPE_COMMS_MACOS_CSC_KEY_PASSWORD",
