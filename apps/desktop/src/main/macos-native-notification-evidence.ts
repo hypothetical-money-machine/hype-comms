@@ -1,6 +1,8 @@
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { NotificationOsPermission } from "@hmm-chat/contracts";
+
 import type { NotificationPresenter, PresentedNotificationHandle } from "./notification-presenter";
 
 export const MACOS_NATIVE_NOTIFICATION_EVIDENCE_ARGUMENT =
@@ -101,6 +103,7 @@ async function waitForDeliveredNotification(options: {
 export async function startMacosNativeNotificationEvidence(options: {
   readonly configuration: MacosNativeNotificationEvidenceConfiguration;
   readonly presenter: NotificationPresenter;
+  readonly requestAuthorization: () => Promise<NotificationOsPermission>;
   readonly getHistory: () => Promise<readonly NotificationHistoryEntry[]>;
   readonly onClick: () => void | Promise<void>;
   readonly timeoutMs?: number;
@@ -112,6 +115,12 @@ export async function startMacosNativeNotificationEvidence(options: {
   const { artifactDirectory } = options.configuration;
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
   await chmod(artifactDirectory, 0o700);
+
+  const permission = await options.requestAuthorization();
+  if (permission !== "granted") {
+    await writeRecord(artifactDirectory, { version: 1, status: "failed" });
+    throw new Error(`macOS notification authorization is ${permission}`);
+  }
 
   let handle: PresentedNotificationHandle;
   try {

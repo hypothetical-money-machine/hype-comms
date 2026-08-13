@@ -158,6 +158,10 @@ Preferences are versioned, atomic, device-local state owned by main. Device enab
 off until packaged rollout gates pass; message-body preview defaults disabled and requires a
 separate explicit opt-in. Native support is `supported` or `unsupported`; OS permission is
 `granted`, `denied`, or `unknown`. Do-not-disturb and sound remain operating-system policy.
+Electron has no portable permission query. The packaged macOS app therefore owns a fixed,
+universal helper inside its signed bundle; main invokes it to read or request
+`UNUserNotificationCenter` authorization before persisting an enable transition. The renderer can
+request only the frozen device preference and never receives a generic native permission bridge.
 
 Native notification code is also guarded at build time. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` accepts
 only `0` or `1`; unset and `0` compile presentation off, report unsupported capability, and do not

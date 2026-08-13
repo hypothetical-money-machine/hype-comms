@@ -46,6 +46,12 @@ if (appBundles.length === 0) {
 }
 
 for (const appBundle of appBundles) {
+  const authorizationHelper = path.join(
+    appBundle,
+    "Contents",
+    "MacOS",
+    "hmm-notification-authorization",
+  );
   runCommand(
     "/usr/bin/codesign",
     ["--verify", "--deep", "--strict", "--verbose=2", appBundle],
@@ -65,6 +71,27 @@ for (const appBundle of appBundles) {
       `${appBundle} is not signed by the expected ${expectedTeamIdentifier} developer team`,
     );
   }
+
+  runCommand(
+    "/usr/bin/codesign",
+    ["--verify", "--strict", "--verbose=2", authorizationHelper],
+    `Notification authorization helper signature verification for ${appBundle}`,
+  );
+  const helperSigningDetails = runCommand(
+    "/usr/bin/codesign",
+    ["--display", "--verbose=4", authorizationHelper],
+    `Notification authorization helper signature inspection for ${appBundle}`,
+  );
+  if (!helperSigningDetails.split("\n").includes(`TeamIdentifier=${expectedTeamIdentifier}`)) {
+    throw new Error(
+      `${authorizationHelper} is not signed by the expected ${expectedTeamIdentifier} developer team`,
+    );
+  }
+  runCommand(
+    "/usr/bin/lipo",
+    [authorizationHelper, "-verify_arch", "arm64", "x86_64"],
+    `Notification authorization helper architecture verification for ${appBundle}`,
+  );
 
   runCommand(
     "/usr/bin/xcrun",

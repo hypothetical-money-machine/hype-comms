@@ -65,6 +65,7 @@ describe("macOS native notification evidence", () => {
     const session = await startMacosNativeNotificationEvidence({
       configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
       presenter,
+      requestAuthorization: async () => "granted",
       getHistory: async () => [
         {
           title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
@@ -104,6 +105,7 @@ describe("macOS native notification evidence", () => {
     const session = await startMacosNativeNotificationEvidence({
       configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
       presenter,
+      requestAuthorization: async () => "granted",
       getHistory: async () => [],
       onClick: async () => {
         throw new Error("window restore failed");
@@ -122,5 +124,27 @@ describe("macOS native notification evidence", () => {
     await expect(
       readFile(path.join(artifactDirectory, "clicked.json"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails before presentation when the real app is not authorized", async () => {
+    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const presenter = new EvidencePresenter();
+
+    await expect(
+      startMacosNativeNotificationEvidence({
+        configuration: {
+          artifactDirectory,
+          userDataPath: path.join(artifactDirectory, "user-data"),
+        },
+        presenter,
+        requestAuthorization: async () => "denied",
+        getHistory: async () => [],
+        onClick: vi.fn(),
+      }),
+    ).rejects.toThrow("authorization is denied");
+    expect(presenter.presentation).toBeNull();
+    expect(JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8"))).toEqual(
+      { version: 1, status: "failed" },
+    );
   });
 });

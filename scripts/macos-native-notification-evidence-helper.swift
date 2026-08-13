@@ -5,7 +5,6 @@ import Foundation
 import ImageIO
 import ScreenCaptureKit
 import UniformTypeIdentifiers
-import UserNotifications
 
 private let syntheticBody = "Synthetic direct message for native notification evidence"
 
@@ -14,17 +13,11 @@ private struct PermissionState: Encodable {
   let screenCapture: Bool
 }
 
-private struct NotificationPermissionState: Encodable {
-  let authorization: String
-  let authorized: Bool
-}
-
 private enum HelperError: LocalizedError {
   case captureFailed
   case invalidArguments
   case notificationCenterUnavailable
   case notificationNotFound
-  case notificationPermissionDenied
   case permissionDenied
   case pngDestinationFailed
 
@@ -32,10 +25,9 @@ private enum HelperError: LocalizedError {
     switch self {
     case .captureFailed: "ScreenCaptureKit did not return a display image"
     case .invalidArguments:
-      "Expected preflight, request, notification-preflight, notification-request, capture <absolute-path>, or click"
+      "Expected preflight, request, capture <absolute-path>, or click"
     case .notificationCenterUnavailable: "Notification Center is not running"
     case .notificationNotFound: "The synthetic Hype Comms notification was not found"
-    case .notificationPermissionDenied: "Hype Comms notifications are not authorized"
     case .permissionDenied: "Screen Recording and Accessibility must both be enabled"
     case .pngDestinationFailed: "Could not write the ScreenCaptureKit PNG"
     }
@@ -65,43 +57,6 @@ private func requestPermissions() throws {
   _ = AXIsProcessTrustedWithOptions(options)
   let state = permissionState()
   try printPermissionState(state)
-}
-
-private func notificationPermissionState() async -> NotificationPermissionState {
-  let settings = await UNUserNotificationCenter.current().notificationSettings()
-  let authorization: String
-  switch settings.authorizationStatus {
-  case .notDetermined: authorization = "not-determined"
-  case .denied: authorization = "denied"
-  case .authorized: authorization = "authorized"
-  case .provisional: authorization = "provisional"
-  case .ephemeral: authorization = "ephemeral"
-  @unknown default: authorization = "unknown"
-  }
-  return NotificationPermissionState(
-    authorization: authorization,
-    authorized: settings.authorizationStatus == .authorized
-  )
-}
-
-private func printNotificationPermissionState(_ state: NotificationPermissionState) throws {
-  let data = try JSONEncoder().encode(state)
-  guard let value = String(data: data, encoding: .utf8) else {
-    throw HelperError.captureFailed
-  }
-  print(value)
-}
-
-private func requestNotificationPermission() async throws {
-  var state = await notificationPermissionState()
-  if state.authorization == "not-determined" {
-    _ = try await UNUserNotificationCenter.current().requestAuthorization(
-      options: [.alert, .badge, .sound]
-    )
-    state = await notificationPermissionState()
-  }
-  try printNotificationPermissionState(state)
-  if !state.authorized { throw HelperError.notificationPermissionDenied }
 }
 
 private func prepareGuiApplication() {
@@ -228,12 +183,6 @@ private enum MacosNativeNotificationEvidenceHelper {
         }
       } else if arguments == ["request"] {
         try requestPermissions()
-      } else if arguments == ["notification-preflight"] {
-        let state = await notificationPermissionState()
-        try printNotificationPermissionState(state)
-        if !state.authorized { throw HelperError.notificationPermissionDenied }
-      } else if arguments == ["notification-request"] {
-        try await requestNotificationPermission()
       } else if arguments.count == 2, arguments[0] == "capture" {
         try await captureScreen(to: arguments[1])
       } else if arguments == ["click"] {

@@ -1,4 +1,5 @@
 node_modules/
+apps/desktop/native-build/
 dist/
 out/
 release/

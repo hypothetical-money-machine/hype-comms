@@ -94,6 +94,16 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   ]);
   assert.match(desktopPackage.scripts["package:win"], /--x64 --arm64/u);
   assert.match(desktopPackage.scripts["package:linux"], /--x64 --arm64/u);
+  assert.match(
+    desktopPackage.scripts["package:mac"],
+    /build-macos-notification-authorization\.mjs/u,
+  );
+  assert.deepEqual(desktopPackage.build.mac.extraFiles, [
+    {
+      from: "native-build/macos/hmm-notification-authorization",
+      to: "MacOS/hmm-notification-authorization",
+    },
+  ]);
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
   assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
   assert.equal(desktopPackage.build.nsis.buildUniversalInstaller, false);
@@ -159,6 +169,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     2,
   );
   assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/build-macos-notification-authorization\.mjs$/gmu)
+      ?.length,
+    2,
+  );
+  assert.equal(
     packageSmokeWorkflow.match(
       /^ {6}- scripts\/macos-native-notification-evidence-helper\.swift$/gmu,
     )?.length,
@@ -188,24 +203,12 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
-  assert.match(nativeEvidenceJob, /name: Build and authorize signed macOS evidence helper/u);
-  assert.match(
-    nativeEvidenceJob,
-    /\/usr\/bin\/open -W -n "\$notification_helper_bundle" --args notification-request &/u,
-  );
-  assert.match(
-    nativeEvidenceJob,
-    /CFBundleIdentifier string com\.hypotheticalmoneymachine\.hmmchat'/u,
-  );
-  assert.match(nativeEvidenceJob, /"\$notification_helper_executable" notification-preflight/u);
+  assert.match(nativeEvidenceJob, /name: Build and authorize signed macOS capture helper/u);
   assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
   assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
   assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
   assert.match(nativeEvidenceJob, /--helper="\$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u);
-  assert.match(
-    nativeEvidenceJob,
-    /--notification-helper="\$HMM_MACOS_NATIVE_NOTIFICATION_AUTHORIZATION_HELPER"/u,
-  );
+  assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
   assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);

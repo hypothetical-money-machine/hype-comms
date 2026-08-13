@@ -11,7 +11,6 @@ const RECORD_TIMEOUT_MS = 30_000;
 export function parseMacosNativeNotificationCaptureArguments(arguments_, env = process.env) {
   let appBundle;
   let helperBundle;
-  let notificationHelperBundle;
   let artifactDirectory;
   for (const argument of arguments_) {
     if (argument.startsWith("--app=")) {
@@ -24,13 +23,6 @@ export function parseMacosNativeNotificationCaptureArguments(arguments_, env = p
       helperBundle = argument.slice("--helper=".length);
       continue;
     }
-    if (argument.startsWith("--notification-helper=")) {
-      if (notificationHelperBundle !== undefined) {
-        throw new Error("--notification-helper may only be supplied once");
-      }
-      notificationHelperBundle = argument.slice("--notification-helper=".length);
-      continue;
-    }
     if (argument.startsWith("--artifacts=")) {
       if (artifactDirectory !== undefined) {
         throw new Error("--artifacts may only be supplied once");
@@ -39,13 +31,6 @@ export function parseMacosNativeNotificationCaptureArguments(arguments_, env = p
       continue;
     }
     throw new Error(`Unknown macOS native notification capture argument: ${argument}`);
-  }
-  if (
-    notificationHelperBundle === undefined ||
-    !path.isAbsolute(notificationHelperBundle) ||
-    path.extname(notificationHelperBundle) !== ".app"
-  ) {
-    throw new Error("--notification-helper must be an absolute .app bundle path");
   }
   if (
     appBundle === undefined ||
@@ -68,9 +53,6 @@ export function parseMacosNativeNotificationCaptureArguments(arguments_, env = p
   ) {
     throw new Error("--artifacts must be a non-root absolute directory");
   }
-  if (path.resolve(helperBundle) === path.resolve(notificationHelperBundle)) {
-    throw new Error("--helper and --notification-helper must identify different app bundles");
-  }
   const runnerTemp = env.RUNNER_TEMP;
   if (runnerTemp !== undefined) {
     const relative = path.relative(path.resolve(runnerTemp), path.resolve(artifactDirectory));
@@ -81,7 +63,6 @@ export function parseMacosNativeNotificationCaptureArguments(arguments_, env = p
   return {
     appBundle: path.resolve(appBundle),
     helperBundle: path.resolve(helperBundle),
-    notificationHelperBundle: path.resolve(notificationHelperBundle),
     artifactDirectory: path.resolve(artifactDirectory),
   };
 }
@@ -147,19 +128,6 @@ async function assertHelperPermissions(helperExecutable) {
   }
 }
 
-async function assertNotificationPermission(notificationHelperExecutable) {
-  const { stdout } = await runCommand(notificationHelperExecutable, ["notification-preflight"]);
-  let state;
-  try {
-    state = JSON.parse(stdout);
-  } catch {
-    throw new Error("The Hype Comms notification probe returned an invalid permission record");
-  }
-  if (state?.authorization !== "authorized" || state?.authorized !== true) {
-    throw new Error("Hype Comms does not own authorized macOS notification permission");
-  }
-}
-
 async function waitForRecord(artifactDirectory, name, options = {}) {
   const deadline = Date.now() + (options.timeoutMs ?? RECORD_TIMEOUT_MS);
   const recordPath = path.join(artifactDirectory, `${name}.json`);
@@ -217,17 +185,14 @@ async function main() {
   if (process.platform !== "darwin") {
     throw new Error("macOS native notification capture must run on macOS");
   }
-  const { appBundle, helperBundle, notificationHelperBundle, artifactDirectory } =
+  const { appBundle, helperBundle, artifactDirectory } =
     parseMacosNativeNotificationCaptureArguments(process.argv.slice(2));
   const executable = executableForBundle(appBundle);
   const helperExecutable = executableForHelperBundle(helperBundle);
-  const notificationHelperExecutable = executableForHelperBundle(notificationHelperBundle);
   await access(executable);
   await access(helperExecutable);
-  await access(notificationHelperExecutable);
   await assertUnlockedConsole();
   await assertHelperPermissions(helperExecutable);
-  await assertNotificationPermission(notificationHelperExecutable);
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
   await writeFile(path.join(artifactDirectory, "automation.log"), "", {
     encoding: "utf8",

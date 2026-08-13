@@ -10,7 +10,6 @@ test("constrains macOS native notification evidence to explicit absolute paths",
       [
         "--app=/tmp/Hype Comms.app",
         "--helper=/tmp/Hype Comms Evidence.app",
-        "--notification-helper=/tmp/Hype Comms Authorization.app",
         "--artifacts=/tmp/native-evidence",
       ],
       {},
@@ -18,7 +17,6 @@ test("constrains macOS native notification evidence to explicit absolute paths",
     {
       appBundle: path.resolve("/tmp/Hype Comms.app"),
       helperBundle: path.resolve("/tmp/Hype Comms Evidence.app"),
-      notificationHelperBundle: path.resolve("/tmp/Hype Comms Authorization.app"),
       artifactDirectory: path.resolve("/tmp/native-evidence"),
     },
   );
@@ -28,7 +26,6 @@ test("constrains macOS native notification evidence to explicit absolute paths",
         [
           "--app=relative.app",
           "--helper=/tmp/Hype Comms Evidence.app",
-          "--notification-helper=/tmp/Hype Comms Authorization.app",
           "--artifacts=/tmp/native-evidence",
         ],
         {},
@@ -41,7 +38,6 @@ test("constrains macOS native notification evidence to explicit absolute paths",
         [
           "--app=/tmp/Hype Comms.app",
           "--helper=/tmp/Hype Comms Evidence.app",
-          "--notification-helper=/tmp/Hype Comms Authorization.app",
           "--artifacts=relative",
         ],
         {},
@@ -51,40 +47,9 @@ test("constrains macOS native notification evidence to explicit absolute paths",
   assert.throws(
     () =>
       parseMacosNativeNotificationCaptureArguments(
-        [
-          "--app=/tmp/Hype Comms.app",
-          "--helper=relative.app",
-          "--notification-helper=/tmp/Hype Comms Authorization.app",
-          "--artifacts=/tmp/native-evidence",
-        ],
+        ["--app=/tmp/Hype Comms.app", "--helper=relative.app", "--artifacts=/tmp/native-evidence"],
         {},
       ),
     /--helper must be an absolute/u,
-  );
-  assert.throws(
-    () =>
-      parseMacosNativeNotificationCaptureArguments(
-        [
-          "--app=/tmp/Hype Comms.app",
-          "--helper=/tmp/Hype Comms Evidence.app",
-          "--notification-helper=relative.app",
-          "--artifacts=/tmp/native-evidence",
-        ],
-        {},
-      ),
-    /--notification-helper must be an absolute/u,
-  );
-  assert.throws(
-    () =>
-      parseMacosNativeNotificationCaptureArguments(
-        [
-          "--app=/tmp/Hype Comms.app",
-          "--helper=/tmp/shared-helper.app",
-          "--notification-helper=/tmp/shared-helper.app",
-          "--artifacts=/tmp/native-evidence",
-        ],
-        {},
-      ),
-    /must identify different app bundles/u,
   );
 });

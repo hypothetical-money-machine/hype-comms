@@ -328,7 +328,8 @@ Deliverables:
 - write the pure eligibility-policy test table before integration; and
 - define separate device preference, native support, and OS permission fields. Electron 43 exposes
   portable native-support detection but no portable permission query, so permission can remain
-  `unknown`; installed denial behavior is observed only where the host exposes it in Milestone 4.
+  `unknown` where the host has no integrated adapter; packaged macOS uses an in-bundle native
+  authorization adapter, with installed behavior proven in Milestone 4.
 
 Completed exit evidence: all behavior in the Product policy section maps to an unambiguous test
 case, and no schema exposes a generic title/body/action notification primitive to the renderer.
@@ -381,8 +382,8 @@ Windows/Linux last-window shutdown, and sign-out action invalidation.
 
 ### Milestone 2: preferences and operating-system state
 
-Status: complete behind the same defaults; installed permission behavior remains Milestone 4
-evidence rather than a portable deterministic signal.
+Status: complete behind the same defaults. Packaged macOS requests authorization through the real
+signed app identity before persisting enablement; installed behavior remains Milestone 4 evidence.
 
 Goal: make the feature respectful and diagnosable without building a general settings system.
 
@@ -394,6 +395,8 @@ Deliverables:
   and OS permission (`granted`, `denied`, or `unknown`) as separate fields through the frozen
   preload API;
 - add a compact renderer setting with clear copy for OS-managed denial and do-not-disturb behavior;
+- on packaged macOS, request authorization from the signed Hype Comms bundle when a person enables
+  notifications, persist enablement only after a grant, and report denial without retrying; and
 - never repeatedly prompt or retry after denial or presenter failure.
 
 Completed deterministic exit evidence: relaunch preserves preferences, unsupported/denied state is

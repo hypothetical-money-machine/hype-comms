@@ -115,6 +115,11 @@ import {
 import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
+  createMacosNotificationAuthorization,
+  setNotificationPreferenceWithAuthorization,
+  type MacosNotificationAuthorization,
+} from "./macos-notification-authorization";
+import {
   resolveMacosNativeNotificationEvidenceConfiguration,
   startMacosNativeNotificationEvidence,
   type MacosNativeNotificationEvidenceSession,
@@ -211,6 +216,12 @@ const macosNativeNotificationEvidenceConfiguration =
     argv: process.argv,
     env: process.env,
   });
+const macosNotificationAuthorization: MacosNotificationAuthorization | null =
+  createMacosNotificationAuthorization({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+  });
 const headlessDesktopConfiguration = resolveHeadlessDesktopConfiguration(
   process.env,
   app.isPackaged,
@@ -284,6 +295,7 @@ function createNotificationCapabilitySource(): NotificationCapabilitySource {
       read: () => ({ nativeSupport: "supported", osPermission: "unknown" }),
     };
   }
+  if (macosNotificationAuthorization !== null) return macosNotificationAuthorization;
   return new ElectronNotificationCapabilitySource(Notification);
 }
 
@@ -1184,6 +1196,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
+    const controller = notificationSettingsController;
     const preference = parseBoundedNotificationIpc(
       notificationPreferenceSchema,
       input,
@@ -1191,7 +1204,13 @@ function registerIpcHandlers(): void {
     );
     return parseBoundedNotificationIpc(
       notificationStateSchema,
-      await notificationSettingsController.setPreference(preference),
+      await setNotificationPreferenceWithAuthorization({
+        authorization: macosNotificationAuthorization,
+        current: controller.state,
+        preference,
+        refreshCapability: () => controller.refreshCapability(),
+        setPreference: (next) => controller.setPreference(next),
+      }),
       NOTIFICATION_STATE_IPC_MAX_BYTES,
     );
   });
@@ -2138,6 +2157,10 @@ if (!hasSingleInstanceLock) {
         macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
           configuration: macosNativeNotificationEvidenceConfiguration,
           presenter: new ElectronNotificationPresenter(Notification),
+          requestAuthorization: async () => {
+            if (macosNotificationAuthorization === null) return "unknown";
+            return macosNotificationAuthorization.request();
+          },
           getHistory: () => Notification.getHistory(),
           onClick: async () => {
             app.show();

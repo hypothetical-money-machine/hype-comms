@@ -120,9 +120,11 @@ On Windows, main sets Electron Builder's exact
 identity is covered by a deterministic
 [test](../apps/desktop/src/main/application-identity.test.ts), but stable attribution and click
 handling still require an installed NSIS evidence run. Electron 43 exposes portable native-support
-detection but no portable OS permission query; keep permission `unknown` where the host does not
-expose it and test denial only where observable. Do not derive `denied` from lack of support or
-retry a failed presenter without an explicit capability refresh.
+detection but no portable OS permission query. Signed packaged macOS builds therefore use a
+universal in-bundle helper to read and request `UNUserNotificationCenter` authorization from the
+real Hype Comms bundle identity before persisting an enable request. Other hosts keep permission
+`unknown` where they expose no equivalent. Do not derive `denied` from lack of support or retry a
+failed presenter without a new person-initiated enable or capability refresh.
 
 This flag is the rollback boundary for the current slice: rebuild a platform with `0` to remove
 presentation while leaving server state, encrypted replicas, unread/mention state, outboxes, and
@@ -131,12 +133,12 @@ Milestone 4 evidence in [the native-notifications roadmap](native-notifications-
 Ordinary package smoke verifies build contents only. The same workflow also has an opt-in
 `native_notification_evidence=true` macOS lane: on an unlocked self-hosted Mac, it builds a
 synthetic-only helper with a stable signed identity, requires that helper to own Screen Recording
-and Accessibility, establishes notification authorization through a signed preflight bundle with
-Hype Comms' production identifier, signs and notarizes Hype Comms, verifies an exact native delivery
-record, captures the OS toast, activates only that synthetic notification, and captures the restored
-app. The helpers may prompt the console user; authorize notifications for **Hype Comms** and grant
-Screen Recording and Accessibility to **Hype Comms Evidence**, then rerun the lane after macOS
-applies them. Neither helper nor the evidence build is a release artifact, and the evidence
+and Accessibility, signs and notarizes Hype Comms, lets the installed app request its own notification
+authorization, verifies an exact native delivery record, captures the OS toast, activates only that
+synthetic notification, and captures the restored app. macOS may prompt the console user; authorize
+notifications for **Hype Comms** and grant Screen Recording and Accessibility to **Hype Comms
+Evidence**, then rerun the lane after macOS applies them. The capture helper and evidence build are
+not release artifacts, and the evidence
 directory must never contain real message content. The missing external
 matrix is current and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu
 24.04 on x64/ARM64 installed from both AppImage and Debian packages. A platform may enter an opt-in
