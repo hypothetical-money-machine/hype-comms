@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 import * as agentCapture from "./agent-capture.mjs";
 
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
-export const HEADLESS_DEMO_MANIFEST_KIND = "hmm-chat-headless-demo";
+export const HEADLESS_DEMO_MANIFEST_KIND = "hype-comms-headless-demo";
 export const DEFAULT_MANIFEST_RELATIVE_PATH = path.join(
   ".dev-data",
   "demo",
   "headless-session.json",
 );
-export const DEFAULT_SMOKE_MESSAGE = "HMM headless automation smoke";
+export const DEFAULT_SMOKE_MESSAGE = "Hype Comms headless automation smoke";
 export const HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE = "direct-message";
 export const HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD = "participated-thread";
 export const HEADLESS_NOTIFICATION_CAPTURE_KEYS = ["captureId", "reason", "version"];
@@ -104,7 +104,7 @@ function parsePositiveInteger(value, label) {
 
 /** Parse the intentionally small opt-in smoke command surface. */
 export function parseSmokeArguments(arguments_, environment, projectRoot) {
-  let manifestPath = environment.HMM_HEADLESS_DEMO_MANIFEST;
+  let manifestPath = environment.HYPE_COMMS_HEADLESS_DEMO_MANIFEST;
   let messagePrefix = DEFAULT_SMOKE_MESSAGE;
   let timeoutMs = agentCapture.DEFAULT_TIMEOUT_MS;
   let flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE;
@@ -285,13 +285,13 @@ export async function enableHeadlessNotificationCapture(page) {
     throw new Error("A Playwright Page is required to enable headless notification capture");
   }
   const state = await page.evaluate(async () => {
-    if (globalThis.hmmChat.isHeadless !== true) {
+    if (globalThis.hypeComms.isHeadless !== true) {
       throw new Error("Notification capture proof requires a headless desktop client");
     }
-    if (typeof globalThis.hmmChat.setNotificationPreference !== "function") {
+    if (typeof globalThis.hypeComms.setNotificationPreference !== "function") {
       throw new Error("Notification preferences are unavailable");
     }
-    return globalThis.hmmChat.setNotificationPreference({
+    return globalThis.hypeComms.setNotificationPreference({
       version: 1,
       devicePreference: "enabled",
       contentPreviewPreference: "disabled",
@@ -350,7 +350,7 @@ async function assertExactThreadTarget(page, message, messageId, timeoutMs) {
 
 async function activateCapturedNotification(page, captureId) {
   const activated = await page.evaluate(
-    async (opaqueId) => globalThis.hmmChat.activateCapturedNotification(opaqueId),
+    async (opaqueId) => globalThis.hypeComms.activateCapturedNotification(opaqueId),
     captureId,
   );
   if (activated !== true) {
@@ -378,7 +378,7 @@ export async function assertHeadlessReadCursorIsBlocked(page) {
   }
   const result = await page.evaluate(async () => {
     try {
-      await globalThis.hmmChat.advanceReadCursor(
+      await globalThis.hypeComms.advanceReadCursor(
         "00000000-0000-4000-8000-000000000000",
         "00000000-0000-4000-8000-000000000000",
       );

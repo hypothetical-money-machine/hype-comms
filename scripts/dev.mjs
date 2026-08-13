@@ -17,7 +17,7 @@ if (profile === null) {
       {
         command: "npm run dev:desktop",
         name: "desktop",
-        env: profile === "" ? {} : { HMM_DESKTOP_PROFILE: profile },
+        env: profile === "" ? {} : { HYPE_COMMS_DESKTOP_PROFILE: profile },
       },
     ],
     {

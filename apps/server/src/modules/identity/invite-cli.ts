@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { emailSchema, type Email, type Invitation } from "@hmm-chat/contracts";
+import { emailSchema, type Email, type Invitation } from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { loadConfig } from "../../config.js";
@@ -14,7 +14,7 @@ import { IdentityRepository } from "./repository.js";
 import { IdentityService } from "./service.js";
 
 const USAGE =
-  "Usage: npm run invite --workspace @hmm-chat/server -- --email <address> [--role member]";
+  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member]";
 const CLI_CLIENT_IP = "invite-cli";
 
 export interface InviteCliOutput {
@@ -100,12 +100,12 @@ export async function runInviteCli(
 ): Promise<number> {
   let pool: ReturnType<typeof createPool> | undefined;
   try {
-    if (env.HMM_DATABASE_URL === undefined || env.HMM_DATABASE_URL === "") {
-      throw new Error("HMM_DATABASE_URL is required");
+    if (env.HYPE_COMMS_DATABASE_URL === undefined || env.HYPE_COMMS_DATABASE_URL === "") {
+      throw new Error("HYPE_COMMS_DATABASE_URL is required");
     }
     const input = parseArguments(argv);
     const config = loadConfig(env);
-    if (config.database === undefined) throw new Error("HMM_DATABASE_URL is required");
+    if (config.database === undefined) throw new Error("HYPE_COMMS_DATABASE_URL is required");
 
     pool = createPool(config.database);
     await runMigrations(pool);
@@ -115,7 +115,7 @@ export async function runInviteCli(
       workspace === null ? null : await repository.findActiveOwnerMembership(workspace.id);
     if (workspace === null || owner === null) {
       throw new Error(
-        "No seeded workspace owner was found. Set HMM_OWNER_EMAIL and start the server once to seed it.",
+        "No seeded workspace owner was found. Set HYPE_COMMS_OWNER_EMAIL and start the server once to seed it.",
       );
     }
     const existingUser = await repository.findUserByEmail(input.email);

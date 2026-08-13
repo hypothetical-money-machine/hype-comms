@@ -3,7 +3,7 @@ import {
   magicLinkTokenSchema,
   type DesktopAuthCallbackParameters,
   type MagicLinkToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { normalizeAuthCallbackUrl } from "./security";
 

@@ -9,7 +9,7 @@ import {
   type RealtimeSessionScope,
   type RealtimeTicketResponse,
   type ScopedProductRealtimeEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
 
 import { reportMainProcessError } from "./main-process-log";

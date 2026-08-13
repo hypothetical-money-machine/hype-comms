@@ -1,4 +1,4 @@
-"""Fake-process tests for the drop-in Hermes HMM Chat adapter.
+"""Fake-process tests for the drop-in Hermes Hype Comms adapter.
 
 The real Hermes package is intentionally not required. The small module fakes
 below preserve the import paths and method contracts used by upstream Hermes.
@@ -141,7 +141,7 @@ def _install_fake_hermes() -> None:
 
 _install_fake_hermes()
 _ADAPTER_PATH = Path(__file__).with_name("adapter.py")
-_SPEC = importlib.util.spec_from_file_location("hmm_chat_adapter_under_test", _ADAPTER_PATH)
+_SPEC = importlib.util.spec_from_file_location("hype_comms_adapter_under_test", _ADAPTER_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 adapter_module = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = adapter_module
@@ -225,7 +225,7 @@ def bootstrap(
 ) -> dict[str, Any]:
     return {
         "currentUser": principal(),
-        "workspace": {"id": WORKSPACE_ID, "name": "HMM Chat"},
+        "workspace": {"id": WORKSPACE_ID, "name": "Hype Comms"},
         "syncCursor": cursor,
         # bootstrap.members is already active-only server-side, so a disabled
         # agent simply stops appearing here.
@@ -453,11 +453,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(
             os.environ,
             {
-                "HMM_CHAT_API_ORIGIN": ORIGIN,
-                "HMM_CHAT_TOKEN": "unit-test-token",
-                "HMM_CHAT_ALLOWED_USERS": USER_ID,
-                "HMM_CHAT_ALLOW_ALL_USERS": "false",
-                "HMM_CHAT_CLI_PATH": "hmm-chat-cli",
+                "HYPE_COMMS_API_ORIGIN": ORIGIN,
+                "HYPE_COMMS_TOKEN": "unit-test-token",
+                "HYPE_COMMS_ALLOWED_USERS": USER_ID,
+                "HYPE_COMMS_ALLOW_ALL_USERS": "false",
+                "HYPE_COMMS_CLI_PATH": "hype-comms-cli",
             },
         )
         self.env.start()
@@ -469,7 +469,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         *,
         config: Optional[FakePlatformConfig] = None,
     ) -> Any:
-        return adapter_module.HmmChatAdapter(
+        return adapter_module.HypeCommsAdapter(
             config or FakePlatformConfig(),
             process_factory=factory,
             state_dir=Path(self.temp.name),
@@ -513,7 +513,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         for call in factory.calls:
             self.assertNotIn("unit-test-token", call["args"])
-        self.assertEqual(adapter.lock_calls[0][0], "hmm-chat-agent")
+        self.assertEqual(adapter.lock_calls[0][0], "hype-comms-agent")
         self.assertIn(AGENT_ID, adapter.lock_calls[0][1])
         self.assertEqual(
             stat.S_IMODE(adapter._cursor_path.stat().st_mode),
@@ -554,7 +554,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_channel_authors_share_one_conversation_session(self) -> None:
         original_extra = {
-            "cli_path": "/opt/hmm-chat-cli",
+            "cli_path": "/opt/hype-comms-cli",
             "group_sessions_per_user": True,
             "thread_sessions_per_user": True,
         }
@@ -587,7 +587,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNot(config.extra, original_extra)
-        self.assertEqual(config.extra["cli_path"], "/opt/hmm-chat-cli")
+        self.assertEqual(config.extra["cli_path"], "/opt/hype-comms-cli")
         self.assertFalse(config.extra["group_sessions_per_user"])
         self.assertFalse(config.extra["thread_sessions_per_user"])
         self.assertEqual(
@@ -617,7 +617,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             (
                 "INCOMPATIBLE_HERMES_SESSION_CONFIG",
                 (
-                    "HMM Chat requires shared Hermes thread sessions; "
+                    "Hype Comms requires shared Hermes thread sessions; "
                     "disable gateway.thread_sessions_per_user"
                 ),
                 False,
@@ -1377,13 +1377,13 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         context = Context()
         adapter_module.register(context)
 
-        self.assertEqual(context.kwargs["name"], "hmm_chat")
-        self.assertEqual(context.kwargs["allowed_users_env"], "HMM_CHAT_ALLOWED_USERS")
-        self.assertEqual(context.kwargs["allow_all_env"], "HMM_CHAT_ALLOW_ALL_USERS")
+        self.assertEqual(context.kwargs["name"], "hype_comms")
+        self.assertEqual(context.kwargs["allowed_users_env"], "HYPE_COMMS_ALLOWED_USERS")
+        self.assertEqual(context.kwargs["allow_all_env"], "HYPE_COMMS_ALLOW_ALL_USERS")
         self.assertEqual(context.kwargs["max_message_length"], 4000)
         self.assertEqual(
             context.kwargs["cron_deliver_env_var"],
-            "HMM_CHAT_HOME_CONVERSATION",
+            "HYPE_COMMS_HOME_CONVERSATION",
         )
         self.assertTrue(callable(context.kwargs["standalone_sender_fn"]))
 

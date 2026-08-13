@@ -6,7 +6,7 @@ import {
   currentUserSchema,
   desktopAuthCallbackParametersSchema,
   exchangeAuthHandoffRequestSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
@@ -103,7 +103,7 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
         ? { code: completion.handoffCode, state: completion.desktopState }
         : { error: "authentication_failed", state: completion.desktopState },
     );
-    const callbackUrl = new URL("hmm-chat://auth/callback");
+    const callbackUrl = new URL("hype-comms://auth/callback");
     if ("code" in parameters) {
       callbackUrl.searchParams.set("code", parameters.code);
     } else {

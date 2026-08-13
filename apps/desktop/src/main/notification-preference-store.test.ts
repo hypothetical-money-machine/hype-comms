@@ -19,7 +19,7 @@ async function scratchDirectory(): Promise<string> {
 }
 
 function settingsDirectory(userDataPath: string): string {
-  return path.join(userDataPath, "hmm-chat-settings");
+  return path.join(userDataPath, "hype-comms-settings");
 }
 
 function preferenceFile(userDataPath: string): string {

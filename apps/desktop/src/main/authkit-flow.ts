@@ -12,7 +12,7 @@ import {
   type CreateDesktopAuthorizationRequest,
   type CreateDesktopAuthorizationResponse,
   type DesktopAuthCallbackParameters,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { normalizeDevelopmentApiOrigin } from "../shared/api-origin";
 import { normalizeExternalHttpsUrl } from "./security";
@@ -144,7 +144,8 @@ export function parseStoredAuthKitPendingAuthorization(
 
 /**
  * Owns only the short-lived native authorization transaction. Session exchange and persistence
- * deliberately remain with the caller so this can be integrated with the existing HMM session.
+ * deliberately remain with the caller so this can be integrated with the existing Hype Comms
+ * session.
  */
 export class AuthKitFlow {
   readonly #api: AuthKitAuthorizationApi;

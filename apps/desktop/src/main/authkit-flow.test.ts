@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   CreateDesktopAuthorizationRequest,
   DesktopAuthCallbackParameters,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {

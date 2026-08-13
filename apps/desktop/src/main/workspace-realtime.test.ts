@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 
-import type { ProductRealtimeEvent } from "@hmm-chat/contracts";
+import type { ProductRealtimeEvent } from "@hype-comms/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 
@@ -125,7 +125,7 @@ function messageEvent(
         authorId: USER_B,
         threadRootId: null,
         body,
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,

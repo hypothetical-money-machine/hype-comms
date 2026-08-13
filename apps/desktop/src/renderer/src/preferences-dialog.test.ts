@@ -8,7 +8,7 @@ import type {
   NotificationState,
   ThemePreference,
   ThemeState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { createElement, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

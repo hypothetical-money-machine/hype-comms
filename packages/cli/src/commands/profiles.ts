@@ -51,7 +51,7 @@ export async function profilesCommand(
     const name = validateProfileName(
       requested ??
         context.options.profile ??
-        context.runtime.env.HMM_CHAT_PROFILE ??
+        context.runtime.env.HYPE_COMMS_PROFILE ??
         store.defaultProfile,
     );
     const profile = store.profiles[name];
@@ -115,5 +115,5 @@ export async function profilesCommand(
     return;
   }
 
-  throw new UsageError("Usage: hmm-chat-cli profiles <list|show|set|use|remove>");
+  throw new UsageError("Usage: hype-comms-cli profiles <list|show|set|use|remove>");
 }

@@ -61,7 +61,7 @@ import {
   type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
   type HumanWorkspaceBootstrapResponse,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { ChatSession } from "./chat-session";
 
@@ -185,7 +185,7 @@ export class WorkspaceTransport {
   async bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
     const response = await this.session.fetch(this.#url("/v1/bootstrap").href, {
       method: "GET",
-      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return humanWorkspaceBootstrapResponseSchema.parse(
       withLegacyBootstrapPagination(await this.#payload(response)),
@@ -205,7 +205,7 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(input.limit ?? CONVERSATION_PAGE_DEFAULT_LIMIT));
     const response = await this.session.fetch(url.href, {
       method: "GET",
-      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return listConversationsResponseSchema.parse(await this.#payload(response));
   }
@@ -219,7 +219,7 @@ export class WorkspaceTransport {
       headers: {
         "content-type": "application/json",
         "idempotency-key": idempotencyKey,
-        "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify(body),
     });
@@ -236,7 +236,7 @@ export class WorkspaceTransport {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
-          "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+          "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
         },
         body: JSON.stringify(input),
       },
@@ -290,7 +290,7 @@ export class WorkspaceTransport {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-hmm-chat-capabilities": CLIENT_CAPABILITIES,
+        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify(input),
     });
@@ -307,7 +307,7 @@ export class WorkspaceTransport {
     url.searchParams.set("limit", String(input.limit ?? 50));
     const response = await this.session.fetch(url.href, {
       method: "GET",
-      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return messageHistoryResponseSchema.parse(await this.#payload(response));
   }
@@ -497,7 +497,7 @@ export class WorkspaceTransport {
     try {
       response = await this.session.fetch(url.href, {
         method: "GET",
-        headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
       });
     } catch (error) {
       // Only a transport failure is worth retrying; anything else would retry forever.
@@ -541,7 +541,7 @@ export class WorkspaceTransport {
   async ticket(): Promise<RealtimeTicketResponse> {
     const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
       method: "POST",
-      headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return realtimeTicketResponseSchema.parse(await this.#payload(response));
   }

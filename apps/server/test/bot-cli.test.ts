@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 
-import { botAccessTokenSchema, emailSchema } from "@hmm-chat/contracts";
+import { botAccessTokenSchema, emailSchema } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -14,7 +14,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
@@ -79,9 +79,9 @@ describeWithPostgres("bot CLI", () => {
   function cliEnv(): Record<string, string> {
     return {
       NODE_ENV: "test",
-      HMM_DATABASE_URL: databaseUrl,
-      HMM_DATABASE_POOL_SIZE: "4",
-      HMM_PUBLIC_API_URL: "http://127.0.0.1:3000",
+      HYPE_COMMS_DATABASE_URL: databaseUrl,
+      HYPE_COMMS_DATABASE_POOL_SIZE: "4",
+      HYPE_COMMS_PUBLIC_API_URL: "http://127.0.0.1:3000",
     };
   }
 
@@ -96,7 +96,7 @@ describeWithPostgres("bot CLI", () => {
     await service.seedOwner({
       email: emailSchema.parse("owner@example.com"),
       workspaceName: "Hype Comms",
-      workspaceSlug: "hmm-chat",
+      workspaceSlug: "hype-comms",
     });
   }
 
@@ -120,7 +120,7 @@ describeWithPostgres("bot CLI", () => {
       cliEnv(),
       createdOutput.streams,
     );
-    const tokenMatch = /hmm_bot_[A-Za-z0-9_-]{43}/.exec(createdOutput.stdout);
+    const tokenMatch = /hype_comms_bot_[A-Za-z0-9_-]{43}/.exec(createdOutput.stdout);
     const token = botAccessTokenSchema.parse(tokenMatch?.[0]);
 
     expect(createExitCode).toBe(0);

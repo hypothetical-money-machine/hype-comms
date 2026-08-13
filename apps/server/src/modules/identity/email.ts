@@ -1,4 +1,4 @@
-import type { Email } from "@hmm-chat/contracts";
+import type { Email } from "@hype-comms/contracts";
 import nodemailer, { type Transporter } from "nodemailer";
 
 export interface SendMagicLinkInput {

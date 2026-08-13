@@ -4,7 +4,7 @@ import {
   type AgentScope,
   type AgentTokenSecret,
   type SessionToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
@@ -14,7 +14,7 @@ import type {
   IdentityService,
 } from "./service.js";
 
-const IDENTITY_COOKIE_NAME = "hmm_session";
+const IDENTITY_COOKIE_NAME = "hype_comms_session";
 
 function cookieValue(request: FastifyRequest, cookieName: string): string | undefined {
   const cookie = request.headers.cookie;

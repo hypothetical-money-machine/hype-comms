@@ -1,4 +1,4 @@
-import type { ThemePreference, ThemeState } from "@hmm-chat/contracts";
+import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
 import { getThemeDefinition, themeCssVariable, THEME_TOKEN_NAMES } from "../../shared/theme";

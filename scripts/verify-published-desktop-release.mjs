@@ -10,7 +10,7 @@ function requireEnvironment(name) {
 }
 
 const updateManifest = requireEnvironment("UPDATE_MANIFEST");
-const publicRoot = requireEnvironment("HMM_UPDATE_PUBLIC_ROOT");
+const publicRoot = requireEnvironment("HYPE_COMMS_UPDATE_PUBLIC_ROOT");
 const desktopVersion = requireEnvironment("DESKTOP_VERSION");
 const localManifest = readFileSync(`apps/desktop/release/${updateManifest}`, "utf8");
 const feedRoot = new URL(`${publicRoot}/`);

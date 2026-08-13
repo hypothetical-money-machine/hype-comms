@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { Reaction, ReactionEmoji, User } from "@hmm-chat/contracts";
+import type { Reaction, ReactionEmoji, User } from "@hype-comms/contracts";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "👀", "🚀", "✅", "🤔"] as const;
 const PICKER_WIDTH = 316;

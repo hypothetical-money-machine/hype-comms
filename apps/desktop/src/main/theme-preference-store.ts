@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { themePreferenceSchema, type ThemePreference } from "@hmm-chat/contracts";
+import { themePreferenceSchema, type ThemePreference } from "@hype-comms/contracts";
 
 import { isBuiltInThemeId } from "../shared/theme";
 import {
@@ -59,7 +59,7 @@ export class ThemePreferenceStore {
   #saveTail: Promise<void> = Promise.resolve();
 
   constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hmm-chat-settings", "theme.json");
+    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "theme.json");
     this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
   }
 

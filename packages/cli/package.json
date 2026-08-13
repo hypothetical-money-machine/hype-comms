@@ -1,23 +1,23 @@
 {
-  "name": "@hmm-chat/cli",
+  "name": "@hype-comms/cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Machine-readable command-line client for HMM Chat.",
+  "description": "Machine-readable command-line client for Hype Comms.",
   "type": "module",
   "bin": {
-    "hmm-chat-cli": "./dist/bin.js"
+    "hype-comms-cli": "./dist/bin.js"
   },
   "files": [
     "dist",
     "README.md"
   ],
   "scripts": {
-    "prebuild": "npm run build --workspace @hmm-chat/contracts",
+    "prebuild": "npm run build --workspace @hype-comms/contracts",
     "build": "tsc -p tsconfig.json --noEmit && node build.mjs",
     "prepack": "npm run build",
-    "pretest": "npm run build --workspace @hmm-chat/contracts",
+    "pretest": "npm run build --workspace @hype-comms/contracts",
     "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hmm-chat/contracts",
+    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "engines": {
@@ -28,7 +28,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@hmm-chat/contracts": "*",
+    "@hype-comms/contracts": "*",
     "@types/node": "24.13.3",
     "@types/ws": "8.18.1",
     "esbuild": "0.28.1",

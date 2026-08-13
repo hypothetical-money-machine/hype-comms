@@ -22,7 +22,7 @@ if (profile === null || profile === "") {
     env: {
       ...process.env,
       ELECTRON_RENDERER_URL: "http://127.0.0.1:5173",
-      HMM_DESKTOP_PROFILE: profile,
+      HYPE_COMMS_DESKTOP_PROFILE: profile,
     },
     stdio: "inherit",
   });

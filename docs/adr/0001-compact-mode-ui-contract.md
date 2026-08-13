@@ -33,7 +33,7 @@ user-owned, main-process-authoritative setting from disk to first paint:
   (`z.boolean()`) and `CompactModePreference`. The shared Zod package remains the source of
   truth for the IPC wire shape.
 - **Store.** `CompactModePreferenceStore` writes an atomic JSON file at
-  `hmm-chat-settings/compact-mode.json` under the Electron user data path, beside `theme.json`.
+  `hype-comms-settings/compact-mode.json` under the Electron user data path, beside `theme.json`.
   Unreadable or invalid content falls back to `false` rather than failing launch.
 - **Controller.** `CompactModeController` in the main process owns the resolved value, persists
   changes, and applies the native side effects — notably `setMinimumSize`.

@@ -54,8 +54,8 @@ export class MetricsRegistry {
 
   render(): string {
     const lines = [
-      "# HELP hmm_chat_http_requests_total Completed HTTP requests.",
-      "# TYPE hmm_chat_http_requests_total counter",
+      "# HELP hype_comms_http_requests_total Completed HTTP requests.",
+      "# TYPE hype_comms_http_requests_total counter",
     ];
     const samples = [...this.#http.values()].sort((left, right) =>
       `${left.method}:${left.route}:${left.statusCode}`.localeCompare(
@@ -66,36 +66,36 @@ export class MetricsRegistry {
       const labels =
         `{method="${label(sample.method)}",route="${label(sample.route)}",` +
         `status_code="${sample.statusCode}"}`;
-      lines.push(`hmm_chat_http_requests_total${labels} ${sample.count}`);
+      lines.push(`hype_comms_http_requests_total${labels} ${sample.count}`);
     }
     lines.push(
-      "# HELP hmm_chat_http_request_duration_seconds HTTP request duration.",
-      "# TYPE hmm_chat_http_request_duration_seconds summary",
+      "# HELP hype_comms_http_request_duration_seconds HTTP request duration.",
+      "# TYPE hype_comms_http_request_duration_seconds summary",
     );
     for (const sample of samples) {
       const labels =
         `{method="${label(sample.method)}",route="${label(sample.route)}",` +
         `status_code="${sample.statusCode}"}`;
       lines.push(
-        `hmm_chat_http_request_duration_seconds_sum${labels} ${sample.durationSeconds}`,
-        `hmm_chat_http_request_duration_seconds_count${labels} ${sample.count}`,
+        `hype_comms_http_request_duration_seconds_sum${labels} ${sample.durationSeconds}`,
+        `hype_comms_http_request_duration_seconds_count${labels} ${sample.count}`,
       );
     }
     lines.push(
-      "# HELP hmm_chat_realtime_connections Current authenticated realtime connections.",
-      "# TYPE hmm_chat_realtime_connections gauge",
-      `hmm_chat_realtime_connections ${this.#realtimeConnections}`,
-      "# HELP hmm_chat_refresh_token_reuse_total Detected refresh-token reuse attempts.",
-      "# TYPE hmm_chat_refresh_token_reuse_total counter",
-      `hmm_chat_refresh_token_reuse_total ${this.#refreshTokenReuse}`,
+      "# HELP hype_comms_realtime_connections Current authenticated realtime connections.",
+      "# TYPE hype_comms_realtime_connections gauge",
+      `hype_comms_realtime_connections ${this.#realtimeConnections}`,
+      "# HELP hype_comms_refresh_token_reuse_total Detected refresh-token reuse attempts.",
+      "# TYPE hype_comms_refresh_token_reuse_total counter",
+      `hype_comms_refresh_token_reuse_total ${this.#refreshTokenReuse}`,
     );
     if (this.databasePool !== undefined) {
       lines.push(
-        "# HELP hmm_chat_postgres_pool_connections PostgreSQL pool connections by state.",
-        "# TYPE hmm_chat_postgres_pool_connections gauge",
-        `hmm_chat_postgres_pool_connections{state="total"} ${this.databasePool.totalCount}`,
-        `hmm_chat_postgres_pool_connections{state="idle"} ${this.databasePool.idleCount}`,
-        `hmm_chat_postgres_pool_connections{state="waiting"} ${this.databasePool.waitingCount}`,
+        "# HELP hype_comms_postgres_pool_connections PostgreSQL pool connections by state.",
+        "# TYPE hype_comms_postgres_pool_connections gauge",
+        `hype_comms_postgres_pool_connections{state="total"} ${this.databasePool.totalCount}`,
+        `hype_comms_postgres_pool_connections{state="idle"} ${this.databasePool.idleCount}`,
+        `hype_comms_postgres_pool_connections{state="waiting"} ${this.databasePool.waitingCount}`,
       );
     }
     return `${lines.join("\n")}\n`;

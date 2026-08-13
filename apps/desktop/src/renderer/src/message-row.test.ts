@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { Message, User } from "@hmm-chat/contracts";
+import type { Message, User } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -36,7 +36,7 @@ const message: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Root message",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,
@@ -50,7 +50,7 @@ const pendingMessage: OutboxItem = {
     message: {
       threadRootId: null,
       body: "Pending message",
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       clientMessageId: message.clientMessageId,
       mentionedUserIds: [],
       attachmentIds: [],

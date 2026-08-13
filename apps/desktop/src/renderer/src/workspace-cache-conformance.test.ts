@@ -15,7 +15,7 @@ import {
   type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   clearPersistentWorkspaceCaches,
@@ -133,7 +133,7 @@ const snapshot: WorkspaceSnapshot = {
   workspace: {
     id: WORKSPACE_ID,
     name: "Hype Comms",
-    slug: "hmm-chat",
+    slug: "hype-comms",
     createdBy: MORGAN_ID,
     createdAt: NOW,
     updatedAt: NOW,
@@ -159,7 +159,7 @@ function historyMessage(id: string, clientMessageId: string, sequence: string): 
     authorId: ALICE_ID,
     threadRootId: null,
     body: `Message ${sequence}`,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,
@@ -314,7 +314,7 @@ const queuedAlphaMessage: SendMessageOperation = {
   message: {
     threadRootId: MESSAGE_SEQUENCE_2_ID,
     body: "Must not cross a membership repair",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: "10000000-0000-4000-8000-000000000069",
     mentionedUserIds: [],
     attachmentIds: [],
@@ -327,7 +327,7 @@ const queuedDirectMessage: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "Must survive an unrelated membership repair",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: "10000000-0000-4000-8000-000000000070",
     mentionedUserIds: [],
     attachmentIds: [],
@@ -1055,7 +1055,7 @@ describe("PersistentWorkspaceCache durability", () => {
     );
     await first.enqueue(queuedAlphaMessage, NOW);
 
-    const database = new Dexie(`hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`);
+    const database = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
     await database.open();
     await database.table("metadata").update("state", {
       repairMarker: {

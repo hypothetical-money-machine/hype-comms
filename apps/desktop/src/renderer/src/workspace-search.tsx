@@ -1,4 +1,4 @@
-import type { MessageSearchResponse, MessageSearchResult, User } from "@hmm-chat/contracts";
+import type { MessageSearchResponse, MessageSearchResult, User } from "@hype-comms/contracts";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 

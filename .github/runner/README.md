@@ -15,7 +15,7 @@ Build and register the ARM64 runner once:
 docker compose -f docker-compose.runner.yml build linux-arm64
 runner_token="$(
   gh api -X POST \
-    repos/hype-comms/hmm-chat/actions/runners/registration-token \
+    repos/hype-comms/hype-comms/actions/runners/registration-token \
     --jq .token
 )"
 RUNNER_TOKEN="$runner_token" docker compose -f docker-compose.runner.yml run \
@@ -40,15 +40,15 @@ Check the local container and GitHub registration:
 
 ```bash
 docker compose -f docker-compose.runner.yml ps linux-arm64
-gh api repos/hype-comms/hmm-chat/actions/runners \
-  --jq '.runners[] | select(.name == "hmm-chat-docker-linux-arm64")'
+gh api repos/hype-comms/hype-comms/actions/runners \
+  --jq '.runners[] | select(.name == "hype-comms-docker-linux-arm64")'
 ```
 
 The registration survives container and Docker Desktop restarts in the
-`hmm-chat-runner-data-arm64` volume. To remove it, first remove the runner in the
+`hype-comms-runner-data-arm64` volume. To remove it, first remove the runner in the
 repository's Actions settings, then run:
 
 ```bash
 docker compose -f docker-compose.runner.yml rm --stop --force linux-arm64
-docker volume rm hmm-chat-runner-data-arm64
+docker volume rm hype-comms-runner-data-arm64
 ```

@@ -4,7 +4,7 @@ import type {
   NotificationActionDrainRequest,
   NotificationActivityView,
   NotificationContext,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { DesktopApi, NotificationTransport } from "../../shared/desktop-api";
 

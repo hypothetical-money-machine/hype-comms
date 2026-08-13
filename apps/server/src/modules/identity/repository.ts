@@ -28,7 +28,7 @@ import {
   type Workspace,
   type WorkspaceMembership,
   type WorkspaceRole,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
 

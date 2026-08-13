@@ -98,7 +98,7 @@ import {
   type TaskListQuery,
   type UpdateState,
   type UpdateTaskOperation,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { resolveInitialCompactModeArgument } from "../shared/compact-mode";
@@ -599,4 +599,4 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
   },
 );
 
-contextBridge.exposeInMainWorld("hmmChat", desktopApi);
+contextBridge.exposeInMainWorld("hypeComms", desktopApi);

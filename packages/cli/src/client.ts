@@ -47,7 +47,7 @@ export interface EmptyApiRequestOptions<TRequest> {
 function authorizationHeaders(credential: StoredCredential | undefined): Record<string, string> {
   if (credential === undefined) return {};
   if (credential.kind === "human") {
-    return { cookie: `hmm_session=${credential.sessionToken}` };
+    return { cookie: `hype_comms_session=${credential.sessionToken}` };
   }
   return { authorization: `Bearer ${credential.token}` };
 }
@@ -117,7 +117,7 @@ export class ApiClient {
     if (includeCredential === false || this.#credential === undefined) return {};
     if (this.#credentialOrigin !== this.#origin) {
       throw new UsageError(
-        "The saved credential belongs to a different API origin; select its profile or provide HMM_CHAT_TOKEN",
+        "The saved credential belongs to a different API origin; select its profile or provide HYPE_COMMS_TOKEN",
         "CREDENTIAL_ORIGIN_MISMATCH",
       );
     }
@@ -279,7 +279,7 @@ export function sessionTokenFromHeaders(headers: Headers): string | undefined {
       ? headers.getSetCookie()
       : [headers.get("set-cookie")].filter((value): value is string => value !== null);
   for (const value of values) {
-    const match = /(?:^|,\s*)hmm_session=([^;,\s]*)/u.exec(value);
+    const match = /(?:^|,\s*)hype_comms_session=([^;,\s]*)/u.exec(value);
     if (match?.[1] !== undefined && match[1] !== "") return match[1];
   }
   return undefined;

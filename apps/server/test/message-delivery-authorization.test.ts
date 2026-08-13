@@ -7,7 +7,7 @@ import type {
   AgentCurrentPrincipal,
   CurrentUser,
   SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
@@ -19,7 +19,7 @@ import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-08-09T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
@@ -91,7 +91,7 @@ function message(clientMessageId: string, body = "hello"): SendConversationMessa
   return {
     threadRootId: null,
     body,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId,
     mentionedUserIds: [],
     attachmentIds: [],
@@ -155,7 +155,7 @@ describeWithPostgres("message-delivery authorization", () => {
     );
     await pool.query(
       `INSERT INTO workspaces (id, name, slug, created_by)
-       VALUES ($1, 'Hype Comms', 'hmm-chat', $2)`,
+       VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
     await pool.query(

@@ -122,14 +122,14 @@ export async function runMigrations(
 }
 
 async function runStandalone(): Promise<void> {
-  const url = process.env.HMM_DATABASE_URL;
+  const url = process.env.HYPE_COMMS_DATABASE_URL;
   if (url === undefined || url === "") {
-    throw new Error("HMM_DATABASE_URL is required");
+    throw new Error("HYPE_COMMS_DATABASE_URL is required");
   }
 
   const pool = createPool({
     url,
-    poolSize: Number.parseInt(process.env.HMM_DATABASE_POOL_SIZE ?? "10", 10),
+    poolSize: Number.parseInt(process.env.HYPE_COMMS_DATABASE_POOL_SIZE ?? "10", 10),
   });
   try {
     const result = await runMigrations(pool);

@@ -53,7 +53,7 @@ import type {
   UpdateState,
   HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 

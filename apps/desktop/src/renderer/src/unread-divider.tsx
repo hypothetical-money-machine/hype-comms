@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { ConversationSummary, Message } from "@hmm-chat/contracts";
+import type { ConversationSummary, Message } from "@hype-comms/contracts";
 
 interface UnreadBoundary {
   readonly conversationId: string | null;

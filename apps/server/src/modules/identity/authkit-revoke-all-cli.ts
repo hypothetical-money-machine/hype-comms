@@ -9,7 +9,7 @@ import { prepareAuthKitRollback } from "./authkit-repository.js";
 export const AUTHKIT_REVOKE_ALL_CONFIRMATION = "REVOKE-AUTHKIT-SESSIONS";
 
 const USAGE =
-  "Usage: npm run authkit:revoke-all --workspace @hmm-chat/server -- " +
+  "Usage: npm run authkit:revoke-all --workspace @hype-comms/server -- " +
   `--confirm ${AUTHKIT_REVOKE_ALL_CONFIRMATION}`;
 
 export interface AuthKitRevokeAllCliOutput {
@@ -23,27 +23,27 @@ export interface AuthKitRevokeAllCliDependencies {
 }
 
 function databaseConfig(env: Readonly<Record<string, string | undefined>>) {
-  const databaseUrl = env.HMM_DATABASE_URL;
+  const databaseUrl = env.HYPE_COMMS_DATABASE_URL;
   if (databaseUrl === undefined || databaseUrl.trim() === "") {
-    throw new Error("HMM_DATABASE_URL is required");
+    throw new Error("HYPE_COMMS_DATABASE_URL is required");
   }
   let parsedDatabaseUrl: URL;
   try {
     parsedDatabaseUrl = new URL(databaseUrl);
   } catch {
-    throw new Error("HMM_DATABASE_URL must be a PostgreSQL URL");
+    throw new Error("HYPE_COMMS_DATABASE_URL must be a PostgreSQL URL");
   }
   if (parsedDatabaseUrl.protocol !== "postgres:" && parsedDatabaseUrl.protocol !== "postgresql:") {
-    throw new Error("HMM_DATABASE_URL must be a PostgreSQL URL");
+    throw new Error("HYPE_COMMS_DATABASE_URL must be a PostgreSQL URL");
   }
   const poolSizeResult = z.coerce
     .number()
     .int()
     .min(1)
     .max(100)
-    .safeParse(env.HMM_DATABASE_POOL_SIZE ?? 10);
+    .safeParse(env.HYPE_COMMS_DATABASE_POOL_SIZE ?? 10);
   if (!poolSizeResult.success) {
-    throw new Error("HMM_DATABASE_POOL_SIZE must be an integer from 1 through 100");
+    throw new Error("HYPE_COMMS_DATABASE_POOL_SIZE must be an integer from 1 through 100");
   }
   return { url: databaseUrl, poolSize: poolSizeResult.data };
 }

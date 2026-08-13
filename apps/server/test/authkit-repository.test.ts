@@ -16,7 +16,7 @@ import {
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const encryptionKey = Buffer.alloc(32, 19);
 const ownerId = "10000000-0000-4000-8000-000000000101";

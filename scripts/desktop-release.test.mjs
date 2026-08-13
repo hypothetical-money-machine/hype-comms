@@ -36,11 +36,11 @@ const environment = {
   GH_TOKEN: "test-token",
   GITHUB_API_URL: "https://api.github.example",
   GITHUB_REF_NAME: "v1.2.3",
-  GITHUB_REPOSITORY: "example/hmm-chat",
-  HMM_UPDATE_PUBLIC_ROOT: "https://updates.example/desktop",
-  HMM_UPDATE_S3_BUCKET: "updates",
-  HMM_UPDATE_S3_ENDPOINT: "https://s3.example",
-  RUNNER_TEMP: path.join(os.tmpdir(), "hmm-chat-runner"),
+  GITHUB_REPOSITORY: "example/hype-comms",
+  HYPE_COMMS_UPDATE_PUBLIC_ROOT: "https://updates.example/desktop",
+  HYPE_COMMS_UPDATE_S3_BUCKET: "updates",
+  HYPE_COMMS_UPDATE_S3_ENDPOINT: "https://s3.example",
+  RUNNER_TEMP: path.join(os.tmpdir(), "hype-comms-runner"),
   UPDATE_ARTIFACT_OS: "win",
   UPDATE_MANIFEST: "latest.yml",
 };
@@ -79,15 +79,15 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
   assert.match(
     releaseWorkflow,
-    /runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/u,
+    /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u,
   );
   assert.match(
     releaseWorkflow,
-    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
   );
   assert.match(
     releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hmm-chat-release, docker\]/mu,
+    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
@@ -105,7 +105,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     packageSmokeWorkflow,
-    /runner: '\["self-hosted", "Linux", "ARM64", "hmm-chat-release", "docker"\]'/u,
+    /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
   );
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
@@ -295,7 +295,7 @@ test("rejects ambiguous artifact URL scalars", () => {
 });
 
 test("rewrites the selected generated platform manifest", async () => {
-  const releaseDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-release-"));
+  const releaseDirectory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-release-"));
   try {
     const manifestPath = path.join(releaseDirectory, "latest.yml");
     await writeFile(
@@ -385,7 +385,7 @@ test("waits for every GitHub Release asset without shell utilities", async () =>
   assert.equal(requests.length, 2);
   assert.equal(
     requests[0].url,
-    "https://api.github.example/repos/example/hmm-chat/releases?per_page=100",
+    "https://api.github.example/repos/example/hype-comms/releases?per_page=100",
   );
   assert.equal(requests[0].options.headers.authorization, "Bearer test-token");
   assert.deepEqual(delays, [25]);
@@ -488,7 +488,7 @@ test("runs AWS without a shell and pins its config to runner temp", () => {
   assert.equal(invocation.options.shell, false);
   assert.equal(
     invocation.options.env.AWS_CONFIG_FILE,
-    path.join(environment.RUNNER_TEMP, "hmm-chat-aws-config"),
+    path.join(environment.RUNNER_TEMP, "hype-comms-aws-config"),
   );
 });
 
@@ -511,7 +511,7 @@ test("retries transient AWS command failures with bounded backoff", async () => 
 });
 
 test("validates the generated manifest before uploading it last", async () => {
-  const releaseDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-chat-release-"));
+  const releaseDirectory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-release-"));
   const calls = [];
   try {
     await writeFile(path.join(releaseDirectory, "latest.yml"), "version: 1.2.3\n");

@@ -29,7 +29,9 @@ const configuration: HeadlessDesktopConfiguration = {
 
 function requireUnpackagedIsolatedProfile(isPackaged: boolean, profile: string): void {
   if (isPackaged || profile === "") {
-    throw new Error("HMM_DESKTOP_HEADLESS requires an unpackaged, isolated development profile");
+    throw new Error(
+      "HYPE_COMMS_DESKTOP_HEADLESS requires an unpackaged, isolated development profile",
+    );
   }
 }
 
@@ -43,10 +45,10 @@ export function resolveHeadlessDesktopConfiguration(
   isPackaged: boolean,
   profile: string,
 ): HeadlessDesktopConfiguration | null {
-  const value = env.HMM_DESKTOP_HEADLESS?.trim() ?? "";
+  const value = env.HYPE_COMMS_DESKTOP_HEADLESS?.trim() ?? "";
   if (value === "") return null;
   if (value !== "1") {
-    throw new Error("HMM_DESKTOP_HEADLESS must be set to 1");
+    throw new Error("HYPE_COMMS_DESKTOP_HEADLESS must be set to 1");
   }
 
   requireUnpackagedIsolatedProfile(isPackaged, profile);
@@ -95,7 +97,7 @@ export function assertHeadlessDesktopCommandLine(arguments_: readonly string[]):
     }
     if (hasRemoteDebuggingAddress && address !== HEADLESS_DESKTOP_CDP_ADDRESS) {
       throw new Error(
-        `HMM_DESKTOP_HEADLESS requires --remote-debugging-address=${HEADLESS_DESKTOP_CDP_ADDRESS}`,
+        `HYPE_COMMS_DESKTOP_HEADLESS requires --remote-debugging-address=${HEADLESS_DESKTOP_CDP_ADDRESS}`,
       );
     }
   }

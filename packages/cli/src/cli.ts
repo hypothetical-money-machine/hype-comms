@@ -17,10 +17,10 @@ import { writeError, writeResult } from "./output.js";
 import type { CommandContext, Runtime } from "./types.js";
 import { watchCommand } from "./watch.js";
 
-export const HELP = `hmm-chat-cli - HMM Chat command-line client
+export const HELP = `hype-comms-cli - Hype Comms command-line client
 
 Usage:
-  hmm-chat-cli [global-options] <command> [command-options]
+  hype-comms-cli [global-options] <command> [command-options]
 
 Global options:
   --json                    Emit JSON results (watch emits NDJSON)
@@ -38,7 +38,7 @@ Commands:
   profiles remove NAME
   auth request-magic-link EMAIL
   auth exchange                         Read magic-link token privately
-  auth login-agent [--save]             Read agent token privately or from HMM_CHAT_TOKEN
+  auth login-agent [--save]             Read agent token privately or from HYPE_COMMS_TOKEN
   auth whoami
   auth refresh
   auth logout
@@ -67,7 +67,7 @@ Commands:
   agent-tokens revoke AGENT TOKEN_ID
 
 Environment:
-  HMM_CHAT_API_ORIGIN, HMM_CHAT_TOKEN, HMM_CHAT_PROFILE, HMM_CHAT_CONFIG_DIR
+  HYPE_COMMS_API_ORIGIN, HYPE_COMMS_TOKEN, HYPE_COMMS_PROFILE, HYPE_COMMS_CONFIG_DIR
 
 Credentials are never accepted as command arguments.`;
 

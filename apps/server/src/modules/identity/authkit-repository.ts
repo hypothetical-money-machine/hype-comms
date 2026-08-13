@@ -16,7 +16,7 @@ import {
   type EntityId,
   type IsoDateTime,
   type SessionToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { withTransaction } from "../../db/pool.js";

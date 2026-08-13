@@ -1,6 +1,6 @@
-import { compactModePreferenceSchema, type CompactModePreference } from "@hmm-chat/contracts";
+import { compactModePreferenceSchema, type CompactModePreference } from "@hype-comms/contracts";
 
-const INITIAL_COMPACT_MODE_ARGUMENT_PREFIX = "--hmm-chat-initial-compact-mode=";
+const INITIAL_COMPACT_MODE_ARGUMENT_PREFIX = "--hype-comms-initial-compact-mode=";
 
 /**
  * Supplies the already-initialized compact-mode preference to a sandboxed renderer before

@@ -16,7 +16,7 @@ import {
   systemConnectedEventSchema,
   userSchema,
   workspaceBootstrapResponseSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
@@ -33,7 +33,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -107,7 +107,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     );
     await pool.query(
       `INSERT INTO workspaces (id, name, slug, created_by)
-       VALUES ($1, 'HMM Chat', 'hmm-chat', $2)`,
+       VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
     await pool.query(
@@ -175,7 +175,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/agents",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "hermes", displayName: "Hermes" },
     });
     expect(response.statusCode).toBe(201);
@@ -191,7 +191,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const response = await app.inject({
       method: "POST",
       url: `/v1/agents/${agentId}/tokens`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { label, ...(scopes === undefined ? {} : { scopes }) },
     });
     expect(response.statusCode).toBe(201);
@@ -203,7 +203,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/agents",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "hermes", displayName: "Hermes" },
     });
 
@@ -244,12 +244,12 @@ describeWithPostgres("agent identity and owner administration", () => {
       app.inject({
         method: "GET",
         url: "/v1/agents",
-        headers: { cookie: `hmm_session=${ownerSessionToken}` },
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
         url: `/v1/agents/${agent.user.id}/tokens`,
-        headers: { cookie: `hmm_session=${ownerSessionToken}` },
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
@@ -285,7 +285,7 @@ describeWithPostgres("agent identity and owner administration", () => {
       method: "GET",
       url: "/v1/members",
       headers: {
-        cookie: `hmm_session=${ownerSessionToken}`,
+        cookie: `hype_comms_session=${ownerSessionToken}`,
         authorization: `Bearer ${created.token}`,
       },
     });
@@ -295,7 +295,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const disabled = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const rejected = await app.inject({
       method: "GET",
@@ -386,7 +386,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const disabled = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(disabled.statusCode).toBe(204);
 
@@ -442,7 +442,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const first = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(first.statusCode).toBe(204);
 
@@ -456,7 +456,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const second = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     // The repeat disable still reports success -- the row mutations are idempotent -- but it must
     // not fan out a redundant member.updated to every active member.
@@ -481,7 +481,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const beforeMembers = await app.inject({
       method: "GET",
       url: "/v1/members",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(listMembersResponseSchema.parse(beforeMembers.json()).members).toContainEqual({
       ...agent.user,
@@ -491,7 +491,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const disabled = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(disabled.statusCode).toBe(204);
 
@@ -499,12 +499,12 @@ describeWithPostgres("agent identity and owner administration", () => {
       app.inject({
         method: "GET",
         url: "/v1/members",
-        headers: { cookie: `hmm_session=${ownerSessionToken}` },
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
         url: "/v1/bootstrap",
-        headers: { cookie: `hmm_session=${ownerSessionToken}` },
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
     ]);
     const memberIds = listMembersResponseSchema
@@ -544,13 +544,13 @@ describeWithPostgres("agent identity and owner administration", () => {
       method: "POST",
       url: `/v1/conversations/${generalId}/messages`,
       headers: {
-        cookie: `hmm_session=${ownerSessionToken}`,
+        cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": mentionClientMessageId,
       },
       payload: {
         threadRootId: null,
         body: "@hermes are you still there",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: mentionClientMessageId,
         mentionedUserIds: [agent.user.id],
         attachmentIds: [],
@@ -596,7 +596,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     for (const request of requests) {
       const memberResponse = await app.inject({
         ...request,
-        headers: { cookie: `hmm_session=${memberSessionToken}` },
+        headers: { cookie: `hype_comms_session=${memberSessionToken}` },
       });
       const agentResponse = await app.inject({
         ...request,
@@ -655,7 +655,7 @@ describeWithPostgres("agent identity and owner administration", () => {
       payload: {
         threadRootId: null,
         body: "Hermes is online",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: firstMessageId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -751,8 +751,8 @@ describeWithPostgres("agent identity and owner administration", () => {
       method: "POST",
       url: "/v1/channels",
       headers: {
-        cookie: `hmm_session=${ownerSessionToken}`,
-        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+        cookie: `hype_comms_session=${ownerSessionToken}`,
+        "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
       },
       payload: {
         name: "Announcements",
@@ -770,14 +770,14 @@ describeWithPostgres("agent identity and owner administration", () => {
       method: "POST",
       url: `/v1/conversations/${conversationId}/messages`,
       headers: {
-        cookie: `hmm_session=${ownerSessionToken}`,
+        cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": bulletinClientMessageId,
-        "x-hmm-chat-capabilities": "announcement-channels-v1,threads-v1",
+        "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
       },
       payload: {
         threadRootId: null,
         body: "Owner bulletin",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: bulletinClientMessageId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -797,7 +797,7 @@ describeWithPostgres("agent identity and owner administration", () => {
       payload: {
         threadRootId: null,
         body: "Agent root",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: forbiddenClientMessageId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -816,7 +816,7 @@ describeWithPostgres("agent identity and owner administration", () => {
       payload: {
         threadRootId: root.id,
         body: "Agent reply",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: replyClientMessageId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -841,7 +841,7 @@ describeWithPostgres("agent identity and owner administration", () => {
       payload: {
         threadRootId: null,
         body: "Persistent agent authorship",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId,
         mentionedUserIds: [],
         attachmentIds: [],
@@ -853,13 +853,13 @@ describeWithPostgres("agent identity and owner administration", () => {
       method: "POST",
       url: `/v1/conversations/${generalId}/messages`,
       headers: {
-        cookie: `hmm_session=${ownerSessionToken}`,
+        cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": mentionClientMessageId,
       },
       payload: {
         threadRootId: null,
         body: "@hermes please retain this context",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId: mentionClientMessageId,
         mentionedUserIds: [agent.user.id],
         attachmentIds: [],
@@ -947,7 +947,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     const revoked = await app.inject({
       method: "DELETE",
       url: `/v1/agents/${agent.user.id}/tokens/${first.agentToken.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const [firstMe, secondMe] = await Promise.all([
       app.inject({
@@ -971,19 +971,19 @@ describeWithPostgres("agent identity and owner administration", () => {
     const created = await app.inject({
       method: "POST",
       url: "/v1/invitations",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { email: "invitee@example.test", role: "member" },
     });
     const alias = await app.inject({
       method: "POST",
       url: "/v1/auth/invitations",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { email: "alias@example.test", role: "member" },
     });
     const listed = await app.inject({
       method: "GET",
       url: "/v1/invitations",
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const invitation = listInvitationsResponseSchema
       .parse(listed.json())
@@ -992,12 +992,12 @@ describeWithPostgres("agent identity and owner administration", () => {
     const revoked = await app.inject({
       method: "DELETE",
       url: `/v1/invitations/${invitation.id}`,
-      headers: { cookie: `hmm_session=${ownerSessionToken}` },
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const memberList = await app.inject({
       method: "GET",
       url: "/v1/invitations",
-      headers: { cookie: `hmm_session=${memberSessionToken}` },
+      headers: { cookie: `hype_comms_session=${memberSessionToken}` },
     });
 
     expect(created.statusCode).toBe(201);

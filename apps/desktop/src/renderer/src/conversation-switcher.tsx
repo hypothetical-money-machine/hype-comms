@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
-import type { ChannelMode } from "@hmm-chat/contracts";
+import type { ChannelMode } from "@hype-comms/contracts";
 import { DirectMessageIcon } from "./conversation-indicators";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 

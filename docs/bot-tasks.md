@@ -11,12 +11,12 @@ as SHA-256 hashes. The server redacts the `Authorization` header from request lo
 
 ## Create and inspect a bot
 
-The server command uses `HMM_DATABASE_URL` and the first active workspace owner. Channel flags are
+The server command uses `HYPE_COMMS_DATABASE_URL` and the first active workspace owner. Channel flags are
 explicit and repeatable. Omitting `--scope` grants both current task scopes; credentials expire in
 90 days by default.
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- create \
+npm run bot --workspace @hype-comms/server -- create \
   --username release-bot \
   --display-name "Release Bot" \
   --channel general \
@@ -29,13 +29,13 @@ The token is shown once. Put it in the bot runner's secret store; do not send it
 renderer, commit it, or place it in a URL. List bots and their non-secret access state with:
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- list
+npm run bot --workspace @hype-comms/server -- list
 ```
 
 Add another channel grant without minting a credential:
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- grant \
+npm run bot --workspace @hype-comms/server -- grant \
   --username release-bot \
   --channel launch-planning
 ```
@@ -44,7 +44,7 @@ Rotation atomically revokes every prior credential for that bot and prints one r
 and expiry flags have the same defaults as `create`.
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- rotate \
+npm run bot --workspace @hype-comms/server -- rotate \
   --username release-bot \
   --scope tasks:read \
   --scope tasks:write
@@ -54,7 +54,7 @@ Revoke all active credentials immediately without deleting the bot, its grants, 
 audit attribution:
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- revoke --username release-bot
+npm run bot --workspace @hype-comms/server -- revoke --username release-bot
 ```
 
 ## Call task routes
@@ -64,8 +64,8 @@ origin were loaded from a secret store into the process environment.
 
 ```bash
 curl --fail-with-body \
-  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
-  "${HMM_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks?limit=100"
+  --header "Authorization: Bearer ${HYPE_COMMS_BOT_TOKEN}" \
+  "${HYPE_COMMS_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks?limit=100"
 ```
 
 Create operations require a stable `Idempotency-Key`. A bot should derive this from the external
@@ -74,11 +74,11 @@ event or job that caused the task instead of generating a new value on every ret
 ```bash
 curl --fail-with-body \
   --request POST \
-  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
+  --header "Authorization: Bearer ${HYPE_COMMS_BOT_TOKEN}" \
   --header "Content-Type: application/json" \
   --header "Idempotency-Key: deploy:production:2026-08-05.1" \
   --data '{"title":"Verify production rollout","priority":"high"}' \
-  "${HMM_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks"
+  "${HYPE_COMMS_API_ORIGIN}/v1/channels/${CHANNEL_SLUG}/tasks"
 ```
 
 Channel slugs and conversation-local task numbers form stable human-readable references. Fetch
@@ -86,12 +86,12 @@ Channel slugs and conversation-local task numbers form stable human-readable ref
 
 ```bash
 curl --fail-with-body \
-  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
-  "${HMM_API_ORIGIN}/v1/channels/general/tasks/42"
+  --header "Authorization: Bearer ${HYPE_COMMS_BOT_TOKEN}" \
+  "${HYPE_COMMS_API_ORIGIN}/v1/channels/general/tasks/42"
 
 curl --fail-with-body \
-  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
-  "${HMM_API_ORIGIN}/v1/tasks/${TASK_ID}"
+  --header "Authorization: Bearer ${HYPE_COMMS_BOT_TOKEN}" \
+  "${HYPE_COMMS_API_ORIGIN}/v1/tasks/${TASK_ID}"
 ```
 
 Board and My Tasks lists accept optional `status`, `priority`, `assignee`, `dueAfter`, `dueBefore`,
@@ -102,8 +102,8 @@ card:
 
 ```bash
 curl --fail-with-body \
-  --header "Authorization: Bearer ${HMM_BOT_TOKEN}" \
-  "${HMM_API_ORIGIN}/v1/channels/general/tasks?status=in_progress&priority=urgent&assignee=me&updatedAfter=2026-08-05T00%3A00%3A00.000Z"
+  --header "Authorization: Bearer ${HYPE_COMMS_BOT_TOKEN}" \
+  "${HYPE_COMMS_API_ORIGIN}/v1/channels/general/tasks?status=in_progress&priority=urgent&assignee=me&updatedAfter=2026-08-05T00%3A00%3A00.000Z"
 ```
 
 Pagination cursors are bound to the exact filter set. Reusing a cursor after changing a filter is

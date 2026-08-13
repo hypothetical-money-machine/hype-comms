@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 
-import type { NotificationPreference, NotificationState } from "@hmm-chat/contracts";
+import type { NotificationPreference, NotificationState } from "@hype-comms/contracts";
 
 import type { NotificationTransport } from "../../shared/desktop-api";
 

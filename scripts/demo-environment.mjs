@@ -3,15 +3,15 @@ import { once } from "node:events";
 import { chmod, mkdir, open, readFile, rm, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
-export const DEMO_COMPOSE_PROJECT = "hmm-chat-demo";
+export const DEMO_COMPOSE_PROJECT = "hype-comms-demo";
 export const DEFAULT_DEMO_POSTGRES_BIND_PORT = 54330;
 export const DEFAULT_DEMO_CDP_BASE_PORT = 9222;
 export const DEMO_API_PORT = 3000;
 export const DEMO_RENDERER_PORT = 5173;
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
-export const HEADLESS_DEMO_MANIFEST_KIND = "hmm-chat-headless-demo";
+export const HEADLESS_DEMO_MANIFEST_KIND = "hype-comms-headless-demo";
 export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
-  "HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
+  "HYPE_COMMS_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
 
 const HEADLESS_DEMO_CLIENT_PROFILES = ["claire", "woots"];
 const TCP_PORT_MAX = 65_535;
@@ -229,10 +229,10 @@ export function deriveHeadlessDesktopEnvironment(
   delete environment.REMOTE_DEBUGGING_PORT;
   return {
     ...environment,
-    HMM_DESKTOP_HEADLESS: "1",
-    HMM_NATIVE_NOTIFICATIONS_ENABLED: "1",
-    HMM_DESKTOP_PROFILE: profile,
-    HMM_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
+    HYPE_COMMS_DESKTOP_HEADLESS: "1",
+    HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1",
+    HYPE_COMMS_DESKTOP_PROFILE: profile,
+    HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
     [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: path.resolve(artifactsDirectory),
   };
 }
@@ -323,37 +323,37 @@ export function createHeadlessDemoReadyRecord(paths, manifest) {
 }
 
 export function deriveDemoEnvironment(baseEnv, projectRoot) {
-  const password = baseEnv.HMM_POSTGRES_PASSWORD?.trim() ?? "";
-  if (password === "") throw new Error("HMM_POSTGRES_PASSWORD is required for the demo");
+  const password = baseEnv.HYPE_COMMS_POSTGRES_PASSWORD?.trim() ?? "";
+  if (password === "") throw new Error("HYPE_COMMS_POSTGRES_PASSWORD is required for the demo");
   const portText =
-    baseEnv.HMM_DEMO_POSTGRES_BIND_PORT?.trim() ?? String(DEFAULT_DEMO_POSTGRES_BIND_PORT);
+    baseEnv.HYPE_COMMS_DEMO_POSTGRES_BIND_PORT?.trim() ?? String(DEFAULT_DEMO_POSTGRES_BIND_PORT);
   if (!/^[0-9]+$/.test(portText)) {
-    throw new Error("HMM_DEMO_POSTGRES_BIND_PORT must be a TCP port");
+    throw new Error("HYPE_COMMS_DEMO_POSTGRES_BIND_PORT must be a TCP port");
   }
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("HMM_DEMO_POSTGRES_BIND_PORT must be a TCP port");
+    throw new Error("HYPE_COMMS_DEMO_POSTGRES_BIND_PORT must be a TCP port");
   }
 
-  const databaseUrl = new URL(`postgres://127.0.0.1:${String(port)}/hmm_chat`);
-  databaseUrl.username = "hmm";
+  const databaseUrl = new URL(`postgres://127.0.0.1:${String(port)}/hype_comms`);
+  databaseUrl.username = "hype_comms";
   databaseUrl.password = password;
   const paths = demoPaths(projectRoot);
   const env = {
     ...baseEnv,
     NODE_ENV: "development",
-    HMM_DATABASE_URL: databaseUrl.toString(),
-    HMM_POSTGRES_BIND_PORT: String(port),
-    HMM_DEMO_POSTGRES_BIND_PORT: String(port),
-    HMM_DEMO_CALLBACK_DIRECTORY: paths.callbackDirectory,
+    HYPE_COMMS_DATABASE_URL: databaseUrl.toString(),
+    HYPE_COMMS_POSTGRES_BIND_PORT: String(port),
+    HYPE_COMMS_DEMO_POSTGRES_BIND_PORT: String(port),
+    HYPE_COMMS_DEMO_CALLBACK_DIRECTORY: paths.callbackDirectory,
   };
-  delete env.HMM_OWNER_EMAIL;
-  delete env.HMM_WORKSPACE_NAME;
-  delete env.HMM_WORKSPACE_SLUG;
+  delete env.HYPE_COMMS_OWNER_EMAIL;
+  delete env.HYPE_COMMS_WORKSPACE_NAME;
+  delete env.HYPE_COMMS_WORKSPACE_SLUG;
   // A normal demo must remain interactive even when a caller's shell has automation settings.
   // The headless launcher adds its own pinned CDP configuration after this normalization.
-  delete env.HMM_DESKTOP_HEADLESS;
-  delete env.HMM_NATIVE_NOTIFICATIONS_ENABLED;
+  delete env.HYPE_COMMS_DESKTOP_HEADLESS;
+  delete env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED;
   delete env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV];
   delete env.ELECTRON_CLI_ARGS;
   delete env.REMOTE_DEBUGGING_PORT;

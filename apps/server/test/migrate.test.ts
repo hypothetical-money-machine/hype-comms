@@ -4,13 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { workspaceEventSchema } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
+import { IdentityRepository } from "../src/modules/identity/repository.js";
+import { hashToken } from "../src/modules/identity/tokens.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
@@ -35,14 +38,18 @@ async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void>
   }
 }
 
-async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-agent-migrations-"));
+/** Materializes the migration directory minus one file, so its own effect can be observed. */
+async function withoutMigration(
+  excludedFilename: string,
+  fn: (migrationsDirectory: URL) => Promise<void>,
+): Promise<void> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-partial-migrations-"));
   const source = new URL("../src/db/migrations/", import.meta.url);
   try {
     const filenames = await readdir(source);
     await Promise.all(
       filenames
-        .filter((filename) => filename.endsWith(".sql") && filename !== "0013_agents.sql")
+        .filter((filename) => filename.endsWith(".sql") && filename !== excludedFilename)
         .map(async (filename) => {
           await writeFile(
             path.join(directory, filename),
@@ -56,28 +63,16 @@ async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<v
   }
 }
 
+async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  await withoutMigration("0013_agents.sql", fn);
+}
+
 async function withoutTokenLineageMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-pre-token-lineage-migrations-"));
-  const source = new URL("../src/db/migrations/", import.meta.url);
-  try {
-    const filenames = await readdir(source);
-    await Promise.all(
-      filenames
-        .filter(
-          (filename) =>
-            filename.endsWith(".sql") && filename !== "0015_device_session_token_history.sql",
-        )
-        .map(async (filename) => {
-          await writeFile(
-            path.join(directory, filename),
-            await readFile(new URL(filename, source)),
-          );
-        }),
-    );
-    await fn(pathToFileURL(`${directory}${path.sep}`));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await withoutMigration("0015_device_session_token_history.sql", fn);
+}
+
+async function withoutTechnicalRebrandMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  await withoutMigration("0018_hype_comms_technical_rebrand.sql", fn);
 }
 
 describeWithPostgres("runMigrations", () => {
@@ -103,6 +98,7 @@ describeWithPostgres("runMigrations", () => {
           "0015_device_session_token_history.sql",
           "0016_announcement_channels.sql",
           "0017_workos_authkit.sql",
+          "0018_hype_comms_technical_rebrand.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -129,6 +125,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0015_device_session_token_history.sql" },
         { filename: "0016_announcement_channels.sql" },
         { filename: "0017_workos_authkit.sql" },
+        { filename: "0018_hype_comms_technical_rebrand.sql" },
       ]);
 
       const userId = randomUUID();
@@ -197,7 +194,7 @@ describeWithPostgres("runMigrations", () => {
            id, workspace_id, conversation_id, conversation_sequence,
            committed_workspace_sequence, client_message_id, request_fingerprint,
            author_id, thread_root_id, body, body_format
-         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Root', 'hmm_markdown_v1')`,
+         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Root', 'hype_comms_markdown_v1')`,
         [threadRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
       );
       const replyId = randomUUID();
@@ -207,7 +204,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, $7, 'Reply', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, $7, 'Reply', 'hype_comms_markdown_v1')`,
           [
             replyId,
             workspaceId,
@@ -225,7 +222,7 @@ describeWithPostgres("runMigrations", () => {
            id, workspace_id, conversation_id, conversation_sequence,
            committed_workspace_sequence, client_message_id, request_fingerprint,
            author_id, thread_root_id, body, body_format
-         ) VALUES ($1, $2, $3, 10, 3, $4, $5, $6, NULL, 'Other root', 'hmm_markdown_v1')`,
+         ) VALUES ($1, $2, $3, 10, 3, $4, $5, $6, NULL, 'Other root', 'hype_comms_markdown_v1')`,
         [alternateRootId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
       );
       await expect(
@@ -240,7 +237,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 1, 3, $4, $5, $6, $7, 'Cross thread', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 1, 3, $4, $5, $6, $7, 'Cross thread', 'hype_comms_markdown_v1')`,
           [
             randomUUID(),
             workspaceId,
@@ -258,7 +255,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 3, 4, $4, $5, $6, $7, 'Nested reply', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 3, 4, $4, $5, $6, $7, 'Nested reply', 'hype_comms_markdown_v1')`,
           [
             randomUUID(),
             workspaceId,
@@ -277,7 +274,7 @@ describeWithPostgres("runMigrations", () => {
              id, workspace_id, conversation_id, conversation_sequence,
              committed_workspace_sequence, client_message_id, request_fingerprint,
              author_id, thread_root_id, body, body_format
-           ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hmm_markdown_v1')`,
+           ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hype_comms_markdown_v1')`,
           [selfReplyId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
@@ -329,6 +326,294 @@ describeWithPostgres("runMigrations", () => {
           defaultWorkspaceId,
         ]),
       ).resolves.toMatchObject({ rows: [{ name: "Morgan and Dan" }] });
+    });
+  });
+
+  it("rewrites legacy body formats, the default slug, and the body-format constraint", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const defaultWorkspaceId = randomUUID();
+      const customWorkspaceId = randomUUID();
+      const conversationId = randomUUID();
+      const legacyMessageId = randomUUID();
+      const legacyClientMessageId = randomUUID();
+      const legacyEventId = randomUUID();
+      const legacyEventOccurredAt = "2026-01-01T00:00:00.000Z";
+      const legacyEventEnvelope = {
+        version: 1,
+        id: legacyEventId,
+        type: "message.created",
+        occurredAt: legacyEventOccurredAt,
+        workspaceId: defaultWorkspaceId,
+        conversationId,
+        workspaceSequence: "1",
+        conversationSequence: "1",
+        entityVersion: 1,
+        delivery: "at_least_once",
+      };
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'technical-rebrand@example.test', 'technical', 'Technical')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES
+           ($1, 'Hype Comms', 'hmm-chat', $3),
+           ($2, 'Custom', 'custom-workspace', $3)`,
+        [defaultWorkspaceId, customWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [defaultWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by)
+         VALUES ($1, $2, 'channel', 'General', 'general', 'workspace', $3)`,
+        [conversationId, defaultWorkspaceId, userId],
+      );
+      await pool.query(
+        `INSERT INTO messages (
+           id, workspace_id, conversation_id, conversation_sequence,
+           committed_workspace_sequence, client_message_id, request_fingerprint,
+           author_id, thread_root_id, body, body_format
+         ) VALUES ($1, $2, $3, 1, 1, $4, $5, $6, NULL, 'Legacy', 'hmm_markdown_v1')`,
+        [
+          legacyMessageId,
+          defaultWorkspaceId,
+          conversationId,
+          legacyClientMessageId,
+          Buffer.alloc(32),
+          userId,
+        ],
+      );
+      // Retained events embed the message verbatim, so the literal also lives in JSONB.
+      const legacyEventPayload = {
+        message: {
+          id: legacyMessageId,
+          conversationId,
+          conversationSequence: "1",
+          version: 1,
+          clientMessageId: legacyClientMessageId,
+          authorId: userId,
+          threadRootId: null,
+          body: "Legacy",
+          bodyFormat: "hmm_markdown_v1",
+          editedAt: null,
+          deletedAt: null,
+          createdAt: legacyEventOccurredAt,
+          updatedAt: legacyEventOccurredAt,
+        },
+        mentionedUserIds: [],
+      };
+      await pool.query(
+        `INSERT INTO sync_events (
+           id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
+           event_type, actor_user_id, entity_version, payload, occurred_at
+         ) VALUES ($1, $2, 1, $3, 1, 'message.created', $4, 1, $5::jsonb, $6)`,
+        [
+          legacyEventId,
+          defaultWorkspaceId,
+          conversationId,
+          userId,
+          JSON.stringify(legacyEventPayload),
+          legacyEventOccurredAt,
+        ],
+      );
+      // Non-vacuity: this is exactly what WorkspaceRepository.#mapEvent feeds the strict schema,
+      // and it throws until 0018 rewrites the retained payload.
+      expect(() =>
+        workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: legacyEventPayload }),
+      ).toThrow();
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      const retainedEvent = await pool.query<{ payload: unknown; body_format: string | null }>(
+        `SELECT payload, payload #>> '{message,bodyFormat}' AS body_format
+           FROM sync_events
+          WHERE id = $1`,
+        [legacyEventId],
+      );
+      const [retainedRow] = retainedEvent.rows;
+      if (retainedRow === undefined) {
+        throw new Error("The retained sync event disappeared during the migration.");
+      }
+      expect(retainedRow.body_format).toBe("hype_comms_markdown_v1");
+      // Catch-up sync and realtime reconnection both go through this parse.
+      expect(() =>
+        workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: retainedRow.payload }),
+      ).not.toThrow();
+
+      await expect(
+        pool.query<{ body_format: string }>("SELECT body_format FROM messages WHERE id = $1", [
+          legacyMessageId,
+        ]),
+      ).resolves.toMatchObject({ rows: [{ body_format: "hype_comms_markdown_v1" }] });
+      const slugs = await pool.query<{ id: string; slug: string }>(
+        "SELECT id, slug FROM workspaces",
+      );
+      expect(new Map(slugs.rows.map((row) => [row.id, row.slug]))).toEqual(
+        new Map([
+          [defaultWorkspaceId, "hype-comms"],
+          [customWorkspaceId, "custom-workspace"],
+        ]),
+      );
+
+      // The recreated CHECK has to accept the new literal and keep rejecting the old one.
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 2, 2, $4, $5, $6, NULL, 'Current', 'hype_comms_markdown_v1')`,
+          [
+            randomUUID(),
+            defaultWorkspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+          ],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, thread_root_id, body, body_format
+           ) VALUES ($1, $2, $3, 3, 3, $4, $5, $6, NULL, 'Legacy again', 'hmm_markdown_v1')`,
+          [
+            randomUUID(),
+            defaultWorkspaceId,
+            conversationId,
+            randomUUID(),
+            Buffer.alloc(32),
+            userId,
+          ],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+    });
+  });
+
+  it("revokes every pre-cutover device session so old tokens stop authenticating", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const activeSessionId = randomUUID();
+      const revokedSessionId = randomUUID();
+      const alreadyRevokedAt = "2026-01-02T03:04:05.000Z";
+      // The cookie rename does not change the token, so this is exactly what a pre-cutover client
+      // replays as hype_comms_session=<old value>.
+      const legacyToken = "legacy-pre-cutover-session-token";
+      const legacyTokenHash = hashToken(legacyToken);
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'session-cutover@example.test', 'cutover', 'Cutover')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO device_sessions
+           (id, user_id, token_hash, label, created_at, last_seen_at, expires_at,
+            revoked_at, workos_session_id)
+         VALUES
+           ($1, $3, $4, 'Pre-cutover laptop', clock_timestamp(), clock_timestamp(),
+            clock_timestamp() + interval '30 days', NULL, 'session_precutoveractive1'),
+           ($2, $3, $5, 'Already signed out', clock_timestamp(), clock_timestamp(),
+            clock_timestamp() + interval '30 days', $6, NULL)`,
+        [
+          activeSessionId,
+          revokedSessionId,
+          userId,
+          legacyTokenHash,
+          Buffer.alloc(32, 7),
+          alreadyRevokedAt,
+        ],
+      );
+
+      // Non-vacuity: this is the lookup IdentityService.authenticateContext performs, and it
+      // still returns the session until 0018 revokes it.
+      const repository = new IdentityRepository(pool);
+      await expect(repository.findDeviceSessionByTokenHash(legacyTokenHash)).resolves.toMatchObject(
+        { id: activeSessionId },
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      await expect(repository.findDeviceSessionByTokenHash(legacyTokenHash)).resolves.toBeNull();
+      const sessions = await pool.query<{
+        id: string;
+        revoked_at: Date | null;
+        workos_session_id: string | null;
+      }>("SELECT id, revoked_at, workos_session_id FROM device_sessions ORDER BY id");
+      const revocations = new Map(
+        sessions.rows.map((row) => [
+          row.id,
+          { at: row.revoked_at, provider: row.workos_session_id },
+        ]),
+      );
+      expect(revocations.get(activeSessionId)?.at).toBeInstanceOf(Date);
+      // Revoking drops the provider session link, matching revokeAllDeviceSessions.
+      expect(revocations.get(activeSessionId)?.provider).toBeNull();
+      // An earlier sign-out keeps its own timestamp instead of being restamped.
+      expect(revocations.get(revokedSessionId)?.at).toEqual(new Date(alreadyRevokedAt));
+    });
+  });
+
+  it("leaves the legacy slug alone when the renamed slug already exists", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const legacyWorkspaceId = randomUUID();
+      const renamedWorkspaceId = randomUUID();
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'slug-collision@example.test', 'collision', 'Collision')`,
+        [userId],
+      );
+      // workspaces.slug is UNIQUE, so an unguarded rename would abort the migration and
+      // crash-loop the server on every boot.
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES
+           ($1, 'Legacy', 'hmm-chat', $3),
+           ($2, 'Hype Comms', 'hype-comms', $3)`,
+        [legacyWorkspaceId, renamedWorkspaceId, userId],
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      const slugs = await pool.query<{ id: string; slug: string }>(
+        "SELECT id, slug FROM workspaces",
+      );
+      expect(new Map(slugs.rows.map((row) => [row.id, row.slug]))).toEqual(
+        new Map([
+          [legacyWorkspaceId, "hmm-chat"],
+          [renamedWorkspaceId, "hype-comms"],
+        ]),
+      );
     });
   });
 
@@ -626,7 +911,7 @@ describeWithPostgres("runMigrations", () => {
 
   it("fails loudly when an applied migration file changes", async () => {
     await withFreshSchema(async (pool) => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-migrations-"));
+      const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-migrations-"));
       const migrationUrl = new URL("../src/db/migrations/0001_identity.sql", import.meta.url);
       const copiedMigration = path.join(directory, "0001_identity.sql");
       try {

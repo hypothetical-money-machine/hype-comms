@@ -9,7 +9,7 @@ the build nor device default may flip before the complete external host matrix p
 implementation and security contract. This roadmap sequences the remaining proof and rollout work
 and does not override those documents.
 
-Tracking issue: [#42](https://github.com/hype-comms/hmm-chat/issues/42) remains open
+Tracking issue: [#42](https://github.com/hype-comms/hype-comms/issues/42) remains open
 for Milestone 4 evidence and the eventual default decision.
 
 ## Outcome
@@ -60,7 +60,7 @@ The default-off notification implementation now includes:
 - Windows AppUserModelID configuration matching the packaged application ID before the first
   `BrowserWindow` is created.
 
-This is not a user rollout or a completed roadmap item. `HMM_NATIVE_NOTIFICATIONS_ENABLED` is a
+This is not a user rollout or a completed roadmap item. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is a
 build-time switch: unset or `0` compiles presentation off and `1` includes the controller. Even in
 an enabled build, the persisted device preference defaults to disabled and body preview defaults
 off. Ordinary demos clear the switch; the isolated headless demo pins it on and selects capture,

@@ -1,4 +1,4 @@
-import type { NotificationActivityUpdate, NotificationState } from "@hmm-chat/contracts";
+import type { NotificationActivityUpdate, NotificationState } from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import {

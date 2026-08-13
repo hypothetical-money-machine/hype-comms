@@ -2,7 +2,7 @@
 
 Hype Comms supports WorkOS AuthKit as an optional sign-in proof. AuthKit does not replace the
 application's identity or session model: PostgreSQL still owns local UUIDs, invite admission,
-workspace capacity, `hmm_session` cookies, device-session rotation, realtime scope, and immediate
+workspace capacity, `hype_comms_session` cookies, device-session rotation, realtime scope, and immediate
 local revocation. Existing magic links remain compatible during rollout.
 
 ## Request flow
@@ -21,11 +21,11 @@ local revocation. Existing magic links remain compatible during rollout.
    is activated transactionally under the 25-principal workspace cap. Impersonation and
    unverified email are rejected.
 6. The server redirects to only
-   `hmm-chat://auth/callback?code=<hmm-handoff>&state=<desktop-state>`. Provider codes, tokens,
+   `hype-comms://auth/callback?code=<hype-comms-handoff>&state=<desktop-state>`. Provider codes, tokens,
    errors, and email never enter that URL.
 7. Electron constant-time matches state, deletes its pending verifier before exchange, and sends
    the five-minute handoff plus verifier to `POST /v1/auth/exchange`. The server consumes it once
-   and creates the existing 30-day rotating `hmm_session` device session.
+   and creates the existing 30-day rotating `hype_comms_session` device session.
 
 An indeterminate handoff exchange is terminal and is never retried automatically. Starting again
 creates completely new provider and desktop transactions.
@@ -43,7 +43,7 @@ Create or select a WorkOS Application in the same environment as the API key, th
   on after the system browser ends the WorkOS session
 
 For loopback development, the redirect URI is
-`http://127.0.0.1:3000/v1/auth/workos/callback`. It must exactly match `HMM_PUBLIC_API_URL` plus the
+`http://127.0.0.1:3000/v1/auth/workos/callback`. It must exactly match `HYPE_COMMS_PUBLIC_API_URL` plus the
 callback path. WorkOS never redirects directly to the desktop scheme.
 
 The app retains only the upstream WorkOS session ID needed to receive revocation. WorkOS access
@@ -57,8 +57,8 @@ Configure all four core values together:
 WORKOS_API_KEY=sk_live_replace-me
 WORKOS_CLIENT_ID=client_replace-me
 WORKOS_REDIRECT_URI=https://chat-api.example.invalid/v1/auth/workos/callback
-HMM_AUTH_ENCRYPTION_KEY=replace-with-43-character-unpadded-base64url
-HMM_AUTHKIT_ADMISSION_ENABLED=false
+HYPE_COMMS_AUTH_ENCRYPTION_KEY=replace-with-43-character-unpadded-base64url
+HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=false
 ```
 
 Generate the encryption key without writing it to shell history or the repository:
@@ -72,7 +72,7 @@ boundary:
 
 ```dotenv
 WORKOS_WEBHOOK_SECRET=replace-me
-HMM_TRUSTED_PROXIES=172.20.0.0/16
+HYPE_COMMS_TRUSTED_PROXIES=172.20.0.0/16
 ```
 
 JWT validation defaults to WorkOS's canonical `https://api.workos.com/` issuer. If the Application
@@ -83,20 +83,20 @@ uses a WorkOS custom authentication domain, configure the exact HTTPS URL expose
 WORKOS_JWT_ISSUER=https://auth.example.com
 ```
 
-`WORKOS_API_KEY`, `HMM_AUTH_ENCRYPTION_KEY`, and `WORKOS_WEBHOOK_SECRET` are server secrets. Do not
+`WORKOS_API_KEY`, `HYPE_COMMS_AUTH_ENCRYPTION_KEY`, and `WORKOS_WEBHOOK_SECRET` are server secrets. Do not
 put them in desktop build variables, renderer code, logs, screenshots, or client configuration.
 Development/test accepts only a `sk_test_` key and loopback HTTP public origin. Production accepts
-only a `sk_live_` key and requires HTTPS. `HMM_AUTHKIT_ADMISSION_ENABLED` defaults to `false`.
+only a `sk_live_` key and requires HTTPS. `HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED` defaults to `false`.
 Signed webhooks and hourly active-session reconciliation remain live while the gate is false and
 provider configuration is present. Database-only retention remains live even if provider secrets
 are removed. Capability discovery reports AuthKit disabled and authorization, callback, and
 handoff-exchange routes are unavailable. Production refuses to enable the gate without the
-webhook secret and a nonempty, validated `HMM_TRUSTED_PROXIES` list.
+webhook secret and a nonempty, validated `HYPE_COMMS_TRUSTED_PROXIES` list.
 
 ## Admission and lifecycle behavior
 
 - AuthKit is sign-in, not public signup. Create a local invitation first with the existing owner
-  UI or `npm run invite --workspace @hmm-chat/server -- --email member@example.com`.
+  UI or `npm run invite --workspace @hype-comms/server -- --email member@example.com`.
 - Matching uses the normalized, WorkOS-verified email exactly. A WorkOS subject becomes permanently
   bound to one local human account; a different subject cannot take it over later.
 - A mapped subject whose verified email no longer matches the local account is denied rather than
@@ -135,14 +135,14 @@ cutover boundary because older servers do not receive or apply WorkOS session-re
 A safe rollout is:
 
 1. Back up PostgreSQL. Configure the four provider values, webhook secret, and exact trusted proxy
-   IP/CIDR, but leave `HMM_AUTHKIT_ADMISSION_ENABLED=false`.
+   IP/CIDR, but leave `HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=false`.
 2. Deploy migration `0017` and the AuthKit-capable server to every serving instance. With the gate
    still false, verify `/v1/auth/capabilities` reports `authKit: false` and the three admission
    routes are unavailable.
 3. Verify signed `session.revoked` delivery in the WorkOS dashboard. Webhook processing,
    active-session reconciliation, and expired-state cleanup remain active while admission is
    gated off.
-4. After every old server has been drained, set `HMM_AUTHKIT_ADMISSION_ENABLED=true` on every new
+4. After every old server has been drained, set `HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=true` on every new
    server and verify capability discovery reports `authKit: true` consistently.
 5. Ship the desktop update. New clients show **Sign in with WorkOS**; old clients continue using
    magic links. Keep magic-link delivery until the rollback window and desired migration period
@@ -153,7 +153,7 @@ A safe rollout is:
 Do not roll an AuthKit-enabled deployment directly back to an older server. The older server would
 continue accepting an existing local cookie but could not honor a later WorkOS revocation. Instead:
 
-1. On the current release, set `HMM_AUTHKIT_ADMISSION_ENABLED=false` everywhere. Fully drain every
+1. On the current release, set `HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=false` everywhere. Fully drain every
    gate-enabled server, then verify every serving instance reports `authKit: false`. Keep the
    provider settings and signed webhook configured through the upstream revocation step.
 2. Revoke the retained WorkOS sessions through the WorkOS dashboard or session-revocation API.
@@ -167,7 +167,7 @@ continue accepting an existing local cookie but could not honor a later WorkOS r
    revoke magic-link sessions:
 
    ```bash
-   npm run authkit:revoke-all --workspace @hmm-chat/server -- \
+   npm run authkit:revoke-all --workspace @hype-comms/server -- \
      --confirm REVOKE-AUTHKIT-SESSIONS
    ```
 
@@ -187,7 +187,7 @@ continue accepting an existing local cookie but could not honor a later WorkOS r
 Do not roll the database migration back while any AuthKit-created device session or retained WorkOS
 state exists. A normal application rollback is not safe without the gate, upstream webhook drain,
 and local revoke-and-purge sequence above. The local command intentionally requires only
-`HMM_DATABASE_URL` (and the optional bounded `HMM_DATABASE_POOL_SIZE`), so provider credential loss
+`HYPE_COMMS_DATABASE_URL` (and the optional bounded `HYPE_COMMS_DATABASE_POOL_SIZE`), so provider credential loss
 cannot block the emergency rollback boundary.
 
 ## Provider tests with WorkOS Emulate

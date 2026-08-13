@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 
-const CHANNEL = "hmm_chat_events";
+const CHANNEL = "hype_comms_events";
 
 /** Backoff schedule for re-establishing LISTEN; the final delay repeats forever. */
 const DEFAULT_RECONNECT_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];

@@ -15,7 +15,7 @@ export const botScopesSchema = z
  */
 export const botAccessTokenSchema = z
   .string()
-  .regex(/^hmm_bot_[A-Za-z0-9_-]{43}$/, "Expected a Hype Comms bot access token");
+  .regex(/^hype_comms_bot_[A-Za-z0-9_-]{43}$/, "Expected a Hype Comms bot access token");
 
 export type BotScope = z.infer<typeof botScopeSchema>;
 export type BotAccessToken = z.infer<typeof botAccessTokenSchema>;

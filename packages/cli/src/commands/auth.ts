@@ -7,7 +7,7 @@ import {
   requestMagicLinkSchema,
   sessionTokenSchema,
   verifyMagicLinkSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { parseCommandArguments, requirePositionals } from "../argv.js";
 import { ApiClient, sessionTokenFromHeaders } from "../client.js";
@@ -84,7 +84,7 @@ export async function authCommand(
   if (subcommand === "login-agent") {
     const parsed = parseCommandArguments(args, { save: { kind: "boolean" } });
     requirePositionals(parsed, 0);
-    const environmentToken = context.runtime.env.HMM_CHAT_TOKEN;
+    const environmentToken = context.runtime.env.HYPE_COMMS_TOKEN;
     const token =
       environmentToken !== undefined && environmentToken !== ""
         ? environmentToken
@@ -149,7 +149,7 @@ export async function authCommand(
     const result = await withProfileLock(context.runtime, async (directory) => {
       const store = await loadProfileStore(directory);
       const name = validateProfileName(
-        context.options.profile ?? context.runtime.env.HMM_CHAT_PROFILE ?? store.defaultProfile,
+        context.options.profile ?? context.runtime.env.HYPE_COMMS_PROFILE ?? store.defaultProfile,
       );
       const stored = store.profiles[name];
       if (stored?.credential?.kind !== "human") {
@@ -188,7 +188,7 @@ export async function authCommand(
     const result = await withProfileLock(context.runtime, async (directory) => {
       const store = await loadProfileStore(directory);
       const name = validateProfileName(
-        context.options.profile ?? context.runtime.env.HMM_CHAT_PROFILE ?? store.defaultProfile,
+        context.options.profile ?? context.runtime.env.HYPE_COMMS_PROFILE ?? store.defaultProfile,
       );
       const stored = store.profiles[name];
       if (stored === undefined)
@@ -244,10 +244,10 @@ export async function authCommand(
       writeResult(context.runtime.io, { revoked: id.data }, context.options.json);
       return;
     }
-    throw new UsageError("Usage: hmm-chat-cli auth devices <list|revoke>");
+    throw new UsageError("Usage: hype-comms-cli auth devices <list|revoke>");
   }
 
   throw new UsageError(
-    "Usage: hmm-chat-cli auth <request-magic-link|exchange|login-agent|whoami|refresh|logout|devices>",
+    "Usage: hype-comms-cli auth <request-magic-link|exchange|login-agent|whoami|refresh|logout|devices>",
   );
 }

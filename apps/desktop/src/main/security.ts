@@ -2,8 +2,8 @@ import path from "node:path";
 
 export const APP_PROTOCOL = "app";
 export const APP_PROTOCOL_HOST = "bundle";
-export const AUTH_PROTOCOL_SCHEME = "hmm-chat";
-export const AUTH_PROTOCOL = "hmm-chat:";
+export const AUTH_PROTOCOL_SCHEME = "hype-comms";
+export const AUTH_PROTOCOL = "hype-comms:";
 export const MAX_URL_LENGTH = 4_096;
 
 export interface ProtocolClientRegistration {

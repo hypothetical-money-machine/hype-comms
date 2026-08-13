@@ -3,7 +3,7 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConversationSummary } from "@hmm-chat/contracts";
+import type { ConversationSummary } from "@hype-comms/contracts";
 
 import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 

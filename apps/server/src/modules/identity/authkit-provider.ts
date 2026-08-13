@@ -9,7 +9,7 @@ import {
   type AuthPkceCodeVerifier,
   type AuthProviderAuthorizationCode,
   type AuthProviderState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import {
   AuthenticationException,
   BadRequestException,

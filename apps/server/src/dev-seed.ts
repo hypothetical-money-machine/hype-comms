@@ -9,7 +9,7 @@ import {
   type Email,
   type EntityId,
   type SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { Pool, QueryResultRow } from "pg";
 
 import { loadConfig, type ServerConfig } from "./config.js";
@@ -50,7 +50,7 @@ const DEMO_MEMBERS = [
 const DEMO_OWNER: SeedOwnerInput = {
   email: DEMO_MEMBERS[0].email,
   workspaceName: "Hype Comms",
-  workspaceSlug: "hmm-chat",
+  workspaceSlug: "hype-comms",
 };
 
 const DEMO_CHANNELS = [
@@ -289,7 +289,7 @@ function messageInput(
   return {
     threadRootId: null,
     body: fixture.body,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: fixture.clientMessageId,
     mentionedUserIds: (fixture.mentions ?? []).map((profile) => {
       const member = members.get(profile);
@@ -319,7 +319,7 @@ async function issueAuthCallback(
   }
   const token = new URL(sender.sent.url).searchParams.get("token");
   if (token === null) throw new Error("Demo sign-in link did not contain a token");
-  const callback = new URL("hmm-chat://auth/callback");
+  const callback = new URL("hype-comms://auth/callback");
   callback.searchParams.set("token", token);
   return callback.toString();
 }
@@ -465,15 +465,17 @@ export async function writeDevelopmentDemoCallbacks(
 async function main(): Promise<void> {
   const config = loadConfig();
   if (config.database === undefined) {
-    throw new Error("HMM_DATABASE_URL is required to seed the development demo");
+    throw new Error("HYPE_COMMS_DATABASE_URL is required to seed the development demo");
   }
   const pool = createPool(config.database);
   try {
     await runMigrations(pool);
     const result = await seedDevelopmentDemo(pool, config);
-    const callbackDirectory = process.env.HMM_DEMO_CALLBACK_DIRECTORY?.trim() ?? "";
+    const callbackDirectory = process.env.HYPE_COMMS_DEMO_CALLBACK_DIRECTORY?.trim() ?? "";
     if (callbackDirectory === "") {
-      throw new Error("HMM_DEMO_CALLBACK_DIRECTORY is required to seed the development demo");
+      throw new Error(
+        "HYPE_COMMS_DEMO_CALLBACK_DIRECTORY is required to seed the development demo",
+      );
     }
     const output = await writeDevelopmentDemoCallbacks(result, callbackDirectory);
     process.stdout.write(`${JSON.stringify(output)}\n`);

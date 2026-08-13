@@ -3,7 +3,7 @@ import {
   authCapabilitiesSchema,
   currentUserSchema,
   type CurrentUser,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
@@ -431,7 +431,7 @@ describe("AuthKit routes", () => {
       identity: { service: identity.asService(), authKitService: authKit.asService() },
     });
     apps.push(app);
-    const headers = { cookie: `hmm_session=${SESSION_TOKEN}` };
+    const headers = { cookie: `hype_comms_session=${SESSION_TOKEN}` };
 
     const authKitResponse = await app.inject({
       method: "DELETE",
@@ -451,13 +451,13 @@ describe("AuthKit routes", () => {
 
     expect(authKitResponse.statusCode).toBe(204);
     expect(authKitResponse.headers["cache-control"]).toBe("no-store");
-    expect(authKitResponse.headers["x-hmm-authkit-logout-url"]).toBe(logoutUrl);
+    expect(authKitResponse.headers["x-hype-comms-authkit-logout-url"]).toBe(logoutUrl);
     expect(magicLinkResponse.statusCode).toBe(204);
     expect(magicLinkResponse.headers["cache-control"]).toBe("no-store");
-    expect(magicLinkResponse.headers).not.toHaveProperty("x-hmm-authkit-logout-url");
+    expect(magicLinkResponse.headers).not.toHaveProperty("x-hype-comms-authkit-logout-url");
     expect(invalidProviderResponse.statusCode).toBe(204);
     expect(invalidProviderResponse.headers["cache-control"]).toBe("no-store");
-    expect(invalidProviderResponse.headers).not.toHaveProperty("x-hmm-authkit-logout-url");
+    expect(invalidProviderResponse.headers).not.toHaveProperty("x-hype-comms-authkit-logout-url");
     expect(identity.signOut).toHaveBeenCalledTimes(3);
   });
 
@@ -670,10 +670,10 @@ describe("AuthKit routes", () => {
 
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toBe(
-      `hmm-chat://auth/callback?error=authentication_failed&state=${DESKTOP_STATE}`,
+      `hype-comms://auth/callback?error=authentication_failed&state=${DESKTOP_STATE}`,
     );
     const callback = new URL(response.headers.location ?? "");
-    expect(callback.protocol).toBe("hmm-chat:");
+    expect(callback.protocol).toBe("hype-comms:");
     expect(callback.host).toBe("auth");
     expect(callback.pathname).toBe("/callback");
     expect(callback.username).toBe("");
@@ -766,7 +766,7 @@ describe("AuthKit routes", () => {
     expect(currentUserSchema.parse(response.json())).toEqual(currentUser);
     expect(response.body).not.toContain(SESSION_TOKEN);
     expect(response.headers["cache-control"]).toBe("no-store");
-    expect(response.headers["set-cookie"]).toContain(`hmm_session=${SESSION_TOKEN}`);
+    expect(response.headers["set-cookie"]).toContain(`hype_comms_session=${SESSION_TOKEN}`);
     expect(response.headers["set-cookie"]).toContain("Path=/");
     expect(response.headers["set-cookie"]).toContain("HttpOnly");
     expect(response.headers["set-cookie"]).toContain("SameSite=Strict");

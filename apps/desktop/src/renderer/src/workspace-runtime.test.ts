@@ -49,7 +49,7 @@ import type {
   UpdateTaskOperation,
   WorkspaceEvent,
   ScopedProductRealtimeEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type {
   DesktopApi,
@@ -260,7 +260,7 @@ function bootstrapAt(
     workspace: {
       id: WORKSPACE_ID,
       name: "Hype Comms",
-      slug: "hmm-chat",
+      slug: "hype-comms",
       createdBy: USER_ID,
       createdAt: NOW,
       updatedAt: NOW,
@@ -321,7 +321,7 @@ function message(
     authorId,
     threadRootId: null,
     body: authorId === USER_ID ? "Mine" : "Theirs",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,
@@ -1463,7 +1463,7 @@ function queuedOperation(
     message: {
       threadRootId: null,
       body,
-      bodyFormat: "hmm_markdown_v1",
+      bodyFormat: "hype_comms_markdown_v1",
       clientMessageId,
       mentionedUserIds: [],
       attachmentIds: [],

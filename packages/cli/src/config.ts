@@ -13,7 +13,7 @@ import {
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { agentTokenSecretSchema, sessionTokenSchema } from "@hmm-chat/contracts";
+import { agentTokenSecretSchema, sessionTokenSchema } from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { UsageError } from "./errors.js";
@@ -110,10 +110,10 @@ export function normalizeApiOrigin(value: string): string {
 }
 
 export function configDirectory(runtime: Pick<Runtime, "env" | "homeDirectory">): string {
-  const configured = runtime.env.HMM_CHAT_CONFIG_DIR;
+  const configured = runtime.env.HYPE_COMMS_CONFIG_DIR;
   if (configured !== undefined && configured !== "") {
     if (!isAbsolute(configured)) {
-      throw new UsageError("HMM_CHAT_CONFIG_DIR must be an absolute path", "INVALID_CONFIG_DIR");
+      throw new UsageError("HYPE_COMMS_CONFIG_DIR must be an absolute path", "INVALID_CONFIG_DIR");
     }
     return configured;
   }
@@ -122,9 +122,9 @@ export function configDirectory(runtime: Pick<Runtime, "env" | "homeDirectory">)
     if (!isAbsolute(xdg)) {
       throw new UsageError("XDG_CONFIG_HOME must be an absolute path", "INVALID_CONFIG_DIR");
     }
-    return join(xdg, "hmm-chat");
+    return join(xdg, "hype-comms");
   }
-  return join(runtime.homeDirectory, ".config", "hmm-chat");
+  return join(runtime.homeDirectory, ".config", "hype-comms");
 }
 
 function storePath(directory: string): string {
@@ -275,26 +275,26 @@ export async function resolveProfile(
   const directory = configDirectory(runtime);
   const store = await loadProfileStore(directory);
   const name = validateProfileName(
-    options.profile ?? runtime.env.HMM_CHAT_PROFILE ?? store.defaultProfile,
+    options.profile ?? runtime.env.HYPE_COMMS_PROFILE ?? store.defaultProfile,
   );
   const stored = store.profiles[name];
-  const originValue = options.apiOrigin ?? runtime.env.HMM_CHAT_API_ORIGIN ?? stored?.apiOrigin;
+  const originValue = options.apiOrigin ?? runtime.env.HYPE_COMMS_API_ORIGIN ?? stored?.apiOrigin;
   if (originValue === undefined || originValue === "") {
     throw new UsageError(
-      "No API origin is configured; set HMM_CHAT_API_ORIGIN or save a profile",
+      "No API origin is configured; set HYPE_COMMS_API_ORIGIN or save a profile",
       "MISSING_API_ORIGIN",
     );
   }
 
   const environmentToken =
-    behavior.ignoreEnvironmentToken === true ? undefined : runtime.env.HMM_CHAT_TOKEN;
+    behavior.ignoreEnvironmentToken === true ? undefined : runtime.env.HYPE_COMMS_TOKEN;
   let credential: StoredCredential | undefined = stored?.credential;
   let credentialOrigin =
     stored?.credential === undefined ? undefined : normalizeApiOrigin(stored.apiOrigin);
   if (environmentToken !== undefined && environmentToken !== "") {
     const token = agentTokenSchema.safeParse(environmentToken);
     if (!token.success)
-      throw new UsageError("HMM_CHAT_TOKEN is not a valid agent token", "INVALID_TOKEN");
+      throw new UsageError("HYPE_COMMS_TOKEN is not a valid agent token", "INVALID_TOKEN");
     credential = { kind: "agent", token: token.data };
     credentialOrigin = normalizeApiOrigin(originValue);
   }

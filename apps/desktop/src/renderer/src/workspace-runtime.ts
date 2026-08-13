@@ -27,7 +27,7 @@ import {
   type User,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
 import {
@@ -862,7 +862,7 @@ export class WorkspaceRuntime {
       message: {
         threadRootId,
         body,
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         clientMessageId,
         mentionedUserIds: [...mentionedUserIds],
         attachmentIds: [],

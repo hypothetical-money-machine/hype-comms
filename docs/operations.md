@@ -9,7 +9,7 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
 - A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
   PostgreSQL 16 service, an immutable-SHA server image build into
-  `registry.example.invalid/example-project/hmm-chat`, then a GitOps image promotion in
+  `registry.example.invalid/example-project/hype-comms`, then a GitOps image promotion in
   `hype-comms/deployment-repository` for the `production-cluster` cluster.
 - A `v*` tag on `main` must exactly match `apps/desktop/package.json` and have nonempty, reviewed
   notes at `docs/releases/v<version>.md`. Prepare those files with
@@ -34,12 +34,12 @@ refuses missing URLs and databases whose names are not explicitly test-only.
 - `GET /livez` proves only that the process can answer HTTP.
 - `GET /readyz` returns `503` while draining or when PostgreSQL is unavailable. Load balancers and
   rollout health checks should use this endpoint.
-- Set `HMM_METRICS_TOKEN` to an unguessable 32–256 character secret to register `GET /metrics`.
+- Set `HYPE_COMMS_METRICS_TOKEN` to an unguessable 32–256 character secret to register `GET /metrics`.
   Scrapers send `Authorization: Bearer <token>`; the endpoint otherwise does not exist. Never place
   this token in repository variables, desktop configuration, query strings, or logs.
-- The current Prometheus surface is `hmm_chat_http_requests_total`,
-  `hmm_chat_http_request_duration_seconds_{sum,count}`, `hmm_chat_realtime_connections`, and
-  `hmm_chat_postgres_pool_connections`. Route labels use Fastify templates, not raw URLs, so IDs and
+- The current Prometheus surface is `hype_comms_http_requests_total`,
+  `hype_comms_http_request_duration_seconds_{sum,count}`, `hype_comms_realtime_connections`, and
+  `hype_comms_postgres_pool_connections`. Route labels use Fastify templates, not raw URLs, so IDs and
   query values cannot create unbounded or sensitive labels.
 
 Initial alerts should cover sustained 5xx responses, readiness failure, nonzero PostgreSQL waiters,
@@ -62,7 +62,7 @@ Attach the successful Woodpecker pipeline URL to the release record so the insta
 version's service, dependency, and concurrency behavior is proven rather than inferred from YAML.
 
 Agent identity rollout requires an expand/enable sequence because the previous server cannot parse
-the new persisted user kind. Deploy this migration with `HMM_AGENT_PROVISIONING_ENABLED=false`
+the new persisted user kind. Deploy this migration with `HYPE_COMMS_AGENT_PROVISIONING_ENABLED=false`
 (the production default). After the new server is healthy and the previous image has left the
 supported rollback window, set the variable to `true` and redeploy before provisioning the first
 agent. Do not re-enable rollback to the previous image after an agent has been created.
@@ -87,17 +87,17 @@ A successful backup job without a tested restore is not a completed durability c
 ### Native notification rollout controls
 
 Native notifications are not enabled in ordinary development, package, or release builds.
-`HMM_NATIVE_NOTIFICATIONS_ENABLED` is read by Electron Vite at build time and accepts only `0` or
+`HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` is read by Electron Vite at build time and accepts only `0` or
 `1`; unset and `0` compile the controller off, report native support as unsupported, and never
-construct a presenter. Use `HMM_NATIVE_NOTIFICATIONS_ENABLED=1` only for an explicit development,
+construct a presenter. Use `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED=1` only for an explicit development,
 headless, or packaged native-evidence build. It does not turn notifications on for a device: the
 versioned main-process preference still defaults disabled, and message-body preview remains a
 separate default-off preference. The variable has no effect when set only at runtime for an
 already-built artifact.
 
 The ordinary interactive demo deliberately removes notification and headless automation variables.
-The headless demo instead pins the build flag to `1`, sets `HMM_DESKTOP_HEADLESS=1`, uses isolated
-profiles, and supplies `HMM_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY` as a private absolute
+The headless demo instead pins the build flag to `1`, sets `HYPE_COMMS_DESKTOP_HEADLESS=1`, uses isolated
+profiles, and supplies `HYPE_COMMS_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY` as a private absolute
 per-run directory. It never constructs Electron's native presenter. Eligible outcomes append only
 `version`, opaque `captureId`, and `reason` to mode-`0600`
 `notifications-<profile>.jsonl` files, capped at 1,024 records. Automation must activate a live
@@ -112,7 +112,7 @@ opens a fresh realtime epoch. Default-off macOS builds retain last-window realti
 and Linux stop realtime and quit on their last window.
 
 On Windows, main sets Electron Builder's exact
-`com.hypotheticalmoneymachine.hmmchat` AppUserModelID before the first `BrowserWindow`. The source
+`com.hypemm.hypecomms` AppUserModelID before the first `BrowserWindow`. The source
 identity is covered by a deterministic
 [test](../apps/desktop/src/main/application-identity.test.ts), but stable attribution and click
 handling still require an installed NSIS evidence run. Electron 43 exposes portable native-support

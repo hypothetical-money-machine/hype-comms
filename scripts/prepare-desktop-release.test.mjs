@@ -33,7 +33,7 @@ async function createFixture({ desktopVersion = "0.1.23", lockVersion = desktopV
   await writeFile(
     path.join(projectRoot, "apps", "desktop", "package.json"),
     json({
-      name: "@hmm-chat/desktop",
+      name: "@hype-comms/desktop",
       version: desktopVersion,
       description: "Keep an unrelated 0.1.23 value unchanged",
     }),
@@ -41,13 +41,13 @@ async function createFixture({ desktopVersion = "0.1.23", lockVersion = desktopV
   await writeFile(
     path.join(projectRoot, "package-lock.json"),
     json({
-      name: "hmm-chat",
+      name: "hype-comms",
       version: "0.1.0",
       lockfileVersion: 3,
       packages: {
-        "": { name: "hmm-chat", version: "0.1.0" },
+        "": { name: "hype-comms", version: "0.1.0" },
         "apps/desktop": {
-          name: "@hmm-chat/desktop",
+          name: "@hype-comms/desktop",
           version: lockVersion,
           description: "Keep another 0.1.23 value unchanged",
         },
@@ -615,7 +615,7 @@ test("rejects a malformed desktop lock entry before writing", async () => {
   try {
     await writeFile(
       path.join(projectRoot, "package-lock.json"),
-      json({ name: "hmm-chat", version: "0.1.0", lockfileVersion: 3, packages: {} }),
+      json({ name: "hype-comms", version: "0.1.0", lockfileVersion: 3, packages: {} }),
     );
 
     await assert.rejects(

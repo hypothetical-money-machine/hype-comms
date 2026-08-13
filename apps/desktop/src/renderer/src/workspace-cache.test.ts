@@ -13,7 +13,7 @@ import {
   type SendMessageOperation,
   type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   clearPersistentWorkspaceCache,
@@ -50,7 +50,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   workspace: {
     id: WORKSPACE_ID,
     name: "Hype Comms",
-    slug: "hmm-chat",
+    slug: "hype-comms",
     createdBy: USER_ID,
     createdAt: NOW,
     updatedAt: NOW,
@@ -97,7 +97,7 @@ const operation: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "Survive restart",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: CLIENT_MESSAGE_ID,
     mentionedUserIds: [],
     attachmentIds: [],
@@ -113,7 +113,7 @@ const message: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Survive restart",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,
@@ -258,7 +258,7 @@ describe("PersistentWorkspaceCache", () => {
     const restarted = new PersistentWorkspaceCache({ crypto, scope });
     expect((await restarted.load()).reactions).toEqual([reaction]);
 
-    const name = `hmm-chat-cache-v2-${scope.workspaceId}-${scope.userId}`;
+    const name = `hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`;
     const database = new Dexie(name);
     await database.open();
     const rows = await database.table("reactions").toArray();
@@ -328,7 +328,7 @@ describe("PersistentWorkspaceCache", () => {
       userId: "10000000-0000-4000-8000-000000000007",
       workspaceId: WORKSPACE_ID,
     };
-    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const name = `hype-comms-cache-v1-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
     const legacy = new Dexie(name);
     legacy.version(1).stores({
       metadata: "&id",
@@ -362,7 +362,7 @@ describe("PersistentWorkspaceCache", () => {
       userId: "10000000-0000-4000-8000-000000000011",
       workspaceId: WORKSPACE_ID,
     };
-    const name = `hmm-chat-cache-v2-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
+    const name = `hype-comms-cache-v1-${upgradeScope.workspaceId}-${upgradeScope.userId}`;
     const legacy = new Dexie(name);
     legacy.version(4).stores({
       metadata: "&id",

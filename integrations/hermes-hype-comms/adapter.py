@@ -1,7 +1,7 @@
-"""Hermes platform adapter for HMM Chat.
+"""Hermes platform adapter for Hype Comms.
 
 The adapter deliberately delegates every product-network operation to
-``hmm-chat-cli``. Agent tokens remain in the child environment, message bodies
+``hype-comms-cli``. Agent tokens remain in the child environment, message bodies
 travel over stdin, and watch stdout is parsed as NDJSON only.
 """
 
@@ -33,8 +33,8 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_NAME = "hmm_chat"
-DEFAULT_CLI = "hmm-chat-cli"
+PLATFORM_NAME = "hype_comms"
+DEFAULT_CLI = "hype-comms-cli"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_CLI_OUTPUT_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
@@ -60,7 +60,7 @@ SUPPORTED_EVENT_TYPES = frozenset(
 )
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DECIMAL_CURSOR = re.compile(r"^(?:0|[1-9][0-9]*)$")
-_TOKEN_PATTERN = re.compile(r"\bhmm_agent_[A-Za-z0-9_-]+\b")
+_TOKEN_PATTERN = re.compile(r"\bhype_comms_agent_[A-Za-z0-9_-]+\b")
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+\b")
 _URL_USERINFO_PATTERN = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
 _POSIX_PATH_PATTERN = re.compile(r"(?<![:/A-Za-z0-9_])/(?!/)[^\s\"'<>]*")
@@ -106,7 +106,7 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in _TRUE_VALUES
 
 
-def _safe_text(value: object, *, fallback: str = "HMM Chat CLI failed") -> str:
+def _safe_text(value: object, *, fallback: str = "Hype Comms CLI failed") -> str:
     raw_text = str(value or "").replace("\x00", "")
     if raw_text.startswith((" ", "\t")):
         return fallback
@@ -130,7 +130,7 @@ def _decode_output(value: object, *, limit: int = MAX_CLI_OUTPUT_BYTES) -> str:
             raise CliFailure(
                 6,
                 "CLI_OUTPUT_TOO_LARGE",
-                "HMM Chat CLI output exceeded the adapter limit",
+                "Hype Comms CLI output exceeded the adapter limit",
                 False,
             )
         try:
@@ -139,7 +139,7 @@ def _decode_output(value: object, *, limit: int = MAX_CLI_OUTPUT_BYTES) -> str:
             raise CliFailure(
                 6,
                 "INVALID_CLI_ENCODING",
-                "HMM Chat CLI output was not valid UTF-8",
+                "Hype Comms CLI output was not valid UTF-8",
                 False,
             ) from exc
     text = str(value or "")
@@ -147,7 +147,7 @@ def _decode_output(value: object, *, limit: int = MAX_CLI_OUTPUT_BYTES) -> str:
         raise CliFailure(
             6,
             "CLI_OUTPUT_TOO_LARGE",
-            "HMM Chat CLI output exceeded the adapter limit",
+            "Hype Comms CLI output exceeded the adapter limit",
             False,
         )
     return text
@@ -227,7 +227,7 @@ def _watch_failure_from_exit(exit_code: int, stderr: str) -> CliFailure:
     return CliFailure(
         5,
         "WATCH_PROCESS_EXITED",
-        "HMM Chat watch process exited unexpectedly",
+        "Hype Comms watch process exited unexpectedly",
         True,
         error_kind="transient",
     )
@@ -237,7 +237,7 @@ def _log_diagnostics(stderr: str) -> None:
     for line in stderr.splitlines():
         safe = _safe_text(line, fallback="")
         if safe:
-            logger.info("[HMM Chat CLI] %s", safe)
+            logger.info("[Hype Comms CLI] %s", safe)
 
 
 def _canonical_origin(raw_origin: str) -> str:
@@ -245,13 +245,13 @@ def _canonical_origin(raw_origin: str) -> str:
         parsed = urlsplit(raw_origin.strip())
         port = parsed.port
     except (TypeError, ValueError) as exc:
-        raise ValueError("HMM_CHAT_API_ORIGIN is invalid") from exc
+        raise ValueError("HYPE_COMMS_API_ORIGIN is invalid") from exc
     if parsed.scheme not in {"https", "http"} or not parsed.hostname:
-        raise ValueError("HMM_CHAT_API_ORIGIN must be an HTTP(S) origin")
+        raise ValueError("HYPE_COMMS_API_ORIGIN must be an HTTP(S) origin")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("HMM_CHAT_API_ORIGIN must not contain credentials")
+        raise ValueError("HYPE_COMMS_API_ORIGIN must not contain credentials")
     if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise ValueError("HMM_CHAT_API_ORIGIN must not contain a path, query, or fragment")
+        raise ValueError("HYPE_COMMS_API_ORIGIN must not contain a path, query, or fragment")
     host = parsed.hostname.lower().rstrip(".")
     if parsed.scheme == "http":
         try:
@@ -259,7 +259,7 @@ def _canonical_origin(raw_origin: str) -> str:
         except ValueError:
             loopback = host == "localhost"
         if not loopback:
-            raise ValueError("Plaintext HMM Chat origins must be loopback")
+            raise ValueError("Plaintext Hype Comms origins must be loopback")
     bracketed_host = f"[{host}]" if ":" in host else host
     netloc = bracketed_host if port is None else f"{bracketed_host}:{port}"
     return f"{parsed.scheme}://{netloc}"
@@ -267,34 +267,34 @@ def _canonical_origin(raw_origin: str) -> str:
 
 def _cli_path(config: Optional[PlatformConfig] = None) -> str:
     extra = getattr(config, "extra", {}) or {}
-    return str(os.getenv("HMM_CHAT_CLI_PATH") or extra.get("cli_path") or DEFAULT_CLI).strip()
+    return str(os.getenv("HYPE_COMMS_CLI_PATH") or extra.get("cli_path") or DEFAULT_CLI).strip()
 
 
 def _configured_origin(config: Optional[PlatformConfig] = None) -> str:
     extra = getattr(config, "extra", {}) or {}
-    value = str(os.getenv("HMM_CHAT_API_ORIGIN") or extra.get("api_origin") or "").strip()
+    value = str(os.getenv("HYPE_COMMS_API_ORIGIN") or extra.get("api_origin") or "").strip()
     if not value:
-        raise ValueError("HMM_CHAT_API_ORIGIN is required")
+        raise ValueError("HYPE_COMMS_API_ORIGIN is required")
     return _canonical_origin(value)
 
 
 def _configured_token() -> str:
-    token = os.getenv("HMM_CHAT_TOKEN", "")
+    token = os.getenv("HYPE_COMMS_TOKEN", "")
     if not token:
-        raise ValueError("HMM_CHAT_TOKEN is required")
+        raise ValueError("HYPE_COMMS_TOKEN is required")
     return token
 
 
 def _has_access_policy() -> bool:
-    return bool(os.getenv("HMM_CHAT_ALLOWED_USERS", "").strip()) or _truthy(
-        os.getenv("HMM_CHAT_ALLOW_ALL_USERS")
+    return bool(os.getenv("HYPE_COMMS_ALLOWED_USERS", "").strip()) or _truthy(
+        os.getenv("HYPE_COMMS_ALLOW_ALL_USERS")
     )
 
 
 def _child_environment(origin: str, token: str) -> Dict[str, str]:
     child_env = dict(os.environ)
-    child_env["HMM_CHAT_API_ORIGIN"] = origin
-    child_env["HMM_CHAT_TOKEN"] = token
+    child_env["HYPE_COMMS_API_ORIGIN"] = origin
+    child_env["HYPE_COMMS_TOKEN"] = token
     return child_env
 
 
@@ -318,9 +318,9 @@ async def _run_cli_json(
             env=_child_environment(origin, token),
         )
     except FileNotFoundError as exc:
-        raise CliFailure(2, "CLI_NOT_FOUND", "hmm-chat-cli is not installed", False) from exc
+        raise CliFailure(2, "CLI_NOT_FOUND", "hype-comms-cli is not installed", False) from exc
     except OSError as exc:
-        raise CliFailure(2, "CLI_START_FAILED", "hmm-chat-cli could not be started", False) from exc
+        raise CliFailure(2, "CLI_START_FAILED", "hype-comms-cli could not be started", False) from exc
 
     try:
         stdout_raw, stderr_raw = await asyncio.wait_for(
@@ -341,7 +341,7 @@ async def _run_cli_json(
         raise CliFailure(
             5,
             "CLI_TIMEOUT",
-            "HMM Chat CLI request timed out",
+            "Hype Comms CLI request timed out",
             True,
             error_kind="transient",
         ) from exc
@@ -357,7 +357,7 @@ async def _run_cli_json(
         raise CliFailure(
             6,
             "INVALID_CLI_JSON",
-            "HMM Chat CLI returned invalid JSON",
+            "Hype Comms CLI returned invalid JSON",
             False,
             error_kind="bad_format",
         ) from exc
@@ -365,7 +365,7 @@ async def _run_cli_json(
         raise CliFailure(
             6,
             "INVALID_CLI_CONTRACT",
-            "HMM Chat CLI returned an unexpected JSON result",
+            "Hype Comms CLI returned an unexpected JSON result",
             False,
             error_kind="bad_format",
         )
@@ -378,7 +378,7 @@ def _message_id(result: Mapping[str, Any]) -> str:
         raise CliFailure(
             6,
             "INVALID_SEND_CONTRACT",
-            "HMM Chat CLI send result had no canonical message ID",
+            "Hype Comms CLI send result had no canonical message ID",
             False,
             error_kind="bad_format",
         )
@@ -398,7 +398,7 @@ async def _standalone_send(
 
     del thread_id, force_document
     if media_files:
-        return {"error": "HMM Chat adapter does not support media delivery"}
+        return {"error": "Hype Comms adapter does not support media delivery"}
     try:
         origin = _configured_origin(pconfig)
         token = _configured_token()
@@ -414,14 +414,14 @@ async def _standalone_send(
         return {"error": _safe_text(exc)}
 
 
-class HmmChatAdapter(BasePlatformAdapter):
-    """Persistent HMM Chat participant backed by ``hmm-chat-cli``."""
+class HypeCommsAdapter(BasePlatformAdapter):
+    """Persistent Hype Comms participant backed by ``hype-comms-cli``."""
 
     supports_code_blocks = True
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
-        # HMM Chat's Zod contract runs in JavaScript, where string length is
+        # Hype Comms's Zod contract runs in JavaScript, where string length is
         # measured in UTF-16 code units.
         return lambda value: len(value.encode("utf-16-le")) // 2
 
@@ -438,10 +438,10 @@ class HmmChatAdapter(BasePlatformAdapter):
         elif isinstance(existing_extra, Mapping):
             # PlatformConfig instances normally own a dict. Copy it so an
             # adapter cannot mutate a caller-owned mapping while making the
-            # conversation-scoped session policy authoritative for HMM Chat.
+            # conversation-scoped session policy authoritative for Hype Comms.
             extra = dict(existing_extra)
         else:
-            raise ValueError("HMM Chat PlatformConfig.extra must be a mapping")
+            raise ValueError("Hype Comms PlatformConfig.extra must be a mapping")
         extra.update(CONVERSATION_SESSION_EXTRA)
         config.extra = extra
         super().__init__(config, Platform(PLATFORM_NAME))
@@ -485,7 +485,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                     2,
                     "INCOMPATIBLE_HERMES_SESSION_CONFIG",
                     (
-                        "HMM Chat requires shared Hermes thread sessions; "
+                        "Hype Comms requires shared Hermes thread sessions; "
                         "disable gateway.thread_sessions_per_user"
                     ),
                     False,
@@ -504,7 +504,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 2,
                 "CONFIG_INVALID",
-                "HMM_CHAT_TOKEN is required",
+                "HYPE_COMMS_TOKEN is required",
                 False,
                 error_kind="forbidden",
             ) from exc
@@ -533,7 +533,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "AGENT_PRINCIPAL_REQUIRED",
-                "HMM Chat token did not resolve to an agent principal",
+                "Hype Comms token did not resolve to an agent principal",
                 False,
                 error_kind="forbidden",
             )
@@ -542,7 +542,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 3,
                 "AGENT_SCOPE_MISSING",
-                "HMM Chat agent token lacks required adapter scopes",
+                "Hype Comms agent token lacks required adapter scopes",
                 False,
                 error_kind="forbidden",
             )
@@ -554,7 +554,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_CURSOR",
-                "HMM Chat CLI returned an invalid workspace cursor",
+                "Hype Comms CLI returned an invalid workspace cursor",
                 False,
                 error_kind="bad_format",
             )
@@ -588,7 +588,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_DIRECTORY_CONTRACT",
-                "HMM Chat CLI returned inconsistent workspace metadata",
+                "Hype Comms CLI returned inconsistent workspace metadata",
                 False,
                 error_kind="bad_format",
             )
@@ -599,7 +599,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 raise CliFailure(
                     6,
                     "INVALID_MEMBER_CONTRACT",
-                    "HMM Chat CLI returned invalid member metadata",
+                    "Hype Comms CLI returned invalid member metadata",
                     False,
                     error_kind="bad_format",
                 )
@@ -612,7 +612,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 raise CliFailure(
                     6,
                     "INVALID_CONVERSATION_CONTRACT",
-                    "HMM Chat CLI returned invalid conversation metadata",
+                    "Hype Comms CLI returned invalid conversation metadata",
                     False,
                     error_kind="bad_format",
                 )
@@ -627,7 +627,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 raise CliFailure(
                     6,
                     "INVALID_CONVERSATION_CONTRACT",
-                    "HMM Chat CLI returned invalid conversation metadata",
+                    "Hype Comms CLI returned invalid conversation metadata",
                     False,
                     error_kind="bad_format",
                 )
@@ -643,11 +643,11 @@ class HmmChatAdapter(BasePlatformAdapter):
     def _state_root(self) -> Path:
         if self._state_dir_override is not None:
             return self._state_dir_override
-        configured = os.getenv("HMM_CHAT_HERMES_STATE_DIR", "").strip()
+        configured = os.getenv("HYPE_COMMS_HERMES_STATE_DIR", "").strip()
         if configured:
             return Path(configured).expanduser()
         hermes_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
-        return hermes_home / "state" / "hmm-chat"
+        return hermes_home / "state" / "hype-comms"
 
     def _select_cursor_path(self) -> Path:
         identity_key = hashlib.sha256(
@@ -661,7 +661,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_UNAVAILABLE",
-                "HMM Chat cursor state directory is unavailable",
+                "Hype Comms cursor state directory is unavailable",
                 False,
                 error_kind="bad_format",
             ) from exc
@@ -676,7 +676,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_INVALID",
-                "HMM Chat cursor checkpoint is unreadable",
+                "Hype Comms cursor checkpoint is unreadable",
                 False,
                 error_kind="bad_format",
             ) from exc
@@ -684,7 +684,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_INVALID",
-                "HMM Chat cursor checkpoint has an unsupported format",
+                "Hype Comms cursor checkpoint has an unsupported format",
                 False,
                 error_kind="bad_format",
             )
@@ -696,7 +696,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_UNAVAILABLE",
-                "HMM Chat cursor checkpoint is unavailable",
+                "Hype Comms cursor checkpoint is unavailable",
                 False,
                 error_kind="bad_format",
             )
@@ -741,7 +741,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_WRITE_FAILED",
-                "HMM Chat cursor checkpoint could not be saved",
+                "Hype Comms cursor checkpoint could not be saved",
                 False,
                 error_kind="bad_format",
             ) from exc
@@ -757,7 +757,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 raise CliFailure(
                     2,
                     "ACCESS_POLICY_REQUIRED",
-                    "Configure HMM_CHAT_ALLOWED_USERS or explicitly allow all users",
+                    "Configure HYPE_COMMS_ALLOWED_USERS or explicitly allow all users",
                     False,
                     error_kind="forbidden",
                 )
@@ -772,9 +772,9 @@ class HmmChatAdapter(BasePlatformAdapter):
 
             lock_identity = f"{self._api_origin}\0{self._agent_user_id}"
             if not self._acquire_platform_lock(
-                "hmm-chat-agent",
+                "hype-comms-agent",
                 lock_identity,
-                "HMM Chat agent identity",
+                "Hype Comms agent identity",
             ):
                 return False
             self._lock_held = True
@@ -791,9 +791,9 @@ class HmmChatAdapter(BasePlatformAdapter):
             self._mark_connected()
             self._watch_task = asyncio.create_task(
                 self._watch_supervisor(process),
-                name="hmm-chat-watch-supervisor",
+                name="hype-comms-watch-supervisor",
             )
-            logger.info("HMM Chat adapter connected")
+            logger.info("Hype Comms adapter connected")
             return True
         except (CliFailure, ValueError) as exc:
             failure = (
@@ -801,7 +801,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 if isinstance(exc, CliFailure)
                 else CliFailure(2, "CONFIG_INVALID", _safe_text(exc), False)
             )
-            logger.error("HMM Chat adapter startup failed: %s", failure)
+            logger.error("Hype Comms adapter startup failed: %s", failure)
             self._set_fatal_error(failure.code, failure.message, retryable=failure.retryable)
             if self._lock_held:
                 self._release_platform_lock()
@@ -814,7 +814,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "CURSOR_STATE_UNAVAILABLE",
-                "HMM Chat cursor checkpoint is unavailable",
+                "Hype Comms cursor checkpoint is unavailable",
                 False,
             )
         try:
@@ -823,7 +823,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 2,
                 "CONFIG_INVALID",
-                "HMM_CHAT_TOKEN is required",
+                "HYPE_COMMS_TOKEN is required",
                 False,
                 error_kind="forbidden",
             ) from exc
@@ -841,12 +841,12 @@ class HmmChatAdapter(BasePlatformAdapter):
                 limit=MAX_CLI_OUTPUT_BYTES + 1,
             )
         except FileNotFoundError as exc:
-            raise CliFailure(2, "CLI_NOT_FOUND", "hmm-chat-cli is not installed", False) from exc
+            raise CliFailure(2, "CLI_NOT_FOUND", "hype-comms-cli is not installed", False) from exc
         except OSError as exc:
             raise CliFailure(
                 5,
                 "WATCH_START_FAILED",
-                "HMM Chat watch process could not be started",
+                "Hype Comms watch process could not be started",
                 True,
                 error_kind="transient",
             ) from exc
@@ -873,7 +873,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "WATCH_STDOUT_UNAVAILABLE",
-                "HMM Chat watch stdout was unavailable",
+                "Hype Comms watch stdout was unavailable",
                 False,
             )
         stderr_task = asyncio.create_task(self._read_watch_stderr(process))
@@ -888,7 +888,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                     raise CliFailure(
                         6,
                         "WATCH_LINE_TOO_LARGE",
-                        "HMM Chat watch emitted an oversized record",
+                        "Hype Comms watch emitted an oversized record",
                         False,
                     )
                 line = _decode_output(raw_line).strip()
@@ -900,7 +900,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                     raise CliFailure(
                         6,
                         "INVALID_WATCH_JSON",
-                        "HMM Chat watch emitted invalid NDJSON",
+                        "Hype Comms watch emitted invalid NDJSON",
                         False,
                         error_kind="bad_format",
                     ) from exc
@@ -908,7 +908,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                     raise CliFailure(
                         6,
                         "INVALID_WATCH_CONTRACT",
-                        "HMM Chat watch emitted an unexpected record",
+                        "Hype Comms watch emitted an unexpected record",
                         False,
                         error_kind="bad_format",
                     )
@@ -1010,7 +1010,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 CliFailure(
                     5,
                     "WATCH_SUPERVISOR_FAILED",
-                    "HMM Chat watch supervisor failed",
+                    "Hype Comms watch supervisor failed",
                     True,
                     error_kind="transient",
                 )
@@ -1043,7 +1043,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             pass
 
     async def _supervisor_fatal(self, failure: CliFailure) -> None:
-        logger.error("HMM Chat watch stopped: %s", failure)
+        logger.error("Hype Comms watch stopped: %s", failure)
         self._set_fatal_error(failure.code, failure.message, retryable=failure.retryable)
         self._mark_disconnected()
         await self._notify_fatal_error()
@@ -1119,7 +1119,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_CONVERSATION_EVENT",
-                "HMM Chat watch emitted invalid conversation metadata",
+                "Hype Comms watch emitted invalid conversation metadata",
                 False,
             )
         conversation = payload.get("conversation")
@@ -1133,7 +1133,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_CONVERSATION_EVENT",
-                "HMM Chat watch emitted invalid conversation metadata",
+                "Hype Comms watch emitted invalid conversation metadata",
                 False,
             )
         self._conversations[str(conversation["id"])] = {
@@ -1169,7 +1169,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 failure,
                 exit_code=5,
                 code="DIRECTORY_REFRESH_FAILED",
-                message="HMM Chat directory refresh failed and will be retried",
+                message="Hype Comms directory refresh failed and will be retried",
                 retryable=True,
                 error_kind="transient",
             ) from failure
@@ -1194,7 +1194,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_MEMBERSHIP_EVENT",
-                "HMM Chat watch emitted invalid membership metadata",
+                "Hype Comms watch emitted invalid membership metadata",
                 False,
             )
 
@@ -1252,7 +1252,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_MESSAGE_EVENT",
-                "HMM Chat watch emitted invalid message metadata",
+                "Hype Comms watch emitted invalid message metadata",
                 False,
             )
         message = payload.get("message")
@@ -1268,7 +1268,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "INVALID_MESSAGE_EVENT",
-                "HMM Chat watch emitted invalid message metadata",
+                "Hype Comms watch emitted invalid message metadata",
                 False,
             )
 
@@ -1276,7 +1276,7 @@ class HmmChatAdapter(BasePlatformAdapter):
         if author_id == self._agent_user_id:
             return
         if not isinstance(author_id, str):
-            logger.warning("Ignoring HMM Chat message without an active author")
+            logger.warning("Ignoring Hype Comms message without an active author")
             return
 
         conversation_id = str(message["conversationId"])
@@ -1292,7 +1292,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             chat_info = self._chat_info(conversation_id)
             author = self._members.get(author_id)
         if chat_info is None or author is None:
-            logger.warning("Ignoring HMM Chat message with unresolved directory metadata")
+            logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
             return
         if chat_info["type"] == "channel" and self._agent_user_id not in mentioned_user_ids:
             return
@@ -1324,8 +1324,8 @@ class HmmChatAdapter(BasePlatformAdapter):
             message_id=str(message["id"]),
             timestamp=self._event_timestamp(message.get("createdAt") or event.get("occurredAt")),
             metadata={
-                "hmm_chat_workspace_sequence": event.get("workspaceSequence"),
-                "hmm_chat_conversation_sequence": message.get("conversationSequence"),
+                "hype_comms_workspace_sequence": event.get("workspaceSequence"),
+                "hype_comms_conversation_sequence": message.get("conversationSequence"),
             },
         )
         await self.handle_message(normalized)
@@ -1336,7 +1336,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             raise CliFailure(
                 6,
                 "UNSUPPORTED_WATCH_EVENT",
-                "HMM Chat watch emitted an unsupported event",
+                "Hype Comms watch emitted an unsupported event",
                 False,
                 error_kind="bad_format",
             )
@@ -1349,14 +1349,14 @@ class HmmChatAdapter(BasePlatformAdapter):
             # not advance the cursor; a later recognized event, or a
             # reconnect replay, will pass over this one again harmlessly.
             logger.debug(
-                "Ignoring unsupported HMM Chat watch event type: %s", _safe_text(event_type)
+                "Ignoring unsupported Hype Comms watch event type: %s", _safe_text(event_type)
             )
             return "ignored"
         if event.get("workspaceId") != self._workspace_id:
             raise CliFailure(
                 6,
                 "WORKSPACE_MISMATCH",
-                "HMM Chat watch emitted an event for another workspace",
+                "Hype Comms watch emitted an event for another workspace",
                 False,
                 error_kind="bad_format",
             )
@@ -1372,7 +1372,7 @@ class HmmChatAdapter(BasePlatformAdapter):
                 raise CliFailure(
                     6,
                     "INVALID_MEMBER_EVENT",
-                    "HMM Chat watch emitted invalid member metadata",
+                    "Hype Comms watch emitted invalid member metadata",
                     False,
                 )
             # The payload is advisory: it announces THAT the workspace member
@@ -1414,7 +1414,7 @@ class HmmChatAdapter(BasePlatformAdapter):
         if self.message_len_fn(content) > MAX_MESSAGE_LENGTH:
             return SendResult(
                 success=False,
-                error="MESSAGE_TOO_LONG: HMM Chat messages are limited to 4000 characters",
+                error="MESSAGE_TOO_LONG: Hype Comms messages are limited to 4000 characters",
                 retryable=False,
                 error_kind="too_long",
             )
@@ -1475,7 +1475,7 @@ class HmmChatAdapter(BasePlatformAdapter):
             self._release_platform_lock()
             self._lock_held = False
         self._mark_disconnected()
-        logger.info("HMM Chat adapter disconnected")
+        logger.info("Hype Comms adapter disconnected")
 
 
 def check_requirements() -> bool:
@@ -1512,14 +1512,14 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         "api_origin": origin,
         **CONVERSATION_SESSION_EXTRA,
     }
-    cli_path = os.getenv("HMM_CHAT_CLI_PATH", "").strip()
+    cli_path = os.getenv("HYPE_COMMS_CLI_PATH", "").strip()
     if cli_path:
         seed["cli_path"] = cli_path
-    home = os.getenv("HMM_CHAT_HOME_CONVERSATION", "").strip()
+    home = os.getenv("HYPE_COMMS_HOME_CONVERSATION", "").strip()
     if home:
         seed["home_channel"] = {
             "chat_id": home,
-            "name": "HMM Chat home conversation",
+            "name": "Hype Comms home conversation",
         }
     return seed
 
@@ -1529,26 +1529,26 @@ def register(ctx: Any) -> None:
 
     ctx.register_platform(
         name=PLATFORM_NAME,
-        label="HMM Chat",
-        adapter_factory=lambda cfg: HmmChatAdapter(cfg),
+        label="Hype Comms",
+        adapter_factory=lambda cfg: HypeCommsAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["HMM_CHAT_API_ORIGIN", "HMM_CHAT_TOKEN"],
-        install_hint="Install hmm-chat-cli and configure an HMM Chat agent token",
+        required_env=["HYPE_COMMS_API_ORIGIN", "HYPE_COMMS_TOKEN"],
+        install_hint="Install hype-comms-cli and configure an Hype Comms agent token",
         env_enablement_fn=_env_enablement,
-        cron_deliver_env_var="HMM_CHAT_HOME_CONVERSATION",
+        cron_deliver_env_var="HYPE_COMMS_HOME_CONVERSATION",
         standalone_sender_fn=_standalone_send,
-        allowed_users_env="HMM_CHAT_ALLOWED_USERS",
-        allow_all_env="HMM_CHAT_ALLOW_ALL_USERS",
+        allowed_users_env="HYPE_COMMS_ALLOWED_USERS",
+        allow_all_env="HYPE_COMMS_ALLOW_ALL_USERS",
         max_message_length=MAX_MESSAGE_LENGTH,
         emoji="💭",
         pii_safe=False,
         allow_update_command=True,
         platform_hint=(
-            "You are chatting through HMM Chat. Direct messages always wake you; "
-            "channel messages wake you only when they explicitly mention your HMM Chat user. "
-            "Replies return to the same conversation. HMM Chat supports markdown and limits "
+            "You are chatting through Hype Comms. Direct messages always wake you; "
+            "channel messages wake you only when they explicitly mention your Hype Comms user. "
+            "Replies return to the same conversation. Hype Comms supports markdown and limits "
             "each message to 4,000 characters."
         ),
     )

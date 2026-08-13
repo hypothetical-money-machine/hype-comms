@@ -4,7 +4,7 @@ import {
   agentTokenSecretSchema,
   magicLinkTokenSchema,
   sessionTokenSchema,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import { hashToken, issueAgentToken, issueToken } from "../src/modules/identity/tokens.js";
@@ -33,6 +33,6 @@ describe("identity tokens", () => {
 
     expect(agentTokenSecretSchema.parse(issued.token)).toBe(issued.token);
     expect(issued.hash).toEqual(hashToken(issued.token));
-    expect(issued.hash).not.toEqual(hashToken(issued.token.slice("hmm_agent_".length)));
+    expect(issued.hash).not.toEqual(hashToken(issued.token.slice("hype_comms_agent_".length)));
   });
 });

@@ -9,7 +9,7 @@ import {
   THREADS_CAPABILITY,
   type SendMessageOperation,
   type Task,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -105,7 +105,7 @@ const SEND_OPERATION: SendMessageOperation = {
   message: {
     threadRootId: null,
     body: "hello",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId: CLIENT_MESSAGE_ID,
     mentionedUserIds: [],
     attachmentIds: [],
@@ -131,7 +131,7 @@ const SEARCH_RESPONSE = {
         authorId: CURRENT_USER.user.id,
         threadRootId: null,
         body: "Quarterly avalanche review",
-        bodyFormat: "hmm_markdown_v1",
+        bodyFormat: "hype_comms_markdown_v1",
         editedAt: null,
         deletedAt: null,
         createdAt: NOW,
@@ -301,7 +301,7 @@ describe("WorkspaceTransport threads", () => {
         url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
         init: expect.objectContaining({
           method: "GET",
-          headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+          headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
         }),
       },
     ]);
@@ -379,7 +379,7 @@ describe("WorkspaceTransport sync classification", () => {
         url: "https://chat.example/v1/sync?after=41&limit=25",
         init: expect.objectContaining({
           method: "GET",
-          headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+          headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
         }),
       },
     ]);
@@ -397,7 +397,7 @@ describe("WorkspaceTransport sync classification", () => {
     expect(requests).toEqual([
       expect.objectContaining({
         method: "POST",
-        headers: { "x-hmm-chat-capabilities": CLIENT_CAPABILITIES },
+        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
       }),
     ]);
   });
@@ -708,7 +708,7 @@ describe("WorkspaceTransport conversations", () => {
       [];
     const { transport } = createTransport(async (_url, init) => {
       requests.push({
-        capability: new Headers(init.headers).get("x-hmm-chat-capabilities"),
+        capability: new Headers(init.headers).get("x-hype-comms-capabilities"),
         body: typeof init.body === "string" ? init.body : null,
       });
       return jsonResponse({ conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" });

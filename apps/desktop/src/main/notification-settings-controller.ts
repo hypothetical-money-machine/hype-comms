@@ -5,7 +5,7 @@ import {
   type NotificationOsPermission,
   type NotificationPreference,
   type NotificationState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 export interface NotificationPreferencePersistence {
   load(): Promise<NotificationPreference>;

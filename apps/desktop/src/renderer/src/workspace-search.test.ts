@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { MessageSearchResponse, MessageSearchResult, User } from "@hmm-chat/contracts";
+import type { MessageSearchResponse, MessageSearchResult, User } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -32,7 +32,7 @@ const result: MessageSearchResult = {
     authorId: USER_ID,
     threadRootId: null,
     body: "Quarterly avalanche review",
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,

@@ -2,10 +2,14 @@ import { isIP } from "node:net";
 
 import { z } from "zod";
 
-import { emailSchema, type Email } from "@hmm-chat/contracts";
+import { emailSchema, type Email } from "@hype-comms/contracts";
 
 const optionalString = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
+
+const WORKSPACE_SLUG = "hype-comms";
+/** The pre-cutover default. Migration 0018 renames a workspace row carrying it. */
+const LEGACY_WORKSPACE_SLUG = "hmm-chat";
 
 const rawConfigSchema = z
   .object({
@@ -34,7 +38,7 @@ const rawConfigSchema = z
       .min(1)
       .max(80)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
-      .default("hmm-chat"),
+      .default(WORKSPACE_SLUG),
     announcementChannelsEnabled: z
       .enum(["true", "false"])
       .default("false")
@@ -203,31 +207,31 @@ export function loadConfig(
 ): ServerConfig {
   const result = rawConfigSchema.safeParse({
     nodeEnv: env.NODE_ENV,
-    host: env.HMM_HOST,
-    port: env.HMM_PORT,
-    logLevel: env.HMM_LOG_LEVEL,
-    shutdownTimeoutMs: env.HMM_SHUTDOWN_TIMEOUT_MS,
-    metricsToken: env.HMM_METRICS_TOKEN,
-    allowedOrigins: env.HMM_ALLOWED_ORIGINS,
-    publicApiUrl: env.HMM_PUBLIC_API_URL,
-    databaseUrl: env.HMM_DATABASE_URL,
-    databasePoolSize: env.HMM_DATABASE_POOL_SIZE,
-    smtpUrl: env.HMM_SMTP_URL,
-    emailDelivery: env.HMM_EMAIL_DELIVERY,
-    agentProvisioningEnabled: env.HMM_AGENT_PROVISIONING_ENABLED,
-    emailFrom: env.HMM_EMAIL_FROM,
-    ownerEmail: env.HMM_OWNER_EMAIL,
-    workspaceName: env.HMM_WORKSPACE_NAME,
-    workspaceSlug: env.HMM_WORKSPACE_SLUG,
-    announcementChannelsEnabled: env.HMM_ANNOUNCEMENT_CHANNELS_ENABLED,
-    authKitAdmissionEnabled: env.HMM_AUTHKIT_ADMISSION_ENABLED,
+    host: env.HYPE_COMMS_HOST,
+    port: env.HYPE_COMMS_PORT,
+    logLevel: env.HYPE_COMMS_LOG_LEVEL,
+    shutdownTimeoutMs: env.HYPE_COMMS_SHUTDOWN_TIMEOUT_MS,
+    metricsToken: env.HYPE_COMMS_METRICS_TOKEN,
+    allowedOrigins: env.HYPE_COMMS_ALLOWED_ORIGINS,
+    publicApiUrl: env.HYPE_COMMS_PUBLIC_API_URL,
+    databaseUrl: env.HYPE_COMMS_DATABASE_URL,
+    databasePoolSize: env.HYPE_COMMS_DATABASE_POOL_SIZE,
+    smtpUrl: env.HYPE_COMMS_SMTP_URL,
+    emailDelivery: env.HYPE_COMMS_EMAIL_DELIVERY,
+    agentProvisioningEnabled: env.HYPE_COMMS_AGENT_PROVISIONING_ENABLED,
+    emailFrom: env.HYPE_COMMS_EMAIL_FROM,
+    ownerEmail: env.HYPE_COMMS_OWNER_EMAIL,
+    workspaceName: env.HYPE_COMMS_WORKSPACE_NAME,
+    workspaceSlug: env.HYPE_COMMS_WORKSPACE_SLUG,
+    announcementChannelsEnabled: env.HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED,
+    authKitAdmissionEnabled: env.HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED,
     workosApiKey: env.WORKOS_API_KEY,
     workosClientId: env.WORKOS_CLIENT_ID,
     workosRedirectUri: env.WORKOS_REDIRECT_URI,
     workosJwtIssuer: env.WORKOS_JWT_ISSUER,
-    workosEncryptionKey: env.HMM_AUTH_ENCRYPTION_KEY,
+    workosEncryptionKey: env.HYPE_COMMS_AUTH_ENCRYPTION_KEY,
     workosWebhookSecret: env.WORKOS_WEBHOOK_SECRET,
-    trustedProxies: env.HMM_TRUSTED_PROXIES,
+    trustedProxies: env.HYPE_COMMS_TRUSTED_PROXIES,
   });
 
   if (!result.success) {
@@ -237,7 +241,9 @@ export function loadConfig(
   }
 
   if ((result.data.smtpUrl === undefined) !== (result.data.emailFrom === undefined)) {
-    throw new ConfigError(["smtp: HMM_SMTP_URL and HMM_EMAIL_FROM must be configured together"]);
+    throw new ConfigError([
+      "smtp: HYPE_COMMS_SMTP_URL and HYPE_COMMS_EMAIL_FROM must be configured together",
+    ]);
   }
 
   const hasSmtp = result.data.smtpUrl !== undefined && result.data.emailFrom !== undefined;
@@ -253,12 +259,14 @@ export function loadConfig(
           : "manual");
   if (emailDelivery === undefined) {
     throw new ConfigError([
-      "emailDelivery: Configure HMM_SMTP_URL and HMM_EMAIL_FROM, or set " +
-        "HMM_EMAIL_DELIVERY=manual to issue sign-in links with the invite command",
+      "emailDelivery: Configure HYPE_COMMS_SMTP_URL and HYPE_COMMS_EMAIL_FROM, or set " +
+        "HYPE_COMMS_EMAIL_DELIVERY=manual to issue sign-in links with the invite command",
     ]);
   }
   if (emailDelivery === "smtp" && !hasSmtp) {
-    throw new ConfigError(["emailDelivery: smtp requires HMM_SMTP_URL and HMM_EMAIL_FROM"]);
+    throw new ConfigError([
+      "emailDelivery: smtp requires HYPE_COMMS_SMTP_URL and HYPE_COMMS_EMAIL_FROM",
+    ]);
   }
   if (emailDelivery === "console" && result.data.nodeEnv === "production") {
     throw new ConfigError([
@@ -267,6 +275,23 @@ export function loadConfig(
   }
   if (result.data.nodeEnv === "production" && result.data.databaseUrl === undefined) {
     throw new ConfigError(["databaseUrl: PostgreSQL is required in production"]);
+  }
+
+  // A deployment that renamed the variable to HYPE_COMMS_WORKSPACE_SLUG but kept the pre-cutover
+  // value would silently gain a second workspace: migration 0018 renames the stored row's slug to
+  // `hype-comms`, so IdentityService.seedOwner would no longer find `hmm-chat` and would seed a
+  // fresh workspace plus owner membership on the next boot. Map that one legacy value here, once
+  // per load, and say so loudly enough that the operator fixes the variable.
+  const workspaceSlug =
+    result.data.workspaceSlug === LEGACY_WORKSPACE_SLUG
+      ? WORKSPACE_SLUG
+      : result.data.workspaceSlug;
+  if (workspaceSlug !== result.data.workspaceSlug) {
+    console.warn(
+      `HYPE_COMMS_WORKSPACE_SLUG="${LEGACY_WORKSPACE_SLUG}" is the pre-cutover workspace slug; ` +
+        `seeding "${WORKSPACE_SLUG}" instead so the renamed workspace is reused rather than ` +
+        `duplicated. Set HYPE_COMMS_WORKSPACE_SLUG="${WORKSPACE_SLUG}".`,
+    );
   }
 
   const defaultOrigins =
@@ -332,7 +357,7 @@ export function loadConfig(
   ) {
     throw new ConfigError([
       "workos: WORKOS_API_KEY, WORKOS_CLIENT_ID, WORKOS_REDIRECT_URI, and " +
-        "HMM_AUTH_ENCRYPTION_KEY must be configured together",
+        "HYPE_COMMS_AUTH_ENCRYPTION_KEY must be configured together",
     ]);
   }
   if (result.data.workosWebhookSecret !== undefined && configuredWorkosValues.length === 0) {
@@ -348,12 +373,12 @@ export function loadConfig(
     ]);
   }
   if (configuredWorkosValues.length > 0 && result.data.databaseUrl === undefined) {
-    throw new ConfigError(["workos: HMM_DATABASE_URL is required for AuthKit"]);
+    throw new ConfigError(["workos: HYPE_COMMS_DATABASE_URL is required for AuthKit"]);
   }
   if (result.data.authKitAdmissionEnabled && configuredWorkosValues.length === 0) {
     throw new ConfigError([
       "authKitAdmissionEnabled: WorkOS provider settings are required when " +
-        "HMM_AUTHKIT_ADMISSION_ENABLED=true",
+        "HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=true",
     ]);
   }
 
@@ -419,7 +444,7 @@ export function loadConfig(
       trustedProxies.length === 0
     ) {
       throw new ConfigError([
-        "trustedProxies: HMM_TRUSTED_PROXIES must name the reverse proxy IP/CIDR for " +
+        "trustedProxies: HYPE_COMMS_TRUSTED_PROXIES must name the reverse proxy IP/CIDR for " +
           "enabled production AuthKit",
       ]);
     }
@@ -466,7 +491,7 @@ export function loadConfig(
           owner: {
             email: result.data.ownerEmail,
             workspaceName: result.data.workspaceName,
-            workspaceSlug: result.data.workspaceSlug,
+            workspaceSlug,
           },
         }),
     ...(workos === undefined ? {} : { workos }),

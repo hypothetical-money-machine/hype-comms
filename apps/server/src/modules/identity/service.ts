@@ -19,7 +19,7 @@ import {
   type Invitation,
   type MagicLinkRequested,
   type SessionToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { ApiError } from "../../errors.js";
 import type { SignInThrottle } from "../../throttle.js";

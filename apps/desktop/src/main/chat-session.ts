@@ -19,7 +19,7 @@ import {
   type ExchangeAuthHandoffRequest,
   type MagicLinkDeliveryState,
   type MagicLinkToken,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import {
   createAuthCapabilitiesUrl,
@@ -30,7 +30,7 @@ import {
   createMagicLinkUrl,
 } from "../shared/api-origin";
 
-const IDENTITY_COOKIE_NAME = "hmm_session";
+const IDENTITY_COOKIE_NAME = "hype_comms_session";
 const REQUEST_TIMEOUT_MS = 10_000;
 /** Renew a day before the stored credential lapses, so a slow or offline device still recovers. */
 const RENEWAL_MARGIN_MS = 24 * 60 * 60 * 1000;

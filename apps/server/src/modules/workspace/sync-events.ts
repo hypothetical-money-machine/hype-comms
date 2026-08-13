@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { workspaceEventSchema, type WorkspaceEvent } from "@hmm-chat/contracts";
+import { workspaceEventSchema, type WorkspaceEvent } from "@hype-comms/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
 
 /**
  * Everything needed to publish one entry onto the workspace sync-event pipeline
- * (`sync_events` + `sync_event_audiences` + the `hmm_chat_events` `pg_notify` channel), without
+ * (`sync_events` + `sync_event_audiences` + the `hype_comms_events` `pg_notify` channel), without
  * assuming the caller is mutating a conversation. Workspace mutations and agent lifecycle
  * changes both go through this shape so there is exactly one place that knows how a sync event
  * reaches Postgres and wakes up listening sockets.
@@ -128,7 +128,7 @@ export async function insertSyncEventWithSequence(
       [event.id, event.workspaceId, [...input.audienceUserIds]],
     );
   }
-  await client.query(`SELECT pg_notify('hmm_chat_events', $1)`, [
+  await client.query(`SELECT pg_notify('hype_comms_events', $1)`, [
     `${event.workspaceId}:${event.workspaceSequence}`,
   ]);
   return storedEvent;

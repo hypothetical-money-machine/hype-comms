@@ -11,7 +11,7 @@ import {
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
@@ -23,7 +23,7 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const later = "2026-08-24T12:00:00.000Z";
@@ -131,7 +131,7 @@ function message(clientMessageId: string, body = "hello @member"): SendConversat
   return {
     threadRootId: null,
     body,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     clientMessageId,
     mentionedUserIds: [memberId],
     attachmentIds: [],
@@ -183,7 +183,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
     await pool.query(
       `INSERT INTO workspaces (id, name, slug, created_by)
-       VALUES ($1, 'Hype Comms', 'hmm-chat', $2)`,
+       VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
     await pool.query(

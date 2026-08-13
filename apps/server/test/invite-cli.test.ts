@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 
-import { emailSchema, magicLinkTokenSchema, type Email } from "@hmm-chat/contracts";
+import { emailSchema, magicLinkTokenSchema, type Email } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -13,7 +13,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HMM_TEST_DATABASE_URL;
+const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
@@ -79,9 +79,9 @@ describeWithPostgres("invite CLI", () => {
   function cliEnv(): Record<string, string> {
     return {
       NODE_ENV: "test",
-      HMM_DATABASE_URL: databaseUrl,
-      HMM_DATABASE_POOL_SIZE: "4",
-      HMM_PUBLIC_API_URL: "http://127.0.0.1:3000",
+      HYPE_COMMS_DATABASE_URL: databaseUrl,
+      HYPE_COMMS_DATABASE_POOL_SIZE: "4",
+      HYPE_COMMS_PUBLIC_API_URL: "http://127.0.0.1:3000",
     };
   }
 
@@ -236,6 +236,6 @@ describeWithPostgres("invite CLI", () => {
 
     expect(exitCode).toBe(1);
     expect(output.stdout).toBe("");
-    expect(output.stderr).toContain("Set HMM_OWNER_EMAIL and start the server once");
+    expect(output.stderr).toContain("Set HYPE_COMMS_OWNER_EMAIL and start the server once");
   });
 });

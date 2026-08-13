@@ -12,40 +12,40 @@ services:
     build:
       context: .
       target: runtime
-    image: hmm-chat-server:local
+    image: hype-comms-server:local
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${HMM_BIND_PORT:-3000}:3000"
+      - "127.0.0.1:${HYPE_COMMS_BIND_PORT:-3000}:3000"
     environment:
-      NODE_ENV: ${HMM_NODE_ENV:-production}
-      HMM_HOST: 0.0.0.0
-      HMM_PORT: "3000"
-      HMM_LOG_LEVEL: ${HMM_LOG_LEVEL:-info}
+      NODE_ENV: ${HYPE_COMMS_NODE_ENV:-production}
+      HYPE_COMMS_HOST: 0.0.0.0
+      HYPE_COMMS_PORT: "3000"
+      HYPE_COMMS_LOG_LEVEL: ${HYPE_COMMS_LOG_LEVEL:-info}
       # The public URL is what users reach through the tunnel. It must be HTTPS in production and
       # it also decides whether session cookies carry the Secure attribute.
-      HMM_PUBLIC_API_URL: ${HMM_PUBLIC_API_URL:-https://chat-api.example.invalid}
+      HYPE_COMMS_PUBLIC_API_URL: ${HYPE_COMMS_PUBLIC_API_URL:-https://chat-api.example.invalid}
       # The desktop client's renderer origins, not the API hostname. The websocket route
       # rejects any Origin not listed here.
-      HMM_ALLOWED_ORIGINS: ${HMM_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
+      HYPE_COMMS_ALLOWED_ORIGINS: ${HYPE_COMMS_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
       # Trust forwarded client addresses only from Docker-private peers. Override this with the
       # narrow IP/CIDR used by your reverse proxy when Docker uses a different network range.
-      HMM_TRUSTED_PROXIES: ${HMM_TRUSTED_PROXIES:-172.16.0.0/12}
-      HMM_ANNOUNCEMENT_CHANNELS_ENABLED: ${HMM_ANNOUNCEMENT_CHANNELS_ENABLED:-false}
-      HMM_AUTHKIT_ADMISSION_ENABLED: ${HMM_AUTHKIT_ADMISSION_ENABLED:-false}
-      HMM_DATABASE_URL: ${HMM_DATABASE_URL:?set HMM_DATABASE_URL in .env}
-      HMM_DATABASE_POOL_SIZE: ${HMM_DATABASE_POOL_SIZE:-10}
-      HMM_EMAIL_DELIVERY: ${HMM_EMAIL_DELIVERY:-manual}
-      HMM_AGENT_PROVISIONING_ENABLED: ${HMM_AGENT_PROVISIONING_ENABLED:-false}
-      HMM_SMTP_URL: ${HMM_SMTP_URL:-}
-      HMM_EMAIL_FROM: ${HMM_EMAIL_FROM:-}
-      HMM_OWNER_EMAIL: ${HMM_OWNER_EMAIL:-}
-      HMM_WORKSPACE_NAME: ${HMM_WORKSPACE_NAME:-Hype Comms}
-      HMM_WORKSPACE_SLUG: ${HMM_WORKSPACE_SLUG:-hmm-chat}
+      HYPE_COMMS_TRUSTED_PROXIES: ${HYPE_COMMS_TRUSTED_PROXIES:-172.16.0.0/12}
+      HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED: ${HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED:-false}
+      HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: ${HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED:-false}
+      HYPE_COMMS_DATABASE_URL: ${HYPE_COMMS_DATABASE_URL:?set HYPE_COMMS_DATABASE_URL in .env}
+      HYPE_COMMS_DATABASE_POOL_SIZE: ${HYPE_COMMS_DATABASE_POOL_SIZE:-10}
+      HYPE_COMMS_EMAIL_DELIVERY: ${HYPE_COMMS_EMAIL_DELIVERY:-manual}
+      HYPE_COMMS_AGENT_PROVISIONING_ENABLED: ${HYPE_COMMS_AGENT_PROVISIONING_ENABLED:-false}
+      HYPE_COMMS_SMTP_URL: ${HYPE_COMMS_SMTP_URL:-}
+      HYPE_COMMS_EMAIL_FROM: ${HYPE_COMMS_EMAIL_FROM:-}
+      HYPE_COMMS_OWNER_EMAIL: ${HYPE_COMMS_OWNER_EMAIL:-}
+      HYPE_COMMS_WORKSPACE_NAME: ${HYPE_COMMS_WORKSPACE_NAME:-Hype Comms}
+      HYPE_COMMS_WORKSPACE_SLUG: ${HYPE_COMMS_WORKSPACE_SLUG:-hype-comms}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_REDIRECT_URI: ${WORKOS_REDIRECT_URI:-}
       WORKOS_JWT_ISSUER: ${WORKOS_JWT_ISSUER:-}
-      HMM_AUTH_ENCRYPTION_KEY: ${HMM_AUTH_ENCRYPTION_KEY:-}
+      HYPE_COMMS_AUTH_ENCRYPTION_KEY: ${HYPE_COMMS_AUTH_ENCRYPTION_KEY:-}
       WORKOS_WEBHOOK_SECRET: ${WORKOS_WEBHOOK_SECRET:-}
     depends_on:
       postgres:
@@ -62,15 +62,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: hmm
-      POSTGRES_PASSWORD: ${HMM_POSTGRES_PASSWORD:?set HMM_POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: hmm_chat
+      POSTGRES_USER: hype_comms
+      POSTGRES_PASSWORD: ${HYPE_COMMS_POSTGRES_PASSWORD:?set HYPE_COMMS_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: hype_comms
       # Deterministic collation so index ordering cannot shift under a base-image upgrade.
       POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hmm -d hmm_chat"]
+      test: ["CMD-SHELL", "pg_isready -U hype_comms -d hype_comms"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -80,7 +80,7 @@ services:
     # Loopback publication supports host-side migrations and integration tests without making the
     # database reachable from the LAN.
     ports:
-      - "127.0.0.1:${HMM_POSTGRES_BIND_PORT:-5432}:5432"
+      - "127.0.0.1:${HYPE_COMMS_POSTGRES_BIND_PORT:-5432}:5432"
 
 volumes:
   postgres-data:

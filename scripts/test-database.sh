@@ -6,11 +6,11 @@
 
 set -euo pipefail
 
-POSTGRES_IMAGE="${HMM_TEST_POSTGRES_IMAGE:-postgres:16-alpine}"
-POSTGRES_USER="hmm"
-POSTGRES_PASSWORD="hmm-test-password"
-POSTGRES_DATABASE="hmm_chat_test"
-CONTAINER_NAME="hmm-chat-test-postgres-$$-${RANDOM}"
+POSTGRES_IMAGE="${HYPE_COMMS_TEST_POSTGRES_IMAGE:-postgres:16-alpine}"
+POSTGRES_USER="hype_comms"
+POSTGRES_PASSWORD="hype-comms-test-password"
+POSTGRES_DATABASE="hype_comms_test"
+CONTAINER_NAME="hype-comms-test-postgres-$$-${RANDOM}"
 
 # The signal traps pass an explicit status because bash reports $? as 0 on the SIGINT path, so a
 # cleanup that re-reads it would let an aborted run look like a pass to anything chaining off
@@ -93,7 +93,7 @@ if [[ "$database_ready" != "true" ]]; then
 fi
 
 echo "==> running the guarded PostgreSQL suite on Docker-assigned port $HOST_PORT"
-HMM_TEST_DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${HOST_PORT}/${POSTGRES_DATABASE}" \
+HYPE_COMMS_TEST_DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${HOST_PORT}/${POSTGRES_DATABASE}" \
   npm run test:postgres -- "$@"
 
 # Reached only when the suite ran to completion; `set -e` exits earlier on failure.

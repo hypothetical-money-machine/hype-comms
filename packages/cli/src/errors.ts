@@ -1,4 +1,4 @@
-import { apiErrorEnvelopeSchema, type ApiErrorCode } from "@hmm-chat/contracts";
+import { apiErrorEnvelopeSchema, type ApiErrorCode } from "@hype-comms/contracts";
 
 export const EXIT_SUCCESS = 0;
 export const EXIT_USAGE = 2;
@@ -27,7 +27,7 @@ export interface CliErrorOptions {
   readonly cause?: unknown;
 }
 
-const AGENT_TOKEN_PATTERN = /hmm_agent_[A-Za-z0-9_-]+/gu;
+const AGENT_TOKEN_PATTERN = /hype_comms_agent_[A-Za-z0-9_-]+/gu;
 const URL_CREDENTIAL_PATTERN = /\b(https?:\/\/)[^/\s@]+@/giu;
 const ABSOLUTE_PATH_PATTERN = /(?:^|\s)(?:\/[^\s]+|[A-Za-z]:\\[^\s]+)/gu;
 const LONG_CREDENTIAL_PATTERN = /\b[A-Za-z0-9_-]{43,86}\b/gu;

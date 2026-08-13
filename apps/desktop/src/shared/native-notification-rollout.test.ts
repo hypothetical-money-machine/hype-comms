@@ -12,7 +12,7 @@ describe("resolveNativeNotificationRollout", () => {
   it("enables only the explicit pilot value", () => {
     expect(resolveNativeNotificationRollout("1")).toBe(true);
     expect(() => resolveNativeNotificationRollout("true")).toThrow(
-      "HMM_NATIVE_NOTIFICATIONS_ENABLED must be 0 or 1",
+      "HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED must be 0 or 1",
     );
   });
 });

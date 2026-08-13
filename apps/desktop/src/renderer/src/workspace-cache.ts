@@ -27,10 +27,10 @@ import {
   type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 const CACHE_SCHEMA_VERSION = 1 as const;
-const CACHE_DATABASE_PREFIX = "hmm-chat-cache-v2-";
+const CACHE_DATABASE_PREFIX = "hype-comms-cache-v1-";
 const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
 const MAX_MESSAGE_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 /**

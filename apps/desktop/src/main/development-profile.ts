@@ -1,7 +1,7 @@
 import { lstat, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import type { ChatSessionState } from "@hmm-chat/contracts";
+import type { ChatSessionState } from "@hype-comms/contracts";
 
 const PROFILE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_CALLBACK_FILE_BYTES = 16_384;
@@ -9,10 +9,10 @@ const MAX_CALLBACK_FILE_BYTES = 16_384;
 export function resolveDevelopmentProfile(
   env: Readonly<Record<string, string | undefined>>,
 ): string {
-  const value = env.HMM_DESKTOP_PROFILE?.trim() ?? "";
+  const value = env.HYPE_COMMS_DESKTOP_PROFILE?.trim() ?? "";
   if (value === "") return "";
   if (!PROFILE_PATTERN.test(value)) {
-    throw new Error("HMM_DESKTOP_PROFILE must be a lowercase slug");
+    throw new Error("HYPE_COMMS_DESKTOP_PROFILE must be a lowercase slug");
   }
   return value;
 }
@@ -32,10 +32,14 @@ export function resolveDevelopmentAuthCallbackFile(
   isPackaged: boolean,
   profile: string,
 ): string | null {
-  const value = env.HMM_DEVELOPMENT_AUTH_CALLBACK_FILE?.trim() ?? "";
+  const value = env.HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE?.trim() ?? "";
   if (value === "") return null;
-  requireIsolatedUnpackagedProfile("HMM_DEVELOPMENT_AUTH_CALLBACK_FILE", isPackaged, profile);
-  if (value.includes("\0")) throw new Error("HMM_DEVELOPMENT_AUTH_CALLBACK_FILE is invalid");
+  requireIsolatedUnpackagedProfile(
+    "HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE",
+    isPackaged,
+    profile,
+  );
+  if (value.includes("\0")) throw new Error("HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE is invalid");
   return path.resolve(value);
 }
 
@@ -45,13 +49,13 @@ export function resolveDevelopmentUserDataPath(
   profile: string,
   defaultUserDataPath: string,
 ): string {
-  const root = env.HMM_DEVELOPMENT_USER_DATA_ROOT?.trim() ?? "";
+  const root = env.HYPE_COMMS_DEVELOPMENT_USER_DATA_ROOT?.trim() ?? "";
   if (root === "") {
     return profile === ""
       ? defaultUserDataPath
       : path.join(defaultUserDataPath, `development-${profile}`);
   }
-  requireIsolatedUnpackagedProfile("HMM_DEVELOPMENT_USER_DATA_ROOT", isPackaged, profile);
+  requireIsolatedUnpackagedProfile("HYPE_COMMS_DEVELOPMENT_USER_DATA_ROOT", isPackaged, profile);
   return path.join(path.resolve(root), profile);
 }
 

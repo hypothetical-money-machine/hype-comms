@@ -99,7 +99,7 @@ function runCommand(command, arguments_) {
 
 async function downloadAndVerify(asset, archivePath) {
   const response = await fetch(githubCliDownloadUrl(asset.archiveName), {
-    headers: { "user-agent": "hmm-chat-desktop-release" },
+    headers: { "user-agent": "hype-comms-desktop-release" },
     redirect: "follow",
   });
   if (!response.ok || response.body === null) {
@@ -134,7 +134,7 @@ export async function installGithubCli(environment = process.env) {
   }
 
   const asset = githubCliAsset(process.platform, process.arch);
-  const installDirectory = await mkdtemp(path.join(runnerTemp, "hmm-github-cli-"));
+  const installDirectory = await mkdtemp(path.join(runnerTemp, "hype-comms-github-cli-"));
   const archivePath = path.join(installDirectory, asset.archiveName);
   await downloadAndVerify(asset, archivePath);
   await runCommand("tar", ["-xf", archivePath, "-C", installDirectory]);

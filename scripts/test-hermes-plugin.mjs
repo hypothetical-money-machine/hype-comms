@@ -7,7 +7,7 @@ const discoveryArguments = [
   "unittest",
   "discover",
   "-s",
-  "integrations/hermes-hmm-chat",
+  "integrations/hermes-hype-comms",
   "-p",
   "test_*.py",
   "-v",

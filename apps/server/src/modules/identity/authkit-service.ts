@@ -10,7 +10,7 @@ import {
   type AuthProviderState,
   type CreateDesktopAuthorizationResponse,
   type ExchangeAuthHandoffRequest,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import { ApiError } from "../../errors.js";
 import type { AuthKitIdentityProvider } from "./authkit-provider.js";

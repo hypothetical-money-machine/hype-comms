@@ -1,4 +1,4 @@
-import { botAccessTokenSchema, type BotScope } from "@hmm-chat/contracts";
+import { botAccessTokenSchema, type BotScope } from "@hype-comms/contracts";
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";

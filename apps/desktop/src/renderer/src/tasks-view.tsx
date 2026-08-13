@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 
-import type { Task, TaskPriority, TaskStatus, User } from "@hmm-chat/contracts";
+import type { Task, TaskPriority, TaskStatus, User } from "@hype-comms/contracts";
 
 type TaskViewMode = "board" | "list";
 

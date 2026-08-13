@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { open, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
-import { entityIdSchema } from "@hmm-chat/contracts";
+import { entityIdSchema } from "@hype-comms/contracts";
 
 import { normalizeDevelopmentApiOrigin } from "../shared/api-origin";
 import {

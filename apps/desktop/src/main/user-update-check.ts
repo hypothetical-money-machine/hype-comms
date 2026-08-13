@@ -1,4 +1,4 @@
-import type { UpdateState } from "@hmm-chat/contracts";
+import type { UpdateState } from "@hype-comms/contracts";
 
 export interface UpdateCheckDialog {
   readonly type: "info" | "error";

@@ -3,7 +3,7 @@ import type {
   ConversationSummary,
   User,
   WorkspaceBootstrapResponse,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 export const TIMESTAMP = "2026-07-26T20:00:00.000Z";
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -67,8 +67,8 @@ export function bootstrap(): WorkspaceBootstrapResponse {
     currentUser: agentPrincipal(),
     workspace: {
       id: WORKSPACE_ID,
-      name: "HMM",
-      slug: "hmm",
+      name: "Hype Comms",
+      slug: "hype-comms",
       createdBy: USER_ID,
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,

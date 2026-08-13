@@ -1,27 +1,27 @@
 {
-  "name": "@hmm-chat/desktop",
+  "name": "@hype-comms/desktop",
   "version": "0.1.24",
   "private": true,
   "description": "Secure Electron desktop client for Hype Comms",
   "author": {
-    "name": "Hypothetical Money Machine",
+    "name": "Hype Comms",
     "email": "callmemorgan@users.noreply.github.com"
   },
   "license": "UNLICENSED",
-  "homepage": "https://github.com/hype-comms/hmm-chat",
-  "desktopName": "com.hypotheticalmoneymachine.hmmchat.desktop",
+  "homepage": "https://github.com/hype-comms/hype-comms",
+  "desktopName": "com.hypemm.hypecomms.desktop",
   "main": "./dist/main/index.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hype-comms/hmm-chat.git"
+    "url": "https://github.com/hype-comms/hype-comms.git"
   },
   "scripts": {
-    "prebuild": "npm run build --workspace @hmm-chat/contracts",
-    "predev": "npm run build --workspace @hmm-chat/contracts && install-electron --no",
+    "prebuild": "npm run build --workspace @hype-comms/contracts",
+    "predev": "npm run build --workspace @hype-comms/contracts && install-electron --no",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "pretest": "npm run build --workspace @hmm-chat/contracts",
-    "pretypecheck": "npm run build --workspace @hmm-chat/contracts",
+    "pretest": "npm run build --workspace @hype-comms/contracts",
+    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
     "typecheck": "tsc --build --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -51,7 +51,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@hmm-chat/contracts": "*",
+    "@hype-comms/contracts": "*",
     "dexie": "4.4.4",
     "electron-updater": "6.8.9",
     "react": "^19.2.8",
@@ -59,7 +59,7 @@
     "ws": "^8.18.0"
   },
   "build": {
-    "appId": "com.hypotheticalmoneymachine.hmmchat",
+    "appId": "com.hypemm.hypecomms",
     "productName": "Hype Comms",
     "executableName": "hype-comms",
     "artifactName": "hype-comms-${version}-${os}-${arch}.${ext}",
@@ -92,7 +92,7 @@
       {
         "name": "Hype Comms authentication callback",
         "schemes": [
-          "hmm-chat"
+          "hype-comms"
         ]
       }
     ],

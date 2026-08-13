@@ -5,7 +5,7 @@ import {
   sequenceSchema,
   type SyncResponse,
   type SystemConnectedEvent,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
@@ -66,7 +66,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         }
 
         // An absent Origin is accepted for human and agent tickets alike. Requiring it here would
-        // break every non-browser client that holds a human session -- `hmm-chat-cli watch` opens
+        // break every non-browser client that holds a human session -- `hype-comms-cli watch` opens
         // its socket through `ws`, which sends no Origin -- and it buys little: a hostile page
         // cannot obtain a human ticket to replay, because `POST /v1/realtime/tickets` sits behind
         // the CORS policy in app.ts, which rejects an unrecognized origin outright rather than

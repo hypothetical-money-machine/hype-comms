@@ -1,0 +1,38 @@
+name: hype-comms-platform
+label: Hype Comms
+kind: platform
+version: 1.0.0
+description: >
+  Hermes gateway adapter for Hype Comms. Uses hype-comms-cli as the only network
+  transport and wakes Hermes for direct messages and explicit channel mentions.
+author: Hype Comms
+requires_env:
+  - name: HYPE_COMMS_API_ORIGIN
+    description: "Credential-free Hype Comms API origin"
+    prompt: "Hype Comms API origin"
+    password: false
+  - name: HYPE_COMMS_TOKEN
+    description: "Revocable Hype Comms agent token"
+    prompt: "Hype Comms agent token"
+    password: true
+optional_env:
+  - name: HYPE_COMMS_ALLOWED_USERS
+    description: "Comma-separated Hype Comms user UUIDs allowed to wake Hermes"
+    prompt: "Allowed Hype Comms users"
+    password: false
+  - name: HYPE_COMMS_ALLOW_ALL_USERS
+    description: "Explicitly allow every Hype Comms workspace member"
+    prompt: "Allow all workspace members? (true/false)"
+    password: false
+  - name: HYPE_COMMS_HOME_CONVERSATION
+    description: "Conversation UUID used by deliver=hype_comms cron jobs"
+    prompt: "Default Hype Comms conversation UUID"
+    password: false
+  - name: HYPE_COMMS_CLI_PATH
+    description: "hype-comms-cli executable name or absolute path"
+    prompt: "Hype Comms CLI path"
+    password: false
+  - name: HYPE_COMMS_HERMES_STATE_DIR
+    description: "Private directory for per-agent realtime cursor checkpoints"
+    prompt: "Hype Comms Hermes state directory"
+    password: false

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { botScopeSchema, type BotScope } from "@hmm-chat/contracts";
+import { botScopeSchema, type BotScope } from "@hype-comms/contracts";
 
 import { loadConfig } from "../../config.js";
 import { runMigrations } from "../../db/migrate.js";
@@ -12,11 +12,11 @@ import { BotService, botDisplayNameSchema, botUsernameSchema } from "./service.j
 const DEFAULT_EXPIRY_DAYS = 90;
 const DEFAULT_SCOPES = ["tasks:read", "tasks:write"] as const satisfies readonly BotScope[];
 const USAGE = `Usage:
-  npm run bot --workspace @hmm-chat/server -- create --username <handle> --display-name <name> --channel <slug> [--channel <slug>] [--scope tasks:read|tasks:write] [--expires-in-days 90]
-  npm run bot --workspace @hmm-chat/server -- grant --username <handle> --channel <slug> [--channel <slug>]
-  npm run bot --workspace @hmm-chat/server -- rotate --username <handle> [--scope tasks:read|tasks:write] [--expires-in-days 90]
-  npm run bot --workspace @hmm-chat/server -- revoke --username <handle>
-  npm run bot --workspace @hmm-chat/server -- list`;
+  npm run bot --workspace @hype-comms/server -- create --username <handle> --display-name <name> --channel <slug> [--channel <slug>] [--scope tasks:read|tasks:write] [--expires-in-days 90]
+  npm run bot --workspace @hype-comms/server -- grant --username <handle> --channel <slug> [--channel <slug>]
+  npm run bot --workspace @hype-comms/server -- rotate --username <handle> [--scope tasks:read|tasks:write] [--expires-in-days 90]
+  npm run bot --workspace @hype-comms/server -- revoke --username <handle>
+  npm run bot --workspace @hype-comms/server -- list`;
 
 export interface BotCliOutput {
   readonly stdout: Pick<NodeJS.WritableStream, "write">;
@@ -211,12 +211,12 @@ export async function runBotCli(
 ): Promise<number> {
   let pool: ReturnType<typeof createPool> | undefined;
   try {
-    if (env.HMM_DATABASE_URL === undefined || env.HMM_DATABASE_URL === "") {
-      throw new Error("HMM_DATABASE_URL is required");
+    if (env.HYPE_COMMS_DATABASE_URL === undefined || env.HYPE_COMMS_DATABASE_URL === "") {
+      throw new Error("HYPE_COMMS_DATABASE_URL is required");
     }
     const command = parseCommand(argv);
     const config = loadConfig(env);
-    if (config.database === undefined) throw new Error("HMM_DATABASE_URL is required");
+    if (config.database === undefined) throw new Error("HYPE_COMMS_DATABASE_URL is required");
     pool = createPool(config.database);
     await runMigrations(pool);
     const identityRepository = new IdentityRepository(pool);
@@ -225,7 +225,7 @@ export async function runBotCli(
       workspace === null ? null : await identityRepository.findActiveOwnerMembership(workspace.id);
     if (workspace === null || owner === null) {
       throw new Error(
-        "No seeded workspace owner was found. Set HMM_OWNER_EMAIL and start the server once to seed it.",
+        "No seeded workspace owner was found. Set HYPE_COMMS_OWNER_EMAIL and start the server once to seed it.",
       );
     }
     const now = new Date();

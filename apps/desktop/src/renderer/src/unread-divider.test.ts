@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, render, renderHook, screen } from "@testing-library/react";
-import type { ConversationSummary, Message } from "@hmm-chat/contracts";
+import type { ConversationSummary, Message } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -21,7 +21,7 @@ function message(id: string, sequence: string): Message {
     authorId: USER_ID,
     threadRootId: null,
     body: `Message ${sequence}`,
-    bodyFormat: "hmm_markdown_v1",
+    bodyFormat: "hype_comms_markdown_v1",
     editedAt: null,
     deletedAt: null,
     createdAt: NOW,

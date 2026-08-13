@@ -14,7 +14,7 @@ import type {
   RealtimeSessionScope,
   ThemeState,
   UpdateState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -57,7 +57,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   workspace: {
     id: WORKSPACE_ID,
     name: "Hype Comms",
-    slug: "hmm-chat",
+    slug: "hype-comms",
     createdBy: USER_ID,
     createdAt: NOW,
     updatedAt: NOW,
@@ -121,7 +121,7 @@ const notificationMessage: Message = {
   authorId: USER_ID,
   threadRootId: null,
   body: "Recovered notification target",
-  bodyFormat: "hmm_markdown_v1",
+  bodyFormat: "hype_comms_markdown_v1",
   editedAt: null,
   deletedAt: null,
   createdAt: NOW,

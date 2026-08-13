@@ -13,8 +13,8 @@ if [[ ! -f .runner ]]; then
     --replace \
     --url "$RUNNER_URL" \
     --token "$RUNNER_TOKEN" \
-    --name "${RUNNER_NAME:-hmm-chat-docker-linux-x64}" \
-    --labels "${RUNNER_LABELS:-hmm-chat-release,docker}" \
+    --name "${RUNNER_NAME:-hype-comms-docker-linux-x64}" \
+    --labels "${RUNNER_LABELS:-hype-comms-release,docker}" \
     --work _work
 fi
 

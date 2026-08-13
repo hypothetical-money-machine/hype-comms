@@ -10,7 +10,7 @@ function client(fetch: typeof globalThis.fetch): ApiClient {
     profile: {
       name: "test",
       apiOrigin: "https://chat.example.test",
-      credential: { kind: "agent", token: `hmm_agent_${"a".repeat(43)}` },
+      credential: { kind: "agent", token: `hype_comms_agent_${"a".repeat(43)}` },
       credentialOrigin: "https://chat.example.test",
       credentialFromEnvironment: true,
       configDirectory: "/unused",
@@ -24,7 +24,7 @@ describe("ApiClient", () => {
   it("sends bearer auth and preserves an idempotency key", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
       const headers = new Headers(init?.headers);
-      expect(headers.get("authorization")).toBe(`Bearer hmm_agent_${"a".repeat(43)}`);
+      expect(headers.get("authorization")).toBe(`Bearer hype_comms_agent_${"a".repeat(43)}`);
       expect(headers.get("idempotency-key")).toBe("message-id");
       expect(init?.redirect).toBe("manual");
       return jsonResponse({ ok: true });

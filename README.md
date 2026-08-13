@@ -9,7 +9,7 @@ delivery, and a restart-safe encrypted desktop outbox.
 Product strategy and delivery work are tracked in
 [Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
 See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
-contracts, [integrations/hermes-hmm-chat/README.md](integrations/hermes-hmm-chat/README.md) for
+contracts, [integrations/hermes-hype-comms/README.md](integrations/hermes-hype-comms/README.md) for
 the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
 SQLite-to-PostgreSQL cutover boundary.
 
@@ -56,14 +56,14 @@ npm ci
 Everything below is for working on Hype Comms. Create `.env.local` with local-only values:
 
 ```dotenv
-HMM_POSTGRES_PASSWORD=local-password
-HMM_POSTGRES_BIND_PORT=5432
-HMM_DEMO_POSTGRES_BIND_PORT=54330
-HMM_DATABASE_URL=postgres://hmm:local-password@127.0.0.1:5432/hmm_chat
-HMM_OWNER_EMAIL=you@example.com
-HMM_EMAIL_DELIVERY=console
-HMM_PUBLIC_API_URL=http://127.0.0.1:3000
-HMM_ALLOWED_ORIGINS=http://127.0.0.1:5173
+HYPE_COMMS_POSTGRES_PASSWORD=local-password
+HYPE_COMMS_POSTGRES_BIND_PORT=5432
+HYPE_COMMS_DEMO_POSTGRES_BIND_PORT=54330
+HYPE_COMMS_DATABASE_URL=postgres://hype_comms:local-password@127.0.0.1:5432/hype_comms
+HYPE_COMMS_OWNER_EMAIL=you@example.com
+HYPE_COMMS_EMAIL_DELIVERY=console
+HYPE_COMMS_PUBLIC_API_URL=http://127.0.0.1:3000
+HYPE_COMMS_ALLOWED_ORIGINS=http://127.0.0.1:5173
 ```
 
 Start PostgreSQL, then the host server and Electron client:
@@ -77,20 +77,20 @@ In console delivery mode, request a magic link in the app and copy the loopback 
 server log. An owner can also issue a manual invitation:
 
 ```bash
-npm run invite --workspace @hmm-chat/server -- --email member@example.com
+npm run invite --workspace @hype-comms/server -- --email member@example.com
 ```
 
 To exercise AuthKit locally, register
 `http://127.0.0.1:3000/v1/auth/workos/callback` for a WorkOS test Application and add the optional
 values documented in [docs/workos-authkit.md](docs/workos-authkit.md) to `.env.local`. The WorkOS
 API key and both PKCE verifiers remain outside the renderer. Explicitly set
-`HMM_AUTHKIT_ADMISSION_ENABLED=true` only for the local AuthKit exercise; admission defaults off.
+`HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=true` only for the local AuthKit exercise; admission defaults off.
 
 Owners can provision task-only bot members with scoped, expiring credentials and explicit channel
 grants. Tokens are printed once and never enter the desktop renderer:
 
 ```bash
-npm run bot --workspace @hmm-chat/server -- create \
+npm run bot --workspace @hype-comms/server -- create \
   --username release-bot \
   --display-name "Release Bot" \
   --channel general
@@ -112,7 +112,7 @@ For UI and realtime work, start the complete local demo with:
 npm run demo
 ```
 
-The command uses the isolated `hmm-chat-demo` Compose project and PostgreSQL volume on loopback port
+The command uses the isolated `hype-comms-demo` Compose project and PostgreSQL volume on loopback port
 `54330` by default, so it can run beside the normal development database. It applies migrations,
 idempotently seeds Claire, Woots, four channels, one direct conversation, and eight messages, then
 starts the API and two isolated Electron profiles under `.dev-data/demo/desktop`. Authentication
@@ -159,7 +159,7 @@ The launcher prints one versioned readiness JSON record only after both clients 
 `[data-testid="workspace-ready"]`. Its private, secret-free session manifest is
 `.dev-data/demo/headless-session.json`; it contains loopback CDP URLs and a new private,
 run-specific artifact directory. The smoke command reads that manifest by default (or use
-`HMM_HEADLESS_DEMO_MANIFEST=/absolute/path/session.json`) and preserves its artifacts rather than
+`HYPE_COMMS_HEADLESS_DEMO_MANIFEST=/absolute/path/session.json`) and preserves its artifacts rather than
 deleting prior runs.
 
 Automation can reuse [`scripts/agent-capture.mjs`](scripts/agent-capture.mjs) from another local
@@ -196,11 +196,11 @@ recorded under an advisory lock; add a new numbered file and never edit an appli
 
 ### Pointing a development client at a deployment
 
-`HMM_CHAT_API_ORIGIN` is read at build time. Development accepts loopback HTTP or a
+`HYPE_COMMS_API_ORIGIN` is read at build time. Development accepts loopback HTTP or a
 credential-free HTTPS origin:
 
 ```bash
-HMM_CHAT_API_ORIGIN=https://chat-api.example.invalid npm run dev:desktop
+HYPE_COMMS_API_ORIGIN=https://chat-api.example.invalid npm run dev:desktop
 ```
 
 Plain HTTP to a non-loopback host is rejected.
@@ -210,12 +210,12 @@ Plain HTTP to a non-loopback host is rejected.
 Build and run the workspace CLI with Node 24:
 
 ```bash
-npm run build --workspace @hmm-chat/cli
-npm exec --workspace @hmm-chat/cli -- hmm-chat-cli --help
+npm run build --workspace @hype-comms/cli
+npm exec --workspace @hype-comms/cli -- hype-comms-cli --help
 ```
 
-The CLI supports named private profiles plus `HMM_CHAT_API_ORIGIN`, `HMM_CHAT_TOKEN`,
-`HMM_CHAT_PROFILE`, and `HMM_CHAT_CONFIG_DIR` overrides. HTTPS is required except for loopback
+The CLI supports named private profiles plus `HYPE_COMMS_API_ORIGIN`, `HYPE_COMMS_TOKEN`,
+`HYPE_COMMS_PROFILE`, and `HYPE_COMMS_CONFIG_DIR` overrides. HTTPS is required except for loopback
 development servers. Human sessions can request and exchange magic links; agent credentials are
 read from a private prompt, stdin, an injected environment variable, or a `0600` profile file.
 Do not put credentials in command arguments.
@@ -226,9 +226,10 @@ replacement if it is lost. Agents count toward the same 25-active-member limit a
 [CLI guide](packages/cli/README.md) for commands, JSON/NDJSON output, retry behavior, and stable
 exit codes.
 
-The [Hermes adapter](integrations/hermes-hmm-chat/README.md) runs the CLI as its transport. It
+The [Hermes adapter](integrations/hermes-hype-comms/README.md) runs the CLI as its transport. It
 wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
-one Hermes session per HMM conversation, and sends replies back to that canonical conversation.
+one Hermes session per Hype Comms conversation, and sends replies back to that canonical
+conversation.
 Install the server migration first, then the CLI, provision the agent and token, install the
 adapter under `~/.hermes/plugins/`, and finally start the Hermes gateway.
 
@@ -246,9 +247,9 @@ The API and database ports bind to loopback. PostgreSQL is authoritative for ide
 conversations, messages, idempotency records, read cursors, and sync events. There is no SQLite
 runtime volume or shared access-code mode.
 
-`HMM_EMAIL_DELIVERY=manual` permits an administrator to issue links without an SMTP provider.
-Self-service requests return a uniform refusal in that mode. Configure `HMM_SMTP_URL` and
-`HMM_EMAIL_FROM`, then select `smtp`, for delivered mail.
+`HYPE_COMMS_EMAIL_DELIVERY=manual` permits an administrator to issue links without an SMTP provider.
+Self-service requests return a uniform refusal in that mode. Configure `HYPE_COMMS_SMTP_URL` and
+`HYPE_COMMS_EMAIL_FROM`, then select `smtp`, for delivered mail.
 
 AuthKit is optional and additive. Stage its provider, webhook, and trusted-proxy values from
 [docs/workos-authkit.md](docs/workos-authkit.md), then use the explicit admission gate after every
@@ -339,14 +340,14 @@ release.
 macOS signing is configured. A Developer ID Application certificate signs the build from these
 two repository secrets:
 
-- `HMM_MACOS_CSC_LINK` (the base64-encoded Developer ID certificate)
-- `HMM_MACOS_CSC_KEY_PASSWORD`
+- `HYPE_COMMS_MACOS_CSC_LINK` (the base64-encoded Developer ID certificate)
+- `HYPE_COMMS_MACOS_CSC_KEY_PASSWORD`
 
 Notarization is enabled when the signed job also has all three of:
 
-- `HMM_MACOS_APPLE_API_KEY_BASE64` (the base64-encoded App Store Connect API private key)
-- `HMM_MACOS_APPLE_API_KEY_ID`
-- `HMM_MACOS_APPLE_API_ISSUER`
+- `HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64` (the base64-encoded App Store Connect API private key)
+- `HYPE_COMMS_MACOS_APPLE_API_KEY_ID`
+- `HYPE_COMMS_MACOS_APPLE_API_ISSUER`
 
 Without the certificate secrets the macOS job fails at its verification step and publishes nothing,
 which is deliberate: an unsigned macOS build cannot auto-update at all, because Squirrel.Mac will
@@ -375,7 +376,7 @@ npm run check
 ```
 
 Five server suites covering authorization, invitations, sessions, membership roles, workspace
-access, and migrations silently skip when `HMM_TEST_DATABASE_URL` is absent. Run them against a
+access, and migrations silently skip when `HYPE_COMMS_TEST_DATABASE_URL` is absent. Run them against a
 disposable PostgreSQL container matching the deployed major version with:
 
 ```bash
@@ -387,7 +388,7 @@ the container after success, failure, or interruption.
 
 The image defaults to the major version the pilot deploys, currently PostgreSQL 16, so the tests
 exercise what production actually runs. Compose uses the same version for the same reason. Set
-`HMM_TEST_POSTGRES_IMAGE` to check a different major version before proposing an upgrade, and
+`HYPE_COMMS_TEST_POSTGRES_IMAGE` to check a different major version before proposing an upgrade, and
 change both together with the deployment rather than letting them drift apart.
 
 `test:db` is unaffected by this because its container is disposable, but a Compose volume already

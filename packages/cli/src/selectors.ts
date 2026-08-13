@@ -5,7 +5,7 @@ import {
   workspaceBootstrapResponseSchema,
   type ConversationSummary,
   type User,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 import type { ApiClient } from "./client.js";
 import { UsageError } from "./errors.js";
