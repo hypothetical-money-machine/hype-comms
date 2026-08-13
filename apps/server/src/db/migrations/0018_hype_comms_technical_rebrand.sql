@@ -36,6 +36,21 @@ UPDATE api_idempotency_records
        )
  WHERE response_body #>> '{conversation,lastMessage,bodyFormat}' = 'hmm_markdown_v1';
 
+-- Session cutover. The cookie renamed hmm_session -> hype_comms_session, but the token inside it
+-- is an unprefixed secret, so a client that replays its pre-cutover token under the new cookie
+-- name still authenticates: IdentityService.authenticateContext only hashes the presented value
+-- and looks for a matching unrevoked device_sessions row. Revoke every session that predates the
+-- cutover so the documented "all sessions invalidated" is actually enforced, using the same
+-- semantics as IdentityRepository.revokeAllDeviceSessions (stamp revoked_at, drop the provider
+-- session link) rather than DELETE, which would also discard the audit trail and cascade away
+-- device_session_token_history. Revoked sessions are equally refused by realtime ticket
+-- redemption and WebSocket re-authorization, which both require revoked_at IS NULL. The guard
+-- makes this idempotent and keeps an already-recorded revocation timestamp intact.
+UPDATE device_sessions
+   SET revoked_at = clock_timestamp(),
+       workos_session_id = NULL
+ WHERE revoked_at IS NULL;
+
 -- Workspace slug rename. 0008 renamed only the display name; slug was left alone.
 UPDATE workspaces
    SET slug = 'hype-comms',

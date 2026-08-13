@@ -7,6 +7,10 @@ import { emailSchema, type Email } from "@hype-comms/contracts";
 const optionalString = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
 
+const WORKSPACE_SLUG = "hype-comms";
+/** The pre-cutover default. Migration 0018 renames a workspace row carrying it. */
+const LEGACY_WORKSPACE_SLUG = "hmm-chat";
+
 const rawConfigSchema = z
   .object({
     nodeEnv: z.enum(["development", "test", "production"]).default("development"),
@@ -34,7 +38,7 @@ const rawConfigSchema = z
       .min(1)
       .max(80)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
-      .default("hype-comms"),
+      .default(WORKSPACE_SLUG),
     announcementChannelsEnabled: z
       .enum(["true", "false"])
       .default("false")
@@ -273,6 +277,23 @@ export function loadConfig(
     throw new ConfigError(["databaseUrl: PostgreSQL is required in production"]);
   }
 
+  // A deployment that renamed the variable to HYPE_COMMS_WORKSPACE_SLUG but kept the pre-cutover
+  // value would silently gain a second workspace: migration 0018 renames the stored row's slug to
+  // `hype-comms`, so IdentityService.seedOwner would no longer find `hmm-chat` and would seed a
+  // fresh workspace plus owner membership on the next boot. Map that one legacy value here, once
+  // per load, and say so loudly enough that the operator fixes the variable.
+  const workspaceSlug =
+    result.data.workspaceSlug === LEGACY_WORKSPACE_SLUG
+      ? WORKSPACE_SLUG
+      : result.data.workspaceSlug;
+  if (workspaceSlug !== result.data.workspaceSlug) {
+    console.warn(
+      `HYPE_COMMS_WORKSPACE_SLUG="${LEGACY_WORKSPACE_SLUG}" is the pre-cutover workspace slug; ` +
+        `seeding "${WORKSPACE_SLUG}" instead so the renamed workspace is reused rather than ` +
+        `duplicated. Set HYPE_COMMS_WORKSPACE_SLUG="${WORKSPACE_SLUG}".`,
+    );
+  }
+
   const defaultOrigins =
     result.data.nodeEnv === "production" ? ["app://bundle"] : ["http://127.0.0.1:5173"];
   const candidateOrigins = result.data.allowedOrigins
@@ -470,7 +491,7 @@ export function loadConfig(
           owner: {
             email: result.data.ownerEmail,
             workspaceName: result.data.workspaceName,
-            workspaceSlug: result.data.workspaceSlug,
+            workspaceSlug,
           },
         }),
     ...(workos === undefined ? {} : { workos }),

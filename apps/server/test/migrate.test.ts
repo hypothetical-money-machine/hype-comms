@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
+import { IdentityRepository } from "../src/modules/identity/repository.js";
+import { hashToken } from "../src/modules/identity/tokens.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -501,6 +503,76 @@ describeWithPostgres("runMigrations", () => {
           ],
         ),
       ).rejects.toMatchObject({ code: "23514" });
+    });
+  });
+
+  it("revokes every pre-cutover device session so old tokens stop authenticating", async () => {
+    await withFreshSchema(async (pool) => {
+      const userId = randomUUID();
+      const activeSessionId = randomUUID();
+      const revokedSessionId = randomUUID();
+      const alreadyRevokedAt = "2026-01-02T03:04:05.000Z";
+      // The cookie rename does not change the token, so this is exactly what a pre-cutover client
+      // replays as hype_comms_session=<old value>.
+      const legacyToken = "legacy-pre-cutover-session-token";
+      const legacyTokenHash = hashToken(legacyToken);
+
+      await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'session-cutover@example.test', 'cutover', 'Cutover')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO device_sessions
+           (id, user_id, token_hash, label, created_at, last_seen_at, expires_at,
+            revoked_at, workos_session_id)
+         VALUES
+           ($1, $3, $4, 'Pre-cutover laptop', clock_timestamp(), clock_timestamp(),
+            clock_timestamp() + interval '30 days', NULL, 'session_precutoveractive1'),
+           ($2, $3, $5, 'Already signed out', clock_timestamp(), clock_timestamp(),
+            clock_timestamp() + interval '30 days', $6, NULL)`,
+        [
+          activeSessionId,
+          revokedSessionId,
+          userId,
+          legacyTokenHash,
+          Buffer.alloc(32, 7),
+          alreadyRevokedAt,
+        ],
+      );
+
+      // Non-vacuity: this is the lookup IdentityService.authenticateContext performs, and it
+      // still returns the session until 0018 revokes it.
+      const repository = new IdentityRepository(pool);
+      await expect(repository.findDeviceSessionByTokenHash(legacyTokenHash)).resolves.toMatchObject(
+        { id: activeSessionId },
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0018_hype_comms_technical_rebrand.sql"],
+      });
+
+      await expect(repository.findDeviceSessionByTokenHash(legacyTokenHash)).resolves.toBeNull();
+      const sessions = await pool.query<{
+        id: string;
+        revoked_at: Date | null;
+        workos_session_id: string | null;
+      }>("SELECT id, revoked_at, workos_session_id FROM device_sessions ORDER BY id");
+      const revocations = new Map(
+        sessions.rows.map((row) => [
+          row.id,
+          { at: row.revoked_at, provider: row.workos_session_id },
+        ]),
+      );
+      expect(revocations.get(activeSessionId)?.at).toBeInstanceOf(Date);
+      // Revoking drops the provider session link, matching revokeAllDeviceSessions.
+      expect(revocations.get(activeSessionId)?.provider).toBeNull();
+      // An earlier sign-out keeps its own timestamp instead of being restamped.
+      expect(revocations.get(revokedSessionId)?.at).toEqual(new Date(alreadyRevokedAt));
     });
   });
 

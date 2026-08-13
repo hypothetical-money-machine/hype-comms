@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ConfigError, loadConfig } from "../src/config.js";
 
@@ -126,6 +126,44 @@ describe("loadConfig", () => {
         workspaceSlug: "pilot",
       },
     });
+  });
+
+  it("normalizes the pre-cutover workspace slug and warns about the stale value", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Migration 0018 renamed the stored slug, so seeding "hmm-chat" would create a second
+      // workspace instead of adopting the renamed one.
+      expect(
+        loadConfig({
+          HYPE_COMMS_OWNER_EMAIL: "owner@example.com",
+          HYPE_COMMS_WORKSPACE_SLUG: "hmm-chat",
+        }),
+      ).toMatchObject({ owner: { workspaceSlug: "hype-comms" } });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("HYPE_COMMS_WORKSPACE_SLUG");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves every other configured workspace slug untouched and silent", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const workspaceSlug of ["pilot", "hmm", "hmm-chat-archive", "hype-comms"]) {
+        expect(
+          loadConfig({
+            HYPE_COMMS_OWNER_EMAIL: "owner@example.com",
+            HYPE_COMMS_WORKSPACE_SLUG: workspaceSlug,
+          }),
+        ).toMatchObject({ owner: { workspaceSlug } });
+      }
+      expect(loadConfig({ HYPE_COMMS_OWNER_EMAIL: "owner@example.com" })).toMatchObject({
+        owner: { workspaceSlug: "hype-comms" },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("requires SMTP URL and sender address together", () => {
