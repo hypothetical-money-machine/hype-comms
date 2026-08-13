@@ -4,12 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const source = path.join(
-  repositoryRoot,
-  "apps/desktop/native/macos-notification-authorization.swift",
-);
+const source = path.join(repositoryRoot, "apps/desktop/native/macos-notification-authorization.mm");
 const outputDirectory = path.join(repositoryRoot, "apps/desktop/native-build/macos");
-const output = path.join(outputDirectory, "hmm-notification-authorization");
+const output = path.join(outputDirectory, "hmm-notification-authorization.node");
 
 async function run(command, arguments_) {
   const child = spawn(command, arguments_, { stdio: "inherit" });
@@ -24,17 +21,22 @@ async function run(command, arguments_) {
 
 if (process.platform === "darwin") {
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+  const nodeIncludeDirectory = path.resolve(path.dirname(process.execPath), "../include/node");
   const architectures = ["arm64", "x86_64"];
   const architectureOutputs = architectures.map((architecture) => `${output}.${architecture}`);
   for (const [index, architecture] of architectures.entries()) {
     await run("/usr/bin/xcrun", [
-      "swiftc",
-      "-parse-as-library",
+      "clang++",
+      "-bundle",
+      "-undefined",
+      "dynamic_lookup",
+      "-fobjc-arc",
+      "-std=c++20",
       "-O",
       "-target",
       `${architecture}-apple-macos11`,
-      "-framework",
-      "AppKit",
+      "-I",
+      nodeIncludeDirectory,
       "-framework",
       "Foundation",
       "-framework",

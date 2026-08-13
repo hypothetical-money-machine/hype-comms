@@ -101,10 +101,10 @@
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "extraFiles": [
+      "extraResources": [
         {
-          "from": "native-build/macos/hmm-notification-authorization",
-          "to": "MacOS/hmm-notification-authorization"
+          "from": "native-build/macos/hmm-notification-authorization.node",
+          "to": "hmm-notification-authorization.node"
         }
       ],
       "notarize": true,

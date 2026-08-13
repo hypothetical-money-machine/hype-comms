@@ -46,8 +46,12 @@ async function executableForAsar(asarPath) {
   if (path.basename(applicationDirectory) === "Contents") {
     const macExecutableDirectory = path.join(applicationDirectory, "MacOS");
     const executablePath = path.join(macExecutableDirectory, "hype-comms");
-    const authorizationHelper = path.join(macExecutableDirectory, "hmm-notification-authorization");
-    await Promise.all([access(executablePath), access(authorizationHelper)]);
+    const authorizationAddon = path.join(
+      applicationDirectory,
+      "Resources",
+      "hmm-notification-authorization.node",
+    );
+    await Promise.all([access(executablePath), access(authorizationAddon)]);
     return executablePath;
   }
 

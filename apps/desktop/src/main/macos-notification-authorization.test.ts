@@ -15,15 +15,28 @@ const DISABLED_STATE = {
   osPermission: "unknown",
 } as const;
 
+type AuthorizationCallback = (error: unknown, permission: unknown) => void;
+
+function binding(permission: unknown): {
+  readonly authorize: (command: "request" | "status", callback: AuthorizationCallback) => void;
+} {
+  return { authorize: (_command, callback) => callback(null, permission) };
+}
+
 describe("MacosNotificationAuthorization", () => {
-  it("reads and requests strict permission records through the fixed helper command", async () => {
-    const run = vi
+  it("reads and requests permission through the in-process native binding", async () => {
+    const authorize = vi
       .fn()
-      .mockResolvedValueOnce({ stdout: '{"permission":"unknown","version":1}\n' })
-      .mockResolvedValueOnce({ stdout: '{"permission":"granted","version":1}\n' });
+      .mockImplementationOnce((_command: string, callback: AuthorizationCallback) =>
+        callback(null, "unknown"),
+      )
+      .mockImplementationOnce((_command: string, callback: AuthorizationCallback) =>
+        callback(null, "granted"),
+      );
     const authorization = new MacosNotificationAuthorization({
-      executable: "/Applications/Hype Comms.app/Contents/MacOS/hmm-notification-authorization",
-      run,
+      addonPath:
+        "/Applications/Hype Comms.app/Contents/Resources/hmm-notification-authorization.node",
+      load: () => ({ authorize }),
     });
 
     await expect(authorization.read()).resolves.toEqual({
@@ -31,16 +44,21 @@ describe("MacosNotificationAuthorization", () => {
       osPermission: "unknown",
     });
     await expect(authorization.request()).resolves.toBe("granted");
-    expect(run).toHaveBeenNthCalledWith(1, expect.any(String), ["status"], 300_000);
-    expect(run).toHaveBeenNthCalledWith(2, expect.any(String), ["request"], 300_000);
+    expect(authorize).toHaveBeenNthCalledWith(1, "status", expect.any(Function));
+    expect(authorize).toHaveBeenNthCalledWith(2, "request", expect.any(Function));
   });
 
-  it("rejects malformed or expanded helper records", async () => {
+  it("rejects malformed binding results and interfaces", async () => {
+    expect(
+      () =>
+        new MacosNotificationAuthorization({
+          addonPath: "/tmp/addon.node",
+          load: () => ({ authorize: vi.fn(), unexpected: true }),
+        }),
+    ).toThrow("invalid interface");
     const authorization = new MacosNotificationAuthorization({
-      executable: "/tmp/helper",
-      run: async () => ({
-        stdout: '{"permission":"granted","version":1,"content":"unexpected"}\n',
-      }),
+      addonPath: "/tmp/addon.node",
+      load: () => binding("expanded"),
     });
 
     await expect(authorization.request()).rejects.toThrow("invalid state");
@@ -62,26 +80,30 @@ describe("MacosNotificationAuthorization", () => {
       }),
     ).toBeNull();
 
-    const run = vi.fn(async () => ({ stdout: '{"permission":"denied","version":1}\n' }));
+    const authorize = vi.fn((_command: string, callback: AuthorizationCallback) =>
+      callback(null, "denied"),
+    );
+    const load = vi.fn(() => ({ authorize }));
     const authorization = createMacosNotificationAuthorization({
       isPackaged: true,
       platform: "darwin",
       resourcesPath: "/Applications/Hype Comms.app/Contents/Resources",
-      run,
+      load,
     });
     await expect(authorization?.request()).resolves.toBe("denied");
-    expect(run).toHaveBeenCalledWith(
-      path.resolve("/Applications/Hype Comms.app/Contents/MacOS/hmm-notification-authorization"),
-      ["request"],
-      300_000,
+    expect(load).toHaveBeenCalledWith(
+      path.join(
+        "/Applications/Hype Comms.app/Contents/Resources",
+        "hmm-notification-authorization.node",
+      ),
     );
   });
 
   it("requests before persisting enable and leaves intent disabled after denial", async () => {
     const deniedState = { ...DISABLED_STATE, osPermission: "denied" } as const;
     const authorization = new MacosNotificationAuthorization({
-      executable: "/tmp/helper",
-      run: async () => ({ stdout: '{"permission":"denied","version":1}\n' }),
+      addonPath: "/tmp/addon.node",
+      load: () => binding("denied"),
     });
     const refreshCapability = vi.fn(async () => deniedState);
     const setPreference = vi.fn(async () => ({
@@ -108,8 +130,8 @@ describe("MacosNotificationAuthorization", () => {
 
   it("persists enable only after authorization is granted", async () => {
     const authorization = new MacosNotificationAuthorization({
-      executable: "/tmp/helper",
-      run: async () => ({ stdout: '{"permission":"granted","version":1}\n' }),
+      addonPath: "/tmp/addon.node",
+      load: () => binding("granted"),
     });
     const grantedState = { ...DISABLED_STATE, osPermission: "granted" } as const;
     const enabledState = { ...grantedState, devicePreference: "enabled" } as const;

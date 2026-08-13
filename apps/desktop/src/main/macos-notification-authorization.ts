@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import type {
@@ -7,92 +7,43 @@ import type {
   NotificationState,
 } from "@hmm-chat/contracts";
 
-const HELPER_EXECUTABLE = "hmm-notification-authorization";
-const OUTPUT_LIMIT_BYTES = 4_096;
+const ADDON_FILENAME = "hmm-notification-authorization.node";
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
-interface HelperResult {
-  readonly stdout: string;
+interface NativeAuthorizationBinding {
+  readonly authorize: (
+    command: "request" | "status",
+    callback: (error: unknown, permission: unknown) => void,
+  ) => void;
 }
 
-type RunHelper = (
-  executable: string,
-  arguments_: readonly string[],
-  timeoutMs: number,
-) => Promise<HelperResult>;
+type LoadBinding = (addonPath: string) => unknown;
 
-async function runHelper(
-  executable: string,
-  arguments_: readonly string[],
-  timeoutMs: number,
-): Promise<HelperResult> {
-  const child = spawn(executable, [...arguments_], { stdio: ["ignore", "pipe", "pipe"] });
-  let stdout = "";
-  let stderr = "";
-  let outputBytes = 0;
-  const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
-    outputBytes += chunk.byteLength;
-    if (outputBytes > OUTPUT_LIMIT_BYTES) {
-      child.kill("SIGKILL");
-      return;
-    }
-    if (target === "stdout") stdout += chunk.toString("utf8");
-    else stderr += chunk.toString("utf8");
-  };
-  child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
-  child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
-  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-  const status = await new Promise<{
-    readonly code: number | null;
-    readonly signal: string | null;
-  }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  }).finally(() => clearTimeout(timer));
-  if (outputBytes > OUTPUT_LIMIT_BYTES) {
-    throw new Error("macOS notification authorization helper exceeded its output limit");
-  }
-  if (status.code !== 0) {
-    const detail = stderr.trim();
-    throw new Error(
-      `macOS notification authorization helper failed with ${
-        status.signal ?? `code ${String(status.code)}`
-      }${detail === "" ? "" : `: ${detail}`}`,
-    );
-  }
-  return { stdout };
-}
-
-function parsePermission(stdout: string): NotificationOsPermission {
-  let value: unknown;
-  try {
-    value = JSON.parse(stdout);
-  } catch {
-    throw new Error("macOS notification authorization helper returned invalid JSON");
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("macOS notification authorization helper returned an invalid state");
-  }
+function isBinding(value: unknown): value is NativeAuthorizationBinding {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  if (
-    Object.keys(record).sort().join(",") !== "permission,version" ||
-    record.version !== 1 ||
-    (record.permission !== "granted" &&
-      record.permission !== "denied" &&
-      record.permission !== "unknown")
-  ) {
-    throw new Error("macOS notification authorization helper returned an invalid state");
-  }
-  return record.permission;
+  return Object.keys(record).join(",") === "authorize" && typeof record.authorize === "function";
+}
+
+function parsePermission(value: unknown): NotificationOsPermission {
+  if (value === "granted" || value === "denied" || value === "unknown") return value;
+  throw new Error("macOS notification authorization addon returned an invalid state");
+}
+
+function loadBinding(addonPath: string): unknown {
+  const require = createRequire(path.join(path.dirname(addonPath), "package.json"));
+  return require(addonPath) as unknown;
 }
 
 export class MacosNotificationAuthorization {
-  readonly #executable: string;
-  readonly #run: RunHelper;
+  readonly #binding: NativeAuthorizationBinding;
 
-  constructor(options: { readonly executable: string; readonly run?: RunHelper }) {
-    this.#executable = options.executable;
-    this.#run = options.run ?? runHelper;
+  constructor(options: { readonly addonPath: string; readonly load?: LoadBinding }) {
+    const binding = (options.load ?? loadBinding)(options.addonPath);
+    if (!isBinding(binding)) {
+      throw new Error("macOS notification authorization addon has an invalid interface");
+    }
+    this.#binding = binding;
   }
 
   async read(): Promise<{
@@ -109,9 +60,34 @@ export class MacosNotificationAuthorization {
     return this.#invoke("request");
   }
 
-  async #invoke(command: "request" | "status"): Promise<NotificationOsPermission> {
-    const result = await this.#run(this.#executable, [command], REQUEST_TIMEOUT_MS);
-    return parsePermission(result.stdout);
+  #invoke(command: "request" | "status"): Promise<NotificationOsPermission> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("macOS notification authorization timed out")),
+        REQUEST_TIMEOUT_MS,
+      );
+      try {
+        this.#binding.authorize(command, (error, permission) => {
+          clearTimeout(timer);
+          if (typeof error === "string" && error !== "") {
+            reject(new Error(`macOS notification authorization failed: ${error.slice(0, 512)}`));
+            return;
+          }
+          if (error !== null) {
+            reject(new Error("macOS notification authorization returned an invalid error"));
+            return;
+          }
+          try {
+            resolve(parsePermission(permission));
+          } catch (cause) {
+            reject(cause);
+          }
+        });
+      } catch (cause) {
+        clearTimeout(timer);
+        reject(cause);
+      }
+    });
   }
 }
 
@@ -119,12 +95,12 @@ export function createMacosNotificationAuthorization(options: {
   readonly isPackaged: boolean;
   readonly platform: NodeJS.Platform;
   readonly resourcesPath: string;
-  readonly run?: RunHelper;
+  readonly load?: LoadBinding;
 }): MacosNotificationAuthorization | null {
   if (!options.isPackaged || options.platform !== "darwin") return null;
   return new MacosNotificationAuthorization({
-    executable: path.resolve(options.resourcesPath, "..", "MacOS", HELPER_EXECUTABLE),
-    run: options.run,
+    addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
+    load: options.load,
   });
 }
 

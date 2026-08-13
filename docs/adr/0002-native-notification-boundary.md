@@ -159,7 +159,7 @@ off until packaged rollout gates pass; message-body preview defaults disabled an
 separate explicit opt-in. Native support is `supported` or `unsupported`; OS permission is
 `granted`, `denied`, or `unknown`. Do-not-disturb and sound remain operating-system policy.
 Electron has no portable permission query. The packaged macOS app therefore owns a fixed,
-universal helper inside its signed bundle; main invokes it to read or request
+universal N-API addon inside its signed bundle; Electron main loads it in-process to read or request
 `UNUserNotificationCenter` authorization before persisting an enable transition. The renderer can
 request only the frozen device preference and never receives a generic native permission bridge.
 

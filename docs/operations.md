@@ -120,9 +120,9 @@ On Windows, main sets Electron Builder's exact
 identity is covered by a deterministic
 [test](../apps/desktop/src/main/application-identity.test.ts), but stable attribution and click
 handling still require an installed NSIS evidence run. Electron 43 exposes portable native-support
-detection but no portable OS permission query. Signed packaged macOS builds therefore use a
-universal in-bundle helper to read and request `UNUserNotificationCenter` authorization from the
-real Hype Comms bundle identity before persisting an enable request. Other hosts keep permission
+detection but no portable OS permission query. Signed packaged macOS builds therefore load a
+universal native addon into Electron's main process to read and request `UNUserNotificationCenter`
+authorization from the real Hype Comms process identity before persisting an enable request. Other hosts keep permission
 `unknown` where they expose no equivalent. Do not derive `denied` from lack of support or retry a
 failed presenter without a new person-initiated enable or capability refresh.
 

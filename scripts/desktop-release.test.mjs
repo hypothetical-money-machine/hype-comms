@@ -99,10 +99,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /build-macos-notification-authorization\.mjs/u,
   );
   assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
-  assert.deepEqual(desktopPackage.build.mac.extraFiles, [
+  assert.deepEqual(desktopPackage.build.mac.extraResources, [
     {
-      from: "native-build/macos/hmm-notification-authorization",
-      to: "MacOS/hmm-notification-authorization",
+      from: "native-build/macos/hmm-notification-authorization.node",
+      to: "hmm-notification-authorization.node",
     },
   ]);
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);

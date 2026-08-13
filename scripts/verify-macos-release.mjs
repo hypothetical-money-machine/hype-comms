@@ -46,11 +46,11 @@ if (appBundles.length === 0) {
 }
 
 for (const appBundle of appBundles) {
-  const authorizationHelper = path.join(
+  const authorizationAddon = path.join(
     appBundle,
     "Contents",
-    "MacOS",
-    "hmm-notification-authorization",
+    "Resources",
+    "hmm-notification-authorization.node",
   );
   runCommand(
     "/usr/bin/codesign",
@@ -74,23 +74,23 @@ for (const appBundle of appBundles) {
 
   runCommand(
     "/usr/bin/codesign",
-    ["--verify", "--strict", "--verbose=2", authorizationHelper],
-    `Notification authorization helper signature verification for ${appBundle}`,
+    ["--verify", "--strict", "--verbose=2", authorizationAddon],
+    `Notification authorization addon signature verification for ${appBundle}`,
   );
   const helperSigningDetails = runCommand(
     "/usr/bin/codesign",
-    ["--display", "--verbose=4", authorizationHelper],
-    `Notification authorization helper signature inspection for ${appBundle}`,
+    ["--display", "--verbose=4", authorizationAddon],
+    `Notification authorization addon signature inspection for ${appBundle}`,
   );
   if (!helperSigningDetails.split("\n").includes(`TeamIdentifier=${expectedTeamIdentifier}`)) {
     throw new Error(
-      `${authorizationHelper} is not signed by the expected ${expectedTeamIdentifier} developer team`,
+      `${authorizationAddon} is not signed by the expected ${expectedTeamIdentifier} developer team`,
     );
   }
   runCommand(
     "/usr/bin/lipo",
-    [authorizationHelper, "-verify_arch", "arm64", "x86_64"],
-    `Notification authorization helper architecture verification for ${appBundle}`,
+    [authorizationAddon, "-verify_arch", "arm64", "x86_64"],
+    `Notification authorization addon architecture verification for ${appBundle}`,
   );
 
   runCommand(
