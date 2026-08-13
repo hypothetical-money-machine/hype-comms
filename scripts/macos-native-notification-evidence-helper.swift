@@ -126,11 +126,17 @@ private func frame(_ element: AXUIElement) -> CGRect? {
   return CGRect(origin: position, size: size)
 }
 
-private func notificationElementAndCropRect() throws -> (AXUIElement, CGRect) {
-  let applications = NSWorkspace.shared.runningApplications.filter {
+private func notificationApplications() -> [NSRunningApplication] {
+  NSWorkspace.shared.runningApplications.filter {
     $0.bundleIdentifier == "com.apple.notificationcenterui" ||
-      $0.localizedName == "NotificationCenter"
+      $0.bundleIdentifier == "com.apple.UserNotificationCenter" ||
+      $0.localizedName == "NotificationCenter" ||
+      $0.localizedName == "UserNotificationCenter"
   }
+}
+
+private func notificationElementAndCropRect() throws -> (AXUIElement, CGRect) {
+  let applications = notificationApplications()
   guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
   for application in applications {
     let root = AXUIElementCreateApplication(application.processIdentifier)
@@ -175,19 +181,27 @@ private func pressElementOrAncestor(_ element: AXUIElement) -> Bool {
   return false
 }
 
-private func clickSyntheticNotification() throws {
+private func clickSyntheticNotification() async throws {
   guard AXIsProcessTrusted() else { throw HelperError.permissionDenied }
-  let applications = NSWorkspace.shared.runningApplications.filter {
-    $0.bundleIdentifier == "com.apple.notificationcenterui" ||
-      $0.localizedName == "NotificationCenter"
-  }
+  let applications = notificationApplications()
   guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
-  let (match, _) = try notificationElementAndCropRect()
+  let (match, _) = try await waitForNotificationElementAndCropRect()
   if pressElementOrAncestor(match) {
     print("notification-clicked")
     return
   }
   throw HelperError.notificationNotFound
+}
+
+private func waitForNotificationElementAndCropRect() async throws -> (AXUIElement, CGRect) {
+  let deadline = Date().addingTimeInterval(15)
+  while true {
+    do {
+      return try notificationElementAndCropRect()
+    } catch HelperError.notificationNotFound where Date() < deadline {
+      try await Task.sleep(nanoseconds: 200_000_000)
+    }
+  }
 }
 
 private func writePng(_ image: CGImage, to destination: String) throws {
@@ -213,7 +227,7 @@ private func captureNotification(to destination: String) async throws {
   guard CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() else {
     throw HelperError.permissionDenied
   }
-  let (_, cropFrame) = try notificationElementAndCropRect()
+  let (_, cropFrame) = try await waitForNotificationElementAndCropRect()
   let content = try await SCShareableContent.excludingDesktopWindows(
     false,
     onScreenWindowsOnly: true
@@ -296,7 +310,7 @@ private enum MacosNativeNotificationEvidenceHelper {
       {
         try await captureApplication(to: arguments[2])
       } else if arguments == ["click"] {
-        try clickSyntheticNotification()
+        try await clickSyntheticNotification()
       } else {
         throw HelperError.invalidArguments
       }

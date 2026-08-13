@@ -80,6 +80,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     new URL("../.github/workflows/desktop-package-smoke.yml", import.meta.url),
     "utf8",
   );
+  const nativeEvidenceHelper = await readFile(
+    new URL("./macos-native-notification-evidence-helper.swift", import.meta.url),
+    "utf8",
+  );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
   const releasePackageJob = workflowJob(releaseWorkflow, "package");
   const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
@@ -230,6 +234,9 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /--helper="\$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u);
   assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
   assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
+  assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
+  assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
+  assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(15\)/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
