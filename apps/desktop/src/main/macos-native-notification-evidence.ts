@@ -1,7 +1,7 @@
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { NotificationOsPermission } from "@hmm-chat/contracts";
+import type { NotificationOsPermission } from "@hype-comms/contracts";
 
 import type { NotificationPresenter, PresentedNotificationHandle } from "./notification-presenter";
 

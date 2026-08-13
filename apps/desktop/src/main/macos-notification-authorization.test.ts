@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MacosNotificationAuthorization,
   createMacosNotificationAuthorization,
+  requestAuthorizationForPersistedEnabledPreference,
   setNotificationPreferenceWithAuthorization,
 } from "./macos-notification-authorization";
 
@@ -162,5 +163,28 @@ describe("MacosNotificationAuthorization", () => {
       }),
     ).resolves.toEqual(enabledState);
     expect(setPreference).toHaveBeenCalledOnce();
+  });
+
+  it("requests unknown permission for a persisted enabled pilot preference", async () => {
+    const current = { ...DISABLED_STATE, devicePreference: "enabled" } as const;
+    const authorize = vi.fn((_command: string, callback: AuthorizationCallback) =>
+      callback(null, "granted"),
+    );
+    const authorization = new MacosNotificationAuthorization({
+      addonPath: "/tmp/addon.node",
+      load: () => ({ authorize }),
+    });
+    const grantedState = { ...current, osPermission: "granted" } as const;
+    const refreshCapability = vi.fn(async () => grantedState);
+
+    await expect(
+      requestAuthorizationForPersistedEnabledPreference({
+        authorization,
+        current,
+        refreshCapability,
+      }),
+    ).resolves.toEqual(grantedState);
+    expect(authorize).toHaveBeenCalledWith("request", expect.any(Function));
+    expect(refreshCapability).toHaveBeenCalledOnce();
   });
 });

@@ -5,7 +5,7 @@ import type {
   NotificationOsPermission,
   NotificationPreference,
   NotificationState,
-} from "@hmm-chat/contracts";
+} from "@hype-comms/contracts";
 
 const ADDON_FILENAME = "hmm-notification-authorization.node";
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
@@ -103,6 +103,22 @@ export function createMacosNotificationAuthorization(options: {
     addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
     load: options.load,
   });
+}
+
+export async function requestAuthorizationForPersistedEnabledPreference(options: {
+  readonly authorization: MacosNotificationAuthorization | null;
+  readonly current: NotificationState;
+  readonly refreshCapability: () => Promise<NotificationState>;
+}): Promise<NotificationState> {
+  if (
+    options.authorization === null ||
+    options.current.devicePreference !== "enabled" ||
+    options.current.osPermission !== "unknown"
+  ) {
+    return options.current;
+  }
+  await options.authorization.request();
+  return options.refreshCapability();
 }
 
 export async function setNotificationPreferenceWithAuthorization(options: {

@@ -7,7 +7,7 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 private let syntheticBody = "Synthetic direct message for native notification evidence"
-private let hypeCommsBundleIdentifier = "com.hypotheticalmoneymachine.hmmchat"
+private let hypeCommsBundleIdentifier = "com.hypemm.hypecomms"
 
 private struct PermissionState: Encodable {
   let accessibility: Bool
@@ -26,7 +26,7 @@ private enum HelperError: LocalizedError {
     switch self {
     case .captureFailed: "ScreenCaptureKit did not return a display image"
     case .invalidArguments:
-      "Expected preflight, request, capture notification|application <absolute-path>, or click"
+      "Expected preflight, request, capture notification <path>, capture application <pid> <path>, or click"
     case .notificationCenterUnavailable: "Notification Center is not running"
     case .notificationNotFound: "The synthetic Hype Comms notification was not found"
     case .permissionDenied: "Screen Recording and Accessibility must both be enabled"
@@ -223,6 +223,8 @@ private func pollForNotificationElementAndCropRect(
       return try notificationElementAndCropRect()
     } catch HelperError.notificationNotFound {
       try await Task.sleep(nanoseconds: 200_000_000)
+    } catch HelperError.notificationCenterUnavailable {
+      try await Task.sleep(nanoseconds: 200_000_000)
     }
   }
   return nil
@@ -303,14 +305,15 @@ private func captureNotification(to destination: String) async throws {
   try writePng(croppedImage, to: destination)
 }
 
-private func captureApplication(to destination: String) async throws {
+private func captureApplication(to destination: String, processIdentifier: pid_t) async throws {
   guard CGPreflightScreenCaptureAccess() else { throw HelperError.permissionDenied }
   let content = try await SCShareableContent.excludingDesktopWindows(
     false,
     onScreenWindowsOnly: true
   )
   let windows = content.windows.filter {
-    $0.owningApplication?.bundleIdentifier == hypeCommsBundleIdentifier && $0.frame.width > 0 &&
+    $0.owningApplication?.bundleIdentifier == hypeCommsBundleIdentifier &&
+      $0.owningApplication?.processID == processIdentifier && $0.frame.width > 0 &&
       $0.frame.height > 0
   }
   guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
@@ -345,10 +348,11 @@ private enum MacosNativeNotificationEvidenceHelper {
         arguments[1] == "notification"
       {
         try await captureNotification(to: arguments[2])
-      } else if arguments.count == 3, arguments[0] == "capture",
-        arguments[1] == "application"
+      } else if arguments.count == 4, arguments[0] == "capture",
+        arguments[1] == "application", let processIdentifier = pid_t(arguments[2]),
+        processIdentifier > 0
       {
-        try await captureApplication(to: arguments[2])
+        try await captureApplication(to: arguments[3], processIdentifier: processIdentifier)
       } else if arguments == ["click"] {
         try await clickSyntheticNotification()
       } else {

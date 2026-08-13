@@ -45,17 +45,6 @@ const environment = {
   UPDATE_MANIFEST: "latest.yml",
 };
 
-const workflowJob = (workflow, jobName) => {
-  const marker = `  ${jobName}:\n`;
-  const start = workflow.indexOf(marker);
-  assert.notEqual(start, -1, `Expected workflow job ${jobName}`);
-  const remainingWorkflow = workflow.slice(start + marker.length);
-  const nextJob = remainingWorkflow.search(/^ {2}[a-zA-Z0-9_-]+:\n/mu);
-  return nextJob === -1
-    ? workflow.slice(start)
-    : workflow.slice(start, start + marker.length + nextJob);
-};
-
 const matrixEntry = (job, platform) => {
   const marker = `          - platform: ${platform}\n`;
   const start = job.indexOf(marker);
@@ -231,13 +220,17 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
   assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
   assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
-  assert.match(nativeEvidenceJob, /--helper="\$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u);
+  assert.match(
+    nativeEvidenceJob,
+    /--helper="\$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u,
+  );
   assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
   assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
   assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
   assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
   assert.match(nativeEvidenceHelper, /\.maskSecondaryFn/u);
   assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(13\)/u);
+  assert.match(nativeEvidenceHelper, /owningApplication\?\.processID == processIdentifier/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);

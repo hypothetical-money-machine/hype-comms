@@ -164,18 +164,18 @@ jobs:
       - name: Configure macOS signing and notarization
         shell: bash
         env:
-          HMM_MACOS_CSC_LINK: ${{ secrets.HYPE_COMMS_MACOS_CSC_LINK }}
-          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HYPE_COMMS_MACOS_CSC_KEY_PASSWORD }}
-          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 }}
-          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
-          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
+          HYPE_COMMS_MACOS_CSC_LINK: ${{ secrets.HYPE_COMMS_MACOS_CSC_LINK }}
+          HYPE_COMMS_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HYPE_COMMS_MACOS_CSC_KEY_PASSWORD }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
+          HYPE_COMMS_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
           EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
         run: |
-          if [[ -z "$HMM_MACOS_CSC_LINK" ||
-                -z "$HMM_MACOS_CSC_KEY_PASSWORD" ||
-                -z "$HMM_MACOS_APPLE_API_KEY_BASE64" ||
-                -z "$HMM_MACOS_APPLE_API_KEY_ID" ||
-                -z "$HMM_MACOS_APPLE_API_ISSUER" ]]; then
+          if [[ -z "$HYPE_COMMS_MACOS_CSC_LINK" ||
+                -z "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_ID" ||
+                -z "$HYPE_COMMS_MACOS_APPLE_API_ISSUER" ]]; then
             echo "The macOS evidence build requires signing and all notarization secrets." >&2
             exit 1
           fi
@@ -189,8 +189,8 @@ jobs:
           root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
 
-          printf '%s' "${HMM_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
-          printf '%s' "$HMM_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+          printf '%s' "${HYPE_COMMS_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
+          printf '%s' "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
           security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
           rm -f "$original_keychains_path" "$original_keychains_pending_path"
@@ -201,7 +201,7 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain_path"
           security import "$certificate_path" \
             -k "$keychain_path" \
-            -P "$HMM_MACOS_CSC_KEY_PASSWORD" \
+            -P "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/productbuild
           security set-key-partition-list \
@@ -253,8 +253,8 @@ jobs:
             echo "CSC_KEYCHAIN=${keychain_path}"
             echo "CSC_NAME=${expected_identity_hashes[0]}"
             echo "APPLE_API_KEY=${api_key_path}"
-            echo "APPLE_API_KEY_ID=${HMM_MACOS_APPLE_API_KEY_ID}"
-            echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
+            echo "APPLE_API_KEY_ID=${HYPE_COMMS_MACOS_APPLE_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${HYPE_COMMS_MACOS_APPLE_API_ISSUER}"
           } >> "$GITHUB_ENV"
 
       - name: Build signed macOS capture helper
@@ -293,7 +293,7 @@ jobs:
             "$helper_bundle"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$helper_bundle"
 
-          echo "HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
+          echo "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
 
       - name: Package signed and notarized macOS application
         shell: sh
@@ -306,7 +306,7 @@ jobs:
       - name: Await unlocked console and authorize macOS capture helper
         shell: bash
         run: |
-          helper_bundle="$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"
+          helper_bundle="$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"
           helper_executable="${helper_bundle}/Contents/MacOS/hmm-native-notification-evidence"
           unlock_deadline=$((SECONDS + 900))
           while true; do
@@ -366,7 +366,7 @@ jobs:
           echo "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY=${evidence_directory}" >> "$GITHUB_ENV"
           node scripts/capture-macos-native-notification.mjs \
             --app="${install_directory}/Hype Comms.app" \
-            --helper="$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER" \
+            --helper="$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER" \
             --artifacts="$evidence_directory"
 
       - name: Upload macOS notification evidence

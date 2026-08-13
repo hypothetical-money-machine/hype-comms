@@ -116,6 +116,7 @@ import { protectMainProcessLogStreams, reportMainProcessError } from "./main-pro
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
   createMacosNotificationAuthorization,
+  requestAuthorizationForPersistedEnabledPreference,
   setNotificationPreferenceWithAuthorization,
   type MacosNotificationAuthorization,
 } from "./macos-notification-authorization";
@@ -1989,6 +1990,14 @@ if (!hasSingleInstanceLock) {
         compactModeController.initialize(),
         notificationSettingsController.initialize(),
       ]);
+      const initializedNotificationSettings = notificationSettingsController;
+      await requestAuthorizationForPersistedEnabledPreference({
+        authorization: macosNotificationAuthorization,
+        current: initializedNotificationSettings.state,
+        refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+      }).catch((error: unknown) => {
+        reportMainProcessError("Failed to request persisted notification permission", error);
+      });
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
       stopNotificationSettingsSubscription =

@@ -156,8 +156,16 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
   throw new Error(`Timed out waiting for ${name}.json`);
 }
 
-async function captureScreen(helperExecutable, surface, destination) {
-  await runCommand(helperExecutable, ["capture", surface, destination]);
+async function captureScreen(helperExecutable, surface, destination, processIdentifier) {
+  const arguments_ = ["capture", surface];
+  if (surface === "application") {
+    if (!Number.isSafeInteger(processIdentifier) || processIdentifier <= 0) {
+      throw new Error("The evidence application process identifier is invalid");
+    }
+    arguments_.push(String(processIdentifier));
+  }
+  arguments_.push(destination);
+  await runCommand(helperExecutable, arguments_);
   const details = await stat(destination);
   if (!details.isFile() || details.size < 10_000) {
     throw new Error(`macOS screenshot is missing or too small: ${destination}`);
@@ -234,6 +242,7 @@ async function main() {
       helperExecutable,
       "application",
       path.join(artifactDirectory, "macos-native-notification-clicked.png"),
+      child.pid,
     );
   } finally {
     await terminate(child);
