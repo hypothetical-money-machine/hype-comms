@@ -135,6 +135,16 @@ private func notificationApplications() -> [NSRunningApplication] {
   }
 }
 
+private func writeNotificationDiagnostics() {
+  let entries = notificationApplications().map { application in
+    let root = AXUIElementCreateApplication(application.processIdentifier)
+    return "\(application.bundleIdentifier ?? "unknown") root-children=\(children(root).count)"
+  }
+  FileHandle.standardError.write(
+    Data("macOS evidence helper notification processes: \(entries.joined(separator: ", "))\n".utf8)
+  )
+}
+
 private func notificationElementAndCropRect() throws -> (AXUIElement, CGRect) {
   let applications = notificationApplications()
   guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
@@ -193,15 +203,45 @@ private func clickSyntheticNotification() async throws {
   throw HelperError.notificationNotFound
 }
 
-private func waitForNotificationElementAndCropRect() async throws -> (AXUIElement, CGRect) {
-  let deadline = Date().addingTimeInterval(15)
-  while true {
+private func showNotificationCenter() throws {
+  // macOS defines Globe/Fn-N as the system shortcut for Notification Center.
+  guard
+    let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 45, keyDown: true),
+    let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 45, keyDown: false)
+  else { throw HelperError.captureFailed }
+  keyDown.flags = .maskSecondaryFn
+  keyUp.flags = .maskSecondaryFn
+  keyDown.post(tap: .cghidEventTap)
+  keyUp.post(tap: .cghidEventTap)
+}
+
+private func pollForNotificationElementAndCropRect(
+  until deadline: Date
+) async throws -> (AXUIElement, CGRect)? {
+  while Date() < deadline {
     do {
       return try notificationElementAndCropRect()
-    } catch HelperError.notificationNotFound where Date() < deadline {
+    } catch HelperError.notificationNotFound {
       try await Task.sleep(nanoseconds: 200_000_000)
     }
   }
+  return nil
+}
+
+private func waitForNotificationElementAndCropRect() async throws -> (AXUIElement, CGRect) {
+  if let banner = try await pollForNotificationElementAndCropRect(
+    until: Date().addingTimeInterval(2)
+  ) {
+    return banner
+  }
+  try showNotificationCenter()
+  if let historyItem = try await pollForNotificationElementAndCropRect(
+    until: Date().addingTimeInterval(13)
+  ) {
+    return historyItem
+  }
+  writeNotificationDiagnostics()
+  throw HelperError.notificationNotFound
 }
 
 private func writePng(_ image: CGImage, to destination: String) throws {

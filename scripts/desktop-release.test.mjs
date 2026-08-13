@@ -236,7 +236,8 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
   assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
   assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
-  assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(15\)/u);
+  assert.match(nativeEvidenceHelper, /\.maskSecondaryFn/u);
+  assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(13\)/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
