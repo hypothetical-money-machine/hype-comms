@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { workspaceEventSchema } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
@@ -333,6 +334,21 @@ describeWithPostgres("runMigrations", () => {
       const customWorkspaceId = randomUUID();
       const conversationId = randomUUID();
       const legacyMessageId = randomUUID();
+      const legacyClientMessageId = randomUUID();
+      const legacyEventId = randomUUID();
+      const legacyEventOccurredAt = "2026-01-01T00:00:00.000Z";
+      const legacyEventEnvelope = {
+        version: 1,
+        id: legacyEventId,
+        type: "message.created",
+        occurredAt: legacyEventOccurredAt,
+        workspaceId: defaultWorkspaceId,
+        conversationId,
+        workspaceSequence: "1",
+        conversationSequence: "1",
+        entityVersion: 1,
+        delivery: "at_least_once",
+      };
 
       await withoutTechnicalRebrandMigration(async (migrationsDirectory) => {
         await runMigrations(pool, migrationsDirectory);
@@ -371,15 +387,69 @@ describeWithPostgres("runMigrations", () => {
           legacyMessageId,
           defaultWorkspaceId,
           conversationId,
-          randomUUID(),
+          legacyClientMessageId,
           Buffer.alloc(32),
           userId,
         ],
       );
+      // Retained events embed the message verbatim, so the literal also lives in JSONB.
+      const legacyEventPayload = {
+        message: {
+          id: legacyMessageId,
+          conversationId,
+          conversationSequence: "1",
+          version: 1,
+          clientMessageId: legacyClientMessageId,
+          authorId: userId,
+          threadRootId: null,
+          body: "Legacy",
+          bodyFormat: "hmm_markdown_v1",
+          editedAt: null,
+          deletedAt: null,
+          createdAt: legacyEventOccurredAt,
+          updatedAt: legacyEventOccurredAt,
+        },
+        mentionedUserIds: [],
+      };
+      await pool.query(
+        `INSERT INTO sync_events (
+           id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
+           event_type, actor_user_id, entity_version, payload, occurred_at
+         ) VALUES ($1, $2, 1, $3, 1, 'message.created', $4, 1, $5::jsonb, $6)`,
+        [
+          legacyEventId,
+          defaultWorkspaceId,
+          conversationId,
+          userId,
+          JSON.stringify(legacyEventPayload),
+          legacyEventOccurredAt,
+        ],
+      );
+      // Non-vacuity: this is exactly what WorkspaceRepository.#mapEvent feeds the strict schema,
+      // and it throws until 0018 rewrites the retained payload.
+      expect(() =>
+        workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: legacyEventPayload }),
+      ).toThrow();
 
       await expect(runMigrations(pool)).resolves.toEqual({
         applied: ["0018_hype_comms_technical_rebrand.sql"],
       });
+
+      const retainedEvent = await pool.query<{ payload: unknown; body_format: string | null }>(
+        `SELECT payload, payload #>> '{message,bodyFormat}' AS body_format
+           FROM sync_events
+          WHERE id = $1`,
+        [legacyEventId],
+      );
+      const [retainedRow] = retainedEvent.rows;
+      if (retainedRow === undefined) {
+        throw new Error("The retained sync event disappeared during the migration.");
+      }
+      expect(retainedRow.body_format).toBe("hype_comms_markdown_v1");
+      // Catch-up sync and realtime reconnection both go through this parse.
+      expect(() =>
+        workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: retainedRow.payload }),
+      ).not.toThrow();
 
       await expect(
         pool.query<{ body_format: string }>("SELECT body_format FROM messages WHERE id = $1", [
