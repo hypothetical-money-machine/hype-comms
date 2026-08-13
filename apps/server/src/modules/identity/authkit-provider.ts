@@ -399,12 +399,25 @@ export interface WorkOSAuthKitIdentityProviderConfig {
   readonly clientId: string;
   readonly redirectUri: string;
   readonly jwtIssuer: string;
+  /**
+   * Optional SDK transport overrides for a local WorkOS Emulate instance. Production never sets
+   * these; tests and local emulator wiring use them to keep the official client pointed at
+   * `http://localhost:<port>` instead of `https://api.workos.com`.
+   */
+  readonly apiHostname?: string;
+  readonly port?: number;
+  readonly https?: boolean;
 }
 
 export function createWorkOSAuthKitIdentityProvider(
   config: WorkOSAuthKitIdentityProviderConfig,
 ): WorkOSAuthKitIdentityProvider {
-  const workos = new WorkOS(config.apiKey, { clientId: config.clientId });
+  const workos = new WorkOS(config.apiKey, {
+    clientId: config.clientId,
+    ...(config.apiHostname === undefined ? {} : { apiHostname: config.apiHostname }),
+    ...(config.port === undefined ? {} : { port: config.port }),
+    ...(config.https === undefined ? {} : { https: config.https }),
+  });
   const jwks = createRemoteJWKSet(new URL(workos.userManagement.getJwksUrl(config.clientId)));
   return new WorkOSAuthKitIdentityProvider({
     client: {

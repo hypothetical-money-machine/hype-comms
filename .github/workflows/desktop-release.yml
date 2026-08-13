@@ -51,6 +51,17 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match desktop version ${desktop_version}." >&2
             exit 1
           fi
+          release_notes_path="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -L "$release_notes_path" ]] || \
+            [[ ! -f "$release_notes_path" ]] || \
+            ! grep -q '[^[:space:]]' "$release_notes_path"; then
+            echo "Release notes must be a nonempty regular file at ${release_notes_path}." >&2
+            exit 1
+          fi
+          if grep -Fq '<!-- release-notes:todo' "$release_notes_path"; then
+            echo "Release notes at ${release_notes_path} still require review." >&2
+            exit 1
+          fi
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
             echo "Release tag ${GITHUB_REF_NAME} is not on origin/main." >&2
@@ -81,7 +92,7 @@ jobs:
         shell: bash
         run: node scripts/install-github-cli.mjs
 
-      - name: Create draft GitHub Release
+      - name: Prepare draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
@@ -89,7 +100,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          release_notes_path="docs/releases/${GITHUB_REF_NAME}.md"
+          release_notes="$(<"$release_notes_path")"
+          release_body_path="${RUNNER_TEMP}/existing-github-release-notes.md"
+          if
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json body \
+              --jq '.body // ""' > "$release_body_path" 2>/dev/null
+          then
+            if ! RELEASE_NOTES_PATH="$release_notes_path" \
+              GITHUB_RELEASE_BODY_PATH="$release_body_path" \
+              node scripts/desktop-release-notes.mjs; then
+              combined_notes_path="${RUNNER_TEMP}/github-release-notes.md"
+              printf '%s\n' "$release_notes" > "$combined_notes_path"
+              if grep -q '[^[:space:]]' "$release_body_path"; then
+                printf '\n' >> "$combined_notes_path"
+                cat "$release_body_path" >> "$combined_notes_path"
+              fi
+              gh release edit "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Hype Comms ${DESKTOP_VERSION}" \
+                --notes-file "$combined_notes_path"
+            fi
+          else
             notes_start_tag="$(
               gh release list \
                 --repo "$GITHUB_REPOSITORY" \
@@ -107,6 +141,7 @@ jobs:
               --verify-tag \
               --draft \
               --title "Hype Comms ${DESKTOP_VERSION}" \
+              --notes-file "$release_notes_path" \
               --generate-notes \
               --notes-start-tag "$notes_start_tag"
           fi
@@ -511,6 +546,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          release_notes_path="docs/releases/${GITHUB_REF_NAME}.md"
+          release_body_path="${RUNNER_TEMP}/github-release-notes.md"
+          gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json body \
+            --jq '.body // ""' > "$release_body_path"
+          RELEASE_NOTES_PATH="$release_notes_path" \
+            GITHUB_RELEASE_BODY_PATH="$release_body_path" \
+            node scripts/desktop-release-notes.mjs
           assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           for manifest in latest-mac.yml latest.yml latest-linux.yml latest-linux-arm64.yml; do
             if ! printf '%s\n' "$assets" | grep -Fqx "$manifest"; then

@@ -1,14 +1,17 @@
 import { NotFoundException, OauthException } from "@workos-inc/node";
 import { createLocalJWKSet, errors as joseErrors, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AuthKitIdentityRejectedError,
   AuthKitProviderUnavailableError,
   createWorkOSAccessTokenVerifier,
+  createWorkOSAuthKitIdentityProvider,
+  DEFAULT_WORKOS_JWT_ISSUER,
   validateWorkOSAccessTokenClaims,
   WorkOSAuthKitIdentityProvider,
 } from "../src/modules/identity/authkit-provider.js";
+import { startWorkOSEmulateFixture, type WorkOSEmulateFixture } from "./helpers/workos-emulate.js";
 
 const PROVIDER_STATE = "p".repeat(43);
 const PROVIDER_CODE_VERIFIER = "v".repeat(43);
@@ -19,20 +22,33 @@ const AUTHORIZATION_URL =
 const LOGOUT_URL =
   "https://api.workos.com/user_management/sessions/logout?session_id=session_01ABC";
 
-const verifiedAuthentication = {
-  accessToken: "workos-access-secret",
-  refreshToken: "workos-refresh-secret",
-  user: {
-    id: "user_01ABC",
-    email: "Morgan@Example.COM",
-    emailVerified: true,
-  },
-};
+const VERIFIED_USER_ID = "user_01TESTMORGAN";
+const VERIFIED_EMAIL = "Morgan@Example.COM";
+
+const fixtures: WorkOSEmulateFixture[] = [];
+
+afterEach(async () => {
+  await Promise.all(fixtures.splice(0).map(async (fixture) => fixture.close()));
+});
+
+async function emulateFixture(
+  users: Parameters<typeof startWorkOSEmulateFixture>[0]["users"] = [
+    {
+      id: VERIFIED_USER_ID,
+      email: VERIFIED_EMAIL,
+      emailVerified: true,
+    },
+  ],
+): Promise<WorkOSEmulateFixture> {
+  const fixture = await startWorkOSEmulateFixture({ users });
+  fixtures.push(fixture);
+  return fixture;
+}
 
 describe("WorkOS access-token verification", () => {
   it("requires bounded identity, session, temporal, unique, and expected-client claims", () => {
     const claims = {
-      iss: "https://api.workos.com/",
+      iss: DEFAULT_WORKOS_JWT_ISSUER,
       sub: "user_01ABC",
       sid: "session_01ABC",
       client_id: "client_test",
@@ -78,7 +94,7 @@ describe("WorkOS access-token verification", () => {
       createLocalJWKSet({ keys: [publicJwk] }),
     );
     const issuedAt = Math.floor(Date.now() / 1_000);
-    const sign = (clientId: string, issuer = "https://api.workos.com/") =>
+    const sign = (clientId: string, issuer = DEFAULT_WORKOS_JWT_ISSUER) =>
       new SignJWT({
         sid: "session_01ABC",
         client_id: clientId,
@@ -121,7 +137,7 @@ describe("WorkOS access-token verification", () => {
       jti: "01HQSXZXPPFPKMDD32RKTFY6PV",
     })
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer("https://api.workos.com/")
+      .setIssuer(DEFAULT_WORKOS_JWT_ISSUER)
       .setSubject("user_01ABC")
       .setIssuedAt(issuedAt)
       .setExpirationTime(issuedAt + 300)
@@ -132,14 +148,183 @@ describe("WorkOS access-token verification", () => {
   });
 });
 
-describe("WorkOS AuthKit identity provider", () => {
+describe("WorkOS AuthKit identity provider (WorkOS Emulate)", () => {
+  it("exchanges an emulator authorization code for a verified local identity", async () => {
+    const fixture = await emulateFixture();
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+
+    const identity = await fixture.provider.authenticateCode({
+      code: authorization.code,
+      codeVerifier: authorization.codeVerifier,
+      ipAddress: "127.0.0.1",
+      userAgent: "Hype Comms test",
+    });
+
+    expect(identity).toEqual({
+      provider: "workos",
+      subject: VERIFIED_USER_ID,
+      verifiedEmail: "morgan@example.com",
+      providerSessionId: expect.stringMatching(/^session_[A-Za-z0-9]+$/),
+    });
+    expect(JSON.stringify(identity)).not.toMatch(/eyJ/);
+    expect(JSON.stringify(identity)).not.toContain(authorization.code);
+  });
+
+  it("lists active sessions created by the emulator after a successful exchange", async () => {
+    const fixture = await emulateFixture();
+    const first = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+    const firstIdentity = await fixture.provider.authenticateCode({
+      code: first.code,
+      codeVerifier: first.codeVerifier,
+    });
+    const second = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+    const secondIdentity = await fixture.provider.authenticateCode({
+      code: second.code,
+      codeVerifier: second.codeVerifier,
+    });
+
+    await expect(fixture.provider.listActiveSessionIds(VERIFIED_USER_ID)).resolves.toEqual(
+      new Set([firstIdentity.providerSessionId, secondIdentity.providerSessionId]),
+    );
+  });
+
+  it("treats a definitively deleted WorkOS user as having no active sessions", async () => {
+    const fixture = await emulateFixture();
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+    await fixture.provider.authenticateCode({
+      code: authorization.code,
+      codeVerifier: authorization.codeVerifier,
+    });
+
+    await fixture.workos.userManagement.deleteUser(VERIFIED_USER_ID);
+
+    await expect(fixture.provider.listActiveSessionIds(VERIFIED_USER_ID)).resolves.toEqual(
+      new Set(),
+    );
+  });
+
+  it("rejects unverified emails from the emulator", async () => {
+    const fixture = await emulateFixture([
+      {
+        id: "user_01UNVERIFIED",
+        email: "unverified@example.com",
+        emailVerified: false,
+      },
+    ]);
+    const authorization = await fixture.authorizeCode({
+      loginHint: "unverified@example.com",
+    });
+
+    await expect(
+      fixture.provider.authenticateCode({
+        code: authorization.code,
+        codeVerifier: authorization.codeVerifier,
+      }),
+    ).rejects.toBeInstanceOf(AuthKitIdentityRejectedError);
+  });
+
+  it("classifies invalid emulator authorization codes as identity rejections", async () => {
+    const fixture = await emulateFixture();
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+
+    await expect(
+      fixture.provider.authenticateCode({
+        code: "invalid-authorization-code",
+        codeVerifier: authorization.codeVerifier,
+      }),
+    ).rejects.toBeInstanceOf(AuthKitIdentityRejectedError);
+  });
+
+  it("rejects a reused authorization code after a successful emulator exchange", async () => {
+    const fixture = await emulateFixture();
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+    await fixture.provider.authenticateCode({
+      code: authorization.code,
+      codeVerifier: authorization.codeVerifier,
+    });
+
+    await expect(
+      fixture.provider.authenticateCode({
+        code: authorization.code,
+        codeVerifier: authorization.codeVerifier,
+      }),
+    ).rejects.toBeInstanceOf(AuthKitIdentityRejectedError);
+  });
+
+  it("rejects a PKCE verifier that does not match the emulator authorization", async () => {
+    const fixture = await emulateFixture();
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+
+    await expect(
+      fixture.provider.authenticateCode({
+        code: authorization.code,
+        codeVerifier: "x".repeat(43),
+      }),
+    ).rejects.toBeInstanceOf(AuthKitIdentityRejectedError);
+  });
+
+  it("never treats an invalid subject as a complete inactive session set", async () => {
+    const fixture = await emulateFixture();
+
+    await expect(fixture.provider.listActiveSessionIds("not-a-workos-user")).rejects.toBeInstanceOf(
+      AuthKitProviderUnavailableError,
+    );
+  });
+
+  it("rejects raw HTTP authorization URLs from the emulator against HTTPS contracts", async () => {
+    const fixture = await emulateFixture();
+
+    // The official SDK points authorize at the emulator origin (http://localhost:…). Production
+    // Hype Comms only accepts credential-free HTTPS authorization material, so the adapter must
+    // refuse that surface rather than open a non-HTTPS provider URL in the system browser.
+    await expect(fixture.provider.createAuthorization()).rejects.toBeInstanceOf(
+      AuthKitProviderUnavailableError,
+    );
+  });
+
+  it("builds the production factory against the emulator transport overrides", async () => {
+    const fixture = await emulateFixture();
+    const host = new URL(fixture.emulator.url);
+    const provider = createWorkOSAuthKitIdentityProvider({
+      apiKey: fixture.emulator.apiKey,
+      clientId: fixture.clientId,
+      redirectUri: fixture.redirectUri,
+      jwtIssuer: DEFAULT_WORKOS_JWT_ISSUER,
+      apiHostname: host.hostname,
+      port: Number(host.port),
+      https: false,
+    });
+    const authorization = await fixture.authorizeCode({ loginHint: VERIFIED_EMAIL });
+
+    await expect(
+      provider.authenticateCode({
+        code: authorization.code,
+        codeVerifier: authorization.codeVerifier,
+      }),
+    ).resolves.toMatchObject({
+      provider: "workos",
+      subject: VERIFIED_USER_ID,
+      verifiedEmail: "morgan@example.com",
+    });
+  });
+});
+
+describe("WorkOS AuthKit identity provider (adapter edge cases)", () => {
   it("uses server-held PKCE and reduces WorkOS secrets to a verified identity", async () => {
     const getAuthorizationUrlWithPKCE = vi.fn().mockResolvedValue({
       url: AUTHORIZATION_URL,
       state: PROVIDER_STATE,
       codeVerifier: PROVIDER_CODE_VERIFIER,
     });
-    const authenticateWithCode = vi.fn().mockResolvedValue(verifiedAuthentication);
+    const authenticateWithCode = vi.fn().mockResolvedValue({
+      accessToken: "workos-access-secret",
+      refreshToken: "workos-refresh-secret",
+      user: {
+        id: "user_01ABC",
+        email: "Morgan@Example.COM",
+        emailVerified: true,
+      },
+    });
     const getLogoutUrl = vi.fn().mockReturnValue(LOGOUT_URL);
     const verifyAccessToken = vi.fn().mockResolvedValue({
       subject: "user_01ABC",
@@ -267,12 +452,9 @@ describe("WorkOS AuthKit identity provider", () => {
     await expect(provider.listActiveSessionIds("user_01ABC")).rejects.toBeInstanceOf(
       AuthKitProviderUnavailableError,
     );
-    await expect(provider.listActiveSessionIds("not-a-workos-user")).rejects.toBeInstanceOf(
-      AuthKitProviderUnavailableError,
-    );
   });
 
-  it("treats a definitively deleted WorkOS user as having no active sessions", async () => {
+  it("maps definitive NotFoundException pages to an empty active-session set", async () => {
     const provider = new WorkOSAuthKitIdentityProvider({
       client: {
         getAuthorizationUrlWithPKCE: vi.fn(),
@@ -293,13 +475,18 @@ describe("WorkOS AuthKit identity provider", () => {
     await expect(provider.listActiveSessionIds("user_01DELETED")).resolves.toEqual(new Set());
   });
 
-  it("rejects unverified email and every impersonation signal", async () => {
+  it("rejects every impersonation signal", async () => {
+    const verifiedAuthentication = {
+      accessToken: "workos-access-secret",
+      refreshToken: "workos-refresh-secret",
+      user: {
+        id: "user_01ABC",
+        email: "Morgan@Example.COM",
+        emailVerified: true,
+      },
+    };
     const authenticateWithCode = vi
       .fn()
-      .mockResolvedValueOnce({
-        ...verifiedAuthentication,
-        user: { ...verifiedAuthentication.user, emailVerified: false },
-      })
       .mockResolvedValueOnce({
         ...verifiedAuthentication,
         impersonator: { email: "operator@example.com", reason: "Support" },
@@ -316,13 +503,13 @@ describe("WorkOS AuthKit identity provider", () => {
       },
       clientId: "client_test",
       redirectUri: "https://chat.example/v1/auth/workos/callback",
-      verifyAccessToken: vi.fn(),
+      verifyAccessToken: vi.fn().mockResolvedValue({
+        subject: "user_01ABC",
+        sessionId: "session_01ABC",
+      }),
     });
     const input = { code: PROVIDER_CODE, codeVerifier: PROVIDER_CODE_VERIFIER };
 
-    await expect(provider.authenticateCode(input)).rejects.toBeInstanceOf(
-      AuthKitIdentityRejectedError,
-    );
     await expect(provider.authenticateCode(input)).rejects.toBeInstanceOf(
       AuthKitIdentityRejectedError,
     );
@@ -339,7 +526,15 @@ describe("WorkOS AuthKit identity provider", () => {
     const provider = new WorkOSAuthKitIdentityProvider({
       client: {
         getAuthorizationUrlWithPKCE: vi.fn(),
-        authenticateWithCode: vi.fn().mockResolvedValue(verifiedAuthentication),
+        authenticateWithCode: vi.fn().mockResolvedValue({
+          accessToken: "workos-access-secret",
+          refreshToken: "workos-refresh-secret",
+          user: {
+            id: "user_01ABC",
+            email: "Morgan@Example.COM",
+            emailVerified: true,
+          },
+        }),
         getLogoutUrl: vi.fn(),
       },
       clientId: "client_test",
@@ -365,7 +560,14 @@ describe("WorkOS AuthKit identity provider", () => {
         }),
       )
       .mockRejectedValueOnce(new Error(`upstream leaked ${PROVIDER_CODE}`))
-      .mockResolvedValueOnce({ accessToken: "token", user: verifiedAuthentication.user });
+      .mockResolvedValueOnce({
+        accessToken: "token",
+        user: {
+          id: "user_01ABC",
+          email: "Morgan@Example.COM",
+          emailVerified: true,
+        },
+      });
     const provider = new WorkOSAuthKitIdentityProvider({
       client: {
         getAuthorizationUrlWithPKCE: vi.fn(),
