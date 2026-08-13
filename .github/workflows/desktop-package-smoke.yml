@@ -319,13 +319,13 @@ jobs:
             exit 1
           fi
 
-          "$notification_helper_executable" notification-request &
+          /usr/bin/open -W -n "$notification_helper_bundle" --args notification-request &
           notification_request_pid=$!
           permission_deadline=$((SECONDS + 300))
           until "$notification_helper_executable" notification-preflight; do
             if [[ -n "$notification_request_pid" ]] &&
               ! kill -0 "$notification_request_pid" 2>/dev/null; then
-              wait "$notification_request_pid"
+              wait "$notification_request_pid" || true
               notification_request_pid=""
             fi
             if (( SECONDS >= permission_deadline )); then
@@ -339,16 +339,16 @@ jobs:
             sleep 2
           done
           if [[ -n "$notification_request_pid" ]]; then
-            wait "$notification_request_pid"
+            wait "$notification_request_pid" || true
           fi
 
-          "$helper_executable" request &
+          /usr/bin/open -W -n "$helper_bundle" --args request &
           helper_request_pid=$!
           permission_deadline=$((SECONDS + 300))
           until "$helper_executable" preflight; do
             if [[ -n "$helper_request_pid" ]] &&
               ! kill -0 "$helper_request_pid" 2>/dev/null; then
-              wait "$helper_request_pid"
+              wait "$helper_request_pid" || true
               helper_request_pid=""
             fi
             if (( SECONDS >= permission_deadline )); then
@@ -362,7 +362,7 @@ jobs:
             sleep 2
           done
           if [[ -n "$helper_request_pid" ]]; then
-            wait "$helper_request_pid"
+            wait "$helper_request_pid" || true
           fi
           echo "HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
           echo "HMM_MACOS_NATIVE_NOTIFICATION_AUTHORIZATION_HELPER=${notification_helper_bundle}" >> "$GITHUB_ENV"

@@ -189,13 +189,16 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
   assert.match(nativeEvidenceJob, /name: Build and authorize signed macOS evidence helper/u);
-  assert.match(nativeEvidenceJob, /"\$notification_helper_executable" notification-request &/u);
+  assert.match(
+    nativeEvidenceJob,
+    /\/usr\/bin\/open -W -n "\$notification_helper_bundle" --args notification-request &/u,
+  );
   assert.match(
     nativeEvidenceJob,
     /CFBundleIdentifier string com\.hypotheticalmoneymachine\.hmmchat'/u,
   );
   assert.match(nativeEvidenceJob, /"\$notification_helper_executable" notification-preflight/u);
-  assert.match(nativeEvidenceJob, /"\$helper_executable" request/u);
+  assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
   assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
   assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
   assert.match(nativeEvidenceJob, /--helper="\$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u);

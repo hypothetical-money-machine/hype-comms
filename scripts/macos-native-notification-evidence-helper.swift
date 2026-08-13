@@ -104,6 +104,12 @@ private func requestNotificationPermission() async throws {
   if !state.authorized { throw HelperError.notificationPermissionDenied }
 }
 
+private func prepareGuiApplication() {
+  let application = NSApplication.shared
+  application.setActivationPolicy(.accessory)
+  application.finishLaunching()
+}
+
 private func copyAttribute(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
   var value: CFTypeRef?
   guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
@@ -212,6 +218,7 @@ private func captureScreen(to destination: String) async throws {
 private enum MacosNativeNotificationEvidenceHelper {
   static func main() async {
     do {
+      prepareGuiApplication()
       let arguments = Array(CommandLine.arguments.dropFirst())
       if arguments == ["preflight"] {
         let state = permissionState()
