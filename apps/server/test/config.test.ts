@@ -43,6 +43,13 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ HYPE_COMMS_AGENT_PROVISIONING_ENABLED: "yes" })).toThrow(ConfigError);
   });
 
+  it("maps HYPE_COMMS_WEB_ROOT to webRoot and omits it when unset", () => {
+    expect(loadConfig({ HYPE_COMMS_WEB_ROOT: "/srv/hype-comms/web" })).toMatchObject({
+      webRoot: "/srv/hype-comms/web",
+    });
+    expect(loadConfig({})).not.toHaveProperty("webRoot");
+  });
+
   it("rejects malformed ports and origins", () => {
     expect(() => loadConfig({ HYPE_COMMS_PORT: "70000" })).toThrow(ConfigError);
     expect(() => loadConfig({ HYPE_COMMS_ALLOWED_ORIGINS: "https://chat.example/path" })).toThrow(
