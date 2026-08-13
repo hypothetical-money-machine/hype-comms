@@ -257,13 +257,7 @@ jobs:
             echo "APPLE_API_ISSUER=${HMM_MACOS_APPLE_API_ISSUER}"
           } >> "$GITHUB_ENV"
 
-      - name: Keep macOS evidence console awake
-        shell: bash
-        run: |
-          /usr/bin/caffeinate -dims &
-          echo "HMM_MACOS_EVIDENCE_CAFFEINATE_PID=$!" >> "$GITHUB_ENV"
-
-      - name: Build and authorize signed macOS capture helper
+      - name: Build signed macOS capture helper
         shell: bash
         run: |
           helper_bundle="${RUNNER_TEMP}/Hype Comms Evidence.app"
@@ -299,12 +293,35 @@ jobs:
             "$helper_bundle"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$helper_bundle"
 
-          console_state="$(/usr/sbin/ioreg -n Root -d 1)"
-          if [[ "$console_state" =~ \"CGSSessionScreenIsLocked\"[[:space:]]*=[[:space:]]*Yes ||
-                "$console_state" =~ \"IOConsoleLocked\"[[:space:]]*=[[:space:]]*Yes ]]; then
-            echo "The macOS console is locked. Unlock it before dispatching native notification evidence." >&2
-            exit 1
-          fi
+          echo "HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
+
+      - name: Package signed and notarized macOS application
+        shell: sh
+        run: npm run package:desktop:mac
+
+      - name: Verify macOS release signing and notarization
+        shell: bash
+        run: npm run verify:desktop-package:macos-release
+
+      - name: Await unlocked console and authorize macOS capture helper
+        shell: bash
+        run: |
+          helper_bundle="$HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"
+          helper_executable="${helper_bundle}/Contents/MacOS/hmm-native-notification-evidence"
+          unlock_deadline=$((SECONDS + 900))
+          while true; do
+            console_state="$(/usr/sbin/ioreg -n Root -d 1)"
+            if [[ ! "$console_state" =~ \"CGSSessionScreenIsLocked\"[[:space:]]*=[[:space:]]*Yes &&
+                  ! "$console_state" =~ \"IOConsoleLocked\"[[:space:]]*=[[:space:]]*Yes ]]; then
+              break
+            fi
+            if (( SECONDS >= unlock_deadline )); then
+              echo "The macOS console remained locked; unlock it and rerun this workflow." >&2
+              exit 1
+            fi
+            echo "Waiting for the macOS console to be unlocked before GUI evidence capture."
+            sleep 5
+          done
 
           /usr/bin/open -W -n "$helper_bundle" --args request &
           helper_request_pid=$!
@@ -328,15 +345,6 @@ jobs:
           if [[ -n "$helper_request_pid" ]]; then
             wait "$helper_request_pid" || true
           fi
-          echo "HMM_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER=${helper_bundle}" >> "$GITHUB_ENV"
-
-      - name: Package signed and notarized macOS application
-        shell: sh
-        run: npm run package:desktop:mac
-
-      - name: Verify macOS release signing and notarization
-        shell: bash
-        run: npm run verify:desktop-package:macos-release
 
       - name: Capture installed notification and click callback
         shell: bash
@@ -381,9 +389,6 @@ jobs:
           api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
           cleanup_status=0
           set +e
-          if [[ -n "$HMM_MACOS_EVIDENCE_CAFFEINATE_PID" ]]; then
-            kill "$HMM_MACOS_EVIDENCE_CAFFEINATE_PID" 2>/dev/null || true
-          fi
           if [[ -f "$original_keychains_path" ]]; then
             original_keychains=()
             parsed_keychain_count=0
