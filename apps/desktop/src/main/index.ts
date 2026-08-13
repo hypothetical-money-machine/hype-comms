@@ -161,7 +161,7 @@ import {
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
-import { handleLastWindowClosed } from "./window-lifecycle";
+import { BeforeQuitCoordinator, handleLastWindowClosed } from "./window-lifecycle";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -2453,50 +2453,65 @@ if (!hasSingleInstanceLock) {
     });
   });
 
-  app.on("before-quit", () => {
-    macosNativeNotificationEvidenceSession?.handle.close();
-    macosNativeNotificationEvidenceSession = null;
-    if (authCallbackRetryTimer !== null) {
-      clearTimeout(authCallbackRetryTimer);
-      authCallbackRetryTimer = null;
-    }
-    if (authKitCancellationRetryTimer !== null) {
-      clearTimeout(authKitCancellationRetryTimer);
-      authKitCancellationRetryTimer = null;
-    }
-    authKitFlow?.dispose();
-    authKitFlow = null;
-    authKitPendingStore = null;
-    authKitStartPromise = null;
-    macWindowlessRealtimeActive = false;
-    workspaceRealtime?.resetSession();
-    notificationScope = null;
-    notificationActiveGeneration = null;
-    notificationProjectionRepairCoordinator = null;
-    notificationController?.shutdown();
-    notificationController = null;
-    pendingNotificationAuthorizationBarrier?.dispose();
-    pendingNotificationAuthorizationBarrier = null;
-    stopNotificationSettingsSubscription?.();
-    stopNotificationSettingsSubscription = null;
-    notificationSettingsController?.dispose();
-    notificationSettingsController = null;
-    headlessNotificationCaptureArtifact?.close();
-    headlessNotificationCaptureArtifact = null;
-    captureNotificationPresenter = null;
-    updateController?.dispose();
-    stopThemeSubscription?.();
-    stopThemeSubscription = null;
-    themeController?.dispose();
-    stopCompactModeSubscription?.();
-    stopCompactModeSubscription = null;
-    compactModeController?.dispose();
-    stopAiChannelSubscription?.();
-    stopAiChannelSubscription = null;
-    const localAiChannel = aiChannelController;
-    aiChannelController = null;
-    void localAiChannel?.dispose().catch(() => {
+  let quittingAiChannel: AiChannelController | null = null;
+  const beforeQuitCoordinator = new BeforeQuitCoordinator({
+    cleanup: () => {
+      quittingAiChannel = aiChannelController;
+      aiChannelController = null;
+      macosNativeNotificationEvidenceSession?.handle.close();
+      macosNativeNotificationEvidenceSession = null;
+      if (authCallbackRetryTimer !== null) {
+        clearTimeout(authCallbackRetryTimer);
+        authCallbackRetryTimer = null;
+      }
+      if (authKitCancellationRetryTimer !== null) {
+        clearTimeout(authKitCancellationRetryTimer);
+        authKitCancellationRetryTimer = null;
+      }
+      authKitFlow?.dispose();
+      authKitFlow = null;
+      authKitPendingStore = null;
+      authKitStartPromise = null;
+      macWindowlessRealtimeActive = false;
+      workspaceRealtime?.resetSession();
+      notificationScope = null;
+      notificationActiveGeneration = null;
+      notificationProjectionRepairCoordinator = null;
+      notificationController?.shutdown();
+      notificationController = null;
+      pendingNotificationAuthorizationBarrier?.dispose();
+      pendingNotificationAuthorizationBarrier = null;
+      stopNotificationSettingsSubscription?.();
+      stopNotificationSettingsSubscription = null;
+      notificationSettingsController?.dispose();
+      notificationSettingsController = null;
+      headlessNotificationCaptureArtifact?.close();
+      headlessNotificationCaptureArtifact = null;
+      captureNotificationPresenter = null;
+      updateController?.dispose();
+      stopThemeSubscription?.();
+      stopThemeSubscription = null;
+      themeController?.dispose();
+      stopCompactModeSubscription?.();
+      stopCompactModeSubscription = null;
+      compactModeController?.dispose();
+      stopAiChannelSubscription?.();
+      stopAiChannelSubscription = null;
+    },
+    teardown: async () => {
+      const localAiChannel = quittingAiChannel;
+      quittingAiChannel = null;
+      await localAiChannel?.dispose();
+    },
+    reportCleanupFailure: () => {
+      reportMainProcessError("Failed to complete application cleanup before quitting");
+    },
+    reportTeardownFailure: () => {
       reportMainProcessError("Failed to stop the local AI Channel");
-    });
+    },
+    quit: () => app.quit(),
+  });
+  app.on("before-quit", (event) => {
+    beforeQuitCoordinator.handle(event);
   });
 }

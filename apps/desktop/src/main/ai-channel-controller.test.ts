@@ -430,6 +430,193 @@ describe("AiChannelController", () => {
     );
   });
 
+  it("fully redacts workspace-prefix sibling paths from messages, tools, and permissions", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<PromptResponse>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Inspect an outside path",
+    });
+    const callbacks = harness.callbacks();
+    const siblingPath = `${WORKSPACE}-backup/private.txt`;
+    const containingPath = `/outside${WORKSPACE}/private.txt`;
+    const dotContainingPath = `.${WORKSPACE}/private.txt`;
+    const dotPairContainingPath = `..${WORKSPACE}/private.txt`;
+    const schemeContainingPath = `scheme:${WORKSPACE}/private.txt`;
+    const alternateWorkspace = WORKSPACE.replaceAll("/", "\\");
+    const alternateSiblingPath = `${alternateWorkspace}-backup\\private.txt`;
+    const traversalPath = `${WORKSPACE}/../outside-secret.txt`;
+    const nestedTraversalPath = `${WORKSPACE}/src/../../outside-secret.txt`;
+    const alternateTraversalPath = `${alternateWorkspace}\\..\\outside-secret.txt`;
+
+    callbacks.onSessionUpdate(
+      textUpdate("new-session", "agent_message_chunk", `Opened ${siblingPath}`, "sibling-path"),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate(
+        "new-session",
+        "agent_message_chunk",
+        `Opened ${containingPath}`,
+        "containing-path",
+      ),
+    );
+    for (const [messageId, outsidePath] of [
+      ["dot-containing-path", dotContainingPath],
+      ["dot-pair-containing-path", dotPairContainingPath],
+      ["scheme-containing-path", schemeContainingPath],
+      ["traversal-path", traversalPath],
+      ["nested-traversal-path", nestedTraversalPath],
+      ["alternate-traversal-path", alternateTraversalPath],
+    ] as const) {
+      callbacks.onSessionUpdate(
+        textUpdate("new-session", "agent_message_chunk", `Opened ${outsidePath}`, messageId),
+      );
+    }
+    callbacks.onSessionUpdate(
+      textUpdate(
+        "new-session",
+        "agent_message_chunk",
+        `Workspace ${alternateWorkspace}`,
+        "alternate-exact-path",
+      ),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate(
+        "new-session",
+        "agent_message_chunk",
+        `Opened ${alternateWorkspace}\\src\\index.ts`,
+        "alternate-descendant-path",
+      ),
+    );
+    callbacks.onSessionUpdate(
+      textUpdate(
+        "new-session",
+        "agent_message_chunk",
+        `Opened ${alternateSiblingPath}`,
+        "alternate-sibling-path",
+      ),
+    );
+    callbacks.onSessionUpdate({
+      sessionId: "new-session",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "sibling-tool",
+        title: `Read ${siblingPath}`,
+        kind: "read",
+        status: "pending",
+      },
+    });
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "assistant", body: "Opened [path]" }),
+        expect.objectContaining({ role: "assistant", body: "Workspace ." }),
+        expect.objectContaining({ role: "assistant", body: "Opened .\\src\\index.ts" }),
+        expect.objectContaining({ type: "tool", title: "Read [path]" }),
+      ]),
+    );
+    expect(
+      harness.controller.state.entries.filter(
+        (entry) => entry.type === "message" && entry.body === "Opened [path]",
+      ),
+    ).toHaveLength(8);
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "assistant", body: "Opened scheme:[path]" }),
+      ]),
+    );
+
+    const abortController = new AbortController();
+    const permission = callbacks.requestPermission(
+      {
+        sessionId: "new-session",
+        toolCall: {
+          toolCallId: "sibling-tool",
+          title: `Edit ${alternateSiblingPath}`,
+          kind: "edit",
+          status: "pending",
+        },
+        options: [
+          {
+            optionId: "allow-sibling-tool",
+            name: `Allow ${alternateSiblingPath} once`,
+            kind: "allow_once",
+          },
+        ],
+      },
+      abortController.signal,
+    );
+    await flushPromises();
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "tool", title: "Edit [path]" })]),
+    );
+    expect(harness.controller.state.permissionRequest).toMatchObject({
+      title: "Edit [path]",
+      options: [expect.objectContaining({ name: "Allow [path] once" })],
+    });
+    expect(JSON.stringify(harness.controller.state)).not.toContain(`${WORKSPACE}-backup`);
+    expect(JSON.stringify(harness.controller.state)).not.toContain(containingPath);
+    expect(JSON.stringify(harness.controller.state)).not.toContain(dotContainingPath);
+    expect(JSON.stringify(harness.controller.state)).not.toContain(dotPairContainingPath);
+    expect(JSON.stringify(harness.controller.state)).not.toContain(schemeContainingPath);
+    expect(JSON.stringify(harness.controller.state)).not.toContain("outside-secret.txt");
+    expect(JSON.stringify(harness.controller.state)).not.toContain(".-backup");
+    expect(JSON.stringify(harness.controller.state)).not.toContain(alternateSiblingPath);
+
+    abortController.abort();
+    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    await flushPromises();
+  });
+
+  it("keeps exact and descendant paths relative when the workspace is the filesystem root", async () => {
+    const harness = createHarness({ workspacePath: "/", sessionId: null });
+    harness.host.promptGate = deferred<PromptResponse>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Inspect root paths",
+    });
+
+    harness
+      .callbacks()
+      .onSessionUpdate(
+        textUpdate(
+          "new-session",
+          "agent_message_chunk",
+          "Workspace / and child /private/file.txt URL https://example.test/root/path",
+        ),
+      );
+    harness
+      .callbacks()
+      .onSessionUpdate(
+        textUpdate(
+          "new-session",
+          "agent_message_chunk",
+          "Relative ./src/index.ts ../shared.ts .\\src\\index.ts ..\\shared.ts",
+          "relative-paths",
+        ),
+      );
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          body: "Workspace . and child ./private/file.txt URL https://example.test/root/path",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          body: "Relative ./src/index.ts ../shared.ts .\\src\\index.ts ..\\shared.ts",
+        }),
+      ]),
+    );
+
+    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    await flushPromises();
+  });
+
   it("does not retry a rejected prompt and publishes a sanitized error", async () => {
     const harness = createHarness();
     harness.host.promptGate = deferred<PromptResponse>();

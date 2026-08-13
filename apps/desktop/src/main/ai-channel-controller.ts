@@ -88,6 +88,45 @@ function replaceAllLiteral(source: string, search: string, replacement: string):
   return search === "" ? source : source.split(search).join(replacement);
 }
 
+function pathTailContainsParentTraversal(source: string, offset: number): boolean {
+  const pathTail = /^[^\s<>"'`]*/u.exec(source.slice(offset))?.[0] ?? "";
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(pathTail);
+}
+
+function replacePathAtBoundary(source: string, search: string, replacement: string): string {
+  if (search === "") return source;
+
+  const searchEndsWithSeparator = /[\\/]$/u.test(search);
+  let result = "";
+  let offset = 0;
+  while (offset < source.length) {
+    const matchOffset = source.indexOf(search, offset);
+    if (matchOffset < 0) return result + source.slice(offset);
+
+    const matchEnd = matchOffset + search.length;
+    const preceding = source[matchOffset - 1];
+    const following = source[matchEnd];
+    const hasLeadingBoundary = preceding === undefined || !/[A-Za-z0-9_./\\:+~-]/u.test(preceding);
+    const hasTrailingBoundary =
+      searchEndsWithSeparator || following === undefined || following === "/" || following === "\\";
+    if (
+      hasLeadingBoundary &&
+      hasTrailingBoundary &&
+      !pathTailContainsParentTraversal(source, matchEnd)
+    ) {
+      const retainedSeparator =
+        searchEndsWithSeparator && following !== undefined && !/[\s<>"'`]/u.test(following)
+          ? search.at(-1)
+          : "";
+      result += source.slice(offset, matchOffset) + replacement + retainedSeparator;
+    } else {
+      result += source.slice(offset, matchEnd);
+    }
+    offset = matchEnd;
+  }
+  return result;
+}
+
 function replaceUnsafeControlCharacters(value: string): string {
   return Array.from(value, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -100,14 +139,22 @@ function replaceUnsafeControlCharacters(value: string): string {
   }).join("");
 }
 
-function isRelativeDotPath(source: string, slashOffset: number): boolean {
-  const preceding = source[slashOffset - 1];
-  if (preceding !== ".") return false;
-  const beforeDot = source[slashOffset - 2];
-  if (beforeDot === undefined || /[\s([{'"]+/u.test(beforeDot)) return true;
-  if (beforeDot !== ".") return false;
-  const beforeDotPair = source[slashOffset - 3];
-  return beforeDotPair === undefined || /[\s([{'"]+/u.test(beforeDotPair);
+function isUnreplacedWorkspacePath(candidate: string, workspacePath: string | null): boolean {
+  if (workspacePath === null) return false;
+  const variants = new Set([
+    workspacePath,
+    path.sep === "/" ? workspacePath.replaceAll("/", "\\") : workspacePath.replaceAll("\\", "/"),
+  ]);
+  return [...variants].some((variant) => {
+    // Exact and descendant root paths have already been marked. Treating every remaining rooted
+    // candidate as a match would incorrectly redact ordinary ./ and ../ relative paths.
+    if (variant === "/" || variant === "\\") return false;
+    return (
+      candidate === variant ||
+      candidate.startsWith(`${variant}/`) ||
+      candidate.startsWith(`${variant}\\`)
+    );
+  });
 }
 
 function sanitizeDisplayText(
@@ -121,21 +168,21 @@ function sanitizeDisplayText(
     if (sensitiveValue !== "") result = replaceAllLiteral(result, sensitiveValue, "[session]");
   }
 
-  // The trailing underscore keeps a workspace-relative suffix out of absolute-path matching.
-  const workspaceMarker = "\uE100\uE101_";
-  if (workspacePath !== null) {
-    result = replaceAllLiteral(result, workspacePath, workspaceMarker);
-    const alternateSeparatorPath =
-      path.sep === "/" ? workspacePath.replaceAll("/", "\\") : workspacePath.replaceAll("\\", "/");
-    result = replaceAllLiteral(result, alternateSeparatorPath, workspaceMarker);
-  }
-
   // Temporarily remove web URLs so their path separators are not mistaken for local paths.
   const webUrls: string[] = [];
   result = result.replace(/\bhttps?:\/\/[^\s<>"']+/giu, (url) => {
     const index = webUrls.push(url) - 1;
     return `\uE000${String(index)}\uE001`;
   });
+
+  // The trailing underscore keeps a workspace-relative suffix out of absolute-path matching.
+  const workspaceMarker = "\uE100\uE101_";
+  if (workspacePath !== null) {
+    result = replacePathAtBoundary(result, workspacePath, workspaceMarker);
+    const alternateSeparatorPath =
+      path.sep === "/" ? workspacePath.replaceAll("/", "\\") : workspacePath.replaceAll("\\", "/");
+    result = replacePathAtBoundary(result, alternateSeparatorPath, workspaceMarker);
+  }
 
   // ACP text is untrusted display data. Redact filesystem-shaped values after any punctuation.
   result = result
@@ -146,12 +193,39 @@ function sanitizeDisplayText(
     .replace(/file:\/\/[^\s<>"']+/giu, "[path]")
     .replace(/\\\\[^\s<>"']+/gu, "[path]")
     .replace(/\b[A-Za-z]:[\\/][^\s<>"']+/gu, "[path]")
+    .replace(
+      /(?:\.\.?)?\\(?:[^\\\s<>"'`]+\\)*[^\\\s<>"'`]*/gu,
+      (candidate, offset: number, source: string) => {
+        const preceding = source[offset - 1];
+        if (preceding !== undefined && /[A-Za-z0-9_/\\+~-]/u.test(preceding)) return candidate;
+        const separatorOffset = candidate.startsWith("..\\")
+          ? 2
+          : candidate.startsWith(".\\")
+            ? 1
+            : 0;
+        const rootedCandidate = candidate.slice(separatorOffset);
+        return separatorOffset > 0 && !isUnreplacedWorkspacePath(rootedCandidate, workspacePath)
+          ? candidate
+          : "[path]";
+      },
+    )
     .replace(/(^|[\s([{'"])~[\\/][^\s<>"']+/gmu, "$1[path]")
-    .replace(/\/(?:[^/\s<>"'`]+\/)*[^/\s<>"'`]*/gu, (candidate, offset: number, source: string) => {
-      const preceding = source[offset - 1];
-      if (preceding !== undefined && /[A-Za-z0-9_/+~-]/u.test(preceding)) return candidate;
-      return isRelativeDotPath(source, offset) ? candidate : "[path]";
-    });
+    .replace(
+      /(?:\.\.?)?\/(?:[^/\s<>"'`]+\/)*[^/\s<>"'`]*/gu,
+      (candidate, offset: number, source: string) => {
+        const preceding = source[offset - 1];
+        if (preceding !== undefined && /[A-Za-z0-9_/+~-]/u.test(preceding)) return candidate;
+        const separatorOffset = candidate.startsWith("../")
+          ? 2
+          : candidate.startsWith("./")
+            ? 1
+            : 0;
+        const rootedCandidate = candidate.slice(separatorOffset);
+        return separatorOffset > 0 && !isUnreplacedWorkspacePath(rootedCandidate, workspacePath)
+          ? candidate
+          : "[path]";
+      },
+    );
   for (const [index, url] of webUrls.entries()) {
     result = replaceAllLiteral(result, `\uE000${String(index)}\uE001`, url);
   }
