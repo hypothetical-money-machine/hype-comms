@@ -361,32 +361,50 @@ devices is private to that user.
 
 ## Desktop appearance contract
 
-Appearance is an app/profile-local preference for `system` or one registered built-in theme ID.
-The current built-ins are `light` and `dark`; the selector is generated from the ordered theme
-registry. Electron main owns its strict, versioned preference file under `userData`, applies the
-choice's light/dark color scheme to `nativeTheme` before creating a window, and keeps the native
-window background synchronized. Missing, malformed, or unregistered preference data falls back to
-`system`; a failed write leaves the last canonical state unchanged. Sign-out does not clear this
-non-secret device preference.
+Appearance is an app/profile-local design combining a preference for `system` or one registered
+built-in theme ID with an optional accent color. The current built-ins are `light` and `dark`; the
+selector is generated from the ordered theme registry, and a null accent preserves the exact
+bundled appearance. Electron main owns its strict, versioned file under `userData`; version 2 stores
+the preference and accent atomically, while a valid version-1 preference is migrated in memory as
+an accent-free design. Main applies the built-in foundation's light/dark color scheme to
+`nativeTheme` before creating a window and keeps the native window background synchronized. Missing,
+malformed, or unregistered data falls back to the accent-free `system` design; a failed write leaves
+the last canonical state unchanged. Sign-out does not clear this non-secret device preference.
 
-IPC carries only the validated preference, resolved theme ID, and resolved light/dark scheme. It
-never carries arbitrary colors or CSS. The renderer maps that ID to one bundled theme definition
-whose exact semantic-token contract covers surfaces, text hierarchy, borders, actions, status
-colors, focus, elevation, brand effects, and scrollbars. Theme identity is independent from its
-light/dark color scheme, so multiple named themes may share a native scheme. Component CSS consumes
-only those semantic variables; palette values live only in the complete built-in definitions.
-Tokens are installed on the document root so ordinary views and body-level portals inherit the
-same theme.
+IPC carries only the validated preference, resolved theme ID, resolved light/dark scheme, and a
+nullable six-digit hexadecimal accent seed. It never carries arbitrary CSS or presentation-token
+values. The shared theme module maps that state to one bundled theme definition and, when an accent
+is present, derives twelve fixed semantic roles for highlights, accent text, borders, primary
+actions, focus, accent surfaces, and brand gradients. Trusted templates generate every rgba and
+gradient value; contrast correction keeps both accent text roles at 4.5:1 on their opaque and
+composited surfaces, primary-action text at 4.5:1, primary controls and border accents at 3:1
+against adjacent surfaces, and brand text at 4.5:1.
+The complete semantic-token contract still covers surfaces, text hierarchy, borders, actions,
+status colors, focus, elevation, brand effects, and scrollbars. Theme identity is independent from
+its light/dark color scheme, so multiple named themes may share a native scheme. Component CSS
+consumes only those semantic variables. Tokens are installed on the document root so ordinary views
+and body-level portals inherit the same theme.
 
 The current dark appearance is the reference theme and light is a fully defined peer. A new named
 theme becomes selectable by adding one complete validated definition to the registry; its label,
 tokens, color scheme, and native window background travel together. Main passes its exact
-initialized state to the sandboxed preload as a validated, non-secret renderer argument, so named
-themes that share a native color scheme still paint with the correct identity before React mounts.
-Theme state is subscribed before hydration so a stale startup response cannot replace a newer
-native update. `system` follows operating-system appearance changes live; explicit built-in choices
-remain fixed. Every theme must meet the tested text/action/status/control contrast pairs and use the
-shared focus treatment before it can be added to the built-in registry.
+initialized state, including the bounded accent seed, to the sandboxed preload as a validated,
+non-secret renderer argument, so the designed theme paints correctly before React mounts. Theme
+state is subscribed before hydration so a stale startup response cannot replace a newer native
+update. `system` follows operating-system appearance changes live while preserving the accent;
+explicit built-in choices remain fixed. Every theme must meet the tested
+text/action/status/control contrast pairs and use the shared focus treatment before it can be added
+to the built-in registry.
+
+An explicit Electron `nativeTheme.themeSource` also overrides renderer color-scheme media queries,
+so the theme designer cannot infer the operating-system foundation from renderer state. Its System
+preview uses a separate trusted, read-only IPC request. Main serializes that request with appearance
+writes, temporarily removes the explicit native override to sample the OS scheme, restores the
+canonical active source, and returns a validated System state without persisting or publishing it.
+The renderer scopes that result to the draft preview. Before saving a System draft over an explicit
+active theme, it resolves the OS foundation again; if the result changed, the designer refreshes
+the preview and requires another explicit save instead of applying an appearance the user did not
+review.
 
 ## Feature behavior
 

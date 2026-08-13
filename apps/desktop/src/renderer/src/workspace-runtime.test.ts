@@ -1031,8 +1031,16 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not report theme state");
   }
 
+  async getSystemThemeState(): Promise<ThemeState> {
+    throw new Error("The runtime test does not resolve system theme state");
+  }
+
   async setThemePreference(): Promise<ThemeState> {
     throw new Error("The runtime test does not set a theme");
+  }
+
+  async setThemeDesign(): Promise<ThemeState> {
+    throw new Error("The runtime test does not design a theme");
   }
 
   onThemeStateChanged(): () => void {

@@ -5,7 +5,9 @@ import {
   BUILT_IN_THEMES,
   createInitialThemeStateArgument,
   defineTheme,
+  deriveThemeDefinitionWithAccent,
   getThemeDefinition,
+  getThemeDefinitionForState,
   isBuiltInThemeId,
   isBuiltInThemeState,
   parseBuiltInThemeState,
@@ -13,6 +15,8 @@ import {
   resolveInitialThemeStateArgument,
   FALLBACK_INITIAL_THEME_STATE,
   SYSTEM_THEME_IDS,
+  THEME_ACCENT_PRESETS,
+  themeContrastRatio,
   themeCssVariable,
   THEME_TOKEN_NAMES,
   type ThemeDefinition,
@@ -162,6 +166,23 @@ function contrastRatio(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+function compositeHexColor(foreground: string, background: string, alpha: number): string {
+  const channels = (color: string): readonly number[] => {
+    const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/iu.exec(color);
+    if (match === null) throw new Error(`Expected a solid color; received ${color}`);
+    return match.slice(1).map((component) => Number.parseInt(component, 16));
+  };
+  const foregroundChannels = channels(foreground);
+  const backgroundChannels = channels(background);
+  const components = foregroundChannels.map((component, index) => {
+    const backgroundComponent = backgroundChannels[index] ?? 0;
+    return Math.round(backgroundComponent + (component - backgroundComponent) * alpha)
+      .toString(16)
+      .padStart(2, "0");
+  });
+  return `#${components.join("")}`;
+}
+
 describe("theme token contract", () => {
   it("keeps one exact, unique token set across every built-in theme", () => {
     const expectedTokenNames = Object.keys(EXPECTED_CSS_VARIABLES);
@@ -285,6 +306,197 @@ describe("theme token contract", () => {
     expect(() => getThemeDefinition("dim")).toThrow(/Unknown built-in theme identifier: dim/u);
   });
 
+  it("publishes valid, stable accent presets", () => {
+    expect(THEME_ACCENT_PRESETS.map(({ id }) => id)).toEqual([
+      "indigo",
+      "blue",
+      "teal",
+      "green",
+      "amber",
+      "rose",
+    ]);
+    expect(new Set(THEME_ACCENT_PRESETS.map(({ id }) => id)).size).toBe(
+      THEME_ACCENT_PRESETS.length,
+    );
+    for (const preset of THEME_ACCENT_PRESETS) {
+      expect(preset.label.trim()).not.toBe("");
+      expect(preset.color).toMatch(/^#[\da-f]{6}$/u);
+      expect(Object.isFrozen(preset)).toBe(true);
+    }
+    expect(Object.isFrozen(THEME_ACCENT_PRESETS)).toBe(true);
+  });
+
+  it("derives only trusted accent roles and preserves accessible text and action contrast", () => {
+    const changedTokens = [
+      "surfaceHighlight",
+      "textAccent",
+      "textAccentMuted",
+      "borderAccent",
+      "actionPrimary",
+      "actionPrimaryHover",
+      "actionPrimaryText",
+      "focusRing",
+      "accentSurface",
+      "accentSurfaceStrong",
+      "gradientBrand",
+      "gradientSignIn",
+    ] as const satisfies readonly ThemeTokenName[];
+    const changedTokenSet = new Set<ThemeTokenName>(changedTokens);
+
+    for (const base of Object.values(BUILT_IN_THEMES)) {
+      for (const accent of ["#000000", "#ffffff", "#0000ff", "#ffff00", "#ff00ff", "#13c8a3"]) {
+        const derived = deriveThemeDefinitionWithAccent(base, accent);
+        expect(derived.id).toBe(base.id);
+        expect(derived.colorScheme).toBe(base.colorScheme);
+        expect(derived.windowBackground).toBe(base.windowBackground);
+        expect(derived.tokens.actionPrimaryHover).not.toBe(derived.tokens.actionPrimary);
+        expect(derived.tokens.textAccentMuted).not.toBe(derived.tokens.textAccent);
+        expect(deriveThemeDefinitionWithAccent(base, accent).tokens).toEqual(derived.tokens);
+        expect(Object.isFrozen(derived)).toBe(true);
+        expect(Object.isFrozen(derived.tokens)).toBe(true);
+
+        for (const token of THEME_TOKEN_NAMES) {
+          if (!changedTokenSet.has(token)) {
+            expect(derived.tokens[token], `${base.id} unexpectedly changed ${token}`).toBe(
+              base.tokens[token],
+            );
+          }
+        }
+
+        for (const background of [
+          derived.tokens.surfaceContent,
+          derived.tokens.surfaceElevated,
+          derived.tokens.surfaceSidebar,
+        ]) {
+          expect(themeContrastRatio(derived.tokens.textAccent, background)).toBeGreaterThanOrEqual(
+            4.5,
+          );
+          for (const alpha of base.colorScheme === "dark" ? [0.16, 0.2] : [0.12, 0.18]) {
+            const composited = compositeHexColor(accent, background, alpha);
+            expect(
+              themeContrastRatio(derived.tokens.textAccent, composited),
+              `${base.id} ${accent} accent text on ${composited}`,
+            ).toBeGreaterThanOrEqual(4.5);
+            expect(
+              themeContrastRatio(derived.tokens.textAccentMuted, composited),
+              `${base.id} ${accent} muted accent text on ${composited}`,
+            ).toBeGreaterThanOrEqual(4.5);
+          }
+        }
+        expect(
+          themeContrastRatio(derived.tokens.actionPrimaryText, derived.tokens.actionPrimary),
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(
+          themeContrastRatio(derived.tokens.actionPrimaryText, derived.tokens.actionPrimaryHover),
+        ).toBeGreaterThanOrEqual(4.5);
+        for (const background of [
+          derived.tokens.surfaceContent,
+          derived.tokens.surfaceElevated,
+          derived.tokens.surfaceSidebar,
+          derived.tokens.surfaceInput,
+        ]) {
+          expect(
+            themeContrastRatio(derived.tokens.actionPrimary, background),
+            `${base.id} ${accent} action on ${background}`,
+          ).toBeGreaterThanOrEqual(3);
+          expect(
+            themeContrastRatio(derived.tokens.actionPrimaryHover, background),
+            `${base.id} ${accent} hover action on ${background}`,
+          ).toBeGreaterThanOrEqual(3);
+        }
+        for (const background of [
+          derived.tokens.surfaceContent,
+          derived.tokens.surfaceSidebar,
+          derived.tokens.surfaceInput,
+          derived.tokens.surfaceElevated,
+        ]) {
+          expect(
+            themeContrastRatio(derived.tokens.borderAccent, background),
+          ).toBeGreaterThanOrEqual(3);
+        }
+        const brandStops = [...derived.tokens.gradientBrand.matchAll(/#[\da-f]{6}/giu)].map(
+          ([color]) => color,
+        );
+        expect(new Set(brandStops).size).toBe(2);
+        for (const stop of brandStops) {
+          expect(themeContrastRatio(derived.tokens.textInverse, stop)).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    }
+
+    expect(() =>
+      deriveThemeDefinitionWithAccent(BUILT_IN_THEMES.dark, "url(file:///tmp/x)"),
+    ).toThrow();
+  });
+
+  it("resolves a state to its built-in foundation plus optional accent", () => {
+    const plain = getThemeDefinitionForState({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: null,
+    });
+    const designed = getThemeDefinitionForState({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "#ff00ff",
+    });
+
+    expect(plain).toBe(BUILT_IN_THEMES.dark);
+    expect(designed).not.toBe(BUILT_IN_THEMES.dark);
+    expect(designed.tokens.actionPrimary).toBe("#ff00ff");
+    expect(designed.windowBackground).toBe(BUILT_IN_THEMES.dark.windowBackground);
+  });
+
+  it("keeps sampled RGB accents accessible across both built-in foundations", () => {
+    const channels = [0, 51, 102, 153, 204, 255];
+    const component = (value: number): string => value.toString(16).padStart(2, "0");
+
+    for (const base of Object.values(BUILT_IN_THEMES)) {
+      const surfaceAlpha = base.colorScheme === "dark" ? 0.2 : 0.18;
+      const surroundings = [
+        base.tokens.surfaceContent,
+        base.tokens.surfaceElevated,
+        base.tokens.surfaceSidebar,
+        base.tokens.surfaceInput,
+      ];
+      for (const red of channels) {
+        for (const green of channels) {
+          for (const blue of channels) {
+            const accent = `#${component(red)}${component(green)}${component(blue)}`;
+            const derived = deriveThemeDefinitionWithAccent(base, accent);
+
+            for (const background of surroundings) {
+              expect(
+                themeContrastRatio(derived.tokens.actionPrimary, background),
+              ).toBeGreaterThanOrEqual(3);
+              expect(
+                themeContrastRatio(derived.tokens.actionPrimaryHover, background),
+              ).toBeGreaterThanOrEqual(3);
+              const composited = compositeHexColor(accent, background, surfaceAlpha);
+              expect(
+                themeContrastRatio(derived.tokens.textAccent, composited),
+              ).toBeGreaterThanOrEqual(4.5);
+              expect(
+                themeContrastRatio(derived.tokens.textAccentMuted, composited),
+              ).toBeGreaterThanOrEqual(4.5);
+            }
+            expect(
+              themeContrastRatio(derived.tokens.actionPrimaryText, derived.tokens.actionPrimary),
+            ).toBeGreaterThanOrEqual(4.5);
+            expect(
+              themeContrastRatio(
+                derived.tokens.actionPrimaryText,
+                derived.tokens.actionPrimaryHover,
+              ),
+            ).toBeGreaterThanOrEqual(4.5);
+          }
+        }
+      }
+    }
+  });
+
   it("validates resolved state against the bundled theme registry", () => {
     for (const resolvedColorScheme of ["light", "dark"] as const) {
       const systemState = {
@@ -317,10 +529,14 @@ describe("theme token contract", () => {
       preference: "dark",
       resolvedThemeId: "dark",
       resolvedColorScheme: "dark",
+      accentColor: "#A15EFF",
     } as const;
     const argument = createInitialThemeStateArgument(state);
 
-    expect(parseInitialThemeStateArgument(["--renderer-process", argument])).toEqual(state);
+    expect(parseInitialThemeStateArgument(["--renderer-process", argument])).toEqual({
+      ...state,
+      accentColor: "#a15eff",
+    });
     expect(() => parseInitialThemeStateArgument([])).toThrow(/missing/u);
     expect(() =>
       parseInitialThemeStateArgument([
@@ -340,6 +556,7 @@ describe("theme token contract", () => {
       preference: "system",
       resolvedThemeId: "dark",
       resolvedColorScheme: "dark",
+      accentColor: null,
     });
     expect(Object.isFrozen(FALLBACK_INITIAL_THEME_STATE)).toBe(true);
   });

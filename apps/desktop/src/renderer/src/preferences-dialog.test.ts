@@ -6,6 +6,7 @@ import type {
   NotificationContext,
   NotificationPreference,
   NotificationState,
+  ThemeDesign,
   ThemePreference,
   ThemeState,
 } from "@hype-comms/contracts";
@@ -32,9 +33,19 @@ class PreferencesThemeTransport implements ThemeTransport {
   };
   readonly initialThemeState: ThemeState = this.state;
   readonly listeners = new Set<(state: ThemeState) => void>();
+  designGate: Promise<void> | null = null;
 
   async getThemeState(): Promise<ThemeState> {
     return this.state;
+  }
+
+  async getSystemThemeState(): Promise<ThemeState> {
+    return {
+      preference: "system",
+      resolvedThemeId: this.state.resolvedThemeId,
+      resolvedColorScheme: this.state.resolvedColorScheme,
+      accentColor: this.state.accentColor ?? null,
+    };
   }
 
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
@@ -43,6 +54,21 @@ class PreferencesThemeTransport implements ThemeTransport {
       preference,
       resolvedThemeId: definition?.id ?? "dark",
       resolvedColorScheme: definition?.colorScheme ?? "dark",
+      accentColor: this.state.accentColor ?? null,
+    };
+    this.emit(this.state);
+    return this.state;
+  }
+
+  async setThemeDesign(design: ThemeDesign): Promise<ThemeState> {
+    if (this.designGate !== null) await this.designGate;
+    const definition =
+      design.preference === "system" ? null : getThemeDefinition(design.preference);
+    this.state = {
+      preference: design.preference,
+      resolvedThemeId: definition?.id ?? this.state.resolvedThemeId,
+      resolvedColorScheme: definition?.colorScheme ?? this.state.resolvedColorScheme,
+      accentColor: design.accentColor,
     };
     this.emit(this.state);
     return this.state;
@@ -260,6 +286,124 @@ describe("PreferencesDialog", () => {
     const dialog = screen.getByRole("dialog", { name: "Preferences" });
     const first = screen.getByRole("button", { name: "Close preferences" });
     const last = screen.getByRole("checkbox", { name: "Compact mode" });
+
+    last.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    first.focus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("opens the designer in place and gives Escape to its back navigation first", async () => {
+    await renderPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const designer = screen.getByRole("dialog", { name: "Theme designer" });
+    expect(screen.getByRole("button", { name: "Back to preferences" })).toBeTruthy();
+    expect(screen.getByText("Live preview")).toBeTruthy();
+
+    fireEvent.keyDown(designer, { key: "Escape" });
+    expect(screen.getByRole("dialog", { name: "Preferences" })).toBeTruthy();
+    expect(screen.queryByText("Live preview")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Design a theme" }));
+
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Preferences" }), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("protects a dirty theme draft before navigation or dismissal", async () => {
+    await renderPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const designer = screen.getByRole("dialog", { name: "Theme designer" });
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    const back = screen.getByRole("button", { name: "Back to preferences" });
+    fireEvent.click(back);
+    const warning = screen.getByRole("alertdialog", { name: "Discard your changes?" });
+    expect(warning).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Theme designer" })).toBeNull();
+    expect(designer.getAttribute("aria-hidden")).toBe("true");
+    expect(designer.hasAttribute("inert")).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep editing" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(back));
+    expect(designer.getAttribute("aria-hidden")).toBeNull();
+    expect(designer.hasAttribute("inert")).toBe(false);
+
+    const backdrop = designer.parentElement;
+    if (backdrop === null) throw new Error("Dialog backdrop was not rendered");
+    fireEvent.mouseDown(backdrop);
+    const secondWarning = screen.getByRole("alertdialog", { name: "Discard your changes?" });
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(secondWarning.isConnected).toBe(false);
+  });
+
+  it("locks editing and dismissal while a theme save is in flight", async () => {
+    const { themeClient } = await renderPreferences();
+    let releaseSave: (() => void) | undefined;
+    themeClient.designGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const setThemeDesign = vi.spyOn(themeClient, "setThemeDesign");
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    const designer = screen.getByRole("dialog", { name: "Theme designer" });
+    const backdrop = designer.parentElement;
+    if (backdrop === null) throw new Error("Dialog backdrop was not rendered");
+    const save = screen.getByRole("button", { name: "Save & apply" });
+    save.focus();
+    fireEvent.click(save);
+
+    await waitFor(() => {
+      const saving = screen.getByRole("button", { name: "Saving…" });
+      expect(saving.hasAttribute("disabled")).toBe(false);
+      expect(saving.getAttribute("aria-disabled")).toBe("true");
+      expect(document.activeElement).toBe(saving);
+      expect(
+        screen.getByRole("button", { name: "Back to preferences" }).hasAttribute("disabled"),
+      ).toBe(true);
+      expect(
+        screen.getByRole("button", { name: "Close preferences" }).hasAttribute("disabled"),
+      ).toBe(true);
+      expect(screen.getByRole("button", { name: "Rose accent" }).hasAttribute("disabled")).toBe(
+        true,
+      );
+    });
+
+    fireEvent.keyDown(designer, { key: "Tab" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Saving…" }));
+    fireEvent.keyDown(designer, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Saving…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Saving…" }));
+    expect(setThemeDesign).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(designer, { key: "Escape" });
+    fireEvent.mouseDown(backdrop);
+    expect(screen.getByRole("dialog", { name: "Theme designer" })).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+
+    releaseSave?.();
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Preferences" })).toBeTruthy();
+    });
+  });
+
+  it("traps focus across the designer back navigation and save action", async () => {
+    await renderPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const dialog = screen.getByRole("dialog", { name: "Theme designer" });
+    const first = screen.getByRole("button", { name: "Back to preferences" });
+    const last = screen.getByRole("button", { name: "Save & apply" });
 
     last.focus();
     fireEvent.keyDown(dialog, { key: "Tab" });

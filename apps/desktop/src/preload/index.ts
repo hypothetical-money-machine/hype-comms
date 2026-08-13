@@ -65,6 +65,7 @@ import {
   taskListQuerySchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
+  themeDesignSchema,
   themePreferenceSchema,
   updateStateSchema,
   updateTaskOperationSchema,
@@ -93,6 +94,7 @@ import {
   type RealtimeSessionScope,
   type ScopedProductRealtimeEvent,
   type SendMessageOperation,
+  type ThemeDesign,
   type ThemePreference,
   type ThemeState,
   type TaskListQuery,
@@ -208,12 +210,25 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       ),
     getThemeState: async () =>
       parseBuiltInThemeState(await ipcRenderer.invoke(DESKTOP_CHANNELS.themeState)),
+    getSystemThemeState: async () => {
+      const state = parseBuiltInThemeState(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.themeSystemState),
+      );
+      if (state.preference !== "system") {
+        throw new Error("Main returned a non-system appearance for the system preview");
+      }
+      return state;
+    },
     setThemePreference: async (preference: ThemePreference) =>
       parseBuiltInThemeState(
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.themeSet,
           themePreferenceSchema.parse(preference),
         ),
+      ),
+    setThemeDesign: async (design: ThemeDesign) =>
+      parseBuiltInThemeState(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.themeDesignSet, themeDesignSchema.parse(design)),
       ),
     onThemeStateChanged: (listener: (state: ThemeState) => void) =>
       subscribe(DESKTOP_CHANNELS.themeChanged, listener, isBuiltInThemeState),

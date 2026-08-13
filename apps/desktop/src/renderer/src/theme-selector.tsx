@@ -1,4 +1,4 @@
-import { useCallback, useId, useState, useSyncExternalStore } from "react";
+import { useCallback, useId, useState, useSyncExternalStore, type RefObject } from "react";
 
 import {
   themePreferenceSchema,
@@ -11,14 +11,20 @@ import type { ThemeRuntime } from "./theme-runtime";
 
 interface ThemeSelectorProps {
   readonly theme: ThemeRuntime;
+  readonly designButtonRef?: RefObject<HTMLButtonElement | null>;
+  readonly onDesign?: () => void;
 }
 
 function resolvedDescription(state: ThemeState): string {
   const resolved = getThemeDefinition(state.resolvedThemeId).label;
-  return state.preference === "system" ? `Following system · ${resolved}` : `${resolved} theme`;
+  const base =
+    state.preference === "system" ? `Following system · ${resolved}` : `${resolved} theme`;
+  return state.accentColor === null || state.accentColor === undefined
+    ? base
+    : `${base} · Custom accent`;
 }
 
-export function ThemeSelector({ theme }: ThemeSelectorProps) {
+export function ThemeSelector({ theme, designButtonRef, onDesign }: ThemeSelectorProps) {
   const selectId = useId();
   const descriptionId = useId();
   const [saving, setSaving] = useState(false);
@@ -72,6 +78,21 @@ export function ThemeSelector({ theme }: ThemeSelectorProps) {
         <p className="theme-control-error" role="alert">
           {error}
         </p>
+      )}
+      {onDesign !== undefined && (
+        <button
+          ref={designButtonRef}
+          type="button"
+          className="theme-designer-open"
+          aria-label="Design a theme"
+          onClick={onDesign}
+        >
+          <span>
+            <strong>Design a theme</strong>
+            <small>Choose a foundation and make the accent your own.</small>
+          </span>
+          <b aria-hidden="true">›</b>
+        </button>
       )}
     </div>
   );

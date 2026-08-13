@@ -49,6 +49,8 @@ import {
   taskListQuerySchema,
   taskRecordSchema,
   taskSchema,
+  themeAccentColorSchema,
+  themeDesignSchema,
   themePreferenceSchema,
   themeStateSchema,
   updateStateSchema,
@@ -149,6 +151,28 @@ describe("desktop theme contracts", () => {
     },
   );
 
+  it("accepts a strict bounded design and canonicalizes its accent", () => {
+    expect(
+      themeDesignSchema.parse({
+        preference: "system",
+        accentColor: "#A15EFF",
+      }),
+    ).toEqual({ preference: "system", accentColor: "#a15eff" });
+    expect(themeDesignSchema.parse({ preference: "dark", accentColor: null })).toEqual({
+      preference: "dark",
+      accentColor: null,
+    });
+    expect(themeAccentColorSchema.parse("#123ABC")).toBe("#123abc");
+
+    for (const value of ["#fff", "123456", "#12345678", "red", "url(file:///tmp/x)"]) {
+      expect(themeAccentColorSchema.safeParse(value).success).toBe(false);
+    }
+    expect(
+      themeDesignSchema.safeParse({ preference: "light", accentColor: "#123456", css: "body {}" })
+        .success,
+    ).toBe(false);
+  });
+
   it("accepts strict canonical system, built-in, and named theme state", () => {
     expect(
       themeStateSchema.parse({
@@ -166,11 +190,13 @@ describe("desktop theme contracts", () => {
         preference: "light",
         resolvedThemeId: "light",
         resolvedColorScheme: "light",
+        accentColor: "#A15EFF",
       }),
     ).toEqual({
       preference: "light",
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
+      accentColor: "#a15eff",
     });
     expect(
       themeStateSchema.parse({
@@ -191,6 +217,12 @@ describe("desktop theme contracts", () => {
     { preference: "system", resolvedThemeId: "dark", resolvedColorScheme: "sepia" },
     { preference: "dark", resolvedThemeId: "light", resolvedColorScheme: "dark" },
     { preference: "dim", resolvedThemeId: "dark", resolvedColorScheme: "dark" },
+    {
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "rebeccapurple",
+    },
     {
       preference: "dark",
       resolvedThemeId: "dark",

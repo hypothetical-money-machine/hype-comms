@@ -1,12 +1,16 @@
-import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
+import type { ThemeDesign, ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
-import { getThemeDefinition, themeCssVariable, THEME_TOKEN_NAMES } from "../../shared/theme";
+import {
+  getThemeDefinitionForState,
+  themeCssVariable,
+  THEME_TOKEN_NAMES,
+} from "../../shared/theme";
 
 type ThemeListener = (state: ThemeState) => void;
 
 export function applyTheme(root: HTMLElement, state: ThemeState): void {
-  const theme = getThemeDefinition(state.resolvedThemeId);
+  const theme = getThemeDefinitionForState(state);
 
   root.dataset.theme = theme.id;
   root.dataset.themePreference = state.preference;
@@ -74,6 +78,17 @@ export class ThemeRuntime {
     return state;
   }
 
+  /** Resolves a System preview without applying it to the document or publishing runtime state. */
+  getSystemThemeState(): Promise<ThemeState> {
+    return this.#client.getSystemThemeState();
+  }
+
+  async setDesign(design: ThemeDesign): Promise<ThemeState> {
+    const state = await this.#client.setThemeDesign(design);
+    this.#accept(state);
+    return state;
+  }
+
   dispose(): void {
     this.#stopThemeListener?.();
     this.#stopThemeListener = null;
@@ -84,7 +99,8 @@ export class ThemeRuntime {
     const unchanged =
       state.preference === this.#state.preference &&
       state.resolvedThemeId === this.#state.resolvedThemeId &&
-      state.resolvedColorScheme === this.#state.resolvedColorScheme;
+      state.resolvedColorScheme === this.#state.resolvedColorScheme &&
+      (state.accentColor ?? null) === (this.#state.accentColor ?? null);
     if (unchanged) return;
     this.#state = state;
     applyTheme(this.#root, state);

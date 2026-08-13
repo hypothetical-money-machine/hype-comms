@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { ThemePreference, ThemeState } from "@hype-comms/contracts";
+import type { ThemeDesign, ThemePreference, ThemeState } from "@hype-comms/contracts";
 
 import type { ThemeTransport } from "../../shared/desktop-api";
 import { getThemeDefinition, themeCssVariable, THEME_TOKEN_NAMES } from "../../shared/theme";
@@ -15,6 +15,7 @@ class FakeThemeTransport implements ThemeTransport {
   setError: Error | null = null;
   subscriptionError: Error | null = null;
   readonly setPreferences: ThemePreference[] = [];
+  readonly setDesigns: ThemeDesign[] = [];
   readonly listeners = new Set<(state: ThemeState) => void>();
 
   constructor(
@@ -32,6 +33,15 @@ class FakeThemeTransport implements ThemeTransport {
     return this.getState();
   }
 
+  getSystemThemeState(): Promise<ThemeState> {
+    return Promise.resolve({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: this.state.accentColor ?? null,
+    });
+  }
+
   async setThemePreference(preference: ThemePreference): Promise<ThemeState> {
     this.setPreferences.push(preference);
     if (this.setError !== null) throw this.setError;
@@ -40,6 +50,7 @@ class FakeThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: this.state.resolvedThemeId,
         resolvedColorScheme: this.state.resolvedColorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     } else {
       const definition = getThemeDefinition(preference);
@@ -47,8 +58,25 @@ class FakeThemeTransport implements ThemeTransport {
         preference,
         resolvedThemeId: definition.id,
         resolvedColorScheme: definition.colorScheme,
+        accentColor: this.state.accentColor ?? null,
       };
     }
+    return this.state;
+  }
+
+  async setThemeDesign(design: ThemeDesign): Promise<ThemeState> {
+    this.setDesigns.push(design);
+    if (this.setError !== null) throw this.setError;
+    const definition =
+      design.preference === "system"
+        ? getThemeDefinition(this.state.resolvedThemeId)
+        : getThemeDefinition(design.preference);
+    this.state = {
+      preference: design.preference,
+      resolvedThemeId: definition.id,
+      resolvedColorScheme: definition.colorScheme,
+      accentColor: design.accentColor,
+    };
     return this.state;
   }
 
@@ -187,6 +215,50 @@ describe("ThemeRuntime", () => {
       resolvedThemeId: "light",
       resolvedColorScheme: "light",
     });
+    runtime.dispose();
+  });
+
+  it("applies and publishes a saved custom accent", async () => {
+    const root = createRoot();
+    const client = new FakeThemeTransport();
+    const runtime = new ThemeRuntime(client, root);
+    await runtime.start();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+
+    await runtime.setDesign({ preference: "dark", accentColor: "#2563eb" });
+
+    expect(client.setDesigns).toEqual([{ preference: "dark", accentColor: "#2563eb" }]);
+    expect(runtime.state.accentColor).toBe("#2563eb");
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.style.getPropertyValue(themeCssVariable("actionPrimary"))).toBe("#2563eb");
+    expect(listener).toHaveBeenCalledTimes(1);
+    runtime.dispose();
+  });
+
+  it("resolves a system preview without applying or publishing it", async () => {
+    const root = createRoot();
+    const client = new FakeThemeTransport({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: "#be123c",
+    });
+    const runtime = new ThemeRuntime(client, root);
+    await runtime.start();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+
+    await expect(runtime.getSystemThemeState()).resolves.toEqual({
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: "#be123c",
+    });
+
+    expect(runtime.state.preference).toBe("dark");
+    expect(root.dataset.theme).toBe("dark");
+    expect(listener).not.toHaveBeenCalled();
     runtime.dispose();
   });
 });

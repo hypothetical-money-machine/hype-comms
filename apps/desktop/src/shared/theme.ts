@@ -1,7 +1,9 @@
 import {
+  themeAccentColorSchema,
   themeIdSchema,
   themeStateSchema,
   type ResolvedColorScheme,
+  type ThemeAccentColor,
   type ThemeId,
   type ThemeState,
 } from "@hype-comms/contracts";
@@ -82,6 +84,29 @@ export interface ThemeDefinition {
   readonly windowBackground: string;
   readonly tokens: ThemeTokens;
 }
+
+export interface ThemeAccentPreset {
+  readonly id: string;
+  readonly label: string;
+  readonly color: string;
+}
+
+/** Curated seeds; every rendered role is still derived and contrast-corrected per base theme. */
+export const THEME_ACCENT_PRESETS: readonly Readonly<ThemeAccentPreset>[] = Object.freeze(
+  [
+    { id: "indigo", label: "Indigo", color: "#6758ef" },
+    { id: "blue", label: "Blue", color: "#2563eb" },
+    { id: "teal", label: "Teal", color: "#0f766e" },
+    { id: "green", label: "Green", color: "#15803d" },
+    { id: "amber", label: "Amber", color: "#b45309" },
+    { id: "rose", label: "Rose", color: "#be123c" },
+  ].map((preset) =>
+    Object.freeze({
+      ...preset,
+      color: themeAccentColorSchema.parse(preset.color),
+    }),
+  ),
+);
 
 const INITIAL_THEME_STATE_ARGUMENT_PREFIX = "--hype-comms-initial-theme-state=";
 
@@ -290,6 +315,272 @@ export function getThemeDefinition(themeId: string): Readonly<ThemeDefinition> {
   return BUILT_IN_THEMES[themeId];
 }
 
+interface RgbColor {
+  readonly red: number;
+  readonly green: number;
+  readonly blue: number;
+}
+
+const BLACK = themeAccentColorSchema.parse("#000000");
+const WHITE = themeAccentColorSchema.parse("#ffffff");
+
+function parseHexColor(color: string): RgbColor {
+  const canonical = themeAccentColorSchema.parse(color);
+  return {
+    red: Number.parseInt(canonical.slice(1, 3), 16),
+    green: Number.parseInt(canonical.slice(3, 5), 16),
+    blue: Number.parseInt(canonical.slice(5, 7), 16),
+  };
+}
+
+function hexColor({ red, green, blue }: RgbColor): ThemeAccentColor {
+  const component = (value: number): string =>
+    Math.round(Math.min(255, Math.max(0, value)))
+      .toString(16)
+      .padStart(2, "0");
+  return themeAccentColorSchema.parse(`#${component(red)}${component(green)}${component(blue)}`);
+}
+
+function mixHexColors(source: string, target: string, amount: number): ThemeAccentColor {
+  const from = parseHexColor(source);
+  const to = parseHexColor(target);
+  const boundedAmount = Math.min(1, Math.max(0, amount));
+  return hexColor({
+    red: from.red + (to.red - from.red) * boundedAmount,
+    green: from.green + (to.green - from.green) * boundedAmount,
+    blue: from.blue + (to.blue - from.blue) * boundedAmount,
+  });
+}
+
+function alphaColor(color: string, alpha: number): string {
+  const { red, green, blue } = parseHexColor(color);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function compositeColor(foreground: string, background: string, alpha: number): ThemeAccentColor {
+  return mixHexColors(background, foreground, alpha);
+}
+
+function relativeLuminance(color: string): number {
+  const { red, green, blue } = parseHexColor(color);
+  const linear = (component: number): number => {
+    const normalized = component / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue);
+}
+
+/** Contrast for the strict solid colors accepted by the designer and its derived text roles. */
+export function themeContrastRatio(foreground: string, background: string): number {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function meetsContrast(color: string, backgrounds: readonly string[], minimum: number): boolean {
+  return backgrounds.every((background) => themeContrastRatio(color, background) >= minimum);
+}
+
+/**
+ * Preserves the chosen hue for as long as possible, then moves only toward black or white until
+ * every known background meets the required contrast. At least one endpoint is guaranteed to pass
+ * for the light/dark built-ins and thresholds used below.
+ */
+function nearestContrastingColor(
+  color: string,
+  backgrounds: readonly string[],
+  minimum: number,
+): ThemeAccentColor {
+  const canonical = themeAccentColorSchema.parse(color);
+  if (meetsContrast(canonical, backgrounds, minimum)) return canonical;
+
+  for (let step = 1; step <= 100; step += 1) {
+    const amount = step / 100;
+    const darker = mixHexColors(canonical, BLACK, amount);
+    const lighter = mixHexColors(canonical, WHITE, amount);
+    if (meetsContrast(darker, backgrounds, minimum)) return darker;
+    if (meetsContrast(lighter, backgrounds, minimum)) return lighter;
+  }
+  throw new Error("Could not derive an accessible accent role");
+}
+
+function moreContrastingVariation(
+  color: string,
+  foreground: string,
+  amount: number,
+): ThemeAccentColor {
+  const canonical = themeAccentColorSchema.parse(color);
+  const candidates = [
+    mixHexColors(canonical, BLACK, amount),
+    mixHexColors(canonical, WHITE, amount),
+  ]
+    .filter((candidate) => candidate !== canonical)
+    .filter((candidate) => themeContrastRatio(foreground, candidate) >= 4.5)
+    .sort(
+      (left, right) => themeContrastRatio(foreground, right) - themeContrastRatio(foreground, left),
+    );
+  const variation = candidates[0];
+  if (variation !== undefined) return variation;
+
+  // A near-threshold seed can require more than the preferred visual offset. Search both fixed
+  // poles, while never returning the unchanged endpoint for pure black or white accents.
+  for (let step = 1; step <= 100; step += 1) {
+    for (const target of [BLACK, WHITE]) {
+      const candidate = mixHexColors(canonical, target, step / 100);
+      if (candidate !== canonical && themeContrastRatio(foreground, candidate) >= 4.5) {
+        return candidate;
+      }
+    }
+  }
+  throw new Error("Could not derive an accessible accent variation");
+}
+
+function accessibleActionVariation(
+  color: string,
+  foreground: string,
+  surroundings: readonly string[],
+  amount: number,
+): ThemeAccentColor {
+  const canonical = themeAccentColorSchema.parse(color);
+  const valid = (candidate: ThemeAccentColor): boolean =>
+    candidate !== canonical &&
+    themeContrastRatio(foreground, candidate) >= 4.5 &&
+    meetsContrast(candidate, surroundings, 3);
+  const candidates = [
+    mixHexColors(canonical, BLACK, amount),
+    mixHexColors(canonical, WHITE, amount),
+  ].filter(valid);
+  const preferred = candidates[0];
+  if (preferred !== undefined) return preferred;
+
+  for (let step = 1; step <= 100; step += 1) {
+    for (const target of [BLACK, WHITE]) {
+      const candidate = mixHexColors(canonical, target, step / 100);
+      if (valid(candidate)) return candidate;
+    }
+  }
+  throw new Error("Could not derive an accessible primary-action variation");
+}
+
+function distinctContrastingTextVariation(
+  color: string,
+  backgrounds: readonly string[],
+  preferredTarget: string,
+  amount: number,
+): ThemeAccentColor {
+  const canonical = themeAccentColorSchema.parse(color);
+  const oppositeTarget = preferredTarget === BLACK ? WHITE : BLACK;
+  for (const target of [preferredTarget, oppositeTarget]) {
+    const candidate = mixHexColors(canonical, target, amount);
+    if (candidate !== canonical && meetsContrast(candidate, backgrounds, 4.5)) return candidate;
+  }
+  for (let step = 1; step <= 100; step += 1) {
+    for (const target of [preferredTarget, oppositeTarget]) {
+      const candidate = mixHexColors(canonical, target, step / 100);
+      if (candidate !== canonical && meetsContrast(candidate, backgrounds, 4.5)) return candidate;
+    }
+  }
+  return canonical;
+}
+
+/**
+ * Derives renderable semantic roles from one bounded color seed. No user-provided CSS survives this
+ * function: rgba values, gradients, hover states, and contrast-corrected foregrounds are generated
+ * from fixed templates.
+ */
+export function deriveThemeDefinitionWithAccent(
+  base: Readonly<ThemeDefinition>,
+  accentColor: string,
+): Readonly<ThemeDefinition> {
+  const accent = themeAccentColorSchema.parse(accentColor);
+  const contentBackgrounds = [
+    base.tokens.surfaceContent,
+    base.tokens.surfaceElevated,
+    base.tokens.surfaceSidebar,
+    base.tokens.surfaceInput,
+  ];
+  const accentSurfaceAlpha = base.colorScheme === "dark" ? 0.16 : 0.12;
+  const accentSurfaceStrongAlpha = base.colorScheme === "dark" ? 0.2 : 0.18;
+  const accentSurfaceBackgrounds = contentBackgrounds.flatMap((background) => [
+    compositeColor(accent, background, accentSurfaceAlpha),
+    compositeColor(accent, background, accentSurfaceStrongAlpha),
+  ]);
+  const textBackgrounds = [...contentBackgrounds, ...accentSurfaceBackgrounds];
+  const textAccent = nearestContrastingColor(accent, textBackgrounds, 4.5);
+  const textAccentMuted = distinctContrastingTextVariation(
+    textAccent,
+    textBackgrounds,
+    base.colorScheme === "light" ? BLACK : WHITE,
+    base.colorScheme === "light" ? 0.12 : 0.2,
+  );
+  const borderAccent = nearestContrastingColor(
+    accent,
+    [
+      base.tokens.surfaceContent,
+      base.tokens.surfaceSidebar,
+      base.tokens.surfaceInput,
+      base.tokens.surfaceElevated,
+    ],
+    3,
+  );
+
+  const actionSurroundings = [
+    base.tokens.surfaceContent,
+    base.tokens.surfaceElevated,
+    base.tokens.surfaceSidebar,
+    base.tokens.surfaceInput,
+  ];
+  const actionPrimary = nearestContrastingColor(accent, actionSurroundings, 3);
+  const blackActionContrast = themeContrastRatio(BLACK, actionPrimary);
+  const whiteActionContrast = themeContrastRatio(WHITE, actionPrimary);
+  const actionPrimaryText = blackActionContrast >= whiteActionContrast ? BLACK : WHITE;
+  const actionPrimaryHover = accessibleActionVariation(
+    actionPrimary,
+    actionPrimaryText,
+    actionSurroundings,
+    0.12,
+  );
+  const brandStart = nearestContrastingColor(accent, [base.tokens.textInverse], 4.5);
+  const brandEnd = moreContrastingVariation(brandStart, base.tokens.textInverse, 0.14);
+  const highlightAlpha = base.colorScheme === "dark" ? 0.14 : 0.12;
+  const focusAlpha = base.colorScheme === "dark" ? 0.22 : 0.26;
+  const signInPrimaryAlpha = base.colorScheme === "dark" ? 0.22 : 0.16;
+  const signInSecondaryAlpha = base.colorScheme === "dark" ? 0.14 : 0.12;
+
+  return defineTheme({
+    ...base,
+    tokens: {
+      ...base.tokens,
+      surfaceHighlight: alphaColor(accent, highlightAlpha),
+      textAccent,
+      textAccentMuted,
+      borderAccent,
+      actionPrimary,
+      actionPrimaryHover,
+      actionPrimaryText,
+      focusRing: alphaColor(accent, focusAlpha),
+      accentSurface: alphaColor(accent, accentSurfaceAlpha),
+      accentSurfaceStrong: alphaColor(accent, accentSurfaceStrongAlpha),
+      gradientBrand: `linear-gradient(145deg, ${brandStart}, ${brandEnd})`,
+      gradientSignIn:
+        `radial-gradient(circle at 15% 15%, ${alphaColor(accent, signInPrimaryAlpha)}, transparent 38%), ` +
+        `radial-gradient(circle at 85% 80%, ${alphaColor(accent, signInSecondaryAlpha)}, transparent 34%), ` +
+        base.tokens.surfaceCanvas,
+    },
+  });
+}
+
+/** Resolves and validates the built-in foundation, then applies an optional bounded accent. */
+export function getThemeDefinitionForState(state: ThemeState): Readonly<ThemeDefinition> {
+  const canonical = parseBuiltInThemeState(state);
+  const base = getThemeDefinition(canonical.resolvedThemeId);
+  return canonical.accentColor === undefined || canonical.accentColor === null
+    ? base
+    : deriveThemeDefinitionWithAccent(base, canonical.accentColor);
+}
+
 /**
  * Completes structural IPC validation with the bundled registry invariant. This keeps a theme ID
  * and its light/dark native color scheme coherent without hard-coding theme IDs in wire schemas.
@@ -326,6 +617,7 @@ export const FALLBACK_INITIAL_THEME_STATE: ThemeState = Object.freeze({
   preference: "system",
   resolvedThemeId: SYSTEM_THEME_IDS.dark,
   resolvedColorScheme: "dark",
+  accentColor: null,
 });
 
 /**

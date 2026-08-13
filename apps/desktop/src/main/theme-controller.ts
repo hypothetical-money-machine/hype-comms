@@ -1,6 +1,8 @@
 import {
+  themeDesignSchema,
   themePreferenceSchema,
   type ResolvedColorScheme,
+  type ThemeDesign,
   type ThemePreference,
   type ThemeState,
 } from "@hype-comms/contracts";
@@ -16,25 +18,23 @@ export interface NativeThemeAdapter {
 }
 
 export interface ThemePreferencePersistence {
-  load(): Promise<ThemePreference>;
-  save(preference: ThemePreference): Promise<void>;
+  load(): Promise<ThemeDesign>;
+  save(design: ThemeDesign): Promise<void>;
 }
 
-function canonicalThemeState(
-  preference: ThemePreference,
-  shouldUseDarkColors: boolean,
-): ThemeState {
+function canonicalThemeState(design: ThemeDesign, shouldUseDarkColors: boolean): ThemeState {
   const resolvedThemeId =
-    preference === "system"
+    design.preference === "system"
       ? SYSTEM_THEME_IDS[shouldUseDarkColors ? "dark" : "light"]
-      : getThemeDefinition(preference).id;
+      : getThemeDefinition(design.preference).id;
   const definition = getThemeDefinition(resolvedThemeId);
 
   return Object.freeze(
     parseBuiltInThemeState({
-      preference,
+      preference: design.preference,
       resolvedThemeId,
       resolvedColorScheme: definition.colorScheme,
+      accentColor: design.accentColor,
     }),
   );
 }
@@ -49,8 +49,16 @@ function themeStatesEqual(left: ThemeState, right: ThemeState): boolean {
   return (
     left.preference === right.preference &&
     left.resolvedThemeId === right.resolvedThemeId &&
-    left.resolvedColorScheme === right.resolvedColorScheme
+    left.resolvedColorScheme === right.resolvedColorScheme &&
+    (left.accentColor ?? null) === (right.accentColor ?? null)
   );
+}
+
+function designFromState(state: ThemeState): ThemeDesign {
+  return Object.freeze({
+    preference: state.preference,
+    accentColor: state.accentColor ?? null,
+  });
 }
 
 export class ThemeController {
@@ -71,7 +79,7 @@ export class ThemeController {
       return;
     }
     this.#setState(
-      canonicalThemeState(this.#state.preference, this.#nativeTheme.shouldUseDarkColors),
+      canonicalThemeState(designFromState(this.#state), this.#nativeTheme.shouldUseDarkColors),
     );
   };
 
@@ -133,15 +141,57 @@ export class ThemeController {
       if (parsedPreference !== "system") {
         getThemeDefinition(parsedPreference);
       }
-      const request = this.#setTail.then(() => this.#setPreference(parsedPreference));
-      this.#setTail = request.then(
-        () => undefined,
-        () => undefined,
+      return this.#enqueueSet(() =>
+        this.#setDesign({
+          preference: parsedPreference,
+          accentColor: this.state.accentColor ?? null,
+        }),
       );
-      return request;
     } catch (error) {
       return Promise.reject(error);
     }
+  }
+
+  setDesign(design: ThemeDesign): Promise<ThemeState> {
+    try {
+      this.#assertReady();
+      if (!this.#acceptingChanges) {
+        throw new Error("ThemeController is shutting down");
+      }
+      const parsedDesign = themeDesignSchema.parse(design);
+      if (parsedDesign.preference !== "system") {
+        getThemeDefinition(parsedDesign.preference);
+      }
+      return this.#enqueueSet(() => this.#setDesign(parsedDesign));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /**
+   * Resolves the operating-system foundation without changing the saved design or canonical app
+   * state. Electron applies an explicit theme source to both `shouldUseDarkColors` and renderer
+   * media queries, so main must briefly remove that override to read the actual system choice.
+   */
+  resolveSystemState(): Promise<ThemeState> {
+    try {
+      this.#assertReady();
+      if (!this.#acceptingChanges) {
+        throw new Error("ThemeController is shutting down");
+      }
+      return this.#enqueueSet(() => this.#resolveSystemState());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  #enqueueSet(operation: () => ThemeState | Promise<ThemeState>): Promise<ThemeState> {
+    const request = this.#setTail.then(operation);
+    this.#setTail = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    return request;
   }
 
   dispose(): void {
@@ -158,50 +208,129 @@ export class ThemeController {
   }
 
   async #initialize(): Promise<ThemeState> {
-    const preference = themePreferenceSchema.parse(await this.#persistence.load());
+    const design = themeDesignSchema.parse(await this.#persistence.load());
     if (this.#disposed) {
       throw new Error("ThemeController has been disposed");
+    }
+    if (design.preference !== "system") {
+      getThemeDefinition(design.preference);
     }
 
     this.#suppressNativeUpdates = true;
     try {
-      this.#nativeTheme.themeSource = nativeThemeSourceForPreference(preference);
+      this.#nativeTheme.themeSource = nativeThemeSourceForPreference(design.preference);
     } finally {
       this.#suppressNativeUpdates = false;
     }
     this.#nativeTheme.on("updated", this.#handleNativeThemeUpdated);
     this.#nativeThemeSubscribed = true;
-    this.#state = canonicalThemeState(preference, this.#nativeTheme.shouldUseDarkColors);
+    this.#state = canonicalThemeState(design, this.#nativeTheme.shouldUseDarkColors);
     return this.#state;
   }
 
-  async #setPreference(preference: ThemePreference): Promise<ThemeState> {
+  async #setDesign(design: ThemeDesign): Promise<ThemeState> {
     this.#assertReady();
     const previous = this.state;
-    if (preference === previous.preference) {
+    const previousDesign = designFromState(previous);
+    if (
+      design.preference === previousDesign.preference &&
+      design.accentColor === previousDesign.accentColor
+    ) {
       return previous;
     }
 
-    await this.#persistence.save(preference);
-    if (this.#disposed) {
-      throw new Error("ThemeController has been disposed");
+    if (design.preference !== previous.preference) {
+      let failed = false;
+      let failure: unknown;
+      this.#suppressNativeUpdates = true;
+      try {
+        this.#nativeTheme.themeSource = nativeThemeSourceForPreference(design.preference);
+        await this.#persistence.save(design);
+        if (this.#disposed) {
+          throw new Error("ThemeController has been disposed");
+        }
+      } catch (error) {
+        failed = true;
+        failure = error;
+        try {
+          this.#nativeTheme.themeSource = nativeThemeSourceForPreference(previous.preference);
+        } catch (restoreError) {
+          failure = new AggregateError(
+            [error, restoreError],
+            "Theme change failed and the native appearance could not be restored",
+          );
+        }
+      } finally {
+        this.#suppressNativeUpdates = false;
+      }
+      if (failed) {
+        if (!this.#disposed && previous.preference === "system") {
+          this.#setState(
+            canonicalThemeState(previousDesign, this.#nativeTheme.shouldUseDarkColors),
+          );
+        }
+        throw failure;
+      }
+    } else {
+      await this.#persistence.save(design);
+      if (this.#disposed) {
+        throw new Error("ThemeController has been disposed");
+      }
     }
+
+    return this.#setState(canonicalThemeState(design, this.#nativeTheme.shouldUseDarkColors));
+  }
+
+  #resolveSystemState(): ThemeState {
+    this.#assertReady();
+    const current = this.state;
+    if (current.preference === "system") {
+      return current;
+    }
+
+    const expectedSource = nativeThemeSourceForPreference(current.preference);
+    let shouldRestoreSource = false;
+    let shouldUseDarkColors = false;
+    let failure: unknown;
     this.#suppressNativeUpdates = true;
     try {
-      this.#nativeTheme.themeSource = nativeThemeSourceForPreference(preference);
+      // A setter can fail after partially changing a native adapter, so restoration is required
+      // from the moment the probe is attempted, not only after it returns successfully.
+      shouldRestoreSource = true;
+      this.#nativeTheme.themeSource = "system";
+      shouldUseDarkColors = this.#nativeTheme.shouldUseDarkColors;
     } catch (error) {
-      try {
-        this.#nativeTheme.themeSource = nativeThemeSourceForPreference(previous.preference);
-      } catch {
-        // The canonical state remains unchanged even if the native adapter cannot be restored.
-      }
-      await this.#persistence.save(previous.preference).catch(() => undefined);
-      throw error;
+      failure = error;
     } finally {
+      if (shouldRestoreSource) {
+        try {
+          // Derive this from canonical state rather than the adapter's observed source. If an
+          // earlier restoration failed and left nativeTheme on System, a retry must repair it.
+          this.#nativeTheme.themeSource = expectedSource;
+        } catch (restoreError) {
+          failure =
+            failure === undefined
+              ? restoreError
+              : new AggregateError(
+                  [failure, restoreError],
+                  "System appearance resolution failed and the native appearance could not be restored",
+                );
+        }
+      }
       this.#suppressNativeUpdates = false;
     }
 
-    return this.#setState(canonicalThemeState(preference, this.#nativeTheme.shouldUseDarkColors));
+    if (failure !== undefined) {
+      throw failure;
+    }
+    this.#assertReady();
+    return canonicalThemeState(
+      {
+        preference: "system",
+        accentColor: current.accentColor ?? null,
+      },
+      shouldUseDarkColors,
+    );
   }
 
   #setState(state: ThemeState): ThemeState {

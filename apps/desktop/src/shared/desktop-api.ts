@@ -48,6 +48,7 @@ import type {
   TaskListQuery,
   TaskListResponse,
   TaskMutationResponse,
+  ThemeDesign,
   ThemePreference,
   ThemeState,
   UpdateState,
@@ -87,7 +88,9 @@ export interface SessionTransport {
 export interface ThemeTransport {
   readonly initialThemeState: ThemeState;
   readonly getThemeState: () => Promise<ThemeState>;
+  readonly getSystemThemeState: () => Promise<ThemeState>;
   readonly setThemePreference: (preference: ThemePreference) => Promise<ThemeState>;
+  readonly setThemeDesign: (design: ThemeDesign) => Promise<ThemeState>;
   readonly onThemeStateChanged: (listener: (state: ThemeState) => void) => () => void;
 }
 

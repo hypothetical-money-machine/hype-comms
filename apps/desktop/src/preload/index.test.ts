@@ -115,6 +115,32 @@ beforeEach(() => {
   removeListener.mockReset();
 });
 
+describe("preload theme boundary", () => {
+  it("gets a strictly validated System appearance without applying a preference", async () => {
+    const systemState = {
+      preference: "system",
+      resolvedThemeId: "light",
+      resolvedColorScheme: "light",
+      accentColor: "#be123c",
+    } as const;
+    invoke.mockResolvedValueOnce(systemState);
+
+    await expect(desktopApi.getSystemThemeState()).resolves.toEqual(systemState);
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.themeSystemState);
+
+    invoke.mockResolvedValueOnce({
+      preference: "dark",
+      resolvedThemeId: "dark",
+      resolvedColorScheme: "dark",
+      accentColor: null,
+    });
+    await expect(desktopApi.getSystemThemeState()).rejects.toThrow(/non-system appearance/u);
+
+    invoke.mockResolvedValueOnce({ ...systemState, css: "body { display: none }" });
+    await expect(desktopApi.getSystemThemeState()).rejects.toThrow();
+  });
+});
+
 describe("preload listWorkspaceMembers", () => {
   it("invokes the members channel with no request payload", async () => {
     invoke.mockResolvedValueOnce({ members: [MEMBER] });
