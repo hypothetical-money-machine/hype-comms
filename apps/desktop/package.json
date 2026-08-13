@@ -25,7 +25,7 @@
     "typecheck": "tsc --build --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package": "npm run build && electron-builder --publish never",
+    "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --publish never",
     "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --mac --publish never",
     "package:win": "npm run build && electron-builder --win --x64 --arm64 --publish never",
     "package:win:arm64": "npm run build && electron-builder --win nsis:arm64 --publish never",

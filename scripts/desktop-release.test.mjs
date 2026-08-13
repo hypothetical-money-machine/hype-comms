@@ -98,6 +98,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     desktopPackage.scripts["package:mac"],
     /build-macos-notification-authorization\.mjs/u,
   );
+  assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
   assert.deepEqual(desktopPackage.build.mac.extraFiles, [
     {
       from: "native-build/macos/hmm-notification-authorization",
@@ -204,6 +205,16 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
   assert.match(nativeEvidenceJob, /name: Build and authorize signed macOS capture helper/u);
+  for (const secret of [
+    "HYPE_COMMS_MACOS_CSC_LINK",
+    "HYPE_COMMS_MACOS_CSC_KEY_PASSWORD",
+    "HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64",
+    "HYPE_COMMS_MACOS_APPLE_API_KEY_ID",
+    "HYPE_COMMS_MACOS_APPLE_API_ISSUER",
+  ]) {
+    assert.match(nativeEvidenceJob, new RegExp(`secrets\\.${secret}`, "u"));
+  }
+  assert.doesNotMatch(nativeEvidenceJob, /secrets\.HMM_MACOS_/u);
   assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
   assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
   assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);

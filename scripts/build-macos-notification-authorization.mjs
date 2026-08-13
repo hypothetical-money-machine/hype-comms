@@ -22,30 +22,28 @@ async function run(command, arguments_) {
   }
 }
 
-if (process.platform !== "darwin") {
-  throw new Error("The macOS notification authorization helper must be built on macOS");
+if (process.platform === "darwin") {
+  await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+  const architectures = ["arm64", "x86_64"];
+  const architectureOutputs = architectures.map((architecture) => `${output}.${architecture}`);
+  for (const [index, architecture] of architectures.entries()) {
+    await run("/usr/bin/xcrun", [
+      "swiftc",
+      "-parse-as-library",
+      "-O",
+      "-target",
+      `${architecture}-apple-macos11`,
+      "-framework",
+      "AppKit",
+      "-framework",
+      "Foundation",
+      "-framework",
+      "UserNotifications",
+      source,
+      "-o",
+      architectureOutputs[index],
+    ]);
+  }
+  await run("/usr/bin/lipo", ["-create", ...architectureOutputs, "-output", output]);
+  await run("/usr/bin/lipo", [output, "-verify_arch", ...architectures]);
 }
-
-await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
-const architectures = ["arm64", "x86_64"];
-const architectureOutputs = architectures.map((architecture) => `${output}.${architecture}`);
-for (const [index, architecture] of architectures.entries()) {
-  await run("/usr/bin/xcrun", [
-    "swiftc",
-    "-parse-as-library",
-    "-O",
-    "-target",
-    `${architecture}-apple-macos11`,
-    "-framework",
-    "AppKit",
-    "-framework",
-    "Foundation",
-    "-framework",
-    "UserNotifications",
-    source,
-    "-o",
-    architectureOutputs[index],
-  ]);
-}
-await run("/usr/bin/lipo", ["-create", ...architectureOutputs, "-output", output]);
-await run("/usr/bin/lipo", [output, "-verify_arch", ...architectures]);

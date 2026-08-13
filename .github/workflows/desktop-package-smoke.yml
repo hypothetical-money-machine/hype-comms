@@ -164,11 +164,11 @@ jobs:
       - name: Configure macOS signing and notarization
         shell: bash
         env:
-          HMM_MACOS_CSC_LINK: ${{ secrets.HMM_MACOS_CSC_LINK }}
-          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HMM_MACOS_CSC_KEY_PASSWORD }}
-          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HMM_MACOS_APPLE_API_KEY_BASE64 }}
-          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HMM_MACOS_APPLE_API_KEY_ID }}
-          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HMM_MACOS_APPLE_API_ISSUER }}
+          HMM_MACOS_CSC_LINK: ${{ secrets.HYPE_COMMS_MACOS_CSC_LINK }}
+          HMM_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HYPE_COMMS_MACOS_CSC_KEY_PASSWORD }}
+          HMM_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 }}
+          HMM_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
+          HMM_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
           EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
         run: |
           if [[ -z "$HMM_MACOS_CSC_LINK" ||
