@@ -38,8 +38,8 @@ refuses missing URLs and databases whose names are not explicitly test-only.
   Scrapers send `Authorization: Bearer <token>`; the endpoint otherwise does not exist. Never place
   this token in repository variables, desktop configuration, query strings, or logs.
 - The current Prometheus surface is `hype_comms_http_requests_total`,
-  `hype_comms_http_request_duration_seconds_{sum,count}`, `hype_comms_realtime_connections`, and
-  `hype_comms_postgres_pool_connections`. Route labels use Fastify templates, not raw URLs, so IDs and
+  `hype_comms_http_request_duration_seconds_{sum,count}`, `hype_comms_realtime_connections`,
+  `hype_comms_postgres_pool_connections`, and `hype_comms_refresh_token_reuse_total`. Route labels use Fastify templates, not raw URLs, so IDs and
   query values cannot create unbounded or sensitive labels.
 
 Initial alerts should cover sustained 5xx responses, readiness failure, nonzero PostgreSQL waiters,

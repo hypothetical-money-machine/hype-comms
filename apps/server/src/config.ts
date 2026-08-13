@@ -232,6 +232,7 @@ export function loadConfig(
     workosEncryptionKey: env.HYPE_COMMS_AUTH_ENCRYPTION_KEY,
     workosWebhookSecret: env.WORKOS_WEBHOOK_SECRET,
     trustedProxies: env.HYPE_COMMS_TRUSTED_PROXIES,
+    webRoot: env.HYPE_COMMS_WEB_ROOT,
   });
 
   if (!result.success) {
