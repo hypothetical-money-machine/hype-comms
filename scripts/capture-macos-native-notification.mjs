@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 const EVIDENCE_ARGUMENT = "--hmm-macos-native-notification-evidence";
 const EVIDENCE_DIRECTORY_ENV = "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY";
+export const DELIVERY_RECORD_TIMEOUT_MS = 7 * 60_000 + 30_000;
 const RECORD_TIMEOUT_MS = 30_000;
 
 export function parseMacosNativeNotificationCaptureArguments(arguments_, env = process.env) {
@@ -155,8 +156,8 @@ async function waitForRecord(artifactDirectory, name, options = {}) {
   throw new Error(`Timed out waiting for ${name}.json`);
 }
 
-async function captureScreen(helperExecutable, destination) {
-  await runCommand(helperExecutable, ["capture", destination]);
+async function captureScreen(helperExecutable, surface, destination) {
+  await runCommand(helperExecutable, ["capture", surface, destination]);
   const details = await stat(destination);
   if (!details.isFile() || details.size < 10_000) {
     throw new Error(`macOS screenshot is missing or too small: ${destination}`);
@@ -211,12 +212,15 @@ async function main() {
   child.stderr.pipe(createWriteStream(appLog, { flags: "a", mode: 0o600 }));
 
   try {
-    const delivered = await waitForRecord(artifactDirectory, "delivered");
+    const delivered = await waitForRecord(artifactDirectory, "delivered", {
+      timeoutMs: DELIVERY_RECORD_TIMEOUT_MS,
+    });
     if (delivered.version !== 1 || delivered.status !== "delivered") {
       throw new Error("Installed application wrote an invalid delivery record");
     }
     await captureScreen(
       helperExecutable,
+      "notification",
       path.join(artifactDirectory, "macos-native-notification.png"),
     );
 
@@ -228,6 +232,7 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     await captureScreen(
       helperExecutable,
+      "application",
       path.join(artifactDirectory, "macos-native-notification-clicked.png"),
     );
   } finally {

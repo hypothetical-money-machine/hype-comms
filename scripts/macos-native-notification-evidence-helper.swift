@@ -7,6 +7,7 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 private let syntheticBody = "Synthetic direct message for native notification evidence"
+private let hypeCommsBundleIdentifier = "com.hypotheticalmoneymachine.hmmchat"
 
 private struct PermissionState: Encodable {
   let accessibility: Bool
@@ -25,7 +26,7 @@ private enum HelperError: LocalizedError {
     switch self {
     case .captureFailed: "ScreenCaptureKit did not return a display image"
     case .invalidArguments:
-      "Expected preflight, request, capture <absolute-path>, or click"
+      "Expected preflight, request, capture notification|application <absolute-path>, or click"
     case .notificationCenterUnavailable: "Notification Center is not running"
     case .notificationNotFound: "The synthetic Hype Comms notification was not found"
     case .permissionDenied: "Screen Recording and Accessibility must both be enabled"
@@ -99,6 +100,62 @@ private func findSyntheticNotification(
   return nil
 }
 
+private func axPoint(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {
+  guard let rawValue = copyAttribute(element, attribute), CFGetTypeID(rawValue) == AXValueGetTypeID()
+  else { return nil }
+  var point = CGPoint.zero
+  guard AXValueGetValue(rawValue as! AXValue, .cgPoint, &point) else { return nil }
+  return point
+}
+
+private func axSize(_ element: AXUIElement, _ attribute: CFString) -> CGSize? {
+  guard let rawValue = copyAttribute(element, attribute), CFGetTypeID(rawValue) == AXValueGetTypeID()
+  else { return nil }
+  var size = CGSize.zero
+  guard AXValueGetValue(rawValue as! AXValue, .cgSize, &size) else { return nil }
+  return size
+}
+
+private func frame(_ element: AXUIElement) -> CGRect? {
+  guard
+    let position = axPoint(element, kAXPositionAttribute as CFString),
+    let size = axSize(element, kAXSizeAttribute as CFString),
+    size.width > 0,
+    size.height > 0
+  else { return nil }
+  return CGRect(origin: position, size: size)
+}
+
+private func notificationElementAndCropRect() throws -> (AXUIElement, CGRect) {
+  let applications = NSWorkspace.shared.runningApplications.filter {
+    $0.bundleIdentifier == "com.apple.notificationcenterui" ||
+      $0.localizedName == "NotificationCenter"
+  }
+  guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
+  for application in applications {
+    let root = AXUIElementCreateApplication(application.processIdentifier)
+    guard let match = findSyntheticNotification(in: root), let initialFrame = frame(match) else {
+      continue
+    }
+    var cropFrame = initialFrame
+    var current = match
+    for _ in 0..<8 {
+      guard
+        let rawParent = copyAttribute(current, kAXParentAttribute as CFString),
+        CFGetTypeID(rawParent) == AXUIElementGetTypeID()
+      else { break }
+      let parent = rawParent as! AXUIElement
+      guard let parentFrame = frame(parent) else { break }
+      if parentFrame.width > 900 || parentFrame.height > 350 { break }
+      cropFrame = parentFrame
+      current = parent
+      if cropFrame.width >= 250 && cropFrame.height >= 80 { break }
+    }
+    return (match, cropFrame.insetBy(dx: -24, dy: -24))
+  }
+  throw HelperError.notificationNotFound
+}
+
 private func pressElementOrAncestor(_ element: AXUIElement) -> Bool {
   var current: AXUIElement? = element
   for _ in 0..<12 {
@@ -125,35 +182,18 @@ private func clickSyntheticNotification() throws {
       $0.localizedName == "NotificationCenter"
   }
   guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
-  for application in applications {
-    let root = AXUIElementCreateApplication(application.processIdentifier)
-    if let match = findSyntheticNotification(in: root), pressElementOrAncestor(match) {
-      print("notification-clicked")
-      return
-    }
+  let (match, _) = try notificationElementAndCropRect()
+  if pressElementOrAncestor(match) {
+    print("notification-clicked")
+    return
   }
   throw HelperError.notificationNotFound
 }
 
-private func captureScreen(to destination: String) async throws {
+private func writePng(_ image: CGImage, to destination: String) throws {
   guard destination.hasPrefix("/"), destination != "/" else {
     throw HelperError.invalidArguments
   }
-  guard CGPreflightScreenCaptureAccess() else { throw HelperError.permissionDenied }
-  let content = try await SCShareableContent.excludingDesktopWindows(
-    false,
-    onScreenWindowsOnly: true
-  )
-  guard let display = content.displays.first else { throw HelperError.captureFailed }
-  let configuration = SCStreamConfiguration()
-  configuration.width = display.width
-  configuration.height = display.height
-  configuration.showsCursor = false
-  let filter = SCContentFilter(display: display, excludingWindows: [])
-  let image = try await SCScreenshotManager.captureImage(
-    contentFilter: filter,
-    configuration: configuration
-  )
   let url = URL(fileURLWithPath: destination) as CFURL
   guard
     let png = CGImageDestinationCreateWithURL(
@@ -167,6 +207,70 @@ private func captureScreen(to destination: String) async throws {
   }
   CGImageDestinationAddImage(png, image, nil)
   guard CGImageDestinationFinalize(png) else { throw HelperError.pngDestinationFailed }
+}
+
+private func captureNotification(to destination: String) async throws {
+  guard CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() else {
+    throw HelperError.permissionDenied
+  }
+  let (_, cropFrame) = try notificationElementAndCropRect()
+  let content = try await SCShareableContent.excludingDesktopWindows(
+    false,
+    onScreenWindowsOnly: true
+  )
+  guard
+    let display = content.displays.max(by: {
+      $0.frame.intersection(cropFrame).width * $0.frame.intersection(cropFrame).height <
+        $1.frame.intersection(cropFrame).width * $1.frame.intersection(cropFrame).height
+    }),
+    !display.frame.intersection(cropFrame).isNull
+  else { throw HelperError.captureFailed }
+  let configuration = SCStreamConfiguration()
+  configuration.width = display.width
+  configuration.height = display.height
+  configuration.showsCursor = false
+  let filter = SCContentFilter(display: display, excludingWindows: [])
+  let displayImage = try await SCScreenshotManager.captureImage(
+    contentFilter: filter,
+    configuration: configuration
+  )
+  let visibleCrop = cropFrame.intersection(display.frame)
+  let scaleX = CGFloat(displayImage.width) / display.frame.width
+  let scaleY = CGFloat(displayImage.height) / display.frame.height
+  let pixelCrop = CGRect(
+    x: (visibleCrop.minX - display.frame.minX) * scaleX,
+    y: (visibleCrop.minY - display.frame.minY) * scaleY,
+    width: visibleCrop.width * scaleX,
+    height: visibleCrop.height * scaleY
+  ).integral
+  guard let croppedImage = displayImage.cropping(to: pixelCrop) else {
+    throw HelperError.captureFailed
+  }
+  try writePng(croppedImage, to: destination)
+}
+
+private func captureApplication(to destination: String) async throws {
+  guard CGPreflightScreenCaptureAccess() else { throw HelperError.permissionDenied }
+  let content = try await SCShareableContent.excludingDesktopWindows(
+    false,
+    onScreenWindowsOnly: true
+  )
+  let windows = content.windows.filter {
+    $0.owningApplication?.bundleIdentifier == hypeCommsBundleIdentifier && $0.frame.width > 0 &&
+      $0.frame.height > 0
+  }
+  guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+  else { throw HelperError.captureFailed }
+  let configuration = SCStreamConfiguration()
+  configuration.width = max(1, Int(window.frame.width * 2))
+  configuration.height = max(1, Int(window.frame.height * 2))
+  configuration.showsCursor = false
+  let filter = SCContentFilter(desktopIndependentWindow: window)
+  let image = try await SCScreenshotManager.captureImage(
+    contentFilter: filter,
+    configuration: configuration
+  )
+  try writePng(image, to: destination)
 }
 
 @main
@@ -183,8 +287,14 @@ private enum MacosNativeNotificationEvidenceHelper {
         }
       } else if arguments == ["request"] {
         try requestPermissions()
-      } else if arguments.count == 2, arguments[0] == "capture" {
-        try await captureScreen(to: arguments[1])
+      } else if arguments.count == 3, arguments[0] == "capture",
+        arguments[1] == "notification"
+      {
+        try await captureNotification(to: arguments[2])
+      } else if arguments.count == 3, arguments[0] == "capture",
+        arguments[1] == "application"
+      {
+        try await captureApplication(to: arguments[2])
       } else if arguments == ["click"] {
         try clickSyntheticNotification()
       } else {

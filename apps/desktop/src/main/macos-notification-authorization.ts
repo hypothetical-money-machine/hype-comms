@@ -92,12 +92,13 @@ export class MacosNotificationAuthorization {
 }
 
 export function createMacosNotificationAuthorization(options: {
+  readonly compiledIn: boolean;
   readonly isPackaged: boolean;
   readonly platform: NodeJS.Platform;
   readonly resourcesPath: string;
   readonly load?: LoadBinding;
 }): MacosNotificationAuthorization | null {
-  if (!options.isPackaged || options.platform !== "darwin") return null;
+  if (!options.compiledIn || !options.isPackaged || options.platform !== "darwin") return null;
   return new MacosNotificationAuthorization({
     addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
     load: options.load,

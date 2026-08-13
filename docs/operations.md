@@ -135,7 +135,9 @@ Ordinary package smoke verifies build contents only. The same workflow also has 
 synthetic-only helper with a stable signed identity, requires that helper to own Screen Recording
 and Accessibility, signs and notarizes Hype Comms, lets the installed app request its own notification
 authorization, verifies an exact native delivery record, captures the OS toast, activates only that
-synthetic notification, and captures the restored app. macOS may prompt the console user; authorize
+synthetic notification, and captures the restored app. The toast PNG is cropped to the exact
+synthetic accessibility element on its containing display, and the click-through PNG contains only
+the Hype Comms window; unrelated desktop content is never written to the evidence directory. macOS may prompt the console user; authorize
 notifications for **Hype Comms** and grant Screen Recording and Accessibility to **Hype Comms
 Evidence**, then rerun the lane after macOS applies them. The capture helper and evidence build are
 not release artifacts, and the evidence

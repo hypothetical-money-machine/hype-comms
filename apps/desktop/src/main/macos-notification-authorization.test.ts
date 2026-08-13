@@ -67,6 +67,7 @@ describe("MacosNotificationAuthorization", () => {
   it("exists only for packaged macOS and resolves inside the real app bundle", async () => {
     expect(
       createMacosNotificationAuthorization({
+        compiledIn: true,
         isPackaged: false,
         platform: "darwin",
         resourcesPath: "/Applications/Hype Comms.app/Contents/Resources",
@@ -74,9 +75,18 @@ describe("MacosNotificationAuthorization", () => {
     ).toBeNull();
     expect(
       createMacosNotificationAuthorization({
+        compiledIn: true,
         isPackaged: true,
         platform: "linux",
         resourcesPath: "/tmp/resources",
+      }),
+    ).toBeNull();
+    expect(
+      createMacosNotificationAuthorization({
+        compiledIn: false,
+        isPackaged: true,
+        platform: "darwin",
+        resourcesPath: "/Applications/Hype Comms.app/Contents/Resources",
       }),
     ).toBeNull();
 
@@ -85,6 +95,7 @@ describe("MacosNotificationAuthorization", () => {
     );
     const load = vi.fn(() => ({ authorize }));
     const authorization = createMacosNotificationAuthorization({
+      compiledIn: true,
       isPackaged: true,
       platform: "darwin",
       resourcesPath: "/Applications/Hype Comms.app/Contents/Resources",

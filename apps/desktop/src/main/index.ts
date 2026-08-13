@@ -218,6 +218,7 @@ const macosNativeNotificationEvidenceConfiguration =
   });
 const macosNotificationAuthorization: MacosNotificationAuthorization | null =
   createMacosNotificationAuthorization({
+    compiledIn: __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__,
     isPackaged: app.isPackaged,
     platform: process.platform,
     resourcesPath: process.resourcesPath,

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
-import { parseMacosNativeNotificationCaptureArguments } from "./capture-macos-native-notification.mjs";
+import {
+  DELIVERY_RECORD_TIMEOUT_MS,
+  parseMacosNativeNotificationCaptureArguments,
+} from "./capture-macos-native-notification.mjs";
+
+test("allows the full authorization and delivery window", () => {
+  assert.equal(DELIVERY_RECORD_TIMEOUT_MS, 450_000);
+});
 
 test("constrains macOS native notification evidence to explicit absolute paths", () => {
   assert.deepEqual(
