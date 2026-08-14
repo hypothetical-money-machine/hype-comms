@@ -1991,13 +1991,6 @@ if (!hasSingleInstanceLock) {
         notificationSettingsController.initialize(),
       ]);
       const initializedNotificationSettings = notificationSettingsController;
-      await requestAuthorizationForPersistedEnabledPreference({
-        authorization: macosNotificationAuthorization,
-        current: initializedNotificationSettings.state,
-        refreshCapability: () => initializedNotificationSettings.refreshCapability(),
-      }).catch((error: unknown) => {
-        reportMainProcessError("Failed to request persisted notification permission", error);
-      });
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
       stopNotificationSettingsSubscription =
@@ -2160,10 +2153,20 @@ if (!hasSingleInstanceLock) {
 
       await createMainWindow();
 
+      // An upgraded enabled preference must not hold the visible startup path behind an OS prompt.
+      // Until the asynchronous request and refresh complete, the unknown permission state keeps
+      // native presentation suppressed through the normal settings/controller boundary.
+      void requestAuthorizationForPersistedEnabledPreference({
+        authorization: macosNotificationAuthorization,
+        current: initializedNotificationSettings.state,
+        refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+      }).catch((error: unknown) => {
+        reportMainProcessError("Failed to request persisted notification permission", error);
+      });
+
       if (macosNativeNotificationEvidenceConfiguration !== null) {
         mainWindow?.hide();
         app.hide();
-        Notification.removeAll();
         macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
           configuration: macosNativeNotificationEvidenceConfiguration,
           presenter: new ElectronNotificationPresenter(Notification),

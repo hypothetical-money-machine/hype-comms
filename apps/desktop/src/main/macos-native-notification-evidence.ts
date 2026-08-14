@@ -50,6 +50,7 @@ export function resolveMacosNativeNotificationEvidenceConfiguration(options: {
 interface NotificationHistoryEntry {
   readonly title: string;
   readonly body: string;
+  close(): void;
 }
 
 interface NativeEvidenceRecord {
@@ -96,6 +97,20 @@ async function waitForDeliveredNotification(options: {
   throw new Error("Timed out waiting for the synthetic notification in Notification Center");
 }
 
+async function removePriorSyntheticNotifications(
+  getHistory: () => Promise<readonly NotificationHistoryEntry[]>,
+): Promise<void> {
+  const history = await getHistory();
+  for (const entry of history) {
+    if (
+      entry.title === MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE &&
+      entry.body === MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY
+    ) {
+      entry.close();
+    }
+  }
+}
+
 /**
  * Exercise the production Electron presenter in a separately compiled, synthetic-only artifact.
  * No workspace, member, conversation, message identifier, or real message content enters this path.
@@ -121,6 +136,11 @@ export async function startMacosNativeNotificationEvidence(options: {
     await writeRecord(artifactDirectory, { version: 1, status: "failed" });
     throw new Error(`macOS notification authorization is ${permission}`);
   }
+
+  // The evidence app uses the production bundle identity so authorization proves the real release
+  // path. Remove only an earlier copy of the fixed synthetic evidence notification; clearing the
+  // bundle's entire history could discard unrelated notifications on a persistent runner.
+  await removePriorSyntheticNotifications(options.getHistory);
 
   let handle: PresentedNotificationHandle;
   try {

@@ -62,16 +62,33 @@ describe("macOS native notification evidence", () => {
     const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
     const presenter = new EvidencePresenter();
     const onClick = vi.fn();
+    const priorSyntheticClose = vi.fn();
+    const unrelatedClose = vi.fn();
+    let historyReadCount = 0;
     const session = await startMacosNativeNotificationEvidence({
       configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
       presenter,
       requestAuthorization: async () => "granted",
-      getHistory: async () => [
-        {
-          title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
-          body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
-        },
-      ],
+      getHistory: async () => {
+        historyReadCount += 1;
+        if (historyReadCount === 1) {
+          return [
+            {
+              title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
+              body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
+              close: priorSyntheticClose,
+            },
+            { title: "Real message", body: "Do not remove", close: unrelatedClose },
+          ];
+        }
+        return [
+          {
+            title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
+            body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
+            close: vi.fn(),
+          },
+        ];
+      },
       onClick,
       timeoutMs: 100,
       pollIntervalMs: 1,
@@ -82,6 +99,8 @@ describe("macOS native notification evidence", () => {
       body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
       reason: "direct_message",
     });
+    expect(priorSyntheticClose).toHaveBeenCalledOnce();
+    expect(unrelatedClose).not.toHaveBeenCalled();
     await session.delivery;
     expect(
       JSON.parse(await readFile(path.join(artifactDirectory, "delivered.json"), "utf8")),

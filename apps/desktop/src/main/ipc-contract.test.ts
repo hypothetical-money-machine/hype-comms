@@ -54,6 +54,15 @@ describe("desktop IPC contract", () => {
     expect(subscribed.size).toBeGreaterThan(0);
   });
 
+  it("shows the main window before requesting a persisted notification authorization upgrade", () => {
+    const createWindow = mainSource.indexOf("await createMainWindow();");
+    const requestAuthorization = mainSource.indexOf(
+      "void requestAuthorizationForPersistedEnabledPreference({",
+    );
+    expect(createWindow).toBeGreaterThan(-1);
+    expect(requestAuthorization).toBeGreaterThan(createWindow);
+  });
+
   it("handles every channel the renderer can invoke", () => {
     expect(missingFrom(invoked, handled)).toEqual([]);
   });
