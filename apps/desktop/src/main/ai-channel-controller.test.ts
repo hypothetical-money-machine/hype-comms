@@ -430,6 +430,56 @@ describe("AiChannelController", () => {
     );
   });
 
+  it("redacts local paths in web URL query and fragment values", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<PromptResponse>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Inspect URL paths",
+    });
+
+    harness
+      .callbacks()
+      .onSessionUpdate(
+        textUpdate(
+          "new-session",
+          "agent_message_chunk",
+          [
+            "Normal https://example.test/docs/path?q=hello#section",
+            `workspace https://example.test/open?path=${WORKSPACE}/src/index.ts`,
+            "outside https://example.test/open?path=/home/alice/private.txt#file=~/secret.txt",
+            "encoded https://example.test/open?path=%2Fhome%2Falice%2Fencoded.txt",
+            "session https://example.test/open?session=%6E%65%77%2D%73%65%73%73%69%6F%6E#again=%6E%65%77%2D%73%65%73%73%69%6F%6E",
+          ].join(" | "),
+          "url-paths",
+        ),
+      );
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          body: [
+            "Normal https://example.test/docs/path?q=hello#section",
+            "workspace https://example.test/open?path=./src/index.ts",
+            "outside https://example.test/open?path=[path]#file=[path]",
+            "encoded https://example.test/open?path=%5Bpath%5D",
+            "session https://example.test/open?session=%5Bsession%5D#again=%5Bsession%5D",
+          ].join(" | "),
+        }),
+      ]),
+    );
+    const serialized = JSON.stringify(harness.controller.state);
+    expect(serialized).not.toContain(WORKSPACE);
+    expect(serialized).not.toContain("%6E%65%77%2D%73%65%73%73%69%6F%6E");
+    expect(serialized).not.toContain("new-session");
+    expect(serialized).not.toMatch(/home|alice|private\.txt|encoded\.txt|secret\.txt/u);
+
+    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    await flushPromises();
+  });
+
   it("fully redacts workspace-prefix sibling paths from messages, tools, and permissions", async () => {
     const harness = createHarness();
     harness.host.promptGate = deferred<PromptResponse>();

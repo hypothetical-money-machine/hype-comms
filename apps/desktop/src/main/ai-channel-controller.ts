@@ -157,6 +157,63 @@ function isUnreplacedWorkspacePath(candidate: string, workspacePath: string | nu
   });
 }
 
+function sanitizeUrlValue(
+  value: string,
+  workspacePath: string | null,
+  sensitiveValues: readonly string[],
+): string {
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    // Malformed percent escapes stay literal and still pass through display sanitization.
+  }
+
+  const sanitized = /^https?:\/\//iu.test(decoded)
+    ? sanitizeWebUrl(decoded, workspacePath, sensitiveValues)
+    : sanitizeDisplayText(decoded, workspacePath, Number.MAX_SAFE_INTEGER, sensitiveValues);
+  if (sanitized === decoded) return value;
+  return decoded === value ? sanitized : encodeURIComponent(sanitized);
+}
+
+function sanitizeUrlParameters(
+  value: string,
+  workspacePath: string | null,
+  sensitiveValues: readonly string[],
+): string {
+  return value
+    .split("&")
+    .map((parameter) => {
+      const separator = parameter.indexOf("=");
+      if (separator < 0) return sanitizeUrlValue(parameter, workspacePath, sensitiveValues);
+      return `${parameter.slice(0, separator + 1)}${sanitizeUrlValue(
+        parameter.slice(separator + 1),
+        workspacePath,
+        sensitiveValues,
+      )}`;
+    })
+    .join("&");
+}
+
+function sanitizeWebUrl(
+  value: string,
+  workspacePath: string | null,
+  sensitiveValues: readonly string[],
+): string {
+  const fragmentOffset = value.indexOf("#");
+  const beforeFragment = fragmentOffset < 0 ? value : value.slice(0, fragmentOffset);
+  const fragment = fragmentOffset < 0 ? null : value.slice(fragmentOffset + 1);
+  const queryOffset = beforeFragment.indexOf("?");
+  const base = queryOffset < 0 ? beforeFragment : beforeFragment.slice(0, queryOffset);
+  const query = queryOffset < 0 ? null : beforeFragment.slice(queryOffset + 1);
+
+  return (
+    base +
+    (query === null ? "" : `?${sanitizeUrlParameters(query, workspacePath, sensitiveValues)}`) +
+    (fragment === null ? "" : `#${sanitizeUrlParameters(fragment, workspacePath, sensitiveValues)}`)
+  );
+}
+
 function sanitizeDisplayText(
   value: string,
   workspacePath: string | null,
@@ -171,7 +228,7 @@ function sanitizeDisplayText(
   // Temporarily remove web URLs so their path separators are not mistaken for local paths.
   const webUrls: string[] = [];
   result = result.replace(/\bhttps?:\/\/[^\s<>"']+/giu, (url) => {
-    const index = webUrls.push(url) - 1;
+    const index = webUrls.push(sanitizeWebUrl(url, workspacePath, sensitiveValues)) - 1;
     return `\uE000${String(index)}\uE001`;
   });
 
