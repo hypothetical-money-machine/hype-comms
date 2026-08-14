@@ -475,7 +475,9 @@ review.
   [deterministic identity test](../apps/desktop/src/main/application-identity.test.ts) prevents
   source/package drift. Stable installed NSIS attribution and click handling remain part of the
   native evidence gate.
-- No installed operating-system notification evidence is committed yet. The signed/notarized macOS
+- Installed synthetic notification evidence is committed for one signed/notarized macOS ARM64 run:
+  the [OS toast](screenshots/macos-native-notification-toast.png) and
+  [restored-window callback](screenshots/macos-native-notification-click-through.png). The macOS
   release artifact includes the controller as an opt-in pilot while its device preference remains
   disabled by default; Windows and Linux release artifacts remain compiled off. Milestone 4 is
   evaluated per platform so one platform can advance without weakening another's gate. The overall

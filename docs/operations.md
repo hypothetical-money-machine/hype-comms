@@ -141,8 +141,12 @@ the Hype Comms window; unrelated desktop content is never written to the evidenc
 notifications for **Hype Comms** and grant Screen Recording and Accessibility to **Hype Comms
 Evidence**, then rerun the lane after macOS applies them. The capture helper and evidence build are
 not release artifacts, and the evidence
-directory must never contain real message content. The missing external
-matrix is current and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu
+directory must never contain real message content. The signed macOS ARM64 lane passed delivery and
+click restoration in [run 31757537323](https://github.com/hype-comms/hype-comms/actions/runs/31757537323);
+the checked-in [toast](screenshots/macos-native-notification-toast.png) and
+[restored-window](screenshots/macos-native-notification-click-through.png) captures contain only the
+synthetic evidence state. The missing external matrix is current and previous supported macOS on
+arm64/x64, Windows 11 on x64/ARM64, and Ubuntu
 24.04 on x64/ARM64 installed from both AppImage and Debian packages. A platform may enter an opt-in
 pilot and complete its gate without waiting for other platforms; the overall roadmap remains open
 until every platform passes.

@@ -5,7 +5,9 @@ verified-mention, and participated-thread reasons; replica-first macOS window re
 click-through; preferences; and headless capture. The signed/notarized macOS release artifact now
 includes the controller behind its default-off device preference; Windows and Linux release
 artifacts remain compiled off. Milestone 4 remains open and is evaluated per platform, so one
-platform can complete its pilot without waiting for the others.
+platform can complete its pilot without waiting for the others. One signed/notarized macOS ARM64
+run now proves installed synthetic toast delivery and click restoration; it is the first slice of
+the required native matrix, not completion of the macOS gate.
 [architecture.md](architecture.md) and [ADR 0002](adr/0002-native-notification-boundary.md) are the
 implementation and security contract. This roadmap sequences the remaining proof and rollout work
 and does not override those documents.
@@ -76,8 +78,9 @@ fallback. Windows and Linux retain last-window stop-and-quit behavior.
 
 The remaining per-platform gates cover installed native behavior on current and previous supported
 macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both
-AppImage and Debian packages. Existing package smoke and headless screenshots do not satisfy those
-gates. Passing or piloting one platform does not change another platform's release flag.
+AppImage and Debian packages. One signed/notarized macOS ARM64 synthetic toast/click run passes;
+ordinary package smoke and headless screenshots do not satisfy the rest of those gates. Passing or
+piloting one platform does not change another platform's release flag.
 
 ## Product policy
 
@@ -441,9 +444,11 @@ Milestone 3 boundary without local participation inference.
 
 ### Milestone 4: packaged rollout gate for each platform
 
-Status: open. No installed operating-system toast/click evidence exists in this repository today.
-An opt-in workflow lane can capture one signed/notarized macOS arm64 synthetic toast/click run on an
-unlocked self-hosted Mac; it does not run the required installed native matrix.
+Status: open. The opt-in workflow lane passed one signed/notarized macOS ARM64 synthetic toast/click
+run on an unlocked self-hosted Mac. Its checked-in
+[OS toast](screenshots/macos-native-notification-toast.png) and
+[click restoration](screenshots/macos-native-notification-click-through.png) prove that installed
+slice; the lane does not run the rest of the required native matrix.
 
 Goal: prove the native behavior on the artifacts people actually install.
 
@@ -484,8 +489,10 @@ Milestones 0 through 3 are covered by the
 [bootstrap recovery](screenshots/native-notification-bootstrap-retry-recovered.png),
 [participated-thread reply](screenshots/native-notification-participated-thread-reply.png), and
 [mention precedence](screenshots/native-notification-participated-thread-mention-precedence.png)
-captures are renderer/headless evidence only. The packaged-native and OS-toast rows below remain
-open.
+captures are renderer/headless evidence only. The signed macOS ARM64
+[toast](screenshots/macos-native-notification-toast.png) and
+[restored-window](screenshots/macos-native-notification-click-through.png) captures prove one
+packaged-native slice. The full packaged-native and OS-toast rows below remain open.
 
 | Layer | Required evidence |
 | --- | --- |
@@ -589,7 +596,7 @@ The contract, DM/mention/thread behavior, privacy defaults, scope invalidation, 
 and replica-first windowless recovery are implemented and proven deterministically. The
 `ROADMAP.md` native-notifications item remains incomplete until:
 
-- actual packaged interaction and screenshot evidence exists;
+- actual packaged interaction and screenshot evidence exists for every applicable platform slice;
 - `npm run check`, `npm run test:db`, relevant package verification, and native smoke lanes pass;
 - `ROADMAP.md`, `docs/architecture.md`, operations/release notes, and issue references agree; and
 - the installed application—not a mocked renderer alone—has demonstrated display and exact
