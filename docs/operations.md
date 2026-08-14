@@ -145,11 +145,21 @@ directory must never contain real message content. The signed macOS ARM64 lane p
 click restoration in [run 31757537323](https://github.com/hype-comms/hype-comms/actions/runs/31757537323);
 the checked-in [toast](screenshots/macos-native-notification-toast.png) and
 [restored-window](screenshots/macos-native-notification-click-through.png) captures contain only the
-synthetic evidence state. The missing external matrix is current and previous supported macOS on
-arm64/x64, Windows 11 on x64/ARM64, and Ubuntu
-24.04 on x64/ARM64 installed from both AppImage and Debian packages. A platform may enter an opt-in
-pilot and complete its gate without waiting for other platforms; the overall roadmap remains open
-until every platform passes.
+synthetic evidence state. Each external lane covers every cell of that platform's row in the
+[supported host matrix](architecture.md#supported-host-matrix). A platform may enter an opt-in pilot
+and complete its gate without waiting for other platforms; the overall roadmap remains open until
+every platform passes.
+
+`HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` itself has no platform dimension: it is one build-time
+variable read globally by
+[`native-notification-rollout.ts`](../apps/desktop/src/shared/native-notification-rollout.ts) and
+`apps/desktop/electron.vite.config.ts`, and every artifact built with it set ships enabled. A
+per-platform rollout is therefore a property of *where the variable is set*, not of the variable.
+Set it on the individual `package` matrix entry in
+[`desktop-release.yml`](../.github/workflows/desktop-release.yml) whose `platform` has passed its
+lane—never at workflow, job-wide, repository-variable, or environment level, which would enable it
+on the macOS, Windows, and Linux jobs at once and ship unproven platforms enabled in the same
+release.
 
 macOS signing/notarization is configured. Windows Authenticode is blocked on procuring a Windows
 code-signing certificate and publisher identity; no matching repository secrets or variables exist

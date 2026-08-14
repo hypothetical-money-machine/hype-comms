@@ -3,6 +3,9 @@
 - **Status:** Accepted
 - **Date:** 2026-08-10
 
+Rollout-gate scope is amended by
+[ADR 0003](0003-platform-scoped-delivery.md); the trust and freshness boundaries remain unchanged.
+
 ## Context
 
 Hype Comms needs to attract attention to a fresh direct message or server-verified mention while
@@ -244,4 +247,4 @@ Milestone 4 Windows evidence run.
   never reconstructed from local thread state.
 - Ordinary tests and headless demos use fake/capture presenters and cannot depend on a developer's
   OS permission or emit a real toast. Installed-artifact evidence across the supported native
-  matrix remains a release gate.
+  configurations of a target platform remains that platform's rollout gate.
