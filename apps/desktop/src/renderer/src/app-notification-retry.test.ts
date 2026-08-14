@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
+  AiChannelState,
   ChatSessionState,
   HumanWorkspaceBootstrapResponse,
   Message,
@@ -147,6 +148,17 @@ const notificationState: NotificationState = {
   osPermission: "granted",
 };
 
+const aiChannelState: AiChannelState = {
+  version: 1,
+  generation: 1,
+  status: "configured",
+  workspaceName: "hype-comms",
+  entries: [],
+  plan: [],
+  permissionRequest: null,
+  error: null,
+};
+
 interface RetryHarness {
   readonly client: DesktopApi;
   readonly activities: NotificationActivityUpdate[];
@@ -165,6 +177,7 @@ interface RetryHarness {
 interface RetryHarnessOptions {
   readonly failFirstBootstrap?: boolean;
   readonly bootstrap?: HumanWorkspaceBootstrapResponse;
+  readonly aiChannelState?: AiChannelState;
   readonly delayFirstActivity?: boolean;
   readonly delayFirstMessage?: boolean;
   readonly notificationAction?: NotificationAction;
@@ -190,6 +203,7 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
   const sessionListeners = new Set<(next: ChatSessionState) => void>();
   const failFirstBootstrap = options.failFirstBootstrap ?? true;
   const bootstrapResponse = options.bootstrap ?? bootstrap;
+  const aiStateResponse = options.aiChannelState ?? aiChannelState;
 
   const client = {
     platform: "linux",
@@ -289,6 +303,14 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     setNotificationPreference: async () => notificationState,
     refreshNotificationCapability: async () => notificationState,
     onNotificationStateChanged: () => () => undefined,
+    getAiChannelState: async () => aiStateResponse,
+    startAiChannel: async () => aiStateResponse,
+    chooseAiChannelWorkspace: async () => aiStateResponse,
+    newAiChannelSession: async () => aiStateResponse,
+    sendAiChannelPrompt: async () => aiStateResponse,
+    cancelAiChannelPrompt: async () => aiStateResponse,
+    respondAiChannelPermission: async () => aiStateResponse,
+    onAiChannelStateChanged: () => () => undefined,
   };
 
   return {
@@ -492,5 +514,72 @@ describe("App notification session recovery", () => {
     expect(harness.messageRequests).toBe(2);
     expect(harness.reactionHydrations).toBe(1);
     expect(harness.acknowledgements).toHaveLength(1);
+  });
+
+  it("opens the local AI destination without suppressing workspace notifications", async () => {
+    const harness = createRetryHarness({ failFirstBootstrap: false, bootstrap: channelBootstrap });
+    render(
+      createElement(App, {
+        client: harness.client,
+        theme: createTheme(),
+        compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
+      }),
+    );
+
+    await screen.findByTestId("workspace-ready");
+    const aiDestination = screen.getByRole("button", { name: /AI Channel/u });
+    aiDestination.focus();
+    fireEvent.click(aiDestination);
+    await screen.findByRole("heading", { name: "AI Channel" });
+    expect(aiDestination.getAttribute("aria-current")).toBe("page");
+    expect(document.activeElement).toBe(aiDestination);
+    await waitFor(() => expect(harness.activities.at(-1)?.view).toEqual({ pane: "none" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /General/u }));
+    await screen.findByRole("heading", { name: "# General" });
+    await waitFor(() => expect(harness.activities.at(-1)?.view.pane).toBe("chat"));
+  });
+
+  it("preserves an unsent AI draft while navigating through workspace conversations", async () => {
+    const harness = createRetryHarness({
+      failFirstBootstrap: false,
+      bootstrap: channelBootstrap,
+      aiChannelState: { ...aiChannelState, status: "ready" },
+    });
+    render(
+      createElement(App, {
+        client: harness.client,
+        theme: createTheme(),
+        compactMode: createCompactMode(),
+        sidebarPosition: createSidebarPosition(),
+      }),
+    );
+
+    await screen.findByTestId("workspace-ready");
+    const aiDestination = screen.getByRole("button", { name: /AI Channel/u });
+    fireEvent.click(aiDestination);
+    const composer = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
+    fireEvent.change(composer, { target: { value: "Keep this local draft" } });
+
+    const general = screen.getByRole("button", { name: /General/u });
+    general.focus();
+    fireEvent.click(general);
+    await screen.findByRole("heading", { name: "# General" });
+    expect(document.activeElement).toBe(general);
+    expect(document.querySelector(".ai-channel")?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector<HTMLTextAreaElement>("#ai-channel-prompt")?.value).toBe(
+      "Keep this local draft",
+    );
+
+    aiDestination.focus();
+    fireEvent.click(aiDestination);
+    const restoredComposer = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
+    expect(restoredComposer.value).toBe("Keep this local draft");
+    expect(document.activeElement).toBe(aiDestination);
   });
 });

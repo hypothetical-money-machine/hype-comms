@@ -215,4 +215,15 @@ describe("renderer theme CSS", () => {
     );
     expect(styles).toContain("box-shadow: inset -7px 0 var(--theme-border-accent)");
   });
+
+  it("removes the workspace pane from layout while the local AI destination is open", () => {
+    const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
+    const hiddenConversationRule = /\.conversation-pane\[hidden\]\s*\{(?<body>[^}]*)\}/u.exec(
+      styles,
+    );
+    const hiddenAiChannelRule = /\.ai-channel\[hidden\]\s*\{(?<body>[^}]*)\}/u.exec(styles);
+
+    expect(hiddenConversationRule?.groups?.body).toContain("display: none");
+    expect(hiddenAiChannelRule?.groups?.body).toContain("display: none");
+  });
 });

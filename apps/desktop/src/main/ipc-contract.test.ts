@@ -131,4 +131,16 @@ describe("desktop IPC contract", () => {
   it("never registers a request handler for a push-only channel", () => {
     expect([...subscribed].filter((channel) => handled.has(channel)).sort()).toEqual([]);
   });
+
+  it("retires the local AI worker when a passive session transition signs the user out", () => {
+    const deliveryStart = mainSource.indexOf("function deliverSessionState(");
+    const deliveryEnd = mainSource.indexOf("function deliverNotificationState(", deliveryStart);
+    const delivery = mainSource.slice(deliveryStart, deliveryEnd);
+
+    expect(deliveryStart).toBeGreaterThanOrEqual(0);
+    expect(deliveryEnd).toBeGreaterThan(deliveryStart);
+    expect(delivery).toContain('if (state.status !== "signed-in")');
+    expect(delivery).toContain("suspendAiChannel();");
+    expect(mainSource).toContain("chatSession.subscribe(deliverSessionState)");
+  });
 });

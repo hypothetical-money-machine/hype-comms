@@ -109,6 +109,17 @@ const NOTIFICATION_STATE = {
   osPermission: "unknown",
 } as const;
 
+const AI_CHANNEL_STATE = {
+  version: 1,
+  generation: 4,
+  status: "ready",
+  workspaceName: "hype-comms",
+  entries: [],
+  plan: [],
+  permissionRequest: null,
+  error: null,
+} as const;
+
 beforeEach(() => {
   invoke.mockReset();
   on.mockReset();
@@ -161,6 +172,93 @@ describe("preload listWorkspaceMembers", () => {
     invoke.mockResolvedValueOnce(null);
 
     await expect(desktopApi.listWorkspaceMembers()).rejects.toThrow();
+  });
+});
+
+describe("preload AI Channel boundary", () => {
+  it("exposes the complete local AI transport and validates returned snapshots", async () => {
+    expect(desktopApi).toMatchObject({
+      getAiChannelState: expect.any(Function),
+      startAiChannel: expect.any(Function),
+      chooseAiChannelWorkspace: expect.any(Function),
+      newAiChannelSession: expect.any(Function),
+      sendAiChannelPrompt: expect.any(Function),
+      cancelAiChannelPrompt: expect.any(Function),
+      respondAiChannelPermission: expect.any(Function),
+      onAiChannelStateChanged: expect.any(Function),
+    });
+    invoke.mockResolvedValueOnce(AI_CHANNEL_STATE);
+
+    await expect(desktopApi.getAiChannelState()).resolves.toEqual(AI_CHANNEL_STATE);
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.aiChannelState);
+
+    invoke.mockResolvedValueOnce({
+      ...AI_CHANNEL_STATE,
+      workspacePath: "/private/project",
+      sessionId: "private-session",
+    });
+    await expect(desktopApi.getAiChannelState()).rejects.toThrow();
+  });
+
+  it("validates and bounds prompt and permission mutations before invoking main", async () => {
+    invoke.mockResolvedValue(AI_CHANNEL_STATE);
+
+    await expect(
+      desktopApi.sendAiChannelPrompt({ generation: 4, prompt: "Explain this project" }),
+    ).resolves.toEqual(AI_CHANNEL_STATE);
+    await expect(
+      desktopApi.respondAiChannelPermission({
+        generation: 4,
+        requestId: "permission-1",
+        optionId: "allow-once",
+      }),
+    ).resolves.toEqual(AI_CHANNEL_STATE);
+    expect(invoke.mock.calls).toEqual([
+      [DESKTOP_CHANNELS.aiChannelPromptSend, { generation: 4, prompt: "Explain this project" }],
+      [
+        DESKTOP_CHANNELS.aiChannelPermissionRespond,
+        { generation: 4, requestId: "permission-1", optionId: "allow-once" },
+      ],
+    ]);
+
+    await expect(
+      desktopApi.sendAiChannelPrompt({ generation: 4, prompt: "x".repeat(70_000) }),
+    ).rejects.toThrow(/byte limit/);
+    await expect(
+      desktopApi.respondAiChannelPermission({
+        generation: 3,
+        requestId: "permission-1",
+        optionId: "x".repeat(5_000),
+      }),
+    ).rejects.toThrow(/byte limit/);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops invalid or oversized pushes and removes the exact listener", () => {
+    const listener = vi.fn();
+    const unsubscribe = desktopApi.onAiChannelStateChanged(listener);
+    const wrapped = on.mock.calls[0]?.[1] as ((event: unknown, value: unknown) => void) | undefined;
+
+    wrapped?.({}, AI_CHANNEL_STATE);
+    wrapped?.({}, { ...AI_CHANNEL_STATE, workspacePath: "/private/project" });
+    wrapped?.(
+      {},
+      {
+        ...AI_CHANNEL_STATE,
+        entries: Array.from({ length: 11 }, (_value, index) => ({
+          type: "message",
+          id: `message-${String(index)}`,
+          role: "assistant",
+          body: "x".repeat(100_000),
+          createdAt: NOW,
+        })),
+      },
+    );
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(AI_CHANNEL_STATE);
+    unsubscribe();
+    expect(removeListener).toHaveBeenCalledWith(DESKTOP_CHANNELS.aiChannelChanged, wrapped);
   });
 });
 

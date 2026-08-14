@@ -15,6 +15,7 @@ import type {
 } from "@hype-comms/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
+import { AiChannel } from "./ai-channel";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
@@ -314,6 +315,15 @@ function Avatar({ user }: { user: User | undefined }) {
   );
 }
 
+function AiChannelIcon() {
+  return (
+    <svg className="ai-channel-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 1.9c.5 4 2.1 5.6 6.1 6.1-4 .5-5.6 2.1-6.1 6.1-.5-4-2.1-5.6-6.1-6.1 4-.5 5.6-2.1 6.1-6.1Z" />
+      <path d="M15.8 12.4c.2 1.8 1 2.6 2.8 2.8-1.8.2-2.6 1-2.8 2.8-.2-1.8-1-2.6-2.8-2.8 1.8-.2 2.6-1 2.8-2.8Z" />
+    </svg>
+  );
+}
+
 const PARTICIPANT_COLOR_COUNT = 8;
 
 export function participantColorIndex(userId: string): number {
@@ -517,6 +527,8 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
+  const [destination, setDestination] = useState<"workspace" | "ai">("workspace");
+  const [aiChannelVisited, setAiChannelVisited] = useState(false);
   const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
   const notificationBindingGeneration = useRef(0);
   const notificationTransport = useMemo(() => notificationTransportFrom(client), [client]);
@@ -526,6 +538,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
       handleNotificationAction: async (action, context) => {
         const result = await runtime.handleNotificationAction(action, context);
         if (result === "discarded") return;
+        setDestination("workspace");
         setPaneView("chat");
         setShowChannelMembers(false);
         setShowPreferences(false);
@@ -559,6 +572,23 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   }>({ rootId: null, newestReplyId: null, pendingCount: 0 });
   const compact = useCompactModeEnabled(compactMode);
   const chrome = useCompactChrome(compact);
+
+  const selectConversation = useCallback(
+    (conversationId: string): void => {
+      setDestination("workspace");
+      runtime.selectConversation(conversationId);
+    },
+    [runtime],
+  );
+
+  const openAiChannel = useCallback((): void => {
+    setAiChannelVisited(true);
+    setDestination("ai");
+    setPaneView("chat");
+    setShowChannelMembers(false);
+    setShowPreferences(false);
+    runtime.closeThread();
+  }, [runtime]);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -629,6 +659,8 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
       notificationSession?.invalidate();
       setNotificationContext(null);
       if (next.status === "signed-out") {
+        setDestination("workspace");
+        setAiChannelVisited(false);
         resetDrafts();
         setThreadDrafts({});
         setEditingClientMessageId(null);
@@ -796,7 +828,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
 
   useBackgroundUnreadSignal(
     bootstrap?.conversations ?? null,
-    runtimeState.selectedConversationId,
+    destination === "workspace" ? runtimeState.selectedConversationId : null,
     chrome.notifyUnread,
   );
 
@@ -816,6 +848,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     const conversationId = runtimeState.selectedConversationId;
     const list = messageList.current;
     if (
+      destination !== "workspace" ||
       conversationId === null ||
       list === null ||
       !isReadTrackingEligible(isHeadless, document.visibilityState, document.hasFocus())
@@ -833,7 +866,13 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
       selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
     );
     if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
-  }, [isHeadless, runtime, runtimeState.selectedConversationId, selectedSummary?.readCursor]);
+  }, [
+    destination,
+    isHeadless,
+    runtime,
+    runtimeState.selectedConversationId,
+    selectedSummary?.readCursor,
+  ]);
 
   const scheduleReadTracking = useCallback((): void => {
     if (readTrackingFrame.current !== null) return;
@@ -858,6 +897,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     const threadRootId = runtimeState.selectedThreadRootId;
     const list = threadList.current;
     if (
+      destination !== "workspace" ||
       conversationId === null ||
       threadRootId === null ||
       list === null ||
@@ -878,6 +918,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     );
     if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
   }, [
+    destination,
     isHeadless,
     runtime,
     runtimeState.selectedConversationId,
@@ -955,6 +996,14 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   useEffect(() => {
     const list = messageList.current;
     const conversationId = runtimeState.selectedConversationId;
+    if (destination !== "workspace") {
+      // Returning from AI must be treated like entering the timeline again so missed messages
+      // land at the unread divider instead of inheriting the hidden pane's at-bottom state.
+      timelineConversationId.current = null;
+      stickToTimelineBottom.current = false;
+      setTimelineAtLiveTail(false);
+      return;
+    }
     if (list === null || conversationId === null) return;
     if (timelineConversationId.current !== conversationId) {
       timelineConversationId.current = conversationId;
@@ -971,6 +1020,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     setTimelineAtLiveTail(atLiveTail);
     scheduleReadTracking();
   }, [
+    destination,
     messages.length,
     pending.length,
     runtimeState.selectedConversationId,
@@ -1003,18 +1053,21 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
 
   useEffect(() => {
     if (notificationSession === null || notificationContext?.status !== "active") return;
-    const conversationId = runtimeState.selectedConversationId;
-    const view = createNotificationActivityView({
-      pane: paneView,
-      conversationId,
-      timelineAtLiveTail,
-      threadRootId: selectedThreadRootId,
-      threadAtLiveTail,
-    });
+    const view =
+      destination === "ai"
+        ? ({ pane: "none" } as const)
+        : createNotificationActivityView({
+            pane: paneView,
+            conversationId: runtimeState.selectedConversationId,
+            timelineAtLiveTail,
+            threadRootId: selectedThreadRootId,
+            threadAtLiveTail,
+          });
     void notificationSession.report(view).catch(() => undefined);
   }, [
     notificationContext,
     notificationSession,
+    destination,
     paneView,
     runtimeState.selectedConversationId,
     selectedThreadRootId,
@@ -1090,6 +1143,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   };
 
   const openTaskSource = (task: Task): void => {
+    setDestination("workspace");
     setPaneView("chat");
     runtime.openTaskSource(task);
   };
@@ -1134,6 +1188,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
       access: ChannelAccess,
       channelMode: ChannelMode,
     ): Promise<void> => {
+      setDestination("workspace");
       await runtime.createChannel(name, slug, topic, access, channelMode);
     },
     [runtime],
@@ -1158,6 +1213,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   const startDirectMessage = useCallback(
     async (memberId: string) => {
       try {
+        setDestination("workspace");
         await runtime.createDirectConversation(memberId);
       } catch (error) {
         setComposerError(errorMessage(error, "Could not start the direct message"));
@@ -1262,7 +1318,9 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
 
   return (
     <main
-      className={selectedThreadRootId === null ? "shell" : "shell thread-open"}
+      className={
+        destination === "ai" || selectedThreadRootId === null ? "shell" : "shell thread-open"
+      }
       data-testid="workspace-ready"
     >
       {compact && <CompactHotzone chrome={chrome} />}
@@ -1299,10 +1357,12 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
             isArchived: summary.conversation.isArchived,
             channelMode: summary.conversation.channelMode,
           }))}
-          selectedConversationId={runtimeState.selectedConversationId}
+          selectedConversationId={
+            destination === "workspace" ? runtimeState.selectedConversationId : null
+          }
           platform={client.platform}
           onSelect={(conversationId) => {
-            runtime.selectConversation(conversationId);
+            selectConversation(conversationId);
             // Picking a destination means "show me the channel": a pointer resting on the
             // overlay would otherwise hold it open over the conversation it just selected.
             chrome.collapse();
@@ -1322,6 +1382,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           }}
           search={(query, after) => runtime.searchMessages(query, after)}
           openResult={async (result) => {
+            setDestination("workspace");
             await runtime.openSearchResult(result);
             chrome.collapse();
           }}
@@ -1329,6 +1390,26 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
         />
 
         <nav aria-label="Conversations">
+          <div className="nav-heading">
+            <span>AI</span>
+          </div>
+          <button
+            className={
+              destination === "ai"
+                ? "conversation ai-channel-destination active"
+                : "conversation ai-channel-destination"
+            }
+            type="button"
+            aria-current={destination === "ai" ? "page" : undefined}
+            onClick={openAiChannel}
+          >
+            <span className="conversation-label">
+              <AiChannelIcon />
+              <span className="conversation-label-text">AI Channel</span>
+            </span>
+            <span className="ai-channel-local-badge">Local</span>
+          </button>
+
           <div className="nav-heading">
             <span>Channels</span>
             <ChannelCreatePopover
@@ -1343,13 +1424,14 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           {channels.map((summary) => (
             <button
               className={
+                destination === "workspace" &&
                 summary.conversation.id === runtimeState.selectedConversationId
                   ? "conversation active"
                   : "conversation"
               }
               type="button"
               key={summary.conversation.id}
-              onClick={() => runtime.selectConversation(summary.conversation.id)}
+              onClick={() => selectConversation(summary.conversation.id)}
             >
               <span
                 className="conversation-label conversation-label-channel"
@@ -1377,13 +1459,14 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           {directMessages.map((summary) => (
             <button
               className={
+                destination === "workspace" &&
                 summary.conversation.id === runtimeState.selectedConversationId
                   ? "conversation active"
                   : "conversation"
               }
               type="button"
               key={summary.conversation.id}
-              onClick={() => runtime.selectConversation(summary.conversation.id)}
+              onClick={() => selectConversation(summary.conversation.id)}
             >
               <span
                 className="conversation-label conversation-label-direct-message"
@@ -1434,7 +1517,8 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
         </footer>
       </aside>
 
-      <section className="conversation-pane">
+      {aiChannelVisited && <AiChannel transport={client} active={destination === "ai"} />}
+      <section className="conversation-pane" hidden={destination === "ai"}>
         <header className="conversation-header">
           <div>
             <h2>
@@ -1608,7 +1692,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
                       channelReferences={channelReferences}
-                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
+                      onOpenChannel={selectConversation}
                       replyCount={Math.max(
                         threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
                         loadedReplyCountByRoot.get(message.id) ?? 0,
@@ -1666,7 +1750,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                         void runtime.discardMessage(item.operation.message.clientMessageId)
                       }
                       channelReferences={channelReferences}
-                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
+                      onOpenChannel={selectConversation}
                     />
                   </Fragment>
                 );
@@ -1695,7 +1779,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           </>
         )}
       </section>
-      {selectedThreadRootId !== null && (
+      {destination === "workspace" && selectedThreadRootId !== null && (
         <aside className="thread-pane" aria-label="Thread">
           <header className="thread-header">
             <div>
@@ -1748,7 +1832,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                   continuation={false}
                   domIdPrefix="thread-message"
                   channelReferences={channelReferences}
-                  onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
+                  onOpenChannel={selectConversation}
                 />
                 <div className="thread-replies-heading" role="separator">
                   <span>
@@ -1788,7 +1872,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                       )}
                       domIdPrefix="thread-message"
                       channelReferences={channelReferences}
-                      onOpenChannel={(conversationId) => runtime.selectConversation(conversationId)}
+                      onOpenChannel={selectConversation}
                     />
                   </Fragment>
                 ))}
@@ -1842,9 +1926,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                           void runtime.discardMessage(item.operation.message.clientMessageId)
                         }
                         channelReferences={channelReferences}
-                        onOpenChannel={(conversationId) =>
-                          runtime.selectConversation(conversationId)
-                        }
+                        onOpenChannel={selectConversation}
                       />
                     </Fragment>
                   );

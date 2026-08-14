@@ -1,6 +1,7 @@
 export * from "./common.js";
 export * from "./agents.js";
 export * from "./authkit.js";
+export * from "./ai-channel.js";
 export * from "./bots.js";
 export * from "./cache.js";
 export * from "./channel-slug.js";

@@ -2,6 +2,10 @@ import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
   AuthCapabilities,
+  AiChannelGenerationRequest,
+  AiChannelPermissionResponse,
+  AiChannelPromptRequest,
+  AiChannelState,
   CacheCryptoStatus,
   CacheDecryptBatchRequest,
   CacheDecryptBatchResponse,
@@ -102,6 +106,23 @@ export interface CompactModeTransport {
 }
 
 /**
+ * A device-local Claude Code destination. It is deliberately separate from workspace transport:
+ * prompts can execute tools and must never enter the durable chat outbox or server projection.
+ */
+export interface AiChannelTransport {
+  readonly getAiChannelState: () => Promise<AiChannelState>;
+  readonly startAiChannel: (input: AiChannelGenerationRequest) => Promise<AiChannelState>;
+  readonly chooseAiChannelWorkspace: () => Promise<AiChannelState>;
+  readonly newAiChannelSession: (input: AiChannelGenerationRequest) => Promise<AiChannelState>;
+  readonly sendAiChannelPrompt: (input: AiChannelPromptRequest) => Promise<AiChannelState>;
+  readonly cancelAiChannelPrompt: (input: AiChannelGenerationRequest) => Promise<AiChannelState>;
+  readonly respondAiChannelPermission: (
+    input: AiChannelPermissionResponse,
+  ) => Promise<AiChannelState>;
+  readonly onAiChannelStateChanged: (listener: (state: AiChannelState) => void) => () => void;
+}
+
+/**
  * Body-free native-notification bridge. The action drain is also the renderer-ready handshake:
  * callers invoke it only after their exact workspace session and navigation subscriber are ready.
  */
@@ -134,6 +155,7 @@ export interface DesktopApi
     SessionTransport,
     ThemeTransport,
     CompactModeTransport,
+    AiChannelTransport,
     Partial<NotificationTransport>,
     Partial<NotificationCaptureTransport> {
   readonly platform: DesktopPlatform;
