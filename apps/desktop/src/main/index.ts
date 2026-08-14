@@ -2153,10 +2153,10 @@ if (!hasSingleInstanceLock) {
 
       await createMainWindow();
 
-      // An upgraded enabled preference must not hold the visible startup path behind an OS prompt.
-      // Until the asynchronous request and refresh complete, the unknown permission state keeps
-      // native presentation suppressed through the normal settings/controller boundary.
-      void requestAuthorizationForPersistedEnabledPreference({
+      // Show the window before an upgraded enabled preference can prompt, but keep session restore
+      // and realtime behind this barrier so no message reaches the presenter while authorization
+      // remains pending.
+      await requestAuthorizationForPersistedEnabledPreference({
         authorization: macosNotificationAuthorization,
         current: initializedNotificationSettings.state,
         refreshCapability: () => initializedNotificationSettings.refreshCapability(),
