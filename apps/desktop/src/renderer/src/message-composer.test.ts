@@ -87,6 +87,25 @@ describe("MessageComposer", () => {
     expect(textbox.placeholder).toBe("Message # Launch Planning");
   });
 
+  it("focuses the input when the selected conversation changes", async () => {
+    const { rerender, props } = renderComposer({ focusKey: "conversation-general" });
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    const otherControl = document.createElement("button");
+    document.body.append(otherControl);
+    otherControl.focus();
+
+    rerender(
+      createElement(MessageComposer, {
+        ...props,
+        conversationName: "# Launch Planning",
+        focusKey: "conversation-launch-planning",
+      }),
+    );
+
+    await waitFor(() => expect(document.activeElement).toBe(textbox));
+    otherControl.remove();
+  });
+
   it("supports a focused thread-reply variant without losing shared composer behavior", () => {
     const inputRef = createRef<HTMLTextAreaElement>();
     const { props } = renderComposer({

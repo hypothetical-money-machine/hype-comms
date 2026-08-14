@@ -16,6 +16,7 @@ export function MessageComposer({
   draft,
   disabled,
   error,
+  focusKey,
   inputId = "message",
   inputLabel = "Message",
   inputRef,
@@ -29,6 +30,7 @@ export function MessageComposer({
   readonly draft: string;
   readonly disabled: boolean;
   readonly error: string;
+  readonly focusKey?: string | null;
   readonly inputId?: string;
   readonly inputLabel?: string;
   readonly inputRef?: Ref<HTMLTextAreaElement>;
@@ -54,6 +56,11 @@ export function MessageComposer({
     element.style.height = `${String(height)}px`;
     element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
   }, [draft]);
+
+  useEffect(() => {
+    if (focusKey === undefined || focusKey === null || disabled) return;
+    input.current?.focus();
+  }, [disabled, focusKey]);
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();

@@ -1769,6 +1769,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                 draft={draft}
                 disabled={selectedSummary === undefined}
                 error={composerError}
+                focusKey={runtimeState.selectedConversationId}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
