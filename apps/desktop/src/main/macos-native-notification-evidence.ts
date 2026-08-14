@@ -178,7 +178,13 @@ export async function startMacosNativeNotificationEvidence(options: {
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
   await chmod(artifactDirectory, 0o700);
 
-  const permission = await options.requestAuthorization();
+  let permission: NotificationOsPermission;
+  try {
+    permission = await options.requestAuthorization();
+  } catch (error) {
+    await writeRecord(artifactDirectory, { version: 1, status: "failed", notificationId });
+    throw error;
+  }
   if (permission !== "granted") {
     await writeRecord(artifactDirectory, { version: 1, status: "failed", notificationId });
     throw new Error(`macOS notification authorization is ${permission}`);

@@ -249,4 +249,32 @@ describe("macOS native notification evidence", () => {
       { version: 1, status: "failed", notificationId },
     );
   });
+
+  it("records a native authorization error before exiting", async () => {
+    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const presenter = new EvidencePresenter();
+    const notificationId = "evidence-notification-authorization-error";
+    const getHistory = vi.fn(async () => []);
+
+    await expect(
+      startMacosNativeNotificationEvidence({
+        configuration: {
+          artifactDirectory,
+          userDataPath: path.join(artifactDirectory, "user-data"),
+        },
+        presenter,
+        requestAuthorization: async () => {
+          throw new Error("native authorization failed");
+        },
+        getHistory,
+        onClick: vi.fn(),
+        createNotificationId: () => notificationId,
+      }),
+    ).rejects.toThrow("native authorization failed");
+    expect(getHistory).not.toHaveBeenCalled();
+    expect(presenter.presentation).toBeNull();
+    expect(JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8"))).toEqual(
+      { version: 1, status: "failed", notificationId },
+    );
+  });
 });
