@@ -45,13 +45,14 @@ async function executableForAsar(asarPath) {
 
   if (path.basename(applicationDirectory) === "Contents") {
     const macExecutableDirectory = path.join(applicationDirectory, "MacOS");
-    const executables = (await readdir(macExecutableDirectory, { withFileTypes: true }))
-      .filter((entry) => entry.isFile())
-      .map((entry) => path.join(macExecutableDirectory, entry.name));
-    if (executables.length !== 1) {
-      throw new Error(`Expected one macOS executable beside ${asarPath}`);
-    }
-    return executables[0];
+    const executablePath = path.join(macExecutableDirectory, "hype-comms");
+    const authorizationAddon = path.join(
+      applicationDirectory,
+      "Resources",
+      "hmm-notification-authorization.node",
+    );
+    await Promise.all([access(executablePath), access(authorizationAddon)]);
+    return executablePath;
   }
 
   const executableName = process.platform === "win32" ? "hype-comms.exe" : "hype-comms";

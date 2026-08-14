@@ -160,16 +160,19 @@ jobs:
             artifact_os: mac
             manifest: latest-mac.yml
             package_script: package:desktop:mac
+            native_notifications_enabled: "1"
           - platform: Windows
             runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
             artifact_os: win
             manifest: latest.yml
             package_script: package:desktop:win
+            native_notifications_enabled: "0"
           - platform: Linux
             runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
             artifact_os: linux
             manifest: latest-linux.yml
             package_script: package:desktop:linux
+            native_notifications_enabled: "0"
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
@@ -178,6 +181,9 @@ jobs:
       HYPE_COMMS_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
       HYPE_COMMS_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
       HYPE_COMMS_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
+      # Platform pilots advance independently. macOS is signed/notarized and available behind the
+      # default-off device preference; Windows and Linux remain compiled off pending their gates.
+      HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: ${{ matrix.native_notifications_enabled }}
       UPDATE_ARTIFACT_OS: ${{ matrix.artifact_os }}
       UPDATE_MANIFEST: ${{ matrix.manifest }}
       AWS_REGION: ${{ vars.GARAGE_S3_REGION }}

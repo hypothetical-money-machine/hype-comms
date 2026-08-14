@@ -45,6 +45,18 @@ const environment = {
   UPDATE_MANIFEST: "latest.yml",
 };
 
+const matrixEntry = (job, platform) => {
+  const marker = `          - platform: ${platform}\n`;
+  const start = job.indexOf(marker);
+  assert.notEqual(start, -1, `Expected matrix entry for ${platform}`);
+  const remainingJob = job.slice(start + marker.length);
+  const nextEntry = remainingJob.search(/^ {10}- platform: /mu);
+  const matrixEnd = remainingJob.search(/^ {4}runs-on:/mu);
+  const endCandidates = [nextEntry, matrixEnd].filter((index) => index >= 0);
+  assert.ok(endCandidates.length > 0, `Expected matrix entry boundary for ${platform}`);
+  return job.slice(start, start + marker.length + Math.min(...endCandidates));
+};
+
 test("configures native ARM64 and x64 desktop release targets", async () => {
   const desktopPackage = JSON.parse(
     await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
@@ -57,7 +69,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     new URL("../.github/workflows/desktop-package-smoke.yml", import.meta.url),
     "utf8",
   );
+  const nativeEvidenceHelper = await readFile(
+    new URL("./macos-native-notification-evidence-helper.swift", import.meta.url),
+    "utf8",
+  );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
+  const releasePackageJob = workflowJob(releaseWorkflow, "package");
+  const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
+  const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
   const targetArchitectures = (platform) =>
     desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
 
@@ -68,6 +87,17 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   ]);
   assert.match(desktopPackage.scripts["package:win"], /--x64 --arm64/u);
   assert.match(desktopPackage.scripts["package:linux"], /--x64 --arm64/u);
+  assert.match(
+    desktopPackage.scripts["package:mac"],
+    /build-macos-notification-authorization\.mjs/u,
+  );
+  assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
+  assert.deepEqual(desktopPackage.build.mac.extraResources, [
+    {
+      from: "native-build/macos/hmm-notification-authorization.node",
+      to: "hmm-notification-authorization.node",
+    },
+  ]);
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
   assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
   assert.equal(desktopPackage.build.nsis.buildUniversalInstaller, false);
@@ -90,6 +120,22 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
+  assert.match(
+    matrixEntry(releasePackageJob, "macOS"),
+    /^ {12}native_notifications_enabled: "1"$/mu,
+  );
+  assert.match(
+    matrixEntry(releasePackageJob, "Windows"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
+  );
+  assert.match(
+    matrixEntry(releasePackageJob, "Linux"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
+  );
+  assert.match(
+    releasePackageJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
+  );
   assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
   assert.match(
     releaseWorkflow,
@@ -107,6 +153,109 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     packageSmokeWorkflow,
     /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
   );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/capture-macos-native-notification\.mjs$/gmu)
+      ?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/build-macos-notification-authorization\.mjs$/gmu)
+      ?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(
+      /^ {6}- scripts\/macos-native-notification-evidence-helper\.swift$/gmu,
+    )?.length,
+    2,
+  );
+  assert.match(matrixEntry(smokePackageJob, "macOS"), /^ {12}native_notifications_enabled: "1"$/mu);
+  assert.match(
+    matrixEntry(smokePackageJob, "Windows"),
+    /^ {12}native_notifications_enabled: "0"$/mu,
+  );
+  assert.match(matrixEntry(smokePackageJob, "Linux"), /^ {12}native_notifications_enabled: "0"$/mu);
+  assert.match(
+    smokePackageJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
+  );
+  assert.match(
+    packageSmokeWorkflow,
+    /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
+  );
+  assert.match(
+    nativeEvidenceJob,
+    /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.native_notification_evidence$/mu,
+  );
+  assert.match(
+    nativeEvidenceJob,
+    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
+  );
+  assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
+  assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
+  assert.match(nativeEvidenceJob, /name: Build signed macOS capture helper/u);
+  assert.match(
+    nativeEvidenceJob,
+    /name: Await unlocked console and authorize macOS capture helper/u,
+  );
+  assert.doesNotMatch(nativeEvidenceJob, /caffeinate/u);
+  assert.ok(
+    nativeEvidenceJob.indexOf("name: Verify macOS release signing and notarization") <
+      nativeEvidenceJob.indexOf("name: Await unlocked console and authorize macOS capture helper"),
+  );
+  for (const secret of [
+    "HYPE_COMMS_MACOS_CSC_LINK",
+    "HYPE_COMMS_MACOS_CSC_KEY_PASSWORD",
+    "HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64",
+    "HYPE_COMMS_MACOS_APPLE_API_KEY_ID",
+    "HYPE_COMMS_MACOS_APPLE_API_ISSUER",
+  ]) {
+    assert.match(nativeEvidenceJob, new RegExp(`secrets\\.${secret}`, "u"));
+  }
+  assert.doesNotMatch(nativeEvidenceJob, /secrets\.HMM_MACOS_/u);
+  assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
+  assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
+  assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
+  assert.match(
+    nativeEvidenceJob,
+    /--helper="\$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u,
+  );
+  assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
+  assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
+  for (const evidenceFile of [
+    "automation.log",
+    "application.log",
+    "delivered.json",
+    "clicked.json",
+    "failed.json",
+    "macos-native-notification.png",
+    "macos-native-notification-clicked.png",
+  ]) {
+    assert.match(
+      nativeEvidenceJob,
+      new RegExp(
+        `\\$\\{\\{ env\\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \\}\\}/${evidenceFile.replaceAll(
+          ".",
+          "\\.",
+        )}`,
+        "u",
+      ),
+    );
+  }
+  assert.doesNotMatch(nativeEvidenceJob, /\/user-data/u);
+  assert.doesNotMatch(
+    nativeEvidenceJob,
+    /^ {10}path: \$\{\{ env\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \}\}$/mu,
+  );
+  assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
+  assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
+  assert.match(nativeEvidenceHelper, /\.maskSecondaryFn/u);
+  assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(13\)/u);
+  assert.match(nativeEvidenceHelper, /owningApplication\?\.processID == processIdentifier/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
   assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);

@@ -54,6 +54,35 @@ describe("desktop IPC contract", () => {
     expect(subscribed.size).toBeGreaterThan(0);
   });
 
+  it("shows the window and starts authorization without blocking session restore", () => {
+    const createWindow = mainSource.indexOf("await createMainWindow();");
+    const requestAuthorization = mainSource.indexOf(
+      "void settlePendingNotificationAuthorization({",
+    );
+    const restoreSession = mainSource.indexOf("await chatSession.restore();");
+    expect(createWindow).toBeGreaterThan(-1);
+    expect(requestAuthorization).toBeGreaterThan(createWindow);
+    expect(restoreSession).toBeGreaterThan(requestAuthorization);
+  });
+
+  it("fails closed when a packaged Mac cannot load its authorization addon", () => {
+    const capabilityFactory = mainSource.slice(
+      mainSource.indexOf("function createNotificationCapabilitySource()"),
+      mainSource.indexOf("function createNotificationPresenter()"),
+    );
+    const packagedMacGuard = capabilityFactory.indexOf(
+      'if (app.isPackaged && process.platform === "darwin")',
+    );
+    const electronFallback = capabilityFactory.indexOf(
+      "return new ElectronNotificationCapabilitySource(Notification);",
+    );
+    expect(packagedMacGuard).toBeGreaterThan(-1);
+    expect(electronFallback).toBeGreaterThan(packagedMacGuard);
+    expect(capabilityFactory.slice(packagedMacGuard, electronFallback)).toContain(
+      'nativeSupport: "unsupported", osPermission: "unknown"',
+    );
+  });
+
   it("handles every channel the renderer can invoke", () => {
     expect(missingFrom(invoked, handled)).toEqual([]);
   });

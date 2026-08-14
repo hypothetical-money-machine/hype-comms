@@ -64,10 +64,12 @@ Roughly in order:
 - Structured mention completion on the existing verified mention model.
 - File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
   authorized filename search.
-- Finish the [native notifications](docs/native-notifications-roadmap.md) rollout by collecting
-  installed Milestone 4 display/click/lifecycle evidence on current and previous supported macOS
-  arm64/x64, Windows 11 x64/ARM64, and Ubuntu 24.04 x64/ARM64 AppImage and Debian installs. Keep
-  ordinary build and device defaults off until that external matrix passes.
+- Finish the [native notifications](docs/native-notifications-roadmap.md) rollout platform by
+  platform. The signed/notarized macOS release artifact is the first opt-in pilot; collect its
+  installed Milestone 4 display/click/lifecycle evidence while Windows and Linux remain compiled
+  off. Let each platform ship after its applicable gate rather than blocking on the combined
+  macOS, Windows, and Linux matrix; keep every platform's device preference default-off until its
+  own gate passes.
 - Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
   an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
   and notarization plus the cross-platform update feed are already running.

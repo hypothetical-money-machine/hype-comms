@@ -11,7 +11,10 @@ import {
   normalizeDevelopmentApiOrigin,
   normalizeProductionApiOrigin,
 } from "./src/shared/api-origin";
-import { resolveNativeNotificationRollout } from "./src/shared/native-notification-rollout";
+import {
+  resolveMacosNativeNotificationEvidence,
+  resolveNativeNotificationRollout,
+} from "./src/shared/native-notification-rollout";
 import {
   DEVELOPMENT_CONTENT_SECURITY_POLICY,
   PRODUCTION_CONTENT_SECURITY_POLICY,
@@ -37,6 +40,10 @@ export default defineConfig(({ command }) => {
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
     process.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED,
   );
+  const macosNativeNotificationEvidenceEnabled = resolveMacosNativeNotificationEvidence(
+    process.env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED,
+    nativeNotificationsEnabled,
+  );
   const configuredApiOrigin =
     process.env.HYPE_COMMS_API_ORIGIN ??
     (isDevelopment ? DEFAULT_DEVELOPMENT_API_ORIGIN : DEFAULT_PRODUCTION_API_ORIGIN);
@@ -55,6 +62,9 @@ export default defineConfig(({ command }) => {
     main: {
       define: {
         __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
+        __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__: JSON.stringify(
+          macosNativeNotificationEvidenceEnabled,
+        ),
         __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
         __HYPE_COMMS_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
       },

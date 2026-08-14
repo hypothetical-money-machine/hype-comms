@@ -114,6 +114,17 @@ import {
 } from "./headless-notification-capture";
 import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
+import {
+  createMacosNotificationAuthorization,
+  requestAuthorizationForPersistedEnabledPreference,
+  setNotificationPreferenceWithAuthorization,
+  type MacosNotificationAuthorization,
+} from "./macos-notification-authorization";
+import {
+  resolveMacosNativeNotificationEvidenceConfiguration,
+  startMacosNativeNotificationEvidence,
+  type MacosNativeNotificationEvidenceSession,
+} from "./macos-native-notification-evidence";
 import { NotificationController } from "./notification-controller";
 import { NotificationPreferenceStore } from "./notification-preference-store";
 import {
@@ -131,6 +142,10 @@ import {
   NotificationSettingsController,
   type NotificationCapabilitySource,
 } from "./notification-settings-controller";
+import {
+  PendingNotificationAuthorizationBarrier,
+  settlePendingNotificationAuthorization,
+} from "./pending-notification-authorization-barrier";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -198,6 +213,21 @@ let drainingAuthCallbacks = false;
 let authCallbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authIntentGeneration = 0;
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
+const macosNativeNotificationEvidenceConfiguration =
+  resolveMacosNativeNotificationEvidenceConfiguration({
+    compiledIn: __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    argv: process.argv,
+    env: process.env,
+  });
+const macosNotificationAuthorization: MacosNotificationAuthorization | null =
+  createMacosNotificationAuthorization({
+    compiledIn: __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__,
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+  });
 const headlessDesktopConfiguration = resolveHeadlessDesktopConfiguration(
   process.env,
   app.isPackaged,
@@ -218,12 +248,13 @@ const developmentAuthCallbackFile = resolveDevelopmentAuthCallbackFile(
 );
 app.setPath(
   "userData",
-  resolveDevelopmentUserDataPath(
-    process.env,
-    app.isPackaged,
-    developmentProfile,
-    app.getPath("userData"),
-  ),
+  macosNativeNotificationEvidenceConfiguration?.userDataPath ??
+    resolveDevelopmentUserDataPath(
+      process.env,
+      app.isPackaged,
+      developmentProfile,
+      app.getPath("userData"),
+    ),
 );
 let chatSession: ChatSession | null = null;
 let authKitFlow: AuthKitFlow | null = null;
@@ -246,6 +277,7 @@ let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
+let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
 let notificationController: NotificationController | null = null;
 let notificationProjectionRepairCoordinator: NotificationProjectionRepairCoordinator | null = null;
 let captureNotificationPresenter: CaptureNotificationPresenter | null = null;
@@ -257,6 +289,7 @@ let notificationScope: {
   readonly workspaceId: string;
 } | null = null;
 let notificationActiveGeneration: number | null = null;
+let macosNativeNotificationEvidenceSession: MacosNativeNotificationEvidenceSession | null = null;
 
 function createNotificationCapabilitySource(): NotificationCapabilitySource {
   if (!__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
@@ -267,6 +300,14 @@ function createNotificationCapabilitySource(): NotificationCapabilitySource {
   if (headlessDesktopConfiguration !== null) {
     return {
       read: () => ({ nativeSupport: "supported", osPermission: "unknown" }),
+    };
+  }
+  if (macosNotificationAuthorization !== null) return macosNotificationAuthorization;
+  if (app.isPackaged && process.platform === "darwin") {
+    // A compiled-in packaged Mac must use the identity-aware addon. Falling through to Electron
+    // after an addon load failure would advertise support while bypassing the required preflight.
+    return {
+      read: () => ({ nativeSupport: "unsupported", osPermission: "unknown" }),
     };
   }
   return new ElectronNotificationCapabilitySource(Notification);
@@ -1169,6 +1210,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
+    const controller = notificationSettingsController;
     const preference = parseBoundedNotificationIpc(
       notificationPreferenceSchema,
       input,
@@ -1176,7 +1218,13 @@ function registerIpcHandlers(): void {
     );
     return parseBoundedNotificationIpc(
       notificationStateSchema,
-      await notificationSettingsController.setPreference(preference),
+      await setNotificationPreferenceWithAuthorization({
+        authorization: macosNotificationAuthorization,
+        current: controller.state,
+        preference,
+        refreshCapability: () => controller.refreshCapability(),
+        setPreference: (next) => controller.setPreference(next),
+      }),
       NOTIFICATION_STATE_IPC_MAX_BYTES,
     );
   });
@@ -1889,7 +1937,7 @@ function handleAuthCallback(value: string): boolean {
 }
 
 let userDataMigrationFailed = false;
-if (app.isPackaged) {
+if (app.isPackaged && macosNativeNotificationEvidenceConfiguration === null) {
   try {
     migrateLegacyUserData({
       currentPath: app.getPath("userData"),
@@ -1954,15 +2002,25 @@ if (!hasSingleInstanceLock) {
         compactModeController.initialize(),
         notificationSettingsController.initialize(),
       ]);
+      const initializedNotificationSettings = notificationSettingsController;
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
 
+      pendingNotificationAuthorizationBarrier = new PendingNotificationAuthorizationBarrier({
+        source: notificationSettingsController,
+        authorizationPending:
+          macosNotificationAuthorization !== null &&
+          initializedNotificationSettings.state.devicePreference === "enabled" &&
+          initializedNotificationSettings.state.nativeSupport === "supported" &&
+          initializedNotificationSettings.state.osPermission === "unknown",
+      });
+
       if (__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
         notificationController = new NotificationController({
           presenter: createNotificationPresenter(),
-          settings: notificationSettingsController,
+          settings: pendingNotificationAuthorizationBarrier,
           headless: headlessDesktopConfiguration !== null,
           getWindowState: () => {
             const window = mainWindow;
@@ -2094,25 +2152,75 @@ if (!hasSingleInstanceLock) {
 
       registerIpcHandlers();
 
-      const protocolRegistration = createProtocolClientRegistration(
-        app.isPackaged,
-        process.execPath,
-        process.argv,
-      );
-      if (
-        protocolRegistration.executablePath === undefined ||
-        protocolRegistration.arguments === undefined
-      ) {
-        app.setAsDefaultProtocolClient(protocolRegistration.scheme);
-      } else {
-        app.setAsDefaultProtocolClient(
-          protocolRegistration.scheme,
-          protocolRegistration.executablePath,
-          [...protocolRegistration.arguments],
+      if (macosNativeNotificationEvidenceConfiguration === null) {
+        const protocolRegistration = createProtocolClientRegistration(
+          app.isPackaged,
+          process.execPath,
+          process.argv,
         );
+        if (
+          protocolRegistration.executablePath === undefined ||
+          protocolRegistration.arguments === undefined
+        ) {
+          app.setAsDefaultProtocolClient(protocolRegistration.scheme);
+        } else {
+          app.setAsDefaultProtocolClient(
+            protocolRegistration.scheme,
+            protocolRegistration.executablePath,
+            [...protocolRegistration.arguments],
+          );
+        }
       }
 
       await createMainWindow();
+
+      // Show the window before an upgraded enabled preference can prompt. The request runs beside
+      // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
+      // native authorization and its capability refresh settle.
+      void settlePendingNotificationAuthorization({
+        barrier: pendingNotificationAuthorizationBarrier,
+        request: () =>
+          requestAuthorizationForPersistedEnabledPreference({
+            authorization: macosNotificationAuthorization,
+            current: initializedNotificationSettings.state,
+            refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+          }),
+        onFailure: (error) => {
+          reportMainProcessError("Failed to request persisted notification permission", error);
+        },
+      });
+
+      if (macosNativeNotificationEvidenceConfiguration !== null) {
+        mainWindow?.hide();
+        app.hide();
+        macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
+          configuration: macosNativeNotificationEvidenceConfiguration,
+          presenter: new ElectronNotificationPresenter(Notification),
+          requestAuthorization: async () => {
+            if (macosNotificationAuthorization === null) return "unknown";
+            return macosNotificationAuthorization.request();
+          },
+          getHistory: () => Notification.getHistory(),
+          onClick: async () => {
+            app.show();
+            await showOrRecreateMainWindow();
+            const window = mainWindow;
+            if (window === null || window.isDestroyed()) {
+              throw new Error("Native notification evidence could not restore the main window");
+            }
+            void dialog.showMessageBox(window, {
+              type: "info",
+              message: "Native notification click received",
+              detail:
+                "Hype Comms restored its installed window through the native notification callback.",
+              buttons: ["Done"],
+            });
+          },
+        });
+        void macosNativeNotificationEvidenceSession.delivery.catch((error: unknown) => {
+          reportMainProcessError("Native notification evidence delivery failed", error);
+        });
+      }
 
       // Restores a session left over from a previous run; the cookie outlives the process.
       const restoredSession = await chatSession.restore();
@@ -2177,6 +2285,8 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
+    macosNativeNotificationEvidenceSession?.handle.close();
+    macosNativeNotificationEvidenceSession = null;
     if (authCallbackRetryTimer !== null) {
       clearTimeout(authCallbackRetryTimer);
       authCallbackRetryTimer = null;
@@ -2196,6 +2306,8 @@ if (!hasSingleInstanceLock) {
     notificationProjectionRepairCoordinator = null;
     notificationController?.shutdown();
     notificationController = null;
+    pendingNotificationAuthorizationBarrier?.dispose();
+    pendingNotificationAuthorizationBarrier = null;
     stopNotificationSettingsSubscription?.();
     stopNotificationSettingsSubscription = null;
     notificationSettingsController?.dispose();

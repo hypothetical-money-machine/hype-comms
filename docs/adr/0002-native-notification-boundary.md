@@ -46,9 +46,10 @@ The controller/presenter integration required all of these prerequisites before 
   replica cursor.
 
 The implementation now satisfies all four prerequisites, and Milestones 0 through 3 have
-deterministic coverage. This does not prove native operating-system behavior. Ordinary builds still
-compile presentation off and the device preference still defaults disabled until installed
-Milestone 4 evidence passes on the complete supported host matrix.
+deterministic coverage. This does not prove native operating-system behavior. Platform release
+artifacts advance independently: a signed platform may include an opt-in pilot while its device
+preference remains disabled by default, and other platforms remain compiled off until their own
+Milestone 4 gates are ready.
 
 ### Freshness, scope, and deduplication
 
@@ -157,6 +158,10 @@ Preferences are versioned, atomic, device-local state owned by main. Device enab
 off until packaged rollout gates pass; message-body preview defaults disabled and requires a
 separate explicit opt-in. Native support is `supported` or `unsupported`; OS permission is
 `granted`, `denied`, or `unknown`. Do-not-disturb and sound remain operating-system policy.
+Electron has no portable permission query. The packaged macOS app therefore owns a fixed,
+universal N-API addon inside its signed bundle; Electron main loads it in-process to read or request
+`UNUserNotificationCenter` authorization before persisting an enable transition. The renderer can
+request only the frozen device preference and never receives a generic native permission bridge.
 
 Native notification code is also guarded at build time. `HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED` accepts
 only `0` or `1`; unset and `0` compile presentation off, report unsupported capability, and do not
