@@ -76,11 +76,12 @@ renderer catches up from its encrypted replica cursor before an authoritative sn
 sync, and a new realtime epoch. Default-off macOS builds retain the conservative realtime-stop
 fallback. Windows and Linux retain last-window stop-and-quit behavior.
 
-The remaining per-platform gates cover installed native behavior on current and previous supported
-macOS on arm64/x64, Windows 11 on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from both
-AppImage and Debian packages. One signed/notarized macOS ARM64 synthetic toast/click run passes;
-ordinary package smoke and headless screenshots do not satisfy the rest of those gates. Passing or
-piloting one platform does not change another platform's release flag.
+The remaining gates are installed native behavior lanes for macOS, Windows, and Linux. Each lane
+covers every cell of that platform's row in the
+[supported host matrix](architecture.md#supported-host-matrix). One signed/notarized macOS ARM64
+synthetic toast/click run passes; ordinary package smoke and headless screenshots do not satisfy
+the rest of that lane. Passing or piloting one platform does not change another platform's release
+flag.
 
 ## Product policy
 
@@ -457,9 +458,9 @@ Deliverables:
 - capture a real notification with synthetic identities/content plus its click-through result under
   `docs/screenshots/`; use an OS-level/manual capture for the native toast and renderer capture for
   the resulting target;
-- exercise supported, denied where observable, disabled, focused, minimized, and click cases on
-  each applicable platform matrix: current and previous supported macOS on arm64/x64, Windows 11
-  on x64/ARM64, and Ubuntu 24.04 on x64/ARM64 installed from AppImage and Debian packages;
+- exercise supported, denied where observable, disabled, focused, minimized, and click cases across
+  every cell of the target platform's row in the
+  [supported host matrix](architecture.md#supported-host-matrix);
 - include install, launch, logout, relaunch, offline restart, update teardown, and uninstall rather
   than treating a notification-only run as the architecture's Native E2E gate;
 - treat the existing package smoke as a build/content prerequisite only; it does not launch an
@@ -503,7 +504,7 @@ packaged-native slice. The full packaged-native and OS-toast rows below remain o
 | Renderer navigation | Channel, DM, root, and reply targets; authorized absent-cache hydration; revoked/missing fallback |
 | Two-client integration | DM, mention, replay/reconnect, macOS no-window catch-up, concurrent read, sign-out-before-click, agent-authored mention |
 | Headless demo | Injected capture/no-op presenter; native presenter never constructed; opaque-ID policy and action proof |
-| Packaged native | Target platform's supported installed matrix for display, suppression, capability, attribution, click, lifecycle, and cleanup |
+| Packaged native | Target platform's full row in [the supported host matrix](architecture.md#supported-host-matrix) for display, suppression, capability, attribution, click, lifecycle, and cleanup |
 | Visual evidence | Manual OS toast with synthetic content plus captured focused conversation/thread and settings states |
 
 Tests must never depend on a developer's real notification permission or emit real toasts during
@@ -593,12 +594,15 @@ pilot; ordinary development, Windows, and Linux builds remain compiled off, and 
 device preference remains default-off until its applicable Milestone 4 evidence passes.
 
 The contract, DM/mention/thread behavior, privacy defaults, scope invalidation, replay suppression,
-and replica-first windowless recovery are implemented and proven deterministically. The
-For each platform, its native-notifications rollout remains incomplete until:
+and replica-first windowless recovery are implemented and proven deterministically. For each
+platform, its native-notifications rollout remains incomplete until:
 
 - actual packaged interaction and screenshot evidence exists for every applicable platform slice;
 - `npm run check`, `npm run test:db`, relevant package verification, and native smoke lanes pass;
 - `ROADMAP.md`, `docs/architecture.md`, operations/release notes, and issue references agree; and
 - the installed application—not a mocked renderer alone—has demonstrated display and exact
-  click-through on every supported desktop platform, with each platform allowed to pass and ship
-  independently.
+  click-through across every cell of that platform's row in the
+  [supported host matrix](architecture.md#supported-host-matrix).
+
+The overall roadmap item may remain open while other platform lanes are unfinished. That open item
+does not block rollout on a platform whose gate has passed.

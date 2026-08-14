@@ -37,7 +37,9 @@ verifies every supported artifact, but each artifact is tested against its inten
 matrix does not expand every feature's scope.
 
 Native-notification Milestone 4 follows this rule. macOS, Windows, and Linux each have an installed
-evidence lane covering that platform's supported OS versions, architectures, and package formats.
+evidence lane covering every cell of that platform's row in the supported host matrix in
+[`docs/architecture.md`](../architecture.md#supported-host-matrix), which stays the single
+definition of a platform's baseline.
 A platform may enable its build or device default after its lane passes. An incomplete lane keeps
 that platform default-off and remains visible on the roadmap, but does not block a proven platform.
 A shared defect may still pause multiple lanes when it violates one of the invariants above.
