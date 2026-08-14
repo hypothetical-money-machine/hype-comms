@@ -31,7 +31,7 @@
     "@hype-comms/contracts": "*",
     "@types/node": "24.13.3",
     "@types/ws": "8.18.1",
-    "esbuild": "0.28.1",
+    "esbuild": "0.28.2",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   }
