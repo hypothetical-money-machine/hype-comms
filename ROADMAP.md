@@ -9,6 +9,18 @@ rewriting foundations.
 The implementation contract and security boundaries live in
 [`docs/architecture.md`](docs/architecture.md).
 
+## How we ship across platforms
+
+macOS, Windows, and Linux are supported release targets, but feature parity is not a prerequisite
+for useful progress. We may design, implement, merge, and release a capability for one platform or
+a stated subset while preserving the existing behavior elsewhere. Unsupported variants stay
+visible as follow-up work instead of blocking the platform that is ready.
+
+Cross-platform delivery becomes one gate only when a specific item says so or when a shared
+security, data, compatibility, or release invariant makes a partial rollout unsafe. Otherwise,
+acceptance and native evidence are scoped to the platforms named by the work. See
+[`ADR 0003`](docs/adr/0003-platform-scoped-delivery.md).
+
 ## Built and working
 
 - Invite-only access: optional WorkOS AuthKit plus email-bound single-use magic links, rotating

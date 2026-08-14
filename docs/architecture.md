@@ -22,7 +22,10 @@ contract tests.
   My Tasks view may also include tasks assigned to that member from visible channel projects.
   Ordinary two-person DMs remain chat-only.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
-  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
+  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client. Support
+  does not require optional capabilities to land simultaneously: feature scope and rollout evidence
+  are platform-specific by default under [ADR 0003](adr/0003-platform-scoped-delivery.md). Untargeted
+  clients must retain safe existing behavior and shared wire contracts remain compatible.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
@@ -672,7 +675,7 @@ downgrade.
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
 | Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                        |
-| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 (x64 and ARM64), and Ubuntu 24.04 (x64 and ARM64) AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
+| Native E2E                 | Install/launch/logout/relaunch on the platforms in the change's declared scope, covering their supported architectures and package formats. Exercise applicable deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; a full release matrix verifies each platform's intended feature set without imposing parity. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
 | Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
 

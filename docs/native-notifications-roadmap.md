@@ -503,7 +503,7 @@ packaged-native slice. The full packaged-native and OS-toast rows below remain o
 | Renderer navigation | Channel, DM, root, and reply targets; authorized absent-cache hydration; revoked/missing fallback |
 | Two-client integration | DM, mention, replay/reconnect, macOS no-window catch-up, concurrent read, sign-out-before-click, agent-authored mention |
 | Headless demo | Injected capture/no-op presenter; native presenter never constructed; opaque-ID policy and action proof |
-| Packaged native | Full architecture matrix for display, suppression, capability, attribution, click, lifecycle, and cleanup |
+| Packaged native | Target platform's supported installed matrix for display, suppression, capability, attribution, click, lifecycle, and cleanup |
 | Visual evidence | Manual OS toast with synthetic content plus captured focused conversation/thread and settings states |
 
 Tests must never depend on a developer's real notification permission or emit real toasts during
@@ -594,7 +594,7 @@ device preference remains default-off until its applicable Milestone 4 evidence 
 
 The contract, DM/mention/thread behavior, privacy defaults, scope invalidation, replay suppression,
 and replica-first windowless recovery are implemented and proven deterministically. The
-`ROADMAP.md` native-notifications item remains incomplete until:
+For each platform, its native-notifications rollout remains incomplete until:
 
 - actual packaged interaction and screenshot evidence exists for every applicable platform slice;
 - `npm run check`, `npm run test:db`, relevant package verification, and native smoke lanes pass;
