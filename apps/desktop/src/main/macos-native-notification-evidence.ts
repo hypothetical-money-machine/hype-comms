@@ -247,14 +247,19 @@ export async function startMacosNativeNotificationEvidence(options: {
     throw error;
   }
 
+  const delivery = waitForDeliveredNotification({
+    artifactDirectory,
+    getHistory: options.getHistory,
+    notificationId,
+    timeoutMs: options.timeoutMs ?? 120_000,
+    pollIntervalMs: options.pollIntervalMs ?? 250,
+  }).catch(async (error: unknown) => {
+    await writeRecord(artifactDirectory, { version: 1, status: "failed", notificationId });
+    throw error;
+  });
+
   return {
     handle,
-    delivery: waitForDeliveredNotification({
-      artifactDirectory,
-      getHistory: options.getHistory,
-      notificationId,
-      timeoutMs: options.timeoutMs ?? 120_000,
-      pollIntervalMs: options.pollIntervalMs ?? 250,
-    }),
+    delivery,
   };
 }

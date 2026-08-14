@@ -277,4 +277,42 @@ describe("macOS native notification evidence", () => {
       { version: 1, status: "failed", notificationId },
     );
   });
+
+  it.each([
+    ["history lookup rejects", "history", "native history failed"],
+    [
+      "delivery polling times out",
+      "timeout",
+      "Timed out waiting for the synthetic notification in Notification Center",
+    ],
+  ] as const)("records failure when %s", async (_name, failure, expectedError) => {
+    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const presenter = new EvidencePresenter();
+    const notificationId = `evidence-notification-delivery-${failure}`;
+    let historyReadCount = 0;
+
+    const session = await startMacosNativeNotificationEvidence({
+      configuration: {
+        artifactDirectory,
+        userDataPath: path.join(artifactDirectory, "user-data"),
+      },
+      presenter,
+      requestAuthorization: async () => "granted",
+      getHistory: async () => {
+        historyReadCount += 1;
+        if (historyReadCount === 1 || failure === "timeout") return [];
+        throw new Error("native history failed");
+      },
+      onClick: vi.fn(),
+      createNotificationId: () => notificationId,
+      timeoutMs: 5,
+      pollIntervalMs: 1,
+    });
+
+    await expect(session.delivery).rejects.toThrow(expectedError);
+    expect(presenter.presentation).not.toBeNull();
+    expect(JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8"))).toEqual(
+      { version: 1, status: "failed", notificationId },
+    );
+  });
 });
