@@ -172,35 +172,41 @@ private func notificationElementAndCropRect() throws -> (AXUIElement, CGRect) {
   throw HelperError.notificationNotFound
 }
 
-private func pressElementOrAncestor(_ element: AXUIElement) -> Bool {
-  var current: AXUIElement? = element
-  for _ in 0..<12 {
-    guard let candidate = current else { return false }
-    var names: CFArray?
-    if AXUIElementCopyActionNames(candidate, &names) == .success,
-      let actions = names as? [String],
-      actions.contains(kAXPressAction)
-    {
-      return AXUIElementPerformAction(candidate, kAXPressAction as CFString) == .success
-    }
-    guard let parent = copyAttribute(candidate, kAXParentAttribute as CFString) else {
-      return false
-    }
-    current = (parent as! AXUIElement)
-  }
-  return false
+private func click(at point: CGPoint) async throws {
+  guard
+    let move = CGEvent(
+      mouseEventSource: nil,
+      mouseType: .mouseMoved,
+      mouseCursorPosition: point,
+      mouseButton: .left
+    ),
+    let down = CGEvent(
+      mouseEventSource: nil,
+      mouseType: .leftMouseDown,
+      mouseCursorPosition: point,
+      mouseButton: .left
+    ),
+    let up = CGEvent(
+      mouseEventSource: nil,
+      mouseType: .leftMouseUp,
+      mouseCursorPosition: point,
+      mouseButton: .left
+    )
+  else { throw HelperError.captureFailed }
+  move.post(tap: .cghidEventTap)
+  try await Task.sleep(nanoseconds: 50_000_000)
+  down.post(tap: .cghidEventTap)
+  try await Task.sleep(nanoseconds: 50_000_000)
+  up.post(tap: .cghidEventTap)
 }
 
 private func clickSyntheticNotification() async throws {
   guard AXIsProcessTrusted() else { throw HelperError.permissionDenied }
   let applications = notificationApplications()
   guard !applications.isEmpty else { throw HelperError.notificationCenterUnavailable }
-  let (match, _) = try await waitForNotificationElementAndCropRect()
-  if pressElementOrAncestor(match) {
-    print("notification-clicked")
-    return
-  }
-  throw HelperError.notificationNotFound
+  let (_, cropRect) = try await waitForNotificationElementAndCropRect()
+  try await click(at: CGPoint(x: cropRect.midX, y: cropRect.midY))
+  print("notification-clicked")
 }
 
 private func showNotificationCenter() throws {
