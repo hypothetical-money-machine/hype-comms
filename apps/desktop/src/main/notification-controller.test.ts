@@ -26,6 +26,10 @@ import {
   type PresentedNotificationHandle,
 } from "./notification-presenter";
 import { NotificationSettingsController } from "./notification-settings-controller";
+import {
+  PendingNotificationAuthorizationBarrier,
+  settlePendingNotificationAuthorization,
+} from "./pending-notification-authorization-barrier";
 
 const NOW = "2026-08-10T12:00:00.000Z";
 
@@ -348,6 +352,86 @@ function actionAcknowledgement(
 }
 
 describe("NotificationController freshness and policy integration", () => {
+  it("restores the session while startup authorization keeps native delivery suppressed", async () => {
+    const settings = new FakeSettings();
+    settings.state = { ...settings.state, osPermission: "unknown" };
+    const barrier = new PendingNotificationAuthorizationBarrier({
+      source: settings,
+      authorizationPending: true,
+    });
+    const presenter = new FakePresenter();
+    const controller = new NotificationController({
+      presenter,
+      settings: barrier,
+      headless: false,
+      getWindowState: () => ({ focused: false, shown: true, minimized: false }),
+    });
+    controller.startSession({
+      sessionGeneration: 1,
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      bootstrapCursor: "5",
+    });
+    controller.replaceMembers([CURRENT_USER, AUTHOR]);
+    controller.replaceConversations([conversationSummary()]);
+    arm(controller);
+
+    let resolveAuthorization: (() => void) | undefined;
+    const request = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAuthorization = resolve;
+        }),
+    );
+    const authorizationSettlement = settlePendingNotificationAuthorization({
+      request,
+      barrier,
+      onFailure: vi.fn(),
+    });
+    const restoreSession = vi.fn(async () => ({ status: "signed-in" as const }));
+
+    await expect(restoreSession()).resolves.toEqual({ status: "signed-in" });
+    expect(request).toHaveBeenCalledOnce();
+    expect(
+      controller.handleEvent(messageEvent({ eventNumber: 1, sequence: 6 }), {
+        connectionId: CONNECTION_ID,
+        sessionGeneration: 1,
+      }),
+    ).toMatchObject({
+      policy: { decision: "suppressed", reason: "permission_denied" },
+      presentationAttempted: false,
+    });
+
+    // A capability publication cannot open the gate before the request promise itself settles.
+    settings.publish({ ...settings.state, osPermission: "granted" });
+    expect(
+      controller.handleEvent(messageEvent({ eventNumber: 2, sequence: 7 }), {
+        connectionId: CONNECTION_ID,
+        sessionGeneration: 1,
+      }),
+    ).toMatchObject({
+      policy: { decision: "suppressed", reason: "permission_denied" },
+      presentationAttempted: false,
+    });
+    expect(presenter.attempts).toBe(0);
+
+    resolveAuthorization?.();
+    await authorizationSettlement;
+    expect(
+      controller.handleEvent(messageEvent({ eventNumber: 3, sequence: 8 }), {
+        connectionId: CONNECTION_ID,
+        sessionGeneration: 1,
+      }),
+    ).toMatchObject({
+      policy: { decision: "eligible", reason: "direct_message" },
+      presentationAttempted: true,
+    });
+    expect(presenter.attempts).toBe(1);
+
+    controller.shutdown();
+    barrier.dispose();
+  });
+
   it("arms only at a matching system.connected boundary and keeps replay quiet", () => {
     const harness = createHarness();
     const presenter = harness.presenter as FakePresenter;

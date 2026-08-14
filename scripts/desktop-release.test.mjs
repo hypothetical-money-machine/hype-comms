@@ -226,6 +226,31 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
   assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
+  for (const evidenceFile of [
+    "automation.log",
+    "application.log",
+    "delivered.json",
+    "clicked.json",
+    "failed.json",
+    "macos-native-notification.png",
+    "macos-native-notification-clicked.png",
+  ]) {
+    assert.match(
+      nativeEvidenceJob,
+      new RegExp(
+        `\\$\\{\\{ env\\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \\}\\}/${evidenceFile.replaceAll(
+          ".",
+          "\\.",
+        )}`,
+        "u",
+      ),
+    );
+  }
+  assert.doesNotMatch(nativeEvidenceJob, /\/user-data/u);
+  assert.doesNotMatch(
+    nativeEvidenceJob,
+    /^ {10}path: \$\{\{ env\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \}\}$/mu,
+  );
   assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
   assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
   assert.match(nativeEvidenceHelper, /\.maskSecondaryFn/u);

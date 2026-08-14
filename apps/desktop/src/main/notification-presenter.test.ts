@@ -80,6 +80,18 @@ describe("ElectronNotificationPresenter", () => {
     expect(notification?.close).toHaveBeenCalledOnce();
   });
 
+  it("passes an explicit correlation ID to Electron when supplied", () => {
+    const presenter = new ElectronNotificationPresenter(electronConstructor());
+
+    presenter.present({ ...PRESENTATION, id: "evidence-notification-0001" }, callbacks());
+
+    expect(FakeElectronNotification.instances[0]?.options).toEqual({
+      id: "evidence-notification-0001",
+      title: "Morgan",
+      body: "engineering",
+    });
+  });
+
   it("reports asynchronous native failure without carrying its error string", () => {
     const presenter = new ElectronNotificationPresenter(electronConstructor());
     const listeners = callbacks();

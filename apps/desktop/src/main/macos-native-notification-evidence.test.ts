@@ -41,9 +41,20 @@ describe("macOS native notification evidence", () => {
     };
     expect(resolveMacosNativeNotificationEvidenceConfiguration(input)).toEqual({
       artifactDirectory: "/private/tmp/evidence",
-      userDataPath: "/private/tmp/evidence/user-data",
+      userDataPath: "/private/tmp/evidence-user-data",
     });
-    expect(resolveMacosNativeNotificationEvidenceConfiguration({ ...input, argv: [] })).toBeNull();
+    expect(() =>
+      resolveMacosNativeNotificationEvidenceConfiguration({ ...input, argv: [] }),
+    ).toThrow("requires both the argument and artifact directory");
+    expect(() =>
+      resolveMacosNativeNotificationEvidenceConfiguration({
+        ...input,
+        env: {},
+      }),
+    ).toThrow("requires both the argument and artifact directory");
+    expect(
+      resolveMacosNativeNotificationEvidenceConfiguration({ ...input, argv: [], env: {} }),
+    ).toBeNull();
     expect(() =>
       resolveMacosNativeNotificationEvidenceConfiguration({ ...input, compiledIn: false }),
     ).toThrow("not compiled into this artifact");
@@ -64,6 +75,7 @@ describe("macOS native notification evidence", () => {
     const onClick = vi.fn();
     const priorSyntheticClose = vi.fn();
     const unrelatedClose = vi.fn();
+    const currentNotificationId = "evidence-notification-current";
     let historyReadCount = 0;
     const session = await startMacosNativeNotificationEvidence({
       configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
@@ -71,18 +83,42 @@ describe("macOS native notification evidence", () => {
       requestAuthorization: async () => "granted",
       getHistory: async () => {
         historyReadCount += 1;
-        if (historyReadCount === 1) {
+        if (presenter.presentation === null && historyReadCount === 1) {
           return [
             {
+              id: "evidence-notification-stale",
               title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
               body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
               close: priorSyntheticClose,
             },
-            { title: "Real message", body: "Do not remove", close: unrelatedClose },
+            {
+              id: "real-message",
+              title: "Real message",
+              body: "Do not remove",
+              close: unrelatedClose,
+            },
           ];
         }
+        if (presenter.presentation === null && historyReadCount === 2) {
+          return [
+            {
+              id: "evidence-notification-stale",
+              title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
+              body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
+              close: vi.fn(),
+            },
+          ];
+        }
+        if (presenter.presentation === null) return [];
         return [
           {
+            id: "evidence-notification-stale",
+            title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
+            body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
+            close: vi.fn(),
+          },
+          {
+            id: currentNotificationId,
             title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
             body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
             close: vi.fn(),
@@ -90,11 +126,15 @@ describe("macOS native notification evidence", () => {
         ];
       },
       onClick,
+      createNotificationId: () => currentNotificationId,
+      cleanupTimeoutMs: 100,
+      cleanupPollIntervalMs: 1,
       timeoutMs: 100,
       pollIntervalMs: 1,
     });
 
     expect(presenter.presentation).toEqual({
+      id: currentNotificationId,
       title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
       body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
       reason: "direct_message",
@@ -104,7 +144,8 @@ describe("macOS native notification evidence", () => {
     await session.delivery;
     expect(
       JSON.parse(await readFile(path.join(artifactDirectory, "delivered.json"), "utf8")),
-    ).toEqual({ version: 1, status: "delivered" });
+    ).toEqual({ version: 1, status: "delivered", notificationId: currentNotificationId });
+    expect(historyReadCount).toBe(4);
 
     presenter.callbacks?.onClick();
     await vi.waitFor(async () => {
@@ -114,13 +155,52 @@ describe("macOS native notification evidence", () => {
       ).toEqual({
         version: 1,
         status: "clicked",
+        notificationId: currentNotificationId,
       });
     });
+  });
+
+  it("fails before presenting when a prior synthetic notification does not disappear", async () => {
+    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const presenter = new EvidencePresenter();
+    const staleClose = vi.fn();
+    const notificationId = "evidence-notification-cleanup-timeout";
+
+    await expect(
+      startMacosNativeNotificationEvidence({
+        configuration: {
+          artifactDirectory,
+          userDataPath: path.join(artifactDirectory, "user-data"),
+        },
+        presenter,
+        requestAuthorization: async () => "granted",
+        getHistory: async () => [
+          {
+            id: "evidence-notification-stale",
+            title: MACOS_NATIVE_NOTIFICATION_EVIDENCE_TITLE,
+            body: MACOS_NATIVE_NOTIFICATION_EVIDENCE_BODY,
+            close: staleClose,
+          },
+        ],
+        onClick: vi.fn(),
+        createNotificationId: () => notificationId,
+        cleanupTimeoutMs: 5,
+        cleanupPollIntervalMs: 1,
+      }),
+    ).rejects.toThrow(
+      "Timed out waiting for prior synthetic notifications to leave Notification Center",
+    );
+    expect(staleClose).toHaveBeenCalledOnce();
+    expect(presenter.presentation).toBeNull();
+    expect(JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8"))).toEqual(
+      { version: 1, status: "failed", notificationId },
+    );
   });
 
   it("records click success only after the installed interaction state is ready", async () => {
     const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
     const presenter = new EvidencePresenter();
+    const notificationId = "evidence-notification-click-failure";
     const session = await startMacosNativeNotificationEvidence({
       configuration: { artifactDirectory, userDataPath: path.join(artifactDirectory, "user-data") },
       presenter,
@@ -129,6 +209,7 @@ describe("macOS native notification evidence", () => {
       onClick: async () => {
         throw new Error("window restore failed");
       },
+      createNotificationId: () => notificationId,
       timeoutMs: 100,
       pollIntervalMs: 1,
     });
@@ -138,7 +219,7 @@ describe("macOS native notification evidence", () => {
     await vi.waitFor(async () =>
       expect(
         JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8")),
-      ).toEqual({ version: 1, status: "failed" }),
+      ).toEqual({ version: 1, status: "failed", notificationId }),
     );
     await expect(
       readFile(path.join(artifactDirectory, "clicked.json"), "utf8"),
@@ -148,6 +229,7 @@ describe("macOS native notification evidence", () => {
   it("fails before presentation when the real app is not authorized", async () => {
     const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
     const presenter = new EvidencePresenter();
+    const notificationId = "evidence-notification-denied";
 
     await expect(
       startMacosNativeNotificationEvidence({
@@ -159,11 +241,12 @@ describe("macOS native notification evidence", () => {
         requestAuthorization: async () => "denied",
         getHistory: async () => [],
         onClick: vi.fn(),
+        createNotificationId: () => notificationId,
       }),
     ).rejects.toThrow("authorization is denied");
     expect(presenter.presentation).toBeNull();
     expect(JSON.parse(await readFile(path.join(artifactDirectory, "failed.json"), "utf8"))).toEqual(
-      { version: 1, status: "failed" },
+      { version: 1, status: "failed", notificationId },
     );
   });
 });

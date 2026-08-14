@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -203,11 +203,6 @@ async function main() {
   await assertUnlockedConsole();
   await assertHelperPermissions(helperExecutable);
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
-  await writeFile(path.join(artifactDirectory, "automation.log"), "", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-
   const child = spawn(executable, [EVIDENCE_ARGUMENT], {
     env: {
       ...process.env,
@@ -226,6 +221,9 @@ async function main() {
     if (delivered.version !== 1 || delivered.status !== "delivered") {
       throw new Error("Installed application wrote an invalid delivery record");
     }
+    if (typeof delivered.notificationId !== "string" || delivered.notificationId === "") {
+      throw new Error("Installed application omitted the notification correlation ID");
+    }
     await captureScreen(
       helperExecutable,
       "notification",
@@ -234,7 +232,11 @@ async function main() {
 
     await clickSyntheticNotification(helperExecutable);
     const clicked = await waitForRecord(artifactDirectory, "clicked", { timeoutMs: 30_000 });
-    if (clicked.version !== 1 || clicked.status !== "clicked") {
+    if (
+      clicked.version !== 1 ||
+      clicked.status !== "clicked" ||
+      clicked.notificationId !== delivered.notificationId
+    ) {
       throw new Error("Installed application wrote an invalid click record");
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000));

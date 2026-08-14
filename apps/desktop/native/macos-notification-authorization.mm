@@ -13,6 +13,13 @@ struct AuthorizationResult {
   std::string permission;
 };
 
+std::string messageForException(NSException* exception) {
+  NSString* message = exception.reason ?: exception.name;
+  if (message == nil) return "macOS notification authorization raised an exception";
+  const char* utf8 = message.UTF8String;
+  return utf8 == nullptr ? "macOS notification authorization raised an exception" : utf8;
+}
+
 void deliver(napi_threadsafe_function function, AuthorizationResult* result) {
   const napi_status status = napi_call_threadsafe_function(function, result, napi_tsfn_nonblocking);
   if (status != napi_ok) delete result;
@@ -63,13 +70,29 @@ void callJavaScript(
 void reportSettings(
     UNUserNotificationCenter* center,
     napi_threadsafe_function function) {
-  [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+  @try {
+    [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+      @try {
+        auto* result = new AuthorizationResult{
+            .error = "",
+            .permission = permissionForStatus(settings.authorizationStatus),
+        };
+        deliver(function, result);
+      } @catch (NSException* exception) {
+        auto* result = new AuthorizationResult{
+            .error = messageForException(exception),
+            .permission = "",
+        };
+        deliver(function, result);
+      }
+    }];
+  } @catch (NSException* exception) {
     auto* result = new AuthorizationResult{
-        .error = "",
-        .permission = permissionForStatus(settings.authorizationStatus),
+        .error = messageForException(exception),
+        .permission = "",
     };
     deliver(function, result);
-  }];
+  }
 }
 
 napi_value authorize(napi_env environment, napi_callback_info callbackInfo) {
@@ -130,31 +153,58 @@ napi_value authorize(napi_env environment, napi_callback_info callbackInfo) {
     return nullptr;
   }
 
-  UNUserNotificationCenter* center = [UNUserNotificationCenter currentNotificationCenter];
-  [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
-    if (command == "request" && settings.authorizationStatus == UNAuthorizationStatusNotDetermined) {
-      [center requestAuthorizationWithOptions:
-                  (UNAuthorizationOptionAlert | UNAuthorizationOptionBadge |
-                   UNAuthorizationOptionSound)
-                            completionHandler:^(BOOL, NSError* error) {
-        if (error != nil) {
-          auto* result = new AuthorizationResult{
-              .error = std::string(error.localizedDescription.UTF8String),
-              .permission = "",
-          };
-          deliver(function, result);
+  @try {
+    UNUserNotificationCenter* center = [UNUserNotificationCenter currentNotificationCenter];
+    [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+      @try {
+        if (command == "request" &&
+            settings.authorizationStatus == UNAuthorizationStatusNotDetermined) {
+          [center requestAuthorizationWithOptions:
+                      (UNAuthorizationOptionAlert | UNAuthorizationOptionBadge |
+                       UNAuthorizationOptionSound)
+                                completionHandler:^(BOOL, NSError* error) {
+            @try {
+              if (error != nil) {
+                const char* description = error.localizedDescription.UTF8String;
+                auto* result = new AuthorizationResult{
+                    .error = description == nullptr ? "macOS notification authorization failed"
+                                                    : description,
+                    .permission = "",
+                };
+                deliver(function, result);
+                return;
+              }
+              reportSettings(center, function);
+            } @catch (NSException* exception) {
+              auto* result = new AuthorizationResult{
+                  .error = messageForException(exception),
+                  .permission = "",
+              };
+              deliver(function, result);
+            }
+          }];
           return;
         }
-        reportSettings(center, function);
-      }];
-      return;
-    }
+        auto* result = new AuthorizationResult{
+            .error = "",
+            .permission = permissionForStatus(settings.authorizationStatus),
+        };
+        deliver(function, result);
+      } @catch (NSException* exception) {
+        auto* result = new AuthorizationResult{
+            .error = messageForException(exception),
+            .permission = "",
+        };
+        deliver(function, result);
+      }
+    }];
+  } @catch (NSException* exception) {
     auto* result = new AuthorizationResult{
-        .error = "",
-        .permission = permissionForStatus(settings.authorizationStatus),
+        .error = messageForException(exception),
+        .permission = "",
     };
     deliver(function, result);
-  }];
+  }
 
   napi_value undefined;
   napi_get_undefined(environment, &undefined);

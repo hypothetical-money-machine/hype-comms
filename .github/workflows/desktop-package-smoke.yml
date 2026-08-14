@@ -364,17 +364,27 @@ jobs:
             "${install_directory}/Hype Comms.app"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "${install_directory}/Hype Comms.app"
           echo "HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY=${evidence_directory}" >> "$GITHUB_ENV"
+          : > "${evidence_directory}/automation.log"
+          chmod 600 "${evidence_directory}/automation.log"
+          set -o pipefail
           node scripts/capture-macos-native-notification.mjs \
             --app="${install_directory}/Hype Comms.app" \
             --helper="$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER" \
-            --artifacts="$evidence_directory"
+            --artifacts="$evidence_directory" 2>&1 | tee -a "${evidence_directory}/automation.log"
 
       - name: Upload macOS notification evidence
         if: always() && env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-native-notification-evidence
-          path: ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}
+          path: |
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/automation.log
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/application.log
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/delivered.json
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/clicked.json
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/failed.json
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/macos-native-notification.png
+            ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/macos-native-notification-clicked.png
           if-no-files-found: error
           retention-days: 7
 

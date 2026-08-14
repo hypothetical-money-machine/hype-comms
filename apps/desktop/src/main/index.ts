@@ -142,6 +142,10 @@ import {
   NotificationSettingsController,
   type NotificationCapabilitySource,
 } from "./notification-settings-controller";
+import {
+  PendingNotificationAuthorizationBarrier,
+  settlePendingNotificationAuthorization,
+} from "./pending-notification-authorization-barrier";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -273,6 +277,7 @@ let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
+let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
 let notificationController: NotificationController | null = null;
 let notificationProjectionRepairCoordinator: NotificationProjectionRepairCoordinator | null = null;
 let captureNotificationPresenter: CaptureNotificationPresenter | null = null;
@@ -298,6 +303,13 @@ function createNotificationCapabilitySource(): NotificationCapabilitySource {
     };
   }
   if (macosNotificationAuthorization !== null) return macosNotificationAuthorization;
+  if (app.isPackaged && process.platform === "darwin") {
+    // A compiled-in packaged Mac must use the identity-aware addon. Falling through to Electron
+    // after an addon load failure would advertise support while bypassing the required preflight.
+    return {
+      read: () => ({ nativeSupport: "unsupported", osPermission: "unknown" }),
+    };
+  }
   return new ElectronNotificationCapabilitySource(Notification);
 }
 
@@ -1996,10 +2008,19 @@ if (!hasSingleInstanceLock) {
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
 
+      pendingNotificationAuthorizationBarrier = new PendingNotificationAuthorizationBarrier({
+        source: notificationSettingsController,
+        authorizationPending:
+          macosNotificationAuthorization !== null &&
+          initializedNotificationSettings.state.devicePreference === "enabled" &&
+          initializedNotificationSettings.state.nativeSupport === "supported" &&
+          initializedNotificationSettings.state.osPermission === "unknown",
+      });
+
       if (__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
         notificationController = new NotificationController({
           presenter: createNotificationPresenter(),
-          settings: notificationSettingsController,
+          settings: pendingNotificationAuthorizationBarrier,
           headless: headlessDesktopConfiguration !== null,
           getWindowState: () => {
             const window = mainWindow;
@@ -2153,15 +2174,20 @@ if (!hasSingleInstanceLock) {
 
       await createMainWindow();
 
-      // Show the window before an upgraded enabled preference can prompt, but keep session restore
-      // and realtime behind this barrier so no message reaches the presenter while authorization
-      // remains pending.
-      await requestAuthorizationForPersistedEnabledPreference({
-        authorization: macosNotificationAuthorization,
-        current: initializedNotificationSettings.state,
-        refreshCapability: () => initializedNotificationSettings.refreshCapability(),
-      }).catch((error: unknown) => {
-        reportMainProcessError("Failed to request persisted notification permission", error);
+      // Show the window before an upgraded enabled preference can prompt. The request runs beside
+      // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
+      // native authorization and its capability refresh settle.
+      void settlePendingNotificationAuthorization({
+        barrier: pendingNotificationAuthorizationBarrier,
+        request: () =>
+          requestAuthorizationForPersistedEnabledPreference({
+            authorization: macosNotificationAuthorization,
+            current: initializedNotificationSettings.state,
+            refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+          }),
+        onFailure: (error) => {
+          reportMainProcessError("Failed to request persisted notification permission", error);
+        },
       });
 
       if (macosNativeNotificationEvidenceConfiguration !== null) {
@@ -2280,6 +2306,8 @@ if (!hasSingleInstanceLock) {
     notificationProjectionRepairCoordinator = null;
     notificationController?.shutdown();
     notificationController = null;
+    pendingNotificationAuthorizationBarrier?.dispose();
+    pendingNotificationAuthorizationBarrier = null;
     stopNotificationSettingsSubscription?.();
     stopNotificationSettingsSubscription = null;
     notificationSettingsController?.dispose();

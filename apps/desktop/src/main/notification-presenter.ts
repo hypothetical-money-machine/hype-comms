@@ -9,6 +9,7 @@ import { notificationCaptureIdSchema } from "@hype-comms/contracts";
 import type { NotificationEligibilityReason } from "./notification-policy";
 
 export interface NotificationPresentation {
+  readonly id?: string;
   readonly title: string;
   readonly body: string;
   readonly reason: NotificationEligibilityReason;
@@ -51,6 +52,7 @@ export class ElectronNotificationPresenter implements NotificationPresenter {
     callbacks: NotificationPresentationCallbacks,
   ): PresentedNotificationHandle {
     const notification = new this.#Notification({
+      ...(presentation.id === undefined ? {} : { id: presentation.id }),
       title: presentation.title,
       body: presentation.body,
     });

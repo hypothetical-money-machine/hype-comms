@@ -8,6 +8,7 @@ import type {
 } from "@hype-comms/contracts";
 
 const ADDON_FILENAME = "hmm-notification-authorization.node";
+const STATUS_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 interface NativeAuthorizationBinding {
@@ -62,9 +63,10 @@ export class MacosNotificationAuthorization {
 
   #invoke(command: "request" | "status"): Promise<NotificationOsPermission> {
     return new Promise((resolve, reject) => {
+      const timeoutMs = command === "status" ? STATUS_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
       const timer = setTimeout(
-        () => reject(new Error("macOS notification authorization timed out")),
-        REQUEST_TIMEOUT_MS,
+        () => reject(new Error(`macOS notification authorization ${command} timed out`)),
+        timeoutMs,
       );
       try {
         this.#binding.authorize(command, (error, permission) => {
@@ -99,10 +101,14 @@ export function createMacosNotificationAuthorization(options: {
   readonly load?: LoadBinding;
 }): MacosNotificationAuthorization | null {
   if (!options.compiledIn || !options.isPackaged || options.platform !== "darwin") return null;
-  return new MacosNotificationAuthorization({
-    addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
-    load: options.load,
-  });
+  try {
+    return new MacosNotificationAuthorization({
+      addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
+      load: options.load,
+    });
+  } catch {
+    return null;
+  }
 }
 
 export async function requestAuthorizationForPersistedEnabledPreference(options: {
@@ -133,9 +139,24 @@ export async function setNotificationPreferenceWithAuthorization(options: {
     options.current.devicePreference === "disabled" &&
     options.preference.devicePreference === "enabled"
   ) {
-    const permission = await options.authorization.request();
-    const refreshed = await options.refreshCapability();
-    if (permission !== "granted") return refreshed;
+    const previewChanged =
+      options.preference.contentPreviewPreference !== options.current.contentPreviewPreference;
+    const persistPreviewPreference = (): Promise<NotificationState> =>
+      options.setPreference({
+        version: options.preference.version,
+        devicePreference: options.current.devicePreference,
+        contentPreviewPreference: options.preference.contentPreviewPreference,
+      });
+    try {
+      const permission = await options.authorization.request();
+      const refreshed = await options.refreshCapability();
+      if (permission !== "granted") {
+        return previewChanged ? persistPreviewPreference() : refreshed;
+      }
+    } catch (cause) {
+      if (previewChanged) await persistPreviewPreference();
+      throw cause;
+    }
   }
   return options.setPreference(options.preference);
 }
