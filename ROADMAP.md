@@ -18,8 +18,7 @@ visible as follow-up work instead of blocking the platform that is ready.
 
 Cross-platform delivery becomes one gate only when a specific item says so or when a shared
 security, data, compatibility, or release invariant makes a partial rollout unsafe. Otherwise,
-acceptance and native evidence are scoped to the platforms named by the work. See
-[`ADR 0003`](docs/adr/0003-platform-scoped-delivery.md).
+acceptance and native evidence are scoped to the platforms named by the work.
 
 ## Built and working
 

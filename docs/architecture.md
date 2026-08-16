@@ -1,6 +1,6 @@
 # Architecture implementation contract
 
-This document is the decision record for Hype Comms. It distinguishes the current pilot deployment
+This document is the implementation contract for Hype Comms. It distinguishes the current pilot deployment
 from the hosted target; a target statement is not evidence that its infrastructure or release gate
 exists today. Changes to these invariants require a reviewed architecture change and matching
 contract tests.
@@ -24,7 +24,7 @@ contract tests.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
   Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client. Support
   does not require optional capabilities to land simultaneously: feature scope and rollout evidence
-  are platform-specific by default under [ADR 0003](adr/0003-platform-scoped-delivery.md). Untargeted
+  are platform-specific by default. Untargeted
   clients must retain safe existing behavior and shared wire contracts remain compatible.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
@@ -457,8 +457,8 @@ review.
 - Search returns a body snippet with escaped highlights but no durable download URL. Empty,
   stop-word-only, and overly broad queries return a validated user error; queries are
   limited to 200 characters and 30 per minute per member.
-- Native notifications follow the main/renderer, freshness, and action boundary in
-  [ADR 0002](adr/0002-native-notification-boundary.md). Milestones 0 through 3 are implemented and
+- Native notifications follow the main/renderer, freshness, and action boundaries described here.
+  Milestones 0 through 3 are implemented and
   covered deterministically, including direct messages, verified mentions, and the
   capability-gated recipient-specific `participated_thread_reply` reason. Main applies precedence
   in that order: verified mention, direct message, then participated-thread reply. It never infers
@@ -500,7 +500,7 @@ review.
   [restored-window callback](screenshots/macos-native-notification-click-through.png). The macOS
   release artifact includes the controller as an opt-in pilot while its device preference remains
   disabled by default; Windows and Linux release artifacts remain compiled off. Milestone 4 is
-  evaluated per platform under [ADR 0003](adr/0003-platform-scoped-delivery.md), so one platform can
+  evaluated per platform, so one platform can
   advance after every cell of its [supported host matrix](#supported-host-matrix) row passes without
   weakening another's gate. Ordinary package smoke only verifies build contents. Its separate,
   manually dispatched macOS evidence lane signs, installs, launches, displays, captures, and clicks
@@ -692,7 +692,7 @@ downgrade.
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
 | Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                        |
-| Native E2E                 | Baseline install/launch/logout/relaunch, deep links, OS keyring, tray/window lifecycle, offline restart, and uninstall run on every shipped platform's full [supported host matrix](#supported-host-matrix) row; a release never scopes this down. Optional-feature evidence—including notifications granted/denied—is scoped to the platforms in the change's declared scope under [ADR 0003](adr/0003-platform-scoped-delivery.md), and an unproven platform ships that feature off rather than untested. Package smoke runs on relevant changes; the full release matrix runs for releases. |
+| Native E2E                 | Baseline install/launch/logout/relaunch, deep links, OS keyring, tray/window lifecycle, offline restart, and uninstall run on every shipped platform's full [supported host matrix](#supported-host-matrix) row; a release never scopes this down. Optional-feature evidence—including notifications granted/denied—is scoped to the platforms in the change's declared scope, and an unproven platform ships that feature off rather than untested. Package smoke runs on relevant changes; the full release matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
 | Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
 

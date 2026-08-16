@@ -27,8 +27,7 @@ partial implementation unsafe. Otherwise:
 - run shared tests plus the native package or evidence lanes relevant to the changed platforms.
 
 A full release matrix verifies each platform's intended behavior; it does not expand every feature's
-scope to every platform. Native-notification rollout evidence is explicitly platform-scoped by
-[ADR 0003](docs/adr/0003-platform-scoped-delivery.md).
+scope to every platform. Native-notification rollout evidence is explicitly platform-scoped.
 
 ## Build, Test, and Development Commands
 
@@ -99,4 +98,4 @@ Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `CONTEXT.md` at the repo root. See `docs/agents/domain.md`.
