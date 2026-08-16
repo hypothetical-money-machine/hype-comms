@@ -51,6 +51,7 @@ const transaction = {
   providerCodeVerifier: PROVIDER_CODE_VERIFIER,
   desktopCodeChallenge: CODE_CHALLENGE,
   desktopState: DESKTOP_STATE,
+  desktopAuthVariant: "production" as const,
   expiresAt: new Date(NOW.getTime() + 10 * 60_000),
 };
 
@@ -114,6 +115,43 @@ afterEach(async () => {
 });
 
 describe("AuthKitService", () => {
+  it("persists the allowlisted desktop callback variant with each provider transaction", async () => {
+    const createTransaction = vi.fn().mockResolvedValue(undefined);
+    const createAuthorization = vi.fn().mockResolvedValue({
+      authorizationUrl: "https://api.workos.com/user_management/authorize",
+      state: PROVIDER_STATE,
+      codeVerifier: PROVIDER_CODE_VERIFIER,
+    });
+    const service = new AuthKitService({
+      provider: {
+        createAuthorization,
+        authenticateCode: vi.fn(),
+        createLogoutUrl: vi.fn(),
+        listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+      },
+      repository: repositoryWith({ createTransaction }),
+      now: () => NOW,
+    });
+
+    await expect(
+      service.beginDesktopAuthorization({
+        codeChallenge: CODE_CHALLENGE,
+        desktopState: DESKTOP_STATE,
+        desktopAuthVariant: "development",
+      }),
+    ).resolves.toEqual({
+      authorizationUrl: "https://api.workos.com/user_management/authorize",
+    });
+    expect(createTransaction).toHaveBeenCalledWith({
+      providerState: PROVIDER_STATE,
+      providerCodeVerifier: PROVIDER_CODE_VERIFIER,
+      desktopCodeChallenge: CODE_CHALLENGE,
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "development",
+      expiresAt: new Date(NOW.getTime() + 10 * 60_000),
+    });
+  });
+
   it("consumes provider state before exchange and never exchanges a replay", async () => {
     const authenticateCode = vi.fn().mockResolvedValue({
       provider: "workos",
@@ -152,6 +190,7 @@ describe("AuthKitService", () => {
       kind: "success",
       handoffCode: HANDOFF_CODE,
       desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
     });
     await expect(service.completeCallback(input)).rejects.toMatchObject({
       statusCode: 403,
@@ -195,7 +234,11 @@ describe("AuthKitService", () => {
 
     await expect(
       service.completeCallback({ kind: "error", providerState: PROVIDER_STATE }),
-    ).resolves.toEqual({ kind: "error", desktopState: DESKTOP_STATE });
+    ).resolves.toEqual({
+      kind: "error",
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
+    });
     expect(authenticateCode).not.toHaveBeenCalled();
 
     await expect(
@@ -204,7 +247,11 @@ describe("AuthKitService", () => {
         code: PROVIDER_CODE,
         providerState: PROVIDER_STATE,
       }),
-    ).resolves.toEqual({ kind: "error", desktopState: DESKTOP_STATE });
+    ).resolves.toEqual({
+      kind: "error",
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
+    });
   });
 
   it("maps rejected handoffs to a generic credential refusal and dependencies to unavailable", async () => {
@@ -498,6 +545,57 @@ describe("AuthKit routes", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
+  it("defaults old authorization starts to production and rejects unknown variants", async () => {
+    const identity = new FakeIdentityService();
+    const authKit = new FakeAuthKitService();
+    authKit.beginDesktopAuthorization.mockResolvedValue({
+      authorizationUrl: "https://api.workos.com/user_management/authorize",
+    });
+    const app = await buildApp({
+      identity: {
+        service: identity.asService(),
+        authKitAdmissionEnabled: true,
+        authKitService: authKit.asService(),
+      },
+    });
+    apps.push(app);
+
+    const production = await app.inject({
+      method: "POST",
+      url: "/v1/auth/desktop-authorizations",
+      payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
+    });
+    const development = await app.inject({
+      method: "POST",
+      url: "/v1/auth/desktop-authorizations",
+      payload: {
+        codeChallenge: CODE_CHALLENGE,
+        state: DESKTOP_STATE,
+        variant: "development",
+      },
+    });
+    const unknown = await app.inject({
+      method: "POST",
+      url: "/v1/auth/desktop-authorizations",
+      payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE, variant: "preview" },
+    });
+
+    expect(production.statusCode).toBe(201);
+    expect(development.statusCode).toBe(201);
+    expect(unknown.statusCode).toBe(400);
+    expect(authKit.beginDesktopAuthorization).toHaveBeenNthCalledWith(1, {
+      codeChallenge: CODE_CHALLENGE,
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
+    });
+    expect(authKit.beginDesktopAuthorization).toHaveBeenNthCalledWith(2, {
+      codeChallenge: CODE_CHALLENGE,
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "development",
+    });
+    expect(authKit.beginDesktopAuthorization).toHaveBeenCalledTimes(2);
+  });
+
   it("throttles authorization starts per client IP with an explicit retry window", async () => {
     const identity = new FakeIdentityService();
     const authKit = new FakeAuthKitService();
@@ -651,6 +749,7 @@ describe("AuthKit routes", () => {
     authKit.completeCallback.mockResolvedValue({
       kind: "error",
       desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
     });
     const app = await buildApp({
       identity: {
@@ -686,6 +785,36 @@ describe("AuthKit routes", () => {
       kind: "error",
       providerState: PROVIDER_STATE,
     });
+  });
+
+  it("returns successful development handoffs only to the development protocol", async () => {
+    const identity = new FakeIdentityService();
+    const authKit = new FakeAuthKitService();
+    authKit.completeCallback.mockResolvedValue({
+      kind: "success",
+      handoffCode: HANDOFF_CODE,
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "development",
+    });
+    const app = await buildApp({
+      identity: {
+        service: identity.asService(),
+        authKitAdmissionEnabled: true,
+        authKitService: authKit.asService(),
+      },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/auth/workos/callback?code=${PROVIDER_CODE}&state=${PROVIDER_STATE}`,
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(
+      `hype-comms-dev://auth/callback?code=${HANDOFF_CODE}&state=${DESKTOP_STATE}`,
+    );
+    expect(response.headers.location).not.toContain("hype-comms://");
   });
 
   it("rejects malformed and invalid handoffs before creating a local session", async () => {

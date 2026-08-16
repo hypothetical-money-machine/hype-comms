@@ -5,12 +5,14 @@ import {
   authPkceCodeChallengeSchema,
   authPkceCodeVerifierSchema,
   createDesktopAuthorizationResponseSchema,
+  desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
   isoDateTimeSchema,
   type AuthDesktopState,
   type AuthPkceCodeVerifier,
   type CreateDesktopAuthorizationRequest,
   type CreateDesktopAuthorizationResponse,
+  type DesktopAuthVariant,
   type DesktopAuthCallbackParameters,
 } from "@hype-comms/contracts";
 
@@ -75,6 +77,7 @@ export interface AuthKitAuthorizationAttempt {
 export interface AuthKitFlowOptions {
   readonly api: AuthKitAuthorizationApi;
   readonly apiOrigin: string;
+  readonly authVariant: DesktopAuthVariant;
   readonly authorizationTtlMs?: number;
   readonly now?: () => Date;
   readonly openExternal: (url: string) => Promise<void>;
@@ -150,6 +153,7 @@ export function parseStoredAuthKitPendingAuthorization(
 export class AuthKitFlow {
   readonly #api: AuthKitAuthorizationApi;
   readonly #apiOrigin: string;
+  readonly #authVariant: DesktopAuthVariant;
   readonly #authorizationTtlMs: number;
   readonly #now: () => Date;
   readonly #openExternal: (url: string) => Promise<void>;
@@ -178,6 +182,7 @@ export class AuthKitFlow {
 
     this.#api = options.api;
     this.#apiOrigin = apiOrigin;
+    this.#authVariant = desktopAuthVariantSchema.parse(options.authVariant);
     this.#authorizationTtlMs = authorizationTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#openExternal = options.openExternal;
@@ -313,7 +318,11 @@ export class AuthKitFlow {
     this.#scheduleExpiry(pending);
 
     try {
-      const authorization = await this.#api.beginDesktopAuthorization({ codeChallenge, state });
+      const authorization = await this.#api.beginDesktopAuthorization({
+        codeChallenge,
+        state,
+        ...(this.#authVariant === "development" ? { variant: this.#authVariant } : {}),
+      });
       if (this.#isExpired(pending)) {
         throw new AuthKitAuthorizationExpiredError();
       }

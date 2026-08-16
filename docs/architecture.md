@@ -78,13 +78,15 @@ Cloudflare DNS/WAF/TLS  --->  AWS ALB  --->  Fastify on ECS Fargate
 
 The packaged client API is `https://chat-api.example.invalid`; realtime uses
 `wss://chat-api.example.invalid/v1/realtime`. The email landing page is
-`https://chat.hypemm.com/auth/verify`, and the registered desktop protocol is
-`hype-comms://auth/callback`.
+`https://chat.hypemm.com/auth/verify`. Stable releases register `hype-comms://auth/callback`.
+Local packages default to the separate `Hype Comms DEV` identity and register
+`hype-comms-dev://auth/callback`, so both applications can be installed and signed in at once.
 
 The product rebranded from HMM Chat to Hype Comms in two stages. The first stage (July) changed
 only user-visible strings. This repository has since completed a second, hard-cutover stage that
-renamed every remaining technical identifier: the application ID (`com.hypemm.hypecomms`), the
-`hype-comms://` protocol, the `@hype-comms/*` package scope, `HYPE_COMMS_*` environment variables,
+renamed every remaining stable technical identifier: the application ID
+(`com.hypemm.hypecomms`), the `hype-comms://` protocol, the `@hype-comms/*` package scope,
+`HYPE_COMMS_*` environment variables,
 the `X-Hype-Comms-Capabilities` header, session cookie, token prefixes, and cache/database names.
 That migration was a one-time, self-hosted-only cutover: existing sessions and issued
 agent/bot tokens were invalidated, and installed desktop clients required one manual reinstall
@@ -514,9 +516,11 @@ the fixed server callback. The server consumes state before code exchange, verif
 access JWT against WorkOS JWKS and this Application's exact `client_id`, rejects unverified email
 and impersonation, discards upstream tokens, and applies the existing local invitation/capacity
 transaction. A fresh five-minute Hype Comms handoff is bound to desktop PKCE and is the only code
-sent through `hype-comms://auth/callback`. A one-use handoff creates the same `hype_comms_session` cookie and
-device-session lineage as magic-link sign-in; protected routes, realtime tickets, cache scopes,
-and rolling clients therefore keep one authorization model.
+sent through the callback selected at transaction creation: `hype-comms://auth/callback` for the
+omitted or production variant, and `hype-comms-dev://auth/callback` for development. A one-use
+handoff creates the same `hype_comms_session` cookie and device-session lineage as magic-link
+sign-in; protected routes, realtime tickets, cache scopes, and rolling clients therefore keep one
+authorization model.
 
 Only stable `(provider, subject) -> local user` ownership, the last verified email, and the WorkOS
 session ID needed for active-session enforcement survive admission. Signed, raw-body-verified

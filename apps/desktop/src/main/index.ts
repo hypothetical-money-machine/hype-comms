@@ -95,7 +95,7 @@ import {
   AuthKitProtectedStoreUnavailableError,
   SafeStorageAuthKitPendingStore,
 } from "./authkit-pending-store";
-import { configureWindowsApplicationIdentity } from "./application-identity";
+import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
@@ -190,8 +190,14 @@ const WINDOW_MIN_WIDTH = 960;
  * Mirrored by the `html[data-compact] body` min-width in renderer styles.css.
  */
 const COMPACT_WINDOW_MIN_WIDTH = 640;
+const IS_PRODUCTION_BUILD = __HYPE_COMMS_BUILD_FLAVOR__ === "production";
 
-configureWindowsApplicationIdentity(app, process.platform);
+configureApplicationIdentity(app, process.platform, {
+  appId: __HYPE_COMMS_APPLICATION_ID__,
+  desktopName: __HYPE_COMMS_DESKTOP_NAME__,
+  isProductionBuild: IS_PRODUCTION_BUILD,
+  productName: __HYPE_COMMS_PRODUCT_NAME__,
+});
 protectMainProcessLogStreams([process.stdout, process.stderr]);
 
 protocol.registerSchemesAsPrivileged([
@@ -1785,7 +1791,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
         }),
     show: false,
     backgroundColor: getThemeDefinition(themeController.state.resolvedThemeId).windowBackground,
-    title: "Hype Comms",
+    title: __HYPE_COMMS_PRODUCT_NAME__,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       additionalArguments: [
@@ -1990,7 +1996,7 @@ async function drainPendingAuthCallbacks(): Promise<void> {
     while (pendingAuthCallbacks.length > 0) {
       const pendingCallback = pendingAuthCallbacks.shift();
       if (pendingCallback === undefined) continue;
-      const parsed = parseAuthCallback(pendingCallback.value);
+      const parsed = parseAuthCallback(pendingCallback.value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
       if (parsed === null) continue;
       if (parsed.kind === "authkit" && authKitCancellationFenced) {
         // A fenced flow has been superseded by sign-out, magic-link authentication, or an
@@ -2081,7 +2087,7 @@ async function drainPendingAuthCallbacks(): Promise<void> {
 }
 
 function handleAuthCallback(value: string): boolean {
-  const parsed = parseAuthCallback(value);
+  const parsed = parseAuthCallback(value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
   if (parsed === null) return false;
   if (parsed.kind === "authkit" && authKitCancellationFenced) {
     // Acknowledge the owned protocol URL without retaining a callback from a superseded flow.
@@ -2094,7 +2100,13 @@ function handleAuthCallback(value: string): boolean {
 }
 
 let userDataMigrationFailed = false;
-if (app.isPackaged && macosNativeNotificationEvidenceConfiguration === null) {
+if (
+  shouldMigrateLegacyProfile({
+    isPackaged: app.isPackaged,
+    isProductionBuild: IS_PRODUCTION_BUILD,
+    isNativeNotificationEvidence: macosNativeNotificationEvidenceConfiguration !== null,
+  })
+) {
   try {
     migrateLegacyUserData({
       currentPath: app.getPath("userData"),
@@ -2112,7 +2124,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, commandLine) => {
-    const callbackUrl = findAuthCallbackUrl(commandLine);
+    const callbackUrl = findAuthCallbackUrl(commandLine, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
     if (callbackUrl === null || !handleAuthCallback(callbackUrl)) {
       focusMainWindow();
     }
@@ -2233,6 +2245,7 @@ if (!hasSingleInstanceLock) {
 
       chatSession = new ChatSession({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
+        authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
       });
@@ -2245,6 +2258,7 @@ if (!hasSingleInstanceLock) {
       authKitFlow = new AuthKitFlow({
         api: chatSession,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
+        authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         openExternal: (url) => shell.openExternal(url),
         store: authKitPendingStore,
       });
@@ -2291,6 +2305,7 @@ if (!hasSingleInstanceLock) {
       chatSession.subscribe(deliverSessionState);
       updateController = new UpdateController({
         updater: createUpdateSource(),
+        isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
@@ -2326,6 +2341,7 @@ if (!hasSingleInstanceLock) {
           app.isPackaged,
           process.execPath,
           process.argv,
+          __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
         );
         if (
           protocolRegistration.executablePath === undefined ||
@@ -2400,7 +2416,10 @@ if (!hasSingleInstanceLock) {
         });
       }
 
-      const initialCallbackUrl = findAuthCallbackUrl(process.argv);
+      const initialCallbackUrl = findAuthCallbackUrl(
+        process.argv,
+        __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+      );
       if (initialCallbackUrl !== null) {
         handleAuthCallback(initialCallbackUrl);
       }

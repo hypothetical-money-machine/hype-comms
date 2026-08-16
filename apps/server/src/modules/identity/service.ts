@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   agentTokenSecretSchema,
   currentUserSchema,
+  desktopAuthVariantSchema,
   invitationSchema,
   magicLinkRequestedSchema,
   sessionTokenSchema,
@@ -14,6 +15,7 @@ import {
   type CurrentUser,
   type CurrentPrincipal,
   type DeviceSession,
+  type DesktopAuthVariant,
   type Email,
   type EntityId,
   type Invitation,
@@ -150,7 +152,9 @@ export class IdentityService {
     email: Email,
     clientIp: string,
     logger?: ServiceLogger,
+    variantValue: DesktopAuthVariant = "production",
   ): Promise<MagicLinkRequested> {
+    const variant = desktopAuthVariantSchema.parse(variantValue);
     const accepted = magicLinkRequestedSchema.parse({ status: "accepted" });
     const ipKey = `ip:${clientIp}`;
     const emailKey = `email:${email}`;
@@ -189,6 +193,8 @@ export class IdentityService {
 
       const url = new URL("/auth/magic-link", this.#publicAppUrl);
       url.searchParams.set("token", issued.token);
+      // Keep production email URLs byte-for-byte compatible with released clients and links.
+      if (variant === "development") url.searchParams.set("variant", variant);
       await this.#emailSender.sendMagicLink({ to: email, url: url.toString(), expiresAt });
     } catch (error) {
       // A well-formed request always has the same response, including when delivery or persistence

@@ -14,12 +14,13 @@ import {
   listAgentsResponseSchema,
   listAgentTokensResponseSchema,
   listInvitationsResponseSchema,
-  magicLinkTokenSchema,
+  magicLinkLandingQuerySchema,
   magicLinkRequestedSchema,
   requestMagicLinkSchema,
   sessionTokenSchema,
   verifyMagicLinkSchema,
   type CurrentUser,
+  type DesktopAuthVariant,
   type SessionToken,
 } from "@hype-comms/contracts";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
@@ -41,6 +42,10 @@ const MAGIC_LINK_PAGE_HEADERS = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 } as const;
+const DESKTOP_CALLBACK_SCHEMES = {
+  production: "hype-comms",
+  development: "hype-comms-dev",
+} as const satisfies Record<DesktopAuthVariant, string>;
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
@@ -175,11 +180,7 @@ function invalidMagicLinkPage(): string {
 
 export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
   app.get("/auth/magic-link", async (request, reply) => {
-    const query =
-      typeof request.query === "object" && request.query !== null && "token" in request.query
-        ? request.query.token
-        : undefined;
-    const result = magicLinkTokenSchema.safeParse(query);
+    const result = magicLinkLandingQuerySchema.safeParse(request.query);
     const contentSecurityPolicy =
       "default-src 'none'; style-src 'none'; img-src 'none'; script-src 'none'; " +
       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
@@ -193,8 +194,9 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send(invalidMagicLinkPage());
     }
 
-    const target = new URL("hype-comms://auth/callback");
-    target.searchParams.set("token", result.data);
+    const variant = result.data.variant ?? "production";
+    const target = new URL(`${DESKTOP_CALLBACK_SCHEMES[variant]}://auth/callback`);
+    target.searchParams.set("token", result.data.token);
     return reply.code(200).send(magicLinkPage(target.toString()));
   });
 };
@@ -219,7 +221,12 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     }
     const result = requestMagicLinkSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid magic-link request");
-    const response = await service.requestMagicLink(result.data.email, request.ip, request.log);
+    const response = await service.requestMagicLink(
+      result.data.email,
+      request.ip,
+      request.log,
+      result.data.variant,
+    );
     return reply.code(202).send(magicLinkRequestedSchema.parse(response));
   });
 

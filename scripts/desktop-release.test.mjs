@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createElectronBuilderConfiguration } from "../apps/desktop/electron-builder.config.mjs";
 import {
   addArtifactCacheKeys,
   assertVersionCanPublish,
@@ -61,6 +62,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   const desktopPackage = JSON.parse(
     await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
   );
+  const productionBuild = createElectronBuilderConfiguration("production");
   const releaseWorkflow = await readFile(
     new URL("../.github/workflows/desktop-release.yml", import.meta.url),
     "utf8",
@@ -78,7 +80,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
   const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
   const targetArchitectures = (platform) =>
-    desktopPackage.build[platform].target.map(({ arch, target }) => [target, arch]);
+    productionBuild[platform].target.map(({ arch, target }) => [target, arch]);
 
   assert.deepEqual(targetArchitectures("win"), [["nsis", ["x64", "arm64"]]]);
   assert.deepEqual(targetArchitectures("linux"), [
@@ -92,7 +94,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /build-macos-notification-authorization\.mjs/u,
   );
   assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
-  assert.deepEqual(desktopPackage.build.mac.extraResources, [
+  assert.deepEqual(productionBuild.mac.extraResources, [
     {
       from: "native-build/macos/hmm-notification-authorization.node",
       to: "hmm-notification-authorization.node",
@@ -100,13 +102,19 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   ]);
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
   assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
-  assert.equal(desktopPackage.build.nsis.buildUniversalInstaller, false);
-  assert.equal(desktopPackage.build.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
+  assert.equal(productionBuild.nsis.buildUniversalInstaller, false);
+  assert.equal(productionBuild.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
+  for (const packageScript of Object.values(desktopPackage.scripts).filter((script) =>
+    script.includes("electron-builder"),
+  )) {
+    assert.match(packageScript, /--config electron-builder\.config\.mjs/u);
+  }
   assert.match(
     releaseWorkflow,
     /^concurrency:\n[ ]{2}# [^\n]+\n[ ]{2}# [^\n]+\n[ ]{2}group: desktop-release-publish\n[ ]{2}cancel-in-progress: false$/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
+  assert.match(releaseWorkflow, /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production$/mu);
   assert.match(
     releaseWorkflow,
     /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u,
@@ -183,6 +191,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     smokePackageJob,
     /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
   );
+  assert.doesNotMatch(smokePackageJob, /HYPE_COMMS_BUILD_FLAVOR/u);
   assert.match(
     packageSmokeWorkflow,
     /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
@@ -193,7 +202,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     nativeEvidenceJob,
-    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
+    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
   );
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);

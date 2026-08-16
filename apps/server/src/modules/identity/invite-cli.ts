@@ -1,7 +1,13 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { emailSchema, type Email, type Invitation } from "@hype-comms/contracts";
+import {
+  desktopAuthVariantSchema,
+  emailSchema,
+  type DesktopAuthVariant,
+  type Email,
+  type Invitation,
+} from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { loadConfig } from "../../config.js";
@@ -14,7 +20,7 @@ import { IdentityRepository } from "./repository.js";
 import { IdentityService } from "./service.js";
 
 const USAGE =
-  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member]";
+  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member] [--variant production|development]";
 const CLI_CLIENT_IP = "invite-cli";
 
 export interface InviteCliOutput {
@@ -22,9 +28,10 @@ export interface InviteCliOutput {
   readonly stderr: Pick<NodeJS.WritableStream, "write">;
 }
 
-interface InviteArguments {
+export interface InviteArguments {
   readonly email: Email;
   readonly role: "member";
+  readonly variant: DesktopAuthVariant;
 }
 
 class CapturingEmailSender implements EmailSender {
@@ -35,13 +42,14 @@ class CapturingEmailSender implements EmailSender {
   }
 }
 
-function parseArguments(argv: readonly string[]): InviteArguments {
+export function parseInviteArguments(argv: readonly string[]): InviteArguments {
   let email: string | undefined;
   let role: string | undefined;
+  let variant: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag !== "--email" && flag !== "--role") {
+    if (flag !== "--email" && flag !== "--role" && flag !== "--variant") {
       throw new Error(`Unknown argument: ${flag ?? ""}\n${USAGE}`);
     }
     const value = argv[index + 1];
@@ -51,9 +59,12 @@ function parseArguments(argv: readonly string[]): InviteArguments {
     if (flag === "--email") {
       if (email !== undefined) throw new Error(`--email may only be specified once\n${USAGE}`);
       email = value;
-    } else {
+    } else if (flag === "--role") {
       if (role !== undefined) throw new Error(`--role may only be specified once\n${USAGE}`);
       role = value;
+    } else {
+      if (variant !== undefined) throw new Error(`--variant may only be specified once\n${USAGE}`);
+      variant = value;
     }
     index += 1;
   }
@@ -63,7 +74,11 @@ function parseArguments(argv: readonly string[]): InviteArguments {
   if (!emailResult.success) throw new Error(`Invalid email address\n${USAGE}`);
   const roleResult = z.literal("member").safeParse(role ?? "member");
   if (!roleResult.success) throw new Error(`--role must be member\n${USAGE}`);
-  return { email: emailResult.data, role: roleResult.data };
+  const variantResult = desktopAuthVariantSchema.safeParse(variant ?? "production");
+  if (!variantResult.success) {
+    throw new Error(`--variant must be production or development\n${USAGE}`);
+  }
+  return { email: emailResult.data, role: roleResult.data, variant: variantResult.data };
 }
 
 async function createOrReuseInvitation(
@@ -103,7 +118,7 @@ export async function runInviteCli(
     if (env.HYPE_COMMS_DATABASE_URL === undefined || env.HYPE_COMMS_DATABASE_URL === "") {
       throw new Error("HYPE_COMMS_DATABASE_URL is required");
     }
-    const input = parseArguments(argv);
+    const input = parseInviteArguments(argv);
     const config = loadConfig(env);
     if (config.database === undefined) throw new Error("HYPE_COMMS_DATABASE_URL is required");
 
@@ -138,13 +153,18 @@ export async function runInviteCli(
     // requestMagicLink answers identically whether or not it issued a link, and swallows failures
     // so that the HTTP path cannot leak which addresses are real. For an operator command that
     // silence is unhelpful, so surface the underlying cause on stderr.
-    await service.requestMagicLink(input.email, CLI_CLIENT_IP, {
-      error: (details, message) => {
-        const cause = details.err;
-        const reason = cause instanceof Error ? cause.message : "unknown cause";
-        output.stderr.write(`${message}: ${reason}\n`);
+    await service.requestMagicLink(
+      input.email,
+      CLI_CLIENT_IP,
+      {
+        error: (details, message) => {
+          const cause = details.err;
+          const reason = cause instanceof Error ? cause.message : "unknown cause";
+          output.stderr.write(`${message}: ${reason}\n`);
+        },
       },
-    });
+      input.variant,
+    );
     const captured = sender.captured;
     if (captured === null) {
       throw new Error(

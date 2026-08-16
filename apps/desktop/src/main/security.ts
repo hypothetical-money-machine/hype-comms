@@ -1,13 +1,18 @@
 import path from "node:path";
 
+import type { DesktopAuthVariant } from "@hype-comms/contracts";
+
 export const APP_PROTOCOL = "app";
 export const APP_PROTOCOL_HOST = "bundle";
-export const AUTH_PROTOCOL_SCHEME = "hype-comms";
-export const AUTH_PROTOCOL = "hype-comms:";
+export const AUTH_PROTOCOL_SCHEMES = {
+  production: "hype-comms",
+  development: "hype-comms-dev",
+} as const satisfies Record<DesktopAuthVariant, string>;
+export type AuthProtocolScheme = (typeof AUTH_PROTOCOL_SCHEMES)[DesktopAuthVariant];
 export const MAX_URL_LENGTH = 4_096;
 
 export interface ProtocolClientRegistration {
-  readonly scheme: typeof AUTH_PROTOCOL_SCHEME;
+  readonly scheme: AuthProtocolScheme;
   readonly executablePath?: string;
   readonly arguments?: readonly string[];
 }
@@ -16,18 +21,19 @@ export function createProtocolClientRegistration(
   isPackaged: boolean,
   executablePath: string,
   argumentsList: readonly string[],
+  scheme: AuthProtocolScheme,
 ): ProtocolClientRegistration {
   if (isPackaged) {
-    return { scheme: AUTH_PROTOCOL_SCHEME };
+    return { scheme };
   }
 
   const scriptArgument = argumentsList[1];
   if (scriptArgument === undefined) {
-    return { scheme: AUTH_PROTOCOL_SCHEME };
+    return { scheme };
   }
 
   return {
-    scheme: AUTH_PROTOCOL_SCHEME,
+    scheme,
     executablePath,
     arguments: [path.resolve(scriptArgument)],
   };
@@ -103,7 +109,7 @@ export function isTrustedRendererUrl(value: string, developmentServerUrl: string
   }
 }
 
-export function normalizeAuthCallbackUrl(value: string): string | null {
+export function normalizeAuthCallbackUrl(value: string, scheme: AuthProtocolScheme): string | null {
   if (value.length === 0 || value.length > MAX_URL_LENGTH) {
     return null;
   }
@@ -111,7 +117,7 @@ export function normalizeAuthCallbackUrl(value: string): string | null {
   try {
     const url = new URL(value);
     if (
-      url.protocol !== AUTH_PROTOCOL ||
+      url.protocol !== `${scheme}:` ||
       url.hostname !== "auth" ||
       url.pathname !== "/callback" ||
       url.username !== "" ||
@@ -126,9 +132,12 @@ export function normalizeAuthCallbackUrl(value: string): string | null {
   }
 }
 
-export function findAuthCallbackUrl(argumentsList: readonly string[]): string | null {
+export function findAuthCallbackUrl(
+  argumentsList: readonly string[],
+  scheme: AuthProtocolScheme,
+): string | null {
   for (const argument of argumentsList) {
-    const callbackUrl = normalizeAuthCallbackUrl(argument);
+    const callbackUrl = normalizeAuthCallbackUrl(argument, scheme);
     if (callbackUrl !== null) {
       return callbackUrl;
     }

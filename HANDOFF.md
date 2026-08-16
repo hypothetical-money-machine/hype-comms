@@ -56,8 +56,9 @@ Woodpecker is self-hosted and unaffected, so server builds and deploys still wor
 The updater is a remote code execution channel by design. Several guards exist because a review
 found the corresponding hole:
 
-- **The update feed URL is baked at package time.** There is deliberately no env var, argument, or
-  config file that can redirect an installed client at another server.
+- **The stable update feed URL is baked into production packages.** There is no env var, argument,
+  or runtime config file that can redirect an installed client at another server. Development
+  packages omit the feed and disable the updater instead of inheriting the stable channel.
 - **Releases publish only from a tag** whose name matches the desktop package version, and the
   workflow refuses to republish an existing version. Both guards are load-bearing: a
   `workflow_dispatch` from a branch previously bypassed validation entirely, and republishing a

@@ -7,8 +7,11 @@ import {
   authPkceCodeVerifierSchema,
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
+  desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
   exchangeAuthHandoffRequestSchema,
+  magicLinkLandingQuerySchema,
+  requestMagicLinkSchema,
 } from "../src/index.js";
 
 const BASE64_URL_VALUE = "a".repeat(43);
@@ -22,10 +25,57 @@ describe("AuthKit contracts", () => {
       }),
     ).toEqual({ codeChallenge: BASE64_URL_VALUE, state: "b".repeat(43) });
     expect(
+      createDesktopAuthorizationRequestSchema.parse({
+        codeChallenge: BASE64_URL_VALUE,
+        state: "b".repeat(43),
+        variant: "development",
+      }),
+    ).toEqual({
+      codeChallenge: BASE64_URL_VALUE,
+      state: "b".repeat(43),
+      variant: "development",
+    });
+    expect(
       createDesktopAuthorizationResponseSchema.parse({
         authorizationUrl: "https://api.workos.com/user_management/authorize?client_id=client_test",
       }),
     ).toMatchObject({ authorizationUrl: expect.stringContaining("https://api.workos.com/") });
+  });
+
+  it("allowlists desktop callback variants without changing the production wire default", () => {
+    expect(desktopAuthVariantSchema.parse("production")).toBe("production");
+    expect(desktopAuthVariantSchema.parse("development")).toBe("development");
+    expect(() => desktopAuthVariantSchema.parse("preview")).toThrow();
+    expect(() =>
+      createDesktopAuthorizationRequestSchema.parse({
+        codeChallenge: BASE64_URL_VALUE,
+        state: "b".repeat(43),
+        variant: "preview",
+      }),
+    ).toThrow();
+
+    expect(requestMagicLinkSchema.parse({ email: "MEMBER@example.com" })).toEqual({
+      email: "member@example.com",
+    });
+    expect(
+      requestMagicLinkSchema.parse({
+        email: "member@example.com",
+        variant: "development",
+      }),
+    ).toEqual({ email: "member@example.com", variant: "development" });
+    expect(
+      magicLinkLandingQuerySchema.parse({
+        token: BASE64_URL_VALUE,
+        variant: "development",
+        utm_source: "mail",
+      }),
+    ).toEqual({ token: BASE64_URL_VALUE, variant: "development" });
+    expect(() =>
+      requestMagicLinkSchema.parse({ email: "member@example.com", variant: "preview" }),
+    ).toThrow();
+    expect(() =>
+      magicLinkLandingQuerySchema.parse({ token: BASE64_URL_VALUE, variant: "preview" }),
+    ).toThrow();
   });
 
   it("rejects unknown start fields, insecure URLs, credentials in URLs, and malformed PKCE", () => {

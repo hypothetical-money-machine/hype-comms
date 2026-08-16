@@ -283,6 +283,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
   it("serves a non-consuming magic-link landing page with leak-resistant headers", async () => {
     await seedOwner();
     const token = await requestToken("owner@example.com");
+    const emailUrl = new URL(sender.sent.at(-1)?.url ?? "");
     const app = await buildApp({ cookieSecure: false, identity: { service } });
 
     const landing = await app.inject({
@@ -298,6 +299,8 @@ describeWithPostgres("IdentityService and identity routes", () => {
 
     expect(landing.statusCode).toBe(200);
     expect(landing.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(emailUrl.searchParams.get("token")).toBe(token);
+    expect(emailUrl.searchParams.has("variant")).toBe(false);
     expect(landing.headers["referrer-policy"]).toBe("no-referrer");
     expect(landing.headers["cache-control"]).toContain("no-store");
     expect(landing.headers.pragma).toBe("no-cache");
@@ -305,18 +308,54 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(redemption.statusCode).toBe(200);
   });
 
+  it("carries a development request through email and landing to the development protocol", async () => {
+    await seedOwner();
+    const app = await buildApp({ cookieSecure: false, identity: { service } });
+
+    const requested = await app.inject({
+      method: "POST",
+      url: "/v1/auth/magic-link",
+      payload: { email: "owner@example.com", variant: "development" },
+    });
+    const emailUrl = new URL(sender.sent.at(-1)?.url ?? "");
+    const landing = await app.inject({
+      method: "GET",
+      url: `${emailUrl.pathname}${emailUrl.search}`,
+    });
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/v1/auth/magic-link",
+      payload: { email: "owner@example.com", variant: "preview" },
+    });
+    await app.close();
+
+    expect(requested.statusCode).toBe(202);
+    expect(emailUrl.searchParams.get("variant")).toBe("development");
+    expect(landing.statusCode).toBe(200);
+    expect(landing.body).toContain("hype-comms-dev://auth/callback?token=");
+    expect(landing.body).not.toContain("hype-comms://auth/callback");
+    expect(invalid.statusCode).toBe(400);
+    expect(sender.sent).toHaveLength(1);
+  });
+
   it("renders the same invalid landing page for missing and malformed tokens", async () => {
     const app = await buildApp({ identity: { service } });
 
-    const [missing, malformed] = await Promise.all([
+    const [missing, malformed, unknownVariant] = await Promise.all([
       app.inject({ method: "GET", url: "/auth/magic-link" }),
       app.inject({ method: "GET", url: "/auth/magic-link?token=not-a-token" }),
+      app.inject({
+        method: "GET",
+        url: `/auth/magic-link?token=${"t".repeat(43)}&variant=preview`,
+      }),
     ]);
     await app.close();
 
     expect(missing.statusCode).toBe(400);
     expect(malformed.statusCode).toBe(400);
+    expect(unknownVariant.statusCode).toBe(400);
     expect(missing.body).toBe(malformed.body);
+    expect(missing.body).toBe(unknownVariant.body);
     expect(malformed.body).toContain("This link is not valid.");
     expect(malformed.body).not.toContain("not-a-token");
   });

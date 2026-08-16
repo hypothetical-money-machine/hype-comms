@@ -15,6 +15,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  HYPE_COMMS_BUILD_FLAVOR: production
+
 jobs:
   validate:
     name: Validate release version

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type {
   CreateDesktopAuthorizationRequest,
+  DesktopAuthVariant,
   DesktopAuthCallbackParameters,
 } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -62,6 +63,7 @@ function authorizationApi(
 function createFlow(
   options: {
     readonly api?: AuthKitAuthorizationApi;
+    readonly authVariant?: DesktopAuthVariant;
     readonly now?: () => Date;
     readonly openExternal?: (url: string) => Promise<void>;
     readonly store?: MemoryPendingStore;
@@ -72,6 +74,7 @@ function createFlow(
     flow: new AuthKitFlow({
       api: options.api ?? authorizationApi(),
       apiOrigin: API_ORIGIN,
+      authVariant: options.authVariant ?? "production",
       now: options.now ?? (() => NOW),
       openExternal: options.openExternal ?? (async () => undefined),
       store,
@@ -107,6 +110,7 @@ describe("AuthKitFlow", () => {
       expect(store.pending).not.toBeNull();
       expect(store.operations).toEqual(["load", "save"]);
       expect(request.state).toBe(store.pending?.state);
+      expect(request).not.toHaveProperty("variant");
       expect(request.codeChallenge).toBe(
         createHash("sha256")
           .update(store.pending?.codeVerifier ?? "", "ascii")
@@ -129,6 +133,25 @@ describe("AuthKitFlow", () => {
     expect(Buffer.from(attempt.state, "base64url")).toHaveLength(32);
     expect(Buffer.from(store.pending?.codeVerifier ?? "", "base64url")).toHaveLength(32);
     expect(opened).toEqual(["https://example.authkit.app/authorize?screen_hint=sign-in"]);
+    flow.dispose();
+  });
+
+  it("binds development authorization starts to the development callback identity", async () => {
+    const beginDesktopAuthorization = vi.fn(async () => ({
+      authorizationUrl: "https://example.authkit.app/authorize",
+    }));
+    const { flow } = createFlow({
+      api: authorizationApi(beginDesktopAuthorization),
+      authVariant: "development",
+    });
+
+    await flow.start();
+
+    expect(beginDesktopAuthorization).toHaveBeenCalledWith({
+      codeChallenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      state: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      variant: "development",
+    });
     flow.dispose();
   });
 

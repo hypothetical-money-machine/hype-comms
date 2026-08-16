@@ -15,6 +15,13 @@ export const authPkceCodeChallengeSchema = base64Url32ByteValueSchema;
 export const authDesktopStateSchema = base64Url32ByteValueSchema;
 export const authHandoffCodeSchema = base64Url32ByteValueSchema;
 
+/**
+ * The installed desktop identity that must receive an authentication callback. The field remains
+ * optional on start requests so servers can continue accepting released production clients; an
+ * absent value always means production.
+ */
+export const desktopAuthVariantSchema = z.enum(["production", "development"]);
+
 /** RFC 7636 code verifier syntax and bounds. The verifier never crosses into the renderer. */
 export const authPkceCodeVerifierSchema = z
   .string()
@@ -72,6 +79,7 @@ export const createDesktopAuthorizationRequestSchema = z
   .object({
     codeChallenge: authPkceCodeChallengeSchema,
     state: authDesktopStateSchema,
+    variant: desktopAuthVariantSchema.optional(),
   })
   .strict();
 
@@ -146,6 +154,7 @@ export const authCapabilitiesSchema = z
 export type AuthPkceCodeChallenge = z.infer<typeof authPkceCodeChallengeSchema>;
 export type AuthPkceCodeVerifier = z.infer<typeof authPkceCodeVerifierSchema>;
 export type AuthDesktopState = z.infer<typeof authDesktopStateSchema>;
+export type DesktopAuthVariant = z.infer<typeof desktopAuthVariantSchema>;
 export type AuthProviderState = z.infer<typeof authProviderStateSchema>;
 export type AuthProviderAuthorizationCode = z.infer<typeof authProviderAuthorizationCodeSchema>;
 export type AuthProviderError = z.infer<typeof authProviderErrorSchema>;

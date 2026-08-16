@@ -145,6 +145,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, notarize]
     timeout-minutes: 60
     env:
+      HYPE_COMMS_BUILD_FLAVOR: production
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"
       HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"
     steps:

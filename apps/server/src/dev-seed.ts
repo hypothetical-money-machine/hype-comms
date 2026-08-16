@@ -313,13 +313,18 @@ async function issueAuthCallback(
     () => new Date(),
     config.publicApiUrl,
   );
-  await service.requestMagicLink(fixture.email, `demo-${fixture.profile}`);
+  await service.requestMagicLink(
+    fixture.email,
+    `demo-${fixture.profile}`,
+    undefined,
+    "development",
+  );
   if (sender.sent === null) {
     throw new Error(`Could not issue the ${fixture.displayName} demo sign-in link`);
   }
   const token = new URL(sender.sent.url).searchParams.get("token");
   if (token === null) throw new Error("Demo sign-in link did not contain a token");
-  const callback = new URL("hype-comms://auth/callback");
+  const callback = new URL("hype-comms-dev://auth/callback");
   callback.searchParams.set("token", token);
   return callback.toString();
 }

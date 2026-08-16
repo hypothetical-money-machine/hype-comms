@@ -224,12 +224,12 @@ activate that ID only while its in-memory callback remains live; the artifact is
 store and contains no notification labels, target IDs, or body. Packaged and ordinary renderer
 sessions cannot invoke the activation bridge.
 
-On Windows, main calls `app.setAppUserModelId` with Electron Builder's exact
-`com.hypemm.hypecomms` application ID before constructing the first
-`BrowserWindow`. A deterministic
-[identity test](../../apps/desktop/src/main/application-identity.test.ts) prevents the source and
-package identity from drifting. Installed NSIS attribution and click handling still require the
-Milestone 4 Windows evidence run.
+On Windows, main calls `app.setAppUserModelId` with the selected Electron Builder application ID
+before constructing the first `BrowserWindow`. Production uses `com.hypemm.hypecomms`; the
+side-by-side development package uses `com.hypemm.hypecomms.dev`. A deterministic
+[identity test](../../apps/desktop/src/main/application-identity.test.ts) prevents either source
+identity from drifting from its package configuration. Installed production NSIS attribution and
+click handling still require the Milestone 4 Windows evidence run.
 
 ## Consequences
 
