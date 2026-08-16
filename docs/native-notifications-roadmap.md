@@ -8,7 +8,7 @@ artifacts remain compiled off. Milestone 4 remains open and is evaluated per pla
 platform can complete its pilot without waiting for the others. One signed/notarized macOS ARM64
 run now proves installed synthetic toast delivery and click restoration; it is the first slice of
 the required native matrix, not completion of the macOS gate.
-[architecture.md](architecture.md) and [ADR 0002](adr/0002-native-notification-boundary.md) are the
+[architecture.md](architecture.md) are the
 implementation and security contract. This roadmap sequences the remaining proof and rollout work
 and does not override those documents.
 
@@ -323,7 +323,7 @@ Deliverables:
 - land generation-safe realtime, fail-closed invalid-event handling, and membership-revocation
   repair before enabling presentation;
 - record the main/renderer split, windowless realtime contract, live-event freshness boundary,
-  privacy default, and action scope in an ADR;
+  privacy default, and action scope in the implementation contract;
 - define strict notification activity, state, preference, and action schemas;
 - retain last-window realtime stop until the macOS windowless catch-up contract is proven, then
   allow only the separated observer path in explicit flag-enabled builds;
