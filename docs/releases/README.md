@@ -1,5 +1,7 @@
 # Hype Comms release notes
 
+The agent runbook for cutting a release is [docs/agents/releases.md](../agents/releases.md).
+
 Prepare a desktop release with an explicit stable version:
 
 ```bash
