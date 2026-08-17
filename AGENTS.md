@@ -99,3 +99,8 @@ Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 ### Domain docs
 
 Single-context: one `CONTEXT.md` at the repo root. See `docs/agents/domain.md`.
+
+### Desktop releases
+
+How we cut a desktop release, including notes from every merge since the last tag. See
+`docs/agents/releases.md`.
