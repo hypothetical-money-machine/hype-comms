@@ -46,5 +46,6 @@ test("runs PostgreSQL CI on the shared x64 runner group", async () => {
   assert.doesNotMatch(postgresJob, /ARM64|hype-comms-release|docker/u);
   assert.match(runnerDockerfile, /^ {4}postgresql-16 \\$/mu);
   assert.match(postgresJob, /Verify PostgreSQL 16 runner image/u);
+  assert.match(postgresJob, /npm run test:postgres -- --testTimeout 10000/u);
   assert.doesNotMatch(postgresJob, /sudo|apt-get install/u);
 });

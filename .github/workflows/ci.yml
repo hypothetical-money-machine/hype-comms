@@ -84,7 +84,9 @@ jobs:
       - name: Run the complete PostgreSQL suite
         env:
           HYPE_COMMS_TEST_DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
-        run: npm run test:postgres
+        # Database setup time varies across the heterogeneous runner pool. Keep the timeout bounded,
+        # but leave enough headroom for migration-heavy integration tests on either host.
+        run: npm run test:postgres -- --testTimeout 10000
 
       - name: Stop isolated PostgreSQL
         if: always()
