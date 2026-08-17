@@ -72,7 +72,7 @@ test("gates every promotion path through the guarded PostgreSQL entrypoint", asy
 
   assert.equal(JSON.parse(packageJson).scripts["test:postgres"], "node scripts/test-postgres.mjs");
   assert.match(localDatabase, /npm run test:postgres/);
-  assert.match(github, /run: npm run test:postgres/);
+  assert.match(github, /run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/);
   assert.match(woodpecker, /image: postgres:16-alpine/);
   assert.match(woodpecker, /limit: 1/);
   assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run test:postgres/);
