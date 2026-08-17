@@ -1,6 +1,6 @@
 # Architecture implementation contract
 
-This document is the decision record for Hype Comms. It distinguishes the current pilot deployment
+This document is the implementation contract for Hype Comms. It distinguishes the current pilot deployment
 from the hosted target; a target statement is not evidence that its infrastructure or release gate
 exists today. Changes to these invariants require a reviewed architecture change and matching
 contract tests.
@@ -22,7 +22,10 @@ contract tests.
   My Tasks view may also include tasks assigned to that member from visible channel projects.
   Ordinary two-person DMs remain chat-only.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
-  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client.
+  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client. Support
+  does not require optional capabilities to land simultaneously: feature scope and rollout evidence
+  are platform-specific by default. Untargeted
+  clients must retain safe existing behavior and shared wire contracts remain compatible.
 - Runtime application code is TypeScript: React in the renderer, Electron main/preload on
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
@@ -40,6 +43,23 @@ contract tests.
 - The shared Zod package is the source of truth for HTTP, IPC, and realtime wire shapes.
   Reserved schema values such as `group_direct_message`, `editedAt`, and `deletedAt` do not
   imply a reachable behavior today; the server rejects unsupported operations.
+
+### Supported host matrix
+
+This table is the single definition of "that platform's supported OS versions, architectures, and
+package formats." Every document that scopes evidence to a platform—the native-notifications
+roadmap lanes, `docs/operations.md`, and the Native E2E row below—means this row and nothing
+narrower. Changing a platform's baseline is an edit here, not a per-lane judgement call.
+
+| Platform | OS versions                            | Architectures | Package formats  |
+| -------- | -------------------------------------- | ------------- | ---------------- |
+| macOS    | current and immediately previous major | arm64, x64    | DMG              |
+| Windows  | Windows 11                             | x64, ARM64    | NSIS             |
+| Linux    | Ubuntu 24.04 LTS                       | x64, ARM64    | AppImage, Debian |
+
+A platform lane covers every cell of its row. Partial coverage—one architecture, one package
+format, or one OS version—does not pass that platform's lane and must not be recorded as if it
+did.
 
 ## System shape and trust boundaries
 
@@ -439,8 +459,8 @@ review.
 - Search returns a body snippet with escaped highlights but no durable download URL. Empty,
   stop-word-only, and overly broad queries return a validated user error; queries are
   limited to 200 characters and 30 per minute per member.
-- Native notifications follow the main/renderer, freshness, and action boundary in
-  [ADR 0002](adr/0002-native-notification-boundary.md). Milestones 0 through 3 are implemented and
+- Native notifications follow the main/renderer, freshness, and action boundaries described here.
+  Milestones 0 through 3 are implemented and
   covered deterministically, including direct messages, verified mentions, and the
   capability-gated recipient-specific `participated_thread_reply` reason. Main applies precedence
   in that order: verified mention, direct message, then participated-thread reply. It never infers
@@ -472,8 +492,8 @@ review.
   navigation. Denial or presenter failure is a stable local state, not a prompt/retry/reconnect
   loop; a fully quit desktop receives no push. Headless automation uses a body-free opaque-ID
   capture/activation path and never constructs a native presenter.
-- On Windows, main sets the exact Electron Builder AppUserModelID
-  `com.hypemm.hypecomms` before creating a `BrowserWindow`; a
+- On Windows, main sets the selected Electron Builder AppUserModelID before creating a
+  `BrowserWindow`: `com.hypemm.hypecomms` for production and `com.hypemm.hypecomms.dev` for DEV. A
   [deterministic identity test](../apps/desktop/src/main/application-identity.test.ts) prevents
   source/package drift. Stable installed NSIS attribution and click handling remain part of the
   native evidence gate.
@@ -482,11 +502,11 @@ review.
   [restored-window callback](screenshots/macos-native-notification-click-through.png). The macOS
   release artifact includes the controller as an opt-in pilot while its device preference remains
   disabled by default; Windows and Linux release artifacts remain compiled off. Milestone 4 is
-  evaluated per platform so one platform can advance without weakening another's gate. The overall
-  roadmap still covers current and previous supported macOS on arm64/x64, Windows 11 on x64/ARM64,
-  and Ubuntu 24.04 on x64/ARM64 installed from both AppImage and Debian packages. Ordinary package
-  smoke only verifies build contents. Its separate, manually dispatched macOS evidence lane signs,
-  installs, launches, displays, captures, and clicks a synthetic native toast on an unlocked host.
+  evaluated per platform, so one platform can
+  advance after every cell of its [supported host matrix](#supported-host-matrix) row passes without
+  weakening another's gate. Ordinary package smoke only verifies build contents. Its separate,
+  manually dispatched macOS evidence lane signs, installs, launches, displays, captures, and clicks
+  a synthetic native toast on an unlocked host.
 
 ## Security, privacy, and operations
 
@@ -676,7 +696,7 @@ downgrade.
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
 | Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                        |
-| Native E2E                 | Install/launch/logout/relaunch on current and previous supported macOS (arm64 and x64 where available), Windows 11 (x64 and ARM64), and Ubuntu 24.04 (x64 and ARM64) AppImage and Debian. Exercise deep links, OS keyring, tray/window lifecycle, notifications granted/denied, offline restart, and uninstall. Package smoke runs on relevant changes; full matrix runs for releases. |
+| Native E2E                 | Baseline install/launch/logout/relaunch, deep links, OS keyring, tray/window lifecycle, offline restart, and uninstall run on every shipped platform's full [supported host matrix](#supported-host-matrix) row; a release never scopes this down. Optional-feature evidence—including notifications granted/denied—is scoped to the platforms in the change's declared scope, and an unproven platform ships that feature off rather than untested. Package smoke runs on relevant changes; the full release matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
 | Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
 

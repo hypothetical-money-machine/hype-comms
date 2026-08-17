@@ -11,13 +11,31 @@ implementation behavior is defined by source, shared contracts, and tests. Packa
 live in `scripts/`. Do not edit or commit generated `dist/`, `release/`, `coverage/`, or
 `node_modules/` content.
 
+## Platform-Scoped Delivery
+
+The supported desktop platform list is a maintenance and release target, not a feature-parity
+requirement or a sequencing rule. A feature, fix, issue, or pull request may target one platform or
+a stated subset. Work on another platform is a separate follow-up, not an implicit blocker.
+
+Require cross-platform parity only when the user or issue acceptance criteria explicitly require
+it, or when a shared security, data, wire-contract, migration, or release-safety invariant makes a
+partial implementation unsafe. Otherwise:
+
+- preserve existing behavior on platforms outside the stated scope;
+- use capability detection, a platform condition, or a default-off gate where needed;
+- document the supported platform scope and any user-visible limitation; and
+- run shared tests plus the native package or evidence lanes relevant to the changed platforms.
+
+A full release matrix verifies each platform's intended behavior; it does not expand every feature's
+scope to every platform. Native-notification rollout evidence is explicitly platform-scoped.
+
 ## Build, Test, and Development Commands
 
 Use Node 24.18.x and npm 11.16.x, then install exactly from the lockfile with `npm ci`.
 
 - `npm run dev`: start the Fastify server and Electron client together.
 - `npm run dev:server` / `npm run dev:desktop`: run one workspace in watch mode.
-- `npm run check`: run Prettier checks, ESLint, TypeScript, Vitest, and production builds.
+- `npm run check`: run Prettier checks, ESLint, TypeScript, Vitest, and workspace builds.
 - `npm test`: run all workspace tests once.
 - `npm run package:desktop`: create native desktop packages.
 - `npm run package:desktop:appimage`: build only the Linux AppImage.
@@ -80,4 +98,9 @@ Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `CONTEXT.md` at the repo root. See `docs/agents/domain.md`.
+
+### Desktop releases
+
+How we cut a desktop release, including notes from every merge since the last tag. See
+`docs/agents/releases.md`.
