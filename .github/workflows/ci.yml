@@ -17,12 +17,14 @@ jobs:
   check:
     name: Check with PostgreSQL
     # GitHub-hosted jobs are unavailable on the repository's current billing plan. Keep untrusted
-    # fork code off persistent infrastructure; private same-repository branches are collaborator-
-    # controlled and already use these runners for native package smoke tests.
+    # fork code off persistent infrastructure; this organization runner group is restricted to
+    # private same-repository branches controlled by collaborators.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    runs-on:
+      group: hmm-linux-x64-ci
+      labels: hmm-ci
     timeout-minutes: 20
     steps:
       - name: Check out source
@@ -37,7 +39,7 @@ jobs:
       - name: Verify PostgreSQL 16 runner image
         run: |
           if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
-            echo "PostgreSQL 16 is missing; rebuild the linux-arm64 runner image." >&2
+            echo "PostgreSQL 16 is missing; rebuild the linux-x64 runner image." >&2
             exit 1
           fi
 

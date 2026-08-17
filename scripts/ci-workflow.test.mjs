@@ -31,7 +31,7 @@ test("isolates a workflow job from neighboring jobs", () => {
   );
 });
 
-test("runs PostgreSQL CI natively on the ARM64 runner", async () => {
+test("runs PostgreSQL CI on the shared x64 runner group", async () => {
   const ciWorkflow = await readFile(
     new URL("../.github/workflows/ci.yml", import.meta.url),
     "utf8",
@@ -42,8 +42,8 @@ test("runs PostgreSQL CI natively on the ARM64 runner", async () => {
   );
   const postgresJob = workflowJob(ciWorkflow, "check");
 
-  assert.match(postgresJob, /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u);
-  assert.doesNotMatch(postgresJob, /runs-on: \[[^\]]*X64/u);
+  assert.match(postgresJob, /runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci/u);
+  assert.doesNotMatch(postgresJob, /ARM64|hype-comms-release|docker/u);
   assert.match(runnerDockerfile, /^ {4}postgresql-16 \\$/mu);
   assert.match(postgresJob, /Verify PostgreSQL 16 runner image/u);
   assert.doesNotMatch(postgresJob, /sudo|apt-get install/u);
