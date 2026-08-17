@@ -385,6 +385,37 @@ describe("AiChannel", () => {
     );
   });
 
+  it("renders Markdown in user and assistant messages", async () => {
+    const harness = createTransport(
+      aiState({
+        entries: [
+          {
+            type: "message",
+            id: "user-markdown",
+            role: "user",
+            body: "Please check **the renderer**.",
+            createdAt: NOW,
+          },
+          {
+            type: "message",
+            id: "assistant-markdown",
+            role: "assistant",
+            body: "1. Run `npm test`\n2. Review the [docs](https://example.com/docs)",
+            createdAt: NOW,
+          },
+        ],
+      }),
+    );
+    await renderChannel(harness);
+
+    expect(screen.getByText("the renderer").tagName).toBe("STRONG");
+    expect(screen.getByText("npm test").tagName).toBe("CODE");
+    expect(document.querySelectorAll(".ai-channel-message-body li")).toHaveLength(2);
+    expect(
+      screen.getByRole("link", { name: "docs (https://example.com/docs)" }).getAttribute("href"),
+    ).toBe("https://example.com/docs");
+  });
+
   it.each([
     ["Ctrl", { ctrlKey: true }],
     ["Command", { metaKey: true }],

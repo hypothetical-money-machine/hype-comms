@@ -10,6 +10,7 @@ import type {
 import {
   useCallback,
   useEffect,
+  memo,
   useRef,
   useState,
   type FormEvent,
@@ -19,6 +20,7 @@ import {
 } from "react";
 
 import type { AiChannelTransport } from "../../shared/desktop-api";
+import { MarkdownBody } from "./message-body";
 
 const PROMPT_MAX_LENGTH = 64_000;
 const MIN_COMPOSER_HEIGHT = 48;
@@ -101,7 +103,9 @@ function ToolGlyph({ kind }: { readonly kind: AiChannelToolKind }) {
   );
 }
 
-function MessageEntry({ entry }: { readonly entry: Extract<AiChannelEntry, { type: "message" }> }) {
+type AiMessageEntry = Extract<AiChannelEntry, { type: "message" }>;
+
+const MessageEntry = memo(function MessageEntry({ entry }: { readonly entry: AiMessageEntry }) {
   if (entry.role === "thought") {
     return (
       <li className="ai-channel-thought-entry">
@@ -125,9 +129,21 @@ function MessageEntry({ entry }: { readonly entry: Extract<AiChannelEntry, { typ
           <strong>{author}</strong>
           <time dateTime={entry.createdAt}>{formatMessageTime(entry.createdAt)}</time>
         </header>
-        <div className="ai-channel-message-body">{entry.body}</div>
+        <MarkdownBody body={entry.body} className="ai-channel-message-body" />
       </article>
     </li>
+  );
+}, areMessageEntriesEqual);
+
+function areMessageEntriesEqual(
+  previous: Readonly<{ entry: AiMessageEntry }>,
+  next: Readonly<{ entry: AiMessageEntry }>,
+): boolean {
+  return (
+    previous.entry.id === next.entry.id &&
+    previous.entry.role === next.entry.role &&
+    previous.entry.body === next.entry.body &&
+    previous.entry.createdAt === next.entry.createdAt
   );
 }
 
