@@ -36,6 +36,7 @@ function splitBounds(handle: HTMLElement | null): { bottom: number; height: numb
 export function MemberListResizeHandle({ storage, root }: MemberListResizeHandleProps) {
   const handleRef = useRef<HTMLDivElement>(null);
   const heightRef = useRef(DEFAULT_MEMBER_LIST_HEIGHT);
+  const grabOffsetRef = useRef(0);
   const [height, setHeight] = useState(() => {
     const initial = readMemberListHeight(storage);
     heightRef.current = initial;
@@ -59,12 +60,32 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
     [storage, targetRoot],
   );
 
+  const finishDrag = useCallback(() => {
+    setDragging((active) => {
+      if (active) persistMemberListHeight(heightRef.current, storage);
+      return false;
+    });
+  }, [storage]);
+
   useLayoutEffect(() => {
     if (targetRoot === undefined) return;
     applyMemberListHeight(targetRoot, heightRef.current);
     const bounds = splitBounds(handleRef.current);
     if (bounds !== null) setValueMax(maxMemberListHeight(bounds.height));
   }, [targetRoot]);
+
+  useEffect(() => {
+    const split = handleRef.current?.parentElement;
+    if (split === null || split === undefined || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      const bounds = splitBounds(handleRef.current);
+      if (bounds === null || bounds.height <= 0) return;
+      commit(heightRef.current, false);
+    });
+    observer.observe(split);
+    return () => observer.disconnect();
+  }, [commit]);
 
   useEffect(() => {
     if (targetRoot === undefined) return;
@@ -85,30 +106,40 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
       const bounds = splitBounds(handleRef.current);
       if (bounds === null) return;
       event.preventDefault();
-      commit(memberListHeightFromPointer(event.clientY, bounds.bottom, bounds.height), false);
-    };
-    const onUp = () => {
-      setDragging(false);
-      persistMemberListHeight(heightRef.current, storage);
+      commit(
+        memberListHeightFromPointer(
+          event.clientY,
+          bounds.bottom,
+          bounds.height,
+          grabOffsetRef.current,
+        ),
+        false,
+      );
     };
 
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointerup", finishDrag);
+    window.addEventListener("pointercancel", finishDrag);
     return () => {
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointerup", finishDrag);
+      window.removeEventListener("pointercancel", finishDrag);
     };
-  }, [commit, dragging, storage]);
+  }, [commit, dragging, finishDrag]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    setDragging(true);
+    event.currentTarget.focus();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners still end an in-window drag if capture is unavailable.
+    }
     const bounds = splitBounds(event.currentTarget);
-    if (bounds === null) return;
-    commit(memberListHeightFromPointer(event.clientY, bounds.bottom, bounds.height), false);
+    grabOffsetRef.current =
+      bounds === null ? 0 : event.clientY - (bounds.bottom - heightRef.current);
+    setDragging(true);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -155,6 +186,7 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
       tabIndex={0}
       title="Drag to resize members and conversations"
       onPointerDown={onPointerDown}
+      onLostPointerCapture={finishDrag}
       onDoubleClick={() => commit(DEFAULT_MEMBER_LIST_HEIGHT, true)}
       onKeyDown={onKeyDown}
     />

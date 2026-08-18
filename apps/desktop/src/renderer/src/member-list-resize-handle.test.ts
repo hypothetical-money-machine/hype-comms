@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -58,6 +58,7 @@ function renderHandle(storage = new MemoryStorage()) {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   document.documentElement.style.removeProperty(MEMBER_LIST_HEIGHT_CSS_VARIABLE);
   delete document.documentElement.dataset.memberListResizing;
 });
@@ -89,10 +90,13 @@ describe("MemberListResizeHandle", () => {
 
   it("resizes from pointer movement and persists on release", () => {
     const { storage, handle } = renderHandle();
+    const capture = vi.spyOn(handle, "setPointerCapture").mockImplementation(() => undefined);
 
-    fireEvent.pointerDown(handle, { button: 0, clientY: 300 });
+    fireEvent.pointerDown(handle, { button: 0, clientY: 280, pointerId: 7 });
+    expect(capture).toHaveBeenCalledWith(7);
+    expect(document.activeElement).toBe(handle);
     expect(document.documentElement.dataset.memberListResizing).toBe("true");
-    expect(handle.getAttribute("aria-valuenow")).toBe("200");
+    expect(handle.getAttribute("aria-valuenow")).toBe(String(DEFAULT_MEMBER_LIST_HEIGHT));
 
     fireEvent.pointerMove(window, { clientY: 250 });
     expect(handle.getAttribute("aria-valuenow")).toBe("250");
@@ -104,6 +108,54 @@ describe("MemberListResizeHandle", () => {
     expect(document.documentElement.style.getPropertyValue(MEMBER_LIST_HEIGHT_CSS_VARIABLE)).toBe(
       "250px",
     );
+  });
+
+  it("does not jump the divider on a click that never moves", () => {
+    const { storage, handle } = renderHandle();
+
+    fireEvent.pointerDown(handle, { button: 0, clientY: 276 });
+    fireEvent.pointerUp(window);
+
+    expect(handle.getAttribute("aria-valuenow")).toBe(String(DEFAULT_MEMBER_LIST_HEIGHT));
+    expect(storage.values.get(MEMBER_LIST_HEIGHT_STORAGE_KEY)).toBe(
+      String(DEFAULT_MEMBER_LIST_HEIGHT),
+    );
+  });
+
+  it("ends a drag when pointer capture is lost", () => {
+    const { handle } = renderHandle();
+
+    fireEvent.pointerDown(handle, { button: 0, clientY: 280 });
+    expect(document.documentElement.dataset.memberListResizing).toBe("true");
+
+    fireEvent.lostPointerCapture(handle);
+    expect(document.documentElement.dataset.memberListResizing).toBeUndefined();
+  });
+
+  it("reclamps the advertised maximum when the split changes size", () => {
+    const observers: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observers.push(callback);
+        }
+        observe(): void {}
+        disconnect(): void {}
+        unobserve(): void {}
+      },
+    );
+    const storage = new MemoryStorage();
+    storage.values.set(MEMBER_LIST_HEIGHT_STORAGE_KEY, "300");
+    const { handle, split } = renderHandle(storage);
+    expect(observers).toHaveLength(1);
+
+    vi.spyOn(split, "getBoundingClientRect").mockReturnValue(rectangle(100, 400));
+    act(() => {
+      observers[0]?.([], {} as ResizeObserver);
+    });
+    expect(handle.getAttribute("aria-valuenow")).toBe("196");
+    expect(handle.getAttribute("aria-valuemax")).toBe("196");
   });
 
   it("grows and shrinks from the keyboard and clamps at the floor", () => {

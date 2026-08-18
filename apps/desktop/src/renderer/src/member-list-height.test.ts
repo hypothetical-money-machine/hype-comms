@@ -58,6 +58,17 @@ describe("member list height", () => {
     expect(clampMemberListHeight(180.6, 600)).toBe(181);
   });
 
+  it("treats an unmeasured split as the default height instead of the absolute ceiling", () => {
+    expect(maxMemberListHeight(0)).toBe(DEFAULT_MEMBER_LIST_HEIGHT);
+    expect(maxMemberListHeight(-10)).toBe(DEFAULT_MEMBER_LIST_HEIGHT);
+    expect(clampMemberListHeight(4000, 0)).toBe(DEFAULT_MEMBER_LIST_HEIGHT);
+  });
+
+  it("keeps the grab offset so the divider follows the pointer without jumping", () => {
+    expect(memberListHeightFromPointer(276, 500, 400, -4)).toBe(220);
+    expect(memberListHeightFromPointer(226, 500, 400, -4)).toBe(270);
+  });
+
   it("leaves room for the conversation list when the split is short", () => {
     const available = 280;
     expect(maxMemberListHeight(available)).toBe(

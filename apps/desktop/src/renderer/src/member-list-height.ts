@@ -32,7 +32,7 @@ export function parseMemberListHeight(value: string | null): number | null {
 }
 
 export function maxMemberListHeight(availableSplitHeight: number): number {
-  if (availableSplitHeight <= 0) return ABSOLUTE_MAX_MEMBER_LIST_HEIGHT;
+  if (availableSplitHeight <= 0) return DEFAULT_MEMBER_LIST_HEIGHT;
   return Math.max(
     MIN_MEMBER_LIST_HEIGHT,
     availableSplitHeight - MIN_CONVERSATION_NAV_HEIGHT - MEMBER_LIST_RESIZE_HANDLE_HEIGHT,
@@ -50,8 +50,9 @@ export function memberListHeightFromPointer(
   clientY: number,
   splitBottom: number,
   availableSplitHeight: number,
+  grabOffset = 0,
 ): number {
-  return clampMemberListHeight(splitBottom - clientY, availableSplitHeight);
+  return clampMemberListHeight(splitBottom - (clientY - grabOffset), availableSplitHeight);
 }
 
 export function readMemberListHeight(

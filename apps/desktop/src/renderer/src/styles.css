@@ -350,7 +350,7 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .sidebar nav {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: var(--conversation-nav-min-height);
   padding: 14px 10px;
   overflow-y: auto;
@@ -798,7 +798,7 @@ html[data-member-list-resizing] * {
 }
 
 .member-list {
-  flex: 0 1 var(--member-list-height);
+  flex: 0 0 var(--member-list-height);
   min-height: var(--member-list-min-height);
   max-height: calc(
     100% - var(--conversation-nav-min-height) - var(--member-list-resize-handle-height)
