@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
 import { CompactModeRuntime } from "./compact-mode-runtime";
+import { restoreMemberListHeight } from "./member-list-height";
 import { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeRuntime } from "./theme-runtime";
 
@@ -15,6 +16,7 @@ if (rootElement === null) {
 const theme = new ThemeRuntime(window.hypeComms, document.documentElement);
 const compactMode = new CompactModeRuntime(window.hypeComms, document.documentElement);
 const sidebarPosition = new SidebarPositionRuntime(document.documentElement);
+restoreMemberListHeight(document.documentElement);
 
 void theme.start();
 void compactMode.start();
