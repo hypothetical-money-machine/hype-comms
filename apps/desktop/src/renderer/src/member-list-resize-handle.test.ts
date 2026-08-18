@@ -156,6 +156,15 @@ describe("MemberListResizeHandle", () => {
     });
     expect(handle.getAttribute("aria-valuenow")).toBe("196");
     expect(handle.getAttribute("aria-valuemax")).toBe("196");
+    expect(storage.values.get(MEMBER_LIST_HEIGHT_STORAGE_KEY)).toBe("300");
+
+    vi.spyOn(split, "getBoundingClientRect").mockReturnValue(rectangle(100, 600));
+    act(() => {
+      observers[0]?.([], {} as ResizeObserver);
+    });
+    expect(handle.getAttribute("aria-valuenow")).toBe("300");
+    expect(handle.getAttribute("aria-valuemax")).toBe("396");
+    expect(storage.values.get(MEMBER_LIST_HEIGHT_STORAGE_KEY)).toBe("300");
   });
 
   it("grows and shrinks from the keyboard and clamps at the floor", () => {

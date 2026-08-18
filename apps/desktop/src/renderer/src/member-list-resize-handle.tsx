@@ -35,11 +35,13 @@ function splitBounds(handle: HTMLElement | null): { bottom: number; height: numb
 
 export function MemberListResizeHandle({ storage, root }: MemberListResizeHandleProps) {
   const handleRef = useRef<HTMLDivElement>(null);
-  const heightRef = useRef(DEFAULT_MEMBER_LIST_HEIGHT);
+  const preferredHeightRef = useRef(DEFAULT_MEMBER_LIST_HEIGHT);
+  const displayedHeightRef = useRef(DEFAULT_MEMBER_LIST_HEIGHT);
   const grabOffsetRef = useRef(0);
   const [height, setHeight] = useState(() => {
     const initial = readMemberListHeight(storage);
-    heightRef.current = initial;
+    preferredHeightRef.current = initial;
+    displayedHeightRef.current = initial;
     return initial;
   });
   const [dragging, setDragging] = useState(false);
@@ -47,32 +49,40 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
   const targetRoot =
     root ?? (typeof document === "undefined" ? undefined : document.documentElement);
 
+  const publishDisplayed = useCallback(
+    (preferred: number) => {
+      const bounds = splitBounds(handleRef.current);
+      const displayed = clampMemberListHeight(preferred, bounds?.height ?? 0);
+      displayedHeightRef.current = displayed;
+      setHeight(displayed);
+      setValueMax(maxMemberListHeight(bounds?.height ?? 0));
+      if (targetRoot !== undefined) applyMemberListHeight(targetRoot, displayed);
+      return displayed;
+    },
+    [targetRoot],
+  );
+
   const commit = useCallback(
     (next: number, persist: boolean) => {
       const bounds = splitBounds(handleRef.current);
-      const clamped = clampMemberListHeight(next, bounds?.height ?? 0);
-      heightRef.current = clamped;
-      setHeight(clamped);
-      setValueMax(maxMemberListHeight(bounds?.height ?? 0));
-      if (targetRoot !== undefined) applyMemberListHeight(targetRoot, clamped);
-      if (persist) persistMemberListHeight(clamped, storage);
+      const preferred = clampMemberListHeight(next, bounds?.height ?? 0);
+      preferredHeightRef.current = preferred;
+      publishDisplayed(preferred);
+      if (persist) persistMemberListHeight(preferred, storage);
     },
-    [storage, targetRoot],
+    [publishDisplayed, storage],
   );
 
   const finishDrag = useCallback(() => {
     setDragging((active) => {
-      if (active) persistMemberListHeight(heightRef.current, storage);
+      if (active) persistMemberListHeight(preferredHeightRef.current, storage);
       return false;
     });
   }, [storage]);
 
   useLayoutEffect(() => {
-    if (targetRoot === undefined) return;
-    applyMemberListHeight(targetRoot, heightRef.current);
-    const bounds = splitBounds(handleRef.current);
-    if (bounds !== null) setValueMax(maxMemberListHeight(bounds.height));
-  }, [targetRoot]);
+    publishDisplayed(preferredHeightRef.current);
+  }, [publishDisplayed]);
 
   useEffect(() => {
     const split = handleRef.current?.parentElement;
@@ -81,11 +91,11 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
     const observer = new ResizeObserver(() => {
       const bounds = splitBounds(handleRef.current);
       if (bounds === null || bounds.height <= 0) return;
-      commit(heightRef.current, false);
+      publishDisplayed(preferredHeightRef.current);
     });
     observer.observe(split);
     return () => observer.disconnect();
-  }, [commit]);
+  }, [publishDisplayed]);
 
   useEffect(() => {
     if (targetRoot === undefined) return;
@@ -138,7 +148,7 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
     }
     const bounds = splitBounds(event.currentTarget);
     grabOffsetRef.current =
-      bounds === null ? 0 : event.clientY - (bounds.bottom - heightRef.current);
+      bounds === null ? 0 : event.clientY - (bounds.bottom - displayedHeightRef.current);
     setDragging(true);
   };
 
@@ -146,16 +156,16 @@ export function MemberListResizeHandle({ storage, root }: MemberListResizeHandle
     let next: number | null = null;
     switch (event.key) {
       case "ArrowUp":
-        next = height + MEMBER_LIST_HEIGHT_KEYBOARD_STEP;
+        next = preferredHeightRef.current + MEMBER_LIST_HEIGHT_KEYBOARD_STEP;
         break;
       case "ArrowDown":
-        next = height - MEMBER_LIST_HEIGHT_KEYBOARD_STEP;
+        next = preferredHeightRef.current - MEMBER_LIST_HEIGHT_KEYBOARD_STEP;
         break;
       case "PageUp":
-        next = height + MEMBER_LIST_HEIGHT_KEYBOARD_STEP * 4;
+        next = preferredHeightRef.current + MEMBER_LIST_HEIGHT_KEYBOARD_STEP * 4;
         break;
       case "PageDown":
-        next = height - MEMBER_LIST_HEIGHT_KEYBOARD_STEP * 4;
+        next = preferredHeightRef.current - MEMBER_LIST_HEIGHT_KEYBOARD_STEP * 4;
         break;
       case "Home":
         next = MIN_MEMBER_LIST_HEIGHT;
