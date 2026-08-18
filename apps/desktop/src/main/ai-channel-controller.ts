@@ -1,12 +1,5 @@
 import path from "node:path";
 
-import type {
-  RequestPermissionRequest,
-  RequestPermissionResponse,
-  SessionNotification,
-  ToolCall,
-  ToolCallUpdate,
-} from "@agentclientprotocol/sdk";
 import {
   aiChannelGenerationRequestSchema,
   aiChannelPermissionResponseSchema,
@@ -24,15 +17,23 @@ import {
   type AiChannelToolCall,
 } from "@hype-comms/contracts";
 
-import type { ClaudeAcpHost, ClaudeAcpHostExit, CreateClaudeAcpHost } from "./claude-acp-host";
+import type {
+  AiAgentHost,
+  AiAgentHostEvent,
+  AiAgentHostExit,
+  AiAgentHostPermissionOutcome,
+  AiAgentHostPermissionRequest,
+  AiAgentHostTool,
+  CreateAiAgentHost,
+} from "./ai-agent-host";
 import type { AiChannelPreference, AiChannelPreferenceStore } from "./ai-channel-preference-store";
 
 const MAX_ENTRIES = 200;
 const MAX_PLAN_ENTRIES = 100;
 const MAX_ENTRY_BYTES = 700_000;
 const MAX_MESSAGE_BYTES = 100_000;
-const MAX_ACP_IDENTIFIER_LENGTH = 1_024;
-const MAX_TRACKED_ACP_IDENTIFIERS = 1_000;
+const MAX_AGENT_IDENTIFIER_LENGTH = 1_024;
+const MAX_TRACKED_AGENT_IDENTIFIERS = 1_000;
 
 type AiChannelPreferencePersistence = Pick<AiChannelPreferenceStore, "load" | "save">;
 type StateListener = (state: AiChannelState) => void;
@@ -44,14 +45,14 @@ interface HostToken {
 interface ActivePrompt {
   readonly generation: number;
   readonly hostToken: HostToken;
-  readonly sessionId: string;
+  readonly conversationId: string;
 }
 
 interface PendingPermission {
   readonly generation: number;
   readonly requestId: string;
   readonly optionIds: ReadonlyMap<string, string>;
-  readonly resolve: (response: RequestPermissionResponse) => void;
+  readonly resolve: (response: AiAgentHostPermissionOutcome) => void;
   readonly removeAbortListener: () => void;
 }
 
@@ -307,10 +308,10 @@ function workspaceDisplayName(workspacePath: string): string {
   return sanitizeLabel(path.basename(workspacePath), "Workspace", null, 255);
 }
 
-function isAcpIdentifier(value: string): boolean {
+function isAgentIdentifier(value: string): boolean {
   return (
     value.length > 0 &&
-    value.length <= MAX_ACP_IDENTIFIER_LENGTH &&
+    value.length <= MAX_AGENT_IDENTIFIER_LENGTH &&
     value.trim() === value &&
     !value.includes("\0")
   );
@@ -331,12 +332,12 @@ function initialState(preference: AiChannelPreference): AiChannelState {
 }
 
 /**
- * Owns the device-local Claude lifecycle. The renderer receives only the bounded projection in
- * AiChannelState; cwd, ACP session IDs, provider payloads, and process diagnostics stay here.
+ * Owns the device-local AI agent lifecycle. The renderer receives only the bounded projection in
+ * AiChannelState; workspace paths, conversation IDs, provider payloads, and diagnostics stay here.
  */
 export class AiChannelController {
   readonly #preferenceStore: AiChannelPreferencePersistence;
-  readonly #hostFactory: CreateClaudeAcpHost;
+  readonly #hostFactory: CreateAiAgentHost;
   readonly #now: () => Date;
   readonly #reportListenerError: (error: unknown) => void;
   readonly #listeners = new Set<StateListener>();
@@ -347,7 +348,7 @@ export class AiChannelController {
   #preference: AiChannelPreference = { workspacePath: null, sessionId: null };
   #state: AiChannelState | null = null;
   #initialization: Promise<AiChannelState> | null = null;
-  #host: ClaudeAcpHost | null = null;
+  #host: AiAgentHost | null = null;
   #hostToken: HostToken | null = null;
   #acceptedSessionId: string | null = null;
   #activePrompt: ActivePrompt | null = null;
@@ -360,7 +361,7 @@ export class AiChannelController {
 
   constructor(options: {
     readonly preferenceStore: AiChannelPreferencePersistence;
-    readonly hostFactory: CreateClaudeAcpHost;
+    readonly hostFactory: CreateAiAgentHost;
     readonly now?: () => Date;
     readonly reportListenerError?: (error: unknown) => void;
   }) {
@@ -424,10 +425,10 @@ export class AiChannelController {
     }
     if (!this.#isCurrentLifecycleOperation(lifecycleOperation)) return this.#requireState();
     const hostToken = this.#newHostToken();
-    let host: ClaudeAcpHost;
+    let host: AiAgentHost;
     try {
       host = await this.#hostFactory({
-        onSessionUpdate: (update) => this.#handleSessionUpdate(hostToken, update),
+        onEvent: (event) => this.#handleHostEvent(hostToken, event),
         requestPermission: (requestPermission, signal) =>
           this.#handlePermissionRequest(hostToken, requestPermission, signal),
         onExit: (event) => this.#handleHostExit(hostToken, event),
@@ -557,21 +558,21 @@ export class AiChannelController {
       ) {
         return this.#requireState();
       }
-      const response = await host.newSession(workspacePath);
+      const response = await host.newConversation(workspacePath);
       if (
         !this.#isCurrentLifecycleOperation(lifecycleOperation) ||
         !this.#isCurrentHostToken(hostToken)
       ) {
         return this.#requireState();
       }
-      if (!isValidStoredSessionId(response.sessionId)) {
+      if (!isValidStoredSessionId(response.conversationId)) {
         throw new Error("Invalid Claude session identifier");
       }
       const preference: AiChannelPreference = {
         workspacePath,
-        sessionId: response.sessionId,
+        sessionId: response.conversationId,
       };
-      this.#acceptedSessionId = response.sessionId;
+      this.#acceptedSessionId = response.conversationId;
       await this.#preferenceStore.save(preference);
       if (
         !this.#isCurrentLifecycleOperation(lifecycleOperation) ||
@@ -616,7 +617,7 @@ export class AiChannelController {
     const activePrompt: ActivePrompt = {
       generation: state.generation,
       hostToken,
-      sessionId,
+      conversationId: sessionId,
     };
     this.#activePrompt = activePrompt;
     this.#messageIds.delete("assistant:anonymous");
@@ -679,7 +680,7 @@ export class AiChannelController {
     // launch Claude tools as child processes, so killing only the worker is not a sufficient stop
     // signal, while close lets the adapter abort and release its live query explicitly.
     const retirement = this.#trackHostRetirement(
-      this.#retireDetachedHost(host, activePrompt.sessionId, activePrompt),
+      this.#retireDetachedHost(host, activePrompt.conversationId, activePrompt),
     );
     await retirement;
     if (!this.#isCurrentLifecycleOperation(lifecycleOperation)) return this.#requireState();
@@ -768,7 +769,7 @@ export class AiChannelController {
     return token;
   }
 
-  async #loadOrCreateSession(hostToken: HostToken, host: ClaudeAcpHost): Promise<string | null> {
+  async #loadOrCreateSession(hostToken: HostToken, host: AiAgentHost): Promise<string | null> {
     const workspacePath = this.#preference.workspacePath;
     if (workspacePath === null) throw new Error("Missing AI Channel workspace");
     let sessionId = this.#preference.sessionId;
@@ -776,7 +777,7 @@ export class AiChannelController {
     if (sessionId !== null) {
       this.#acceptedSessionId = sessionId;
       try {
-        await host.loadSession(workspacePath, sessionId);
+        await host.resumeConversation(workspacePath, sessionId);
         if (!this.#isCurrentHostToken(hostToken)) return null;
       } catch {
         if (!this.#isCurrentHostToken(hostToken)) return null;
@@ -788,12 +789,12 @@ export class AiChannelController {
     }
 
     if (sessionId === null) {
-      const response = await host.newSession(workspacePath);
+      const response = await host.newConversation(workspacePath);
       if (!this.#isCurrentHostToken(hostToken)) return null;
-      if (!isValidStoredSessionId(response.sessionId)) {
+      if (!isValidStoredSessionId(response.conversationId)) {
         throw new Error("Invalid Claude session identifier");
       }
-      sessionId = response.sessionId;
+      sessionId = response.conversationId;
       this.#acceptedSessionId = sessionId;
     }
 
@@ -804,11 +805,8 @@ export class AiChannelController {
     return sessionId;
   }
 
-  #handleSessionUpdate(hostToken: HostToken, notification: SessionNotification): void {
-    if (
-      !this.#isCurrentHostToken(hostToken) ||
-      notification.sessionId !== this.#acceptedSessionId
-    ) {
+  #handleHostEvent(hostToken: HostToken, event: AiAgentHostEvent): void {
+    if (!this.#isCurrentHostToken(hostToken) || event.conversationId !== this.#acceptedSessionId) {
       return;
     }
     const state = this.#state;
@@ -819,50 +817,29 @@ export class AiChannelController {
       activePrompt.generation === state?.generation;
     if (state === null || (state.status !== "starting" && !acceptsActivePrompt)) return;
 
-    const update = notification.update;
-    switch (update.sessionUpdate) {
-      case "user_message_chunk":
-        if (state.status === "starting") this.#appendMessageChunk("user", update);
+    switch (event.type) {
+      case "message-update":
+        if (event.role === "user" && state.status !== "starting") return;
+        this.#applyMessageUpdate(event);
         return;
-      case "agent_message_chunk":
-        this.#appendMessageChunk("assistant", update);
+      case "tool-update":
+        this.#applyToolUpdate(event.tool, event.isCreation);
         return;
-      case "agent_thought_chunk":
-        this.#appendMessageChunk("thought", update);
+      case "plan-replace":
+        this.#replacePlan(event.entries);
         return;
-      case "tool_call":
-        this.#applyToolUpdate(update, true);
-        return;
-      case "tool_call_update":
-        this.#applyToolUpdate(update, false);
-        return;
-      case "plan":
-        this.#replacePlan(update.entries);
-        return;
-      case "plan_update":
-        if (update.plan.type === "items") this.#replacePlan(update.plan.entries);
-        return;
-      case "plan_removed":
+      case "plan-remove":
         this.#replaceState({ plan: [] });
-        return;
-      case "available_commands_update":
-      case "current_mode_update":
-      case "config_option_update":
-      case "session_info_update":
-      case "usage_update":
         return;
     }
   }
 
-  #appendMessageChunk(
-    role: AiChannelMessage["role"],
-    update: Extract<SessionNotification["update"], { sessionUpdate: `${string}_chunk` }>,
-  ): void {
-    if (update.content.type !== "text") return;
-    if (update.content.text === "") return;
+  #applyMessageUpdate(update: Extract<AiAgentHostEvent, { type: "message-update" }>): void {
+    if (update.text === "") return;
     const rawMessageId = update.messageId;
+    const role = update.role;
     const messageKey =
-      rawMessageId !== null && rawMessageId !== undefined && isAcpIdentifier(rawMessageId)
+      rawMessageId !== null && isAgentIdentifier(rawMessageId)
         ? `${role}:${rawMessageId}`
         : `${role}:anonymous`;
     let publicId = this.#messageIds.get(messageKey);
@@ -877,7 +854,10 @@ export class AiChannelController {
         ? ""
         : (this.#messageBodies.get(messageKey) ??
           (priorEntry?.type === "message" ? priorEntry.body : ""));
-    const rawBody = truncateUtf8(`${priorRawBody}${update.content.text}`, MAX_MESSAGE_BYTES);
+    const rawBody = truncateUtf8(
+      update.operation === "append" ? `${priorRawBody}${update.text}` : update.text,
+      MAX_MESSAGE_BYTES,
+    );
     const body = sanitizeDisplayText(
       rawBody,
       this.#preference.workspacePath,
@@ -886,7 +866,7 @@ export class AiChannelController {
     );
     if (body === "") return;
     if (entryIndex < 0) {
-      if (publicId === undefined && this.#messageIds.size < MAX_TRACKED_ACP_IDENTIFIERS) {
+      if (publicId === undefined && this.#messageIds.size < MAX_TRACKED_AGENT_IDENTIFIERS) {
         publicId = this.#createIdentifier("message");
         this.#messageIds.set(messageKey, publicId);
       }
@@ -917,13 +897,13 @@ export class AiChannelController {
     this.#replaceState({ entries: this.#boundEntries(entries) });
   }
 
-  #applyToolUpdate(update: ToolCall | ToolCallUpdate, isCreation: boolean): void {
-    if (!isAcpIdentifier(update.toolCallId)) return;
-    let publicId = this.#toolIds.get(update.toolCallId);
+  #applyToolUpdate(update: AiAgentHostTool, isCreation: boolean): void {
+    if (!isAgentIdentifier(update.id)) return;
+    let publicId = this.#toolIds.get(update.id);
     if (publicId === undefined) {
-      if (this.#toolIds.size >= MAX_TRACKED_ACP_IDENTIFIERS) return;
+      if (this.#toolIds.size >= MAX_TRACKED_AGENT_IDENTIFIERS) return;
       publicId = this.#createIdentifier("tool");
-      this.#toolIds.set(update.toolCallId, publicId);
+      this.#toolIds.set(update.id, publicId);
     }
 
     const state = this.#requireState();
@@ -943,7 +923,10 @@ export class AiChannelController {
             this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
           );
     const kind = update.kind ?? currentTool?.kind ?? "other";
-    const status = update.status ?? currentTool?.status ?? (isCreation ? "pending" : "in_progress");
+    const status =
+      update.status === "declined"
+        ? "failed"
+        : (update.status ?? currentTool?.status ?? (isCreation ? "pending" : "in_progress"));
     const locations =
       update.locations === null || update.locations === undefined
         ? (currentTool?.locations ?? [])
@@ -969,7 +952,7 @@ export class AiChannelController {
   #replacePlan(
     entries: ReadonlyArray<{
       readonly content: string;
-      readonly priority: AiChannelPlanEntry["priority"];
+      readonly priority: AiChannelPlanEntry["priority"] | null;
       readonly status: AiChannelPlanEntry["status"];
     }>,
   ): void {
@@ -983,7 +966,9 @@ export class AiChannelController {
           1_000,
           this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
         );
-        return content === "" ? null : { content, priority: entry.priority, status: entry.status };
+        return content === ""
+          ? null
+          : { content, priority: entry.priority ?? "medium", status: entry.status };
       })
       .filter((entry): entry is AiChannelPlanEntry => entry !== null);
     this.#replaceState({ plan });
@@ -991,9 +976,9 @@ export class AiChannelController {
 
   #handlePermissionRequest(
     hostToken: HostToken,
-    request: RequestPermissionRequest,
+    request: AiAgentHostPermissionRequest,
     signal: AbortSignal,
-  ): Promise<RequestPermissionResponse> {
+  ): Promise<AiAgentHostPermissionOutcome> {
     const state = this.#state;
     const activePrompt = this.#activePrompt;
     if (
@@ -1002,34 +987,34 @@ export class AiChannelController {
       state.status !== "running" ||
       activePrompt === null ||
       activePrompt.generation !== state.generation ||
-      request.sessionId !== activePrompt.sessionId ||
+      request.conversationId !== activePrompt.conversationId ||
       signal.aborted ||
-      !isAcpIdentifier(request.toolCall.toolCallId)
+      !isAgentIdentifier(request.tool.id)
     ) {
-      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+      return Promise.resolve({ outcome: "cancelled" });
     }
 
     this.#settlePermission({ outcome: "cancelled" }, true);
-    this.#applyToolUpdate(request.toolCall, false);
-    const toolId = this.#toolIds.get(request.toolCall.toolCallId);
+    this.#applyToolUpdate(request.tool, false);
+    const toolId = this.#toolIds.get(request.tool.id);
     if (toolId === undefined || request.options.length === 0 || request.options.length > 8) {
-      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+      return Promise.resolve({ outcome: "cancelled" });
     }
 
     const optionIds = new Map<string, string>();
     const options: AiChannelPermissionOption[] = [];
     const rawOptionIds = new Set<string>();
     for (const option of request.options) {
-      if (!isAcpIdentifier(option.optionId) || rawOptionIds.has(option.optionId)) {
-        return Promise.resolve({ outcome: { outcome: "cancelled" } });
+      if (!isAgentIdentifier(option.id) || rawOptionIds.has(option.id)) {
+        return Promise.resolve({ outcome: "cancelled" });
       }
-      rawOptionIds.add(option.optionId);
+      rawOptionIds.add(option.id);
       const publicOptionId = this.#createIdentifier("permission-option");
-      optionIds.set(publicOptionId, option.optionId);
+      optionIds.set(publicOptionId, option.id);
       options.push({
         id: publicOptionId,
         name: sanitizeLabel(option.name, "Permission option", this.#preference.workspacePath, 200, [
-          activePrompt.sessionId,
+          activePrompt.conversationId,
         ]),
         kind: option.kind,
       });
@@ -1064,7 +1049,7 @@ export class AiChannelController {
     });
   }
 
-  #handleHostExit(hostToken: HostToken, event: ClaudeAcpHostExit): void {
+  #handleHostExit(hostToken: HostToken, event: AiAgentHostExit): void {
     if (!this.#isCurrentHostToken(hostToken)) return;
     this.#settlePermission({ outcome: "cancelled" }, false);
     this.#activePrompt = null;
@@ -1136,12 +1121,12 @@ export class AiChannelController {
     }
   }
 
-  #settlePermission(outcome: RequestPermissionResponse["outcome"], publish: boolean): void {
+  #settlePermission(outcome: AiAgentHostPermissionOutcome, publish: boolean): void {
     const pending = this.#pendingPermission;
     if (pending === null) return;
     this.#pendingPermission = null;
     pending.removeAbortListener();
-    pending.resolve({ outcome });
+    pending.resolve(outcome);
     if (
       publish &&
       this.#state !== null &&
@@ -1174,13 +1159,13 @@ export class AiChannelController {
   }
 
   async #retireDetachedHost(
-    host: ClaudeAcpHost,
+    host: AiAgentHost,
     sessionId: string | null,
     activePrompt: ActivePrompt | null,
   ): Promise<void> {
     if (activePrompt !== null) {
       try {
-        await host.cancel(activePrompt.sessionId);
+        await host.cancel(activePrompt.conversationId);
       } catch {
         // Cancellation is best effort during teardown; disposal is the hard lifecycle fence.
       }
@@ -1203,7 +1188,7 @@ export class AiChannelController {
     return retirement;
   }
 
-  async #disposeHostBestEffort(host: ClaudeAcpHost): Promise<void> {
+  async #disposeHostBestEffort(host: AiAgentHost): Promise<void> {
     try {
       await host.dispose();
     } catch {

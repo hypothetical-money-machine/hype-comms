@@ -1,15 +1,14 @@
-import type {
-  LoadSessionResponse,
-  NewSessionResponse,
-  PromptResponse,
-  RequestPermissionRequest,
-  SessionNotification,
-} from "@agentclientprotocol/sdk";
 import { aiChannelStateSchema, type AiChannelState } from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
+import type {
+  AiAgentHost,
+  AiAgentHostCallbacks,
+  AiAgentHostEvent,
+  AiAgentHostPermissionRequest,
+  CreateAiAgentHost,
+} from "./ai-agent-host";
 import { AiChannelController } from "./ai-channel-controller";
-import type { ClaudeAcpHost, ClaudeAcpHostCallbacks, CreateClaudeAcpHost } from "./claude-acp-host";
 import type { AiChannelPreference } from "./ai-channel-preference-store";
 
 const WORKSPACE = "/private/projects/secret-repo";
@@ -53,35 +52,34 @@ class FakePreferenceStore {
   }
 }
 
-class FakeHost implements ClaudeAcpHost {
-  readonly newSessionCalls: string[] = [];
-  readonly loadSessionCalls: Array<{ cwd: string; sessionId: string }> = [];
-  readonly promptCalls: Array<{ sessionId: string; prompt: string }> = [];
+class FakeHost implements AiAgentHost {
+  readonly newConversationCalls: string[] = [];
+  readonly resumeConversationCalls: Array<{ workspacePath: string; conversationId: string }> = [];
+  readonly promptCalls: Array<{ conversationId: string; prompt: string }> = [];
   readonly cancelCalls: string[] = [];
   readonly closeCalls: string[] = [];
   disposeCalls = 0;
-  nextSessionId = "new-session";
-  loadError: Error | null = null;
-  newSessionError: Error | null = null;
-  promptGate: Deferred<PromptResponse> | null = null;
+  nextConversationId = "new-session";
+  resumeError: Error | null = null;
+  newConversationError: Error | null = null;
+  promptGate: Deferred<void> | null = null;
   cancelGate: Deferred<void> | null = null;
   disposeGate: Deferred<void> | null = null;
 
-  async newSession(cwd: string): Promise<NewSessionResponse> {
-    this.newSessionCalls.push(cwd);
-    if (this.newSessionError !== null) throw this.newSessionError;
-    return { sessionId: this.nextSessionId };
+  async newConversation(workspacePath: string): Promise<{ conversationId: string }> {
+    this.newConversationCalls.push(workspacePath);
+    if (this.newConversationError !== null) throw this.newConversationError;
+    return { conversationId: this.nextConversationId };
   }
 
-  async loadSession(cwd: string, sessionId: string): Promise<LoadSessionResponse> {
-    this.loadSessionCalls.push({ cwd, sessionId });
-    if (this.loadError !== null) throw this.loadError;
-    return {};
+  async resumeConversation(workspacePath: string, conversationId: string): Promise<void> {
+    this.resumeConversationCalls.push({ workspacePath, conversationId });
+    if (this.resumeError !== null) throw this.resumeError;
   }
 
-  prompt(sessionId: string, prompt: string): Promise<PromptResponse> {
-    this.promptCalls.push({ sessionId, prompt });
-    return this.promptGate?.promise ?? Promise.resolve({ stopReason: "end_turn" });
+  prompt(conversationId: string, prompt: string): Promise<void> {
+    this.promptCalls.push({ conversationId, prompt });
+    return this.promptGate?.promise ?? Promise.resolve();
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -103,7 +101,7 @@ interface Harness {
   readonly controller: AiChannelController;
   readonly preferences: FakePreferenceStore;
   readonly host: FakeHost;
-  readonly callbacks: () => ClaudeAcpHostCallbacks;
+  readonly callbacks: () => AiAgentHostCallbacks;
   readonly factoryCalls: () => number;
 }
 
@@ -112,9 +110,9 @@ function createHarness(
 ): Harness {
   const preferences = new FakePreferenceStore(loaded);
   const host = new FakeHost();
-  let capturedCallbacks: ClaudeAcpHostCallbacks | null = null;
+  let capturedCallbacks: AiAgentHostCallbacks | null = null;
   let factoryCalls = 0;
-  const hostFactory: CreateClaudeAcpHost = async (callbacks) => {
+  const hostFactory: CreateAiAgentHost = async (callbacks) => {
     factoryCalls += 1;
     capturedCallbacks = callbacks;
     return host;
@@ -137,39 +135,40 @@ function createHarness(
 }
 
 function textUpdate(
-  sessionId: string,
+  conversationId: string,
   sessionUpdate: "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk",
   text: string,
   messageId = "message-from-acp",
-): SessionNotification {
+): AiAgentHostEvent {
   return {
-    sessionId,
-    update: {
-      sessionUpdate,
-      messageId,
-      content: { type: "text", text },
-    },
+    type: "message-update",
+    conversationId,
+    messageId,
+    role:
+      sessionUpdate === "user_message_chunk"
+        ? "user"
+        : sessionUpdate === "agent_message_chunk"
+          ? "assistant"
+          : "thought",
+    operation: "append",
+    text,
   };
 }
 
-function permissionRequest(sessionId = "new-session"): RequestPermissionRequest {
+function permissionRequest(conversationId = "new-session"): AiAgentHostPermissionRequest {
   return {
-    sessionId,
-    toolCall: {
-      toolCallId: "raw-tool-id",
+    conversationId,
+    tool: {
+      id: "raw-tool-id",
       title: `Edit ${WORKSPACE}/src/index.ts`,
       kind: "edit",
       status: "pending",
       locations: [{ path: `${WORKSPACE}/src/index.ts`, line: 12 }],
-      rawInput: { private: "must-not-cross" },
-      rawOutput: { private: "also-must-not-cross" },
-      _meta: { provider: "private" },
     },
     options: [
-      { optionId: "raw-allow", name: "Allow new-session once", kind: "allow_once" },
-      { optionId: "raw-reject", name: "Reject", kind: "reject_once" },
+      { id: "raw-allow", name: "Allow new-session once", kind: "allow_once" },
+      { id: "raw-reject", name: "Reject", kind: "reject_once" },
     ],
-    _meta: { provider: "private" },
   };
 }
 
@@ -259,10 +258,10 @@ describe("AiChannelController", () => {
 
     expect(state.status).toBe("ready");
     expect(harness.factoryCalls()).toBe(1);
-    expect(harness.host.loadSessionCalls).toEqual([
-      { cwd: WORKSPACE, sessionId: "persisted-session" },
+    expect(harness.host.resumeConversationCalls).toEqual([
+      { workspacePath: WORKSPACE, conversationId: "persisted-session" },
     ]);
-    expect(harness.host.newSessionCalls).toEqual([]);
+    expect(harness.host.newConversationCalls).toEqual([]);
     expect(harness.preferences.saves).toEqual([
       { workspacePath: WORKSPACE, sessionId: "persisted-session" },
     ]);
@@ -271,14 +270,14 @@ describe("AiChannelController", () => {
 
   it("falls back to exactly one new session when loading fails", async () => {
     const harness = createHarness({ workspacePath: WORKSPACE, sessionId: "stale-session" });
-    harness.host.loadError = new Error(`cannot load ${WORKSPACE}`);
-    harness.host.nextSessionId = "replacement-session";
+    harness.host.resumeError = new Error(`cannot load ${WORKSPACE}`);
+    harness.host.nextConversationId = "replacement-session";
 
     const state = await startReady(harness);
 
     expect(state.status).toBe("ready");
-    expect(harness.host.loadSessionCalls).toHaveLength(1);
-    expect(harness.host.newSessionCalls).toEqual([WORKSPACE]);
+    expect(harness.host.resumeConversationCalls).toHaveLength(1);
+    expect(harness.host.newConversationCalls).toEqual([WORKSPACE]);
     expect(harness.preferences.saves.at(-1)).toEqual({
       workspacePath: WORKSPACE,
       sessionId: "replacement-session",
@@ -287,9 +286,9 @@ describe("AiChannelController", () => {
     expect(JSON.stringify(state)).not.toContain("replacement-session");
   });
 
-  it("projects message, thought, tool, and plan updates without raw ACP data or absolute paths", async () => {
+  it("projects neutral message, thought, tool, and plan updates without absolute paths", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
 
     const running = await harness.controller.sendPrompt({
@@ -298,29 +297,28 @@ describe("AiChannelController", () => {
     });
     expect(running.status).toBe("running");
     expect(harness.host.promptCalls).toEqual([
-      { sessionId: "new-session", prompt: `Inspect ${WORKSPACE}/src/index.ts` },
+      { conversationId: "new-session", prompt: `Inspect ${WORKSPACE}/src/index.ts` },
     ]);
     await expect(
       harness.controller.sendPrompt({ generation: running.generation, prompt: "second" }),
     ).rejects.toThrow(/not ready/);
 
     const callbacks = harness.callbacks();
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
         `Opened ${WORKSPACE}/src/index.ts; failed:/etc/passwd URL https://example.test/docs/path session new-`,
       ),
     );
-    callbacks.onSessionUpdate(textUpdate("new-session", "agent_message_chunk", "session"));
-    callbacks.onSessionUpdate(
-      textUpdate("new-session", "agent_thought_chunk", `Thinking in ${WORKSPACE}`),
-    );
-    callbacks.onSessionUpdate({
-      sessionId: "new-session",
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "raw-tool-id",
+    callbacks.onEvent(textUpdate("new-session", "agent_message_chunk", "session"));
+    callbacks.onEvent(textUpdate("new-session", "agent_thought_chunk", `Thinking in ${WORKSPACE}`));
+    callbacks.onEvent({
+      type: "tool-update",
+      conversationId: "new-session",
+      isCreation: true,
+      tool: {
+        id: "raw-tool-id",
         title: `Read ${WORKSPACE}/src/index.ts in new-session`,
         kind: "read",
         status: "in_progress",
@@ -328,23 +326,18 @@ describe("AiChannelController", () => {
           { path: `${WORKSPACE}/src/index.ts`, line: 7 },
           { path: "/home/person/private.txt" },
         ],
-        rawInput: { secret: "raw-input" },
-        rawOutput: { secret: "raw-output" },
-        _meta: { secret: "raw-meta" },
       },
     });
-    callbacks.onSessionUpdate({
-      sessionId: "new-session",
-      update: {
-        sessionUpdate: "plan",
-        entries: [
-          {
-            content: `Review ${WORKSPACE}/src/index.ts for new-session`,
-            priority: "high",
-            status: "in_progress",
-          },
-        ],
-      },
+    callbacks.onEvent({
+      type: "plan-replace",
+      conversationId: "new-session",
+      entries: [
+        {
+          content: `Review ${WORKSPACE}/src/index.ts for new-session`,
+          priority: "high",
+          status: "in_progress",
+        },
+      ],
     });
 
     const state = harness.controller.state;
@@ -372,19 +365,16 @@ describe("AiChannelController", () => {
     ]);
     expect(serialized).not.toContain(WORKSPACE);
     expect(serialized).not.toContain("raw-tool-id");
-    expect(serialized).not.toContain("raw-input");
-    expect(serialized).not.toContain("raw-output");
-    expect(serialized).not.toContain("raw-meta");
     expect(serialized).not.toContain("new-session");
 
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
     expect(harness.controller.state.status).toBe("ready");
   });
 
   it("redacts paths split across streamed chunks and home-relative paths", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -392,16 +382,16 @@ describe("AiChannelController", () => {
     });
     const callbacks = harness.callbacks();
 
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", "Opened /home/", "split-path"),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", "alice/secret.txt", "split-path"),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", "See ~/private.txt now", "home-path"),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
@@ -430,9 +420,42 @@ describe("AiChannelController", () => {
     );
   });
 
+  it("replaces a streamed message with the host's authoritative text", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<void>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Stream a response",
+    });
+
+    harness.callbacks().onEvent({
+      type: "message-update",
+      conversationId: "new-session",
+      messageId: "message-raw",
+      role: "assistant",
+      operation: "append",
+      text: "Partial response",
+    });
+    harness.callbacks().onEvent({
+      type: "message-update",
+      conversationId: "new-session",
+      messageId: "message-raw",
+      role: "assistant",
+      operation: "replace",
+      text: "Authoritative response",
+    });
+
+    expect(
+      harness.controller.state.entries.filter(
+        (entry) => entry.type === "message" && entry.role === "assistant",
+      ),
+    ).toEqual([expect.objectContaining({ body: "Authoritative response" })]);
+  });
+
   it("redacts local paths in web URL query and fragment values", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -441,7 +464,7 @@ describe("AiChannelController", () => {
 
     harness
       .callbacks()
-      .onSessionUpdate(
+      .onEvent(
         textUpdate(
           "new-session",
           "agent_message_chunk",
@@ -476,13 +499,13 @@ describe("AiChannelController", () => {
     expect(serialized).not.toContain("new-session");
     expect(serialized).not.toMatch(/home|alice|private\.txt|encoded\.txt|secret\.txt/u);
 
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
   });
 
   it("fully redacts workspace-prefix sibling paths from messages, tools, and permissions", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -500,10 +523,10 @@ describe("AiChannelController", () => {
     const nestedTraversalPath = `${WORKSPACE}/src/../../outside-secret.txt`;
     const alternateTraversalPath = `${alternateWorkspace}\\..\\outside-secret.txt`;
 
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", `Opened ${siblingPath}`, "sibling-path"),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
@@ -519,11 +542,11 @@ describe("AiChannelController", () => {
       ["nested-traversal-path", nestedTraversalPath],
       ["alternate-traversal-path", alternateTraversalPath],
     ] as const) {
-      callbacks.onSessionUpdate(
+      callbacks.onEvent(
         textUpdate("new-session", "agent_message_chunk", `Opened ${outsidePath}`, messageId),
       );
     }
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
@@ -531,7 +554,7 @@ describe("AiChannelController", () => {
         "alternate-exact-path",
       ),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
@@ -539,7 +562,7 @@ describe("AiChannelController", () => {
         "alternate-descendant-path",
       ),
     );
-    callbacks.onSessionUpdate(
+    callbacks.onEvent(
       textUpdate(
         "new-session",
         "agent_message_chunk",
@@ -547,11 +570,12 @@ describe("AiChannelController", () => {
         "alternate-sibling-path",
       ),
     );
-    callbacks.onSessionUpdate({
-      sessionId: "new-session",
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "sibling-tool",
+    callbacks.onEvent({
+      type: "tool-update",
+      conversationId: "new-session",
+      isCreation: true,
+      tool: {
+        id: "sibling-tool",
         title: `Read ${siblingPath}`,
         kind: "read",
         status: "pending",
@@ -580,16 +604,16 @@ describe("AiChannelController", () => {
     const abortController = new AbortController();
     const permission = callbacks.requestPermission(
       {
-        sessionId: "new-session",
-        toolCall: {
-          toolCallId: "sibling-tool",
+        conversationId: "new-session",
+        tool: {
+          id: "sibling-tool",
           title: `Edit ${alternateSiblingPath}`,
           kind: "edit",
           status: "pending",
         },
         options: [
           {
-            optionId: "allow-sibling-tool",
+            id: "allow-sibling-tool",
             name: `Allow ${alternateSiblingPath} once`,
             kind: "allow_once",
           },
@@ -616,14 +640,14 @@ describe("AiChannelController", () => {
     expect(JSON.stringify(harness.controller.state)).not.toContain(alternateSiblingPath);
 
     abortController.abort();
-    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    await expect(permission).resolves.toEqual({ outcome: "cancelled" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
   });
 
   it("keeps exact and descendant paths relative when the workspace is the filesystem root", async () => {
     const harness = createHarness({ workspacePath: "/", sessionId: null });
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -632,7 +656,7 @@ describe("AiChannelController", () => {
 
     harness
       .callbacks()
-      .onSessionUpdate(
+      .onEvent(
         textUpdate(
           "new-session",
           "agent_message_chunk",
@@ -641,7 +665,7 @@ describe("AiChannelController", () => {
       );
     harness
       .callbacks()
-      .onSessionUpdate(
+      .onEvent(
         textUpdate(
           "new-session",
           "agent_message_chunk",
@@ -663,13 +687,13 @@ describe("AiChannelController", () => {
       ]),
     );
 
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
   });
 
   it("does not retry a rejected prompt and publishes a sanitized error", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -688,9 +712,9 @@ describe("AiChannelController", () => {
     expect(harness.host.disposeCalls).toBe(1);
   });
 
-  it("maps permission identifiers, validates the exact request and option, and returns raw IDs only to ACP", async () => {
+  it("maps permission identifiers and returns only the selected host option", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -707,7 +731,6 @@ describe("AiChannelController", () => {
     expect(request.toolCallId).not.toBe("raw-tool-id");
     expect(request.options.map((option) => option.id)).not.toContain("raw-allow");
     expect(request.options[0]?.name).toBe("Allow [session] once");
-    expect(JSON.stringify(harness.controller.state)).not.toContain("must-not-cross");
     expect(JSON.stringify(harness.controller.state)).not.toContain("new-session");
 
     await expect(
@@ -730,15 +753,13 @@ describe("AiChannelController", () => {
       requestId: request.id,
       optionId: request.options[0]?.id ?? "missing",
     });
-    await expect(permission).resolves.toEqual({
-      outcome: { outcome: "selected", optionId: "raw-allow" },
-    });
+    await expect(permission).resolves.toEqual({ outcome: "selected", optionId: "raw-allow" });
     expect(harness.controller.state.permissionRequest).toBeNull();
   });
 
   it("default-cancels permission, advances generation, and fences prompt completion on cancel", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     const staleCallbacks = harness.callbacks();
     const running = await harness.controller.sendPrompt({
@@ -754,7 +775,7 @@ describe("AiChannelController", () => {
       generation: running.generation,
     });
 
-    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    await expect(permission).resolves.toEqual({ outcome: "cancelled" });
     expect(cancelled).toMatchObject({
       generation: running.generation + 1,
       status: "configured",
@@ -766,30 +787,30 @@ describe("AiChannelController", () => {
       harness.controller.sendPrompt({ generation: running.generation, prompt: "stale" }),
     ).rejects.toThrow(/stale/);
 
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
     expect(harness.controller.state).toEqual(cancelled);
 
     await harness.controller.start({ generation: cancelled.generation });
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
       prompt: "New host turn",
     });
     const newTurnEntries = harness.controller.state.entries;
-    staleCallbacks.onSessionUpdate(
+    staleCallbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", "late prior turn", "late-prior"),
     );
     await expect(
       staleCallbacks.requestPermission(permissionRequest(), new AbortController().signal),
-    ).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    ).resolves.toEqual({ outcome: "cancelled" });
     expect(harness.controller.state.entries).toEqual(newTurnEntries);
     expect(harness.controller.state.permissionRequest).toBeNull();
   });
 
   it("keeps cancellation busy until host retirement and default-cancels late permissions", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     harness.host.cancelGate = deferred<void>();
     harness.host.disposeGate = deferred<void>();
     await startReady(harness);
@@ -810,8 +831,8 @@ describe("AiChannelController", () => {
     expect(harness.host.disposeCalls).toBe(0);
     await expect(
       callbacks.requestPermission(permissionRequest(), new AbortController().signal),
-    ).resolves.toEqual({ outcome: { outcome: "cancelled" } });
-    callbacks.onSessionUpdate(
+    ).resolves.toEqual({ outcome: "cancelled" });
+    callbacks.onEvent(
       textUpdate("new-session", "agent_message_chunk", "late stale output", "late"),
     );
     expect(harness.controller.state.entries).toEqual(entriesBeforeCancellation);
@@ -822,7 +843,7 @@ describe("AiChannelController", () => {
       }),
     ).rejects.toThrow(/not ready/);
 
-    harness.host.promptGate.resolve({ stopReason: "end_turn" });
+    harness.host.promptGate.resolve(undefined);
     await flushPromises();
     expect(harness.controller.state.status).toBe("running");
     harness.host.cancelGate?.resolve(undefined);
@@ -835,7 +856,7 @@ describe("AiChannelController", () => {
 
   it("evicts stale tool identifier mappings with bounded transcript entries", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -844,11 +865,12 @@ describe("AiChannelController", () => {
     const callbacks = harness.callbacks();
 
     for (let index = 0; index < 1_001; index += 1) {
-      callbacks.onSessionUpdate({
-        sessionId: "new-session",
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: `raw-tool-${String(index)}`,
+      callbacks.onEvent({
+        type: "tool-update",
+        conversationId: "new-session",
+        isCreation: true,
+        tool: {
+          id: `raw-tool-${String(index)}`,
           title: `Tool ${String(index)}`,
           kind: "read",
           status: "completed",
@@ -859,9 +881,9 @@ describe("AiChannelController", () => {
     const permission = callbacks.requestPermission(
       {
         ...permissionRequest(),
-        toolCall: {
-          ...permissionRequest().toolCall,
-          toolCallId: "raw-tool-after-eviction",
+        tool: {
+          ...permissionRequest().tool,
+          id: "raw-tool-after-eviction",
         },
       },
       new AbortController().signal,
@@ -872,12 +894,12 @@ describe("AiChannelController", () => {
     await harness.controller.cancelPrompt({
       generation: harness.controller.state.generation,
     });
-    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    await expect(permission).resolves.toEqual({ outcome: "cancelled" });
   });
 
   it("keeps streamed message chunks joined after stale identifier mappings are evicted", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -886,7 +908,7 @@ describe("AiChannelController", () => {
     const callbacks = harness.callbacks();
 
     for (let index = 0; index < 1_001; index += 1) {
-      callbacks.onSessionUpdate(
+      callbacks.onEvent(
         textUpdate(
           "new-session",
           "agent_message_chunk",
@@ -895,12 +917,8 @@ describe("AiChannelController", () => {
         ),
       );
     }
-    callbacks.onSessionUpdate(
-      textUpdate("new-session", "agent_message_chunk", "Hello ", "after-eviction"),
-    );
-    callbacks.onSessionUpdate(
-      textUpdate("new-session", "agent_message_chunk", "world", "after-eviction"),
-    );
+    callbacks.onEvent(textUpdate("new-session", "agent_message_chunk", "Hello ", "after-eviction"));
+    callbacks.onEvent(textUpdate("new-session", "agent_message_chunk", "world", "after-eviction"));
 
     expect(
       harness.controller.state.entries.filter(
@@ -949,7 +967,7 @@ describe("AiChannelController", () => {
   it("starts a new session once, closes the old session, clears projection, and persists", async () => {
     const harness = createHarness();
     await startReady(harness);
-    harness.host.nextSessionId = "second-session";
+    harness.host.nextConversationId = "second-session";
     const before = harness.controller.state;
 
     const state = await harness.controller.newSession({ generation: before.generation });
@@ -961,7 +979,7 @@ describe("AiChannelController", () => {
       plan: [],
     });
     expect(harness.host.closeCalls).toEqual(["new-session"]);
-    expect(harness.host.newSessionCalls).toEqual([WORKSPACE, WORKSPACE]);
+    expect(harness.host.newConversationCalls).toEqual([WORKSPACE, WORKSPACE]);
     expect(harness.preferences.saves.at(-1)).toEqual({
       workspacePath: WORKSPACE,
       sessionId: "second-session",
@@ -970,7 +988,7 @@ describe("AiChannelController", () => {
 
   it("default-cancels on host exit, exposes no exit details, and ignores stale updates", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -982,9 +1000,9 @@ describe("AiChannelController", () => {
     await flushPromises();
     const generation = harness.controller.state.generation;
 
-    harness.callbacks().onExit({ reason: "exited", exitCode: 137 });
+    harness.callbacks().onExit({ reason: "exited" });
 
-    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    await expect(permission).resolves.toEqual({ outcome: "cancelled" });
     expect(harness.controller.state).toMatchObject({
       generation: generation + 1,
       status: "error",
@@ -995,15 +1013,13 @@ describe("AiChannelController", () => {
     const entries = harness.controller.state.entries;
     harness
       .callbacks()
-      .onSessionUpdate(
-        textUpdate("new-session", "agent_message_chunk", "late stale output", "late"),
-      );
+      .onEvent(textUpdate("new-session", "agent_message_chunk", "late stale output", "late"));
     expect(harness.controller.state.entries).toEqual(entries);
   });
 
   it("suspends and disposes with cancellation, close, and host disposal", async () => {
     const harness = createHarness();
-    harness.host.promptGate = deferred<PromptResponse>();
+    harness.host.promptGate = deferred<void>();
     await startReady(harness);
     await harness.controller.sendPrompt({
       generation: harness.controller.state.generation,
@@ -1016,14 +1032,14 @@ describe("AiChannelController", () => {
 
     const suspended = await harness.controller.suspend();
 
-    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    await expect(permission).resolves.toEqual({ outcome: "cancelled" });
     expect(suspended).toMatchObject({ status: "configured", entries: [], plan: [] });
     expect(harness.host.cancelCalls).toEqual(["new-session"]);
     expect(harness.host.closeCalls).toEqual(["new-session"]);
     expect(harness.host.disposeCalls).toBe(1);
 
     const secondHarness = createHarness();
-    secondHarness.host.promptGate = deferred<PromptResponse>();
+    secondHarness.host.promptGate = deferred<void>();
     await startReady(secondHarness);
     await secondHarness.controller.sendPrompt({
       generation: secondHarness.controller.state.generation,
@@ -1035,7 +1051,7 @@ describe("AiChannelController", () => {
     await flushPromises();
     await secondHarness.controller.dispose();
 
-    await expect(disposePermission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    await expect(disposePermission).resolves.toEqual({ outcome: "cancelled" });
     expect(secondHarness.host.cancelCalls).toEqual(["new-session"]);
     expect(secondHarness.host.closeCalls).toEqual(["new-session"]);
     expect(secondHarness.host.disposeCalls).toBe(1);
@@ -1046,8 +1062,8 @@ describe("AiChannelController", () => {
     const listenerErrors: unknown[] = [];
     const preferences = new FakePreferenceStore({ workspacePath: WORKSPACE, sessionId: null });
     const host = new FakeHost();
-    host.promptGate = deferred<PromptResponse>();
-    const callbackCaptures: ClaudeAcpHostCallbacks[] = [];
+    host.promptGate = deferred<void>();
+    const callbackCaptures: AiAgentHostCallbacks[] = [];
     const controller = new AiChannelController({
       preferenceStore: preferences,
       hostFactory: async (nextCallbacks) => {
@@ -1070,7 +1086,7 @@ describe("AiChannelController", () => {
     if (callbacks === undefined) throw new Error("Missing callbacks");
 
     for (let index = 0; index < 220; index += 1) {
-      callbacks.onSessionUpdate(
+      callbacks.onEvent(
         textUpdate(
           "new-session",
           "agent_message_chunk",
