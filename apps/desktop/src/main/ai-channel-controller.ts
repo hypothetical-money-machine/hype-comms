@@ -57,6 +57,11 @@ interface PendingPermission {
   readonly removeAbortListener: () => void;
 }
 
+export interface AiChannelHostPresentation {
+  readonly displayName: string;
+  readonly executableName: string;
+}
+
 function isValidStoredSessionId(value: string | null): value is string {
   return (
     value !== null &&
@@ -339,6 +344,8 @@ function initialState(preference: AiChannelPreference): AiChannelState {
 export class AiChannelController {
   readonly #preferenceStore: AiChannelPreferencePersistence;
   readonly #hostFactory: CreateAiAgentHost;
+  readonly #hostDisplayName: string;
+  readonly #hostExecutableName: string;
   readonly #now: () => Date;
   readonly #reportListenerError: (error: unknown) => void;
   readonly #listeners = new Set<StateListener>();
@@ -363,11 +370,24 @@ export class AiChannelController {
   constructor(options: {
     readonly preferenceStore: AiChannelPreferencePersistence;
     readonly hostFactory: CreateAiAgentHost;
+    readonly hostPresentation: AiChannelHostPresentation;
     readonly now?: () => Date;
     readonly reportListenerError?: (error: unknown) => void;
   }) {
     this.#preferenceStore = options.preferenceStore;
     this.#hostFactory = options.hostFactory;
+    this.#hostDisplayName = sanitizeLabel(
+      options.hostPresentation.displayName,
+      "AI assistant",
+      null,
+      100,
+    );
+    this.#hostExecutableName = sanitizeLabel(
+      options.hostPresentation.executableName,
+      "AI assistant executable",
+      null,
+      100,
+    );
     this.#now = options.now ?? (() => new Date());
     this.#reportListenerError =
       options.reportListenerError ??
@@ -434,7 +454,7 @@ export class AiChannelController {
           this.#handlePermissionRequest(hostToken, requestPermission, signal),
         onExit: (event) => this.#handleHostExit(hostToken, event),
       });
-    } catch {
+    } catch (error) {
       if (
         this.#isCurrentLifecycleOperation(lifecycleOperation) &&
         this.#isCurrentHostToken(hostToken)
@@ -442,7 +462,10 @@ export class AiChannelController {
         this.#hostToken = null;
         this.#replaceState({
           status: "unavailable",
-          error: "Install Claude Code and make sure claude is available on PATH, then retry.",
+          error: this.#hostFailureMessage(
+            error,
+            `Install ${this.#hostDisplayName} and make sure ${this.#hostExecutableName} is available on PATH, then retry.`,
+          ),
         });
       }
       return this.#requireState();
@@ -463,14 +486,17 @@ export class AiChannelController {
       if (!this.#isCurrentLifecycleOperation(lifecycleOperation)) return this.#requireState();
       this.#acceptedSessionId = sessionId;
       this.#replaceState({ status: "ready", error: null });
-    } catch {
+    } catch (error) {
       if (
         this.#isCurrentLifecycleOperation(lifecycleOperation) &&
         this.#isCurrentHostToken(hostToken)
       ) {
         await this.#failCurrentHost(
           hostToken,
-          "Claude Code could not open the selected workspace. Check Claude Code sign-in and folder access, then retry.",
+          this.#hostFailureMessage(
+            error,
+            `${this.#hostDisplayName} could not open the selected workspace. Check ${this.#hostDisplayName} sign-in and folder access, then retry.`,
+          ),
           lifecycleOperation,
         );
       }
@@ -567,7 +593,7 @@ export class AiChannelController {
         return this.#requireState();
       }
       if (!isValidStoredSessionId(response.conversationId)) {
-        throw new Error("Invalid Claude session identifier");
+        throw new Error("Invalid AI agent conversation identifier");
       }
       const preference: AiChannelPreference = {
         workspacePath,
@@ -583,14 +609,17 @@ export class AiChannelController {
       }
       this.#preference = preference;
       return this.#replaceState({ status: "ready", error: null });
-    } catch {
+    } catch (error) {
       if (
         this.#isCurrentLifecycleOperation(lifecycleOperation) &&
         this.#isCurrentHostToken(hostToken)
       ) {
         await this.#failCurrentHost(
           hostToken,
-          "Claude Code could not start a new session.",
+          this.#hostFailureMessage(
+            error,
+            `${this.#hostDisplayName} could not start a new session.`,
+          ),
           lifecycleOperation,
         );
       }
@@ -648,13 +677,13 @@ export class AiChannelController {
     let prompt: Promise<unknown>;
     try {
       prompt = host.prompt(sessionId, request.prompt);
-    } catch {
-      void this.#finishPrompt(activePrompt, false);
+    } catch (error) {
+      void this.#finishPrompt(activePrompt, false, error);
       return this.#requireState();
     }
     void prompt.then(
       () => this.#finishPrompt(activePrompt, true),
-      () => this.#finishPrompt(activePrompt, false),
+      (error: unknown) => this.#finishPrompt(activePrompt, false, error),
     );
     return this.#requireState();
   }
@@ -677,9 +706,9 @@ export class AiChannelController {
     this.#hostToken = null;
     this.#replaceState({ generation, status: "running", permissionRequest: null, error: null });
 
-    // Deliver bounded cancellation and session teardown before disposal. The utility process can
-    // launch Claude tools as child processes, so killing only the worker is not a sufficient stop
-    // signal, while close lets the adapter abort and release its live query explicitly.
+    // Deliver bounded cancellation and conversation teardown before disposal. An agent host can
+    // launch tools as child processes, so killing only the worker is not a sufficient stop signal,
+    // while close lets the adapter abort and release its live turn explicitly.
     const retirement = this.#trackHostRetirement(
       this.#retireDetachedHost(host, activePrompt.conversationId, activePrompt),
     );
@@ -796,7 +825,7 @@ export class AiChannelController {
       const response = await host.newConversation(workspacePath);
       if (!this.#isCurrentHostToken(hostToken)) return null;
       if (!isValidStoredSessionId(response.conversationId)) {
-        throw new Error("Invalid Claude session identifier");
+        throw new Error("Invalid AI agent conversation identifier");
       }
       sessionId = response.conversationId;
       this.#acceptedSessionId = sessionId;
@@ -843,7 +872,7 @@ export class AiChannelController {
     const rawMessageId = update.messageId;
     const role = update.role;
     const messageKey =
-      rawMessageId !== null && isAgentIdentifier(rawMessageId)
+      typeof rawMessageId === "string" && isAgentIdentifier(rawMessageId)
         ? `${role}:${rawMessageId}`
         : `${role}:anonymous`;
     let publicId = this.#messageIds.get(messageKey);
@@ -918,10 +947,10 @@ export class AiChannelController {
     const currentTool = current?.type === "tool" ? current : null;
     const title =
       update.title === null || update.title === undefined
-        ? (currentTool?.title ?? "Claude Code tool")
+        ? (currentTool?.title ?? `${this.#hostDisplayName} tool`)
         : sanitizeLabel(
             update.title,
-            "Claude Code tool",
+            `${this.#hostDisplayName} tool`,
             this.#preference.workspacePath,
             500,
             this.#acceptedSessionId === null ? [] : [this.#acceptedSessionId],
@@ -1030,7 +1059,7 @@ export class AiChannelController {
     const permissionRequest: AiChannelPermissionRequest = {
       id: this.#createIdentifier("permission"),
       toolCallId: toolId,
-      title: currentTool?.title ?? "Claude Code tool",
+      title: currentTool?.title ?? `${this.#hostDisplayName} tool`,
       kind: currentTool?.kind ?? "other",
       options,
     };
@@ -1068,12 +1097,16 @@ export class AiChannelController {
       permissionRequest: null,
       error:
         event.reason === "launch-failed"
-          ? "Claude Code could not start on this device. Check the installation, then retry."
-          : "Claude Code disconnected from this AI Channel.",
+          ? `${this.#hostDisplayName} could not start on this device. Check the installation, then retry.`
+          : `${this.#hostDisplayName} disconnected from this AI Channel.`,
     });
   }
 
-  async #finishPrompt(activePrompt: ActivePrompt, succeeded: boolean): Promise<void> {
+  async #finishPrompt(
+    activePrompt: ActivePrompt,
+    succeeded: boolean,
+    error?: unknown,
+  ): Promise<void> {
     if (
       this.#activePrompt !== activePrompt ||
       !this.#isCurrentHostToken(activePrompt.hostToken) ||
@@ -1089,8 +1122,31 @@ export class AiChannelController {
     }
     await this.#failCurrentHost(
       activePrompt.hostToken,
-      "Claude Code stopped before completing the prompt.",
+      this.#hostFailureMessage(
+        error,
+        `${this.#hostDisplayName} stopped before completing the prompt.`,
+      ),
     );
+  }
+
+  #hostFailureMessage(error: unknown, fallback: string): string {
+    if (!(error instanceof AiAgentHostError)) return fallback;
+    switch (error.code) {
+      case "not-installed":
+        return `Install ${this.#hostDisplayName} and make sure ${this.#hostExecutableName} is available on PATH, then retry.`;
+      case "not-authenticated":
+        return `Sign in to ${this.#hostDisplayName}, then retry.`;
+      case "unsupported-version":
+        return `Update ${this.#hostDisplayName} to a supported version, then retry.`;
+      case "startup-failed":
+        return `${this.#hostDisplayName} could not start on this device. Check the installation, then retry.`;
+      case "protocol-failed":
+        return `${this.#hostDisplayName} could not establish a compatible connection. Update it, then retry.`;
+      case "conversation-not-found":
+      case "conversation-failed":
+      case "turn-failed":
+        return fallback;
+    }
   }
 
   async #failCurrentHost(

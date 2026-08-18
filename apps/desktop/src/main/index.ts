@@ -2163,6 +2163,7 @@ if (!hasSingleInstanceLock) {
       aiChannelController = new AiChannelController({
         preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
         hostFactory: createClaudeAiAgentHost,
+        hostPresentation: { displayName: "Claude Code", executableName: "claude" },
         reportListenerError: () => {
           reportMainProcessError("AI Channel state listener failed");
         },

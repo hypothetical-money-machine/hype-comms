@@ -623,6 +623,27 @@ describe("Codex utility worker boundary", () => {
     expect(worker.killedProcessGroups).toEqual([4_100]);
   });
 
+  it("immediately kills the utility process after a reported child transport failure", async () => {
+    const onExit = vi.fn();
+    const worker = new FakeCodexUtilityWorker();
+    const host = await createFakeHost(worker, callbacks({ onExit }));
+
+    worker.emit({ type: "codex-exit", reason: "transport-failed" });
+    worker.emitError();
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(onExit).toHaveBeenCalledWith({ reason: "transport-failed" });
+    expect(worker.killedProcessGroups).toEqual([4_100]);
+    expect(worker.killed).toBe(true);
+    expect(worker.cleanupOrder).toEqual(["group:4100", "worker"]);
+
+    await host.dispose();
+    worker.emitExit(1);
+
+    expect(worker.cleanupOrder).toEqual(["group:4100", "worker"]);
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
   it("kills a worker that misses its spawn deadline", async () => {
     vi.useFakeTimers();
     const worker = new FakeCodexUtilityWorker(

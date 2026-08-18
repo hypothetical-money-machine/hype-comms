@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
   CodexProtocolError,
@@ -13,6 +13,7 @@ import {
   codexTurnPolicy,
   encodeCodexClientRequest,
   isMissingCodexThreadError,
+  isSupportedCodexCliVersion,
   normalizeCodexNetworkHost,
   parseAccountResult,
   parseCodexCliVersion,
@@ -107,6 +108,9 @@ describe("Codex 0.147.0 JSON-RPC projection", () => {
   it("accepts only the pinned CLI version and narrowly classifies missing threads", () => {
     expect(parseCodexCliVersion("codex-cli 0.147.0\n")).toBe("0.147.0");
     expect(parseCodexCliVersion("warning\ncodex-cli 0.147.0\n")).toBeNull();
+    expect(isSupportedCodexCliVersion("0.147.0")).toBe(true);
+    expect(isSupportedCodexCliVersion("0.146.0")).toBe(false);
+    expect(isSupportedCodexCliVersion("0.148.0")).toBe(false);
     expect(isMissingCodexThreadError({ code: -32000, message: "Thread abc not found" })).toBe(true);
     expect(
       isMissingCodexThreadError({ code: -32000, message: "No rollout found for thread abc" }),
@@ -300,6 +304,47 @@ describe("Codex notification projection", () => {
     expect(JSON.stringify(file)).not.toContain("PRIVATE PATCH");
   });
 
+  it("uses a generic item title when a command cannot be previewed safely", () => {
+    for (const rawCommand of ["bash -lc echo don't", "/usr/bin/env", "--token secret"]) {
+      expect(
+        parseCodexNotification(
+          "item/started",
+          {
+            threadId: "thread-a",
+            turnId: "turn-a",
+            item: {
+              type: "commandExecution",
+              id: "command-provider-id",
+              pluginId: null,
+              scriptPath: null,
+              command: rawCommand,
+              cwd: workspace,
+              processId: null,
+              source: "agent",
+              status: "inProgress",
+              commandActions: [],
+              aggregatedOutput: null,
+              exitCode: null,
+              durationMs: null,
+            },
+            startedAtMs: 10,
+          },
+          workspace,
+        ),
+      ).toMatchObject({
+        kind: "item-started",
+        item: { type: "tool", title: "Run a command" },
+      });
+      expect(() =>
+        parseCodexServerRequest(
+          7,
+          "item/commandExecution/requestApproval",
+          commandApproval(rawCommand),
+        ),
+      ).toThrow(CodexProtocolError);
+    }
+  });
+
   it("rejects every unsafe file-change path instead of filtering it from the preview", () => {
     symlinkSync(
       outside,
@@ -333,6 +378,83 @@ describe("Codex notification projection", () => {
     expect(() =>
       parseCodexNotification("item/started", fileItem("escape/secret.txt"), workspace),
     ).toThrow(CodexProtocolError);
+  });
+
+  it("caches canonical workspace roots with bounded eviction", () => {
+    const cacheRoot = mkdtempSync(path.join(tmpdir(), "hype-codex-root-cache-"));
+    const workspaces = Array.from({ length: 33 }, (_, index) => {
+      const candidate = path.join(cacheRoot, `workspace-${String(index)}`);
+      mkdirSync(candidate);
+      mkdirSync(path.join(candidate, "src"));
+      return candidate;
+    });
+    const realpathSpy = vi.spyOn(realpathSync, "native");
+    const parseImage = (workspacePath: string) =>
+      parseCodexNotification(
+        "item/started",
+        {
+          threadId: "thread-a",
+          turnId: "turn-a",
+          item: { type: "imageView", id: "image-a", path: "src" },
+          startedAtMs: 10,
+        },
+        workspacePath,
+      );
+
+    try {
+      const firstWorkspace = workspaces[0];
+      if (firstWorkspace === undefined) throw new Error("expected a workspace");
+      expect(parseImage(firstWorkspace)).toMatchObject({ item: { locations: ["src"] } });
+      expect(parseImage(firstWorkspace)).toMatchObject({ item: { locations: ["src"] } });
+      expect(
+        realpathSpy.mock.calls.filter(([candidate]) => candidate === firstWorkspace),
+      ).toHaveLength(1);
+
+      for (const workspacePath of workspaces.slice(1)) parseImage(workspacePath);
+      parseImage(firstWorkspace);
+      expect(
+        realpathSpy.mock.calls.filter(([candidate]) => candidate === firstWorkspace),
+      ).toHaveLength(2);
+    } finally {
+      realpathSpy.mockRestore();
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a cached workspace alias is retargeted", () => {
+    const aliasRoot = mkdtempSync(path.join(tmpdir(), "hype-codex-root-alias-"));
+    const firstTarget = path.join(aliasRoot, "first");
+    const secondTarget = path.join(aliasRoot, "second");
+    const workspaceAlias = path.join(aliasRoot, "workspace");
+    mkdirSync(firstTarget);
+    mkdirSync(secondTarget);
+    mkdirSync(path.join(firstTarget, "src"));
+    mkdirSync(path.join(secondTarget, "src"));
+    symlinkSync(firstTarget, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
+    const fileItem = {
+      threadId: "thread-a",
+      turnId: "turn-a",
+      item: {
+        type: "fileChange",
+        id: "file-provider-id",
+        status: "inProgress",
+        changes: [{ path: "src", kind: { type: "update", move_path: null }, diff: "patch" }],
+      },
+      startedAtMs: 10,
+    };
+
+    try {
+      expect(parseCodexNotification("item/started", fileItem, workspaceAlias)).toMatchObject({
+        item: { locations: ["src"] },
+      });
+      unlinkSync(workspaceAlias);
+      symlinkSync(secondTarget, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
+      expect(() => parseCodexNotification("item/started", fileItem, workspaceAlias)).toThrow(
+        CodexProtocolError,
+      );
+    } finally {
+      rmSync(aliasRoot, { recursive: true, force: true });
+    }
   });
 
   it("bounds and maps plans without inventing priorities", () => {

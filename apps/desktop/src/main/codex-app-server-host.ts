@@ -483,8 +483,8 @@ class CodexAppServerHostImplementation implements AiAgentHost {
     private readonly teardownTimeoutMs: number,
   ) {
     worker.onMessage((message) => this.#message(message));
-    worker.onExit(() => this.#workerExit("exited"));
-    worker.onFatalError(() => this.#workerExit("transport-failed"));
+    worker.onExit(() => this.#workerExit("exited", true));
+    worker.onFatalError(() => this.#workerExit("transport-failed", false));
   }
 
   async connect(timeoutMs: number): Promise<void> {
@@ -551,7 +551,7 @@ class CodexAppServerHostImplementation implements AiAgentHost {
         this.#processGroupId = null;
         return;
       case "codex-exit":
-        this.#workerExit("transport-failed");
+        this.#workerExit("transport-failed", false);
     }
   }
 
@@ -646,11 +646,11 @@ class CodexAppServerHostImplementation implements AiAgentHost {
     this.#permissions.clear();
   }
 
-  #workerExit(reason: "exited" | "transport-failed"): void {
+  #workerExit(reason: "exited" | "transport-failed", utilityProcessExited: boolean): void {
+    if (utilityProcessExited) this.#workerKilled = true;
     if (this.#expectedExit || this.#exitReported) return;
     this.#exitReported = true;
-    this.#workerKilled = true;
-    this.#fail(false);
+    this.#fail(!utilityProcessExited);
     try {
       this.callbacks.onExit({ reason });
     } catch {

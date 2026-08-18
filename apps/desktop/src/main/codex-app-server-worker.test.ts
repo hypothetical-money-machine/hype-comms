@@ -129,6 +129,10 @@ function response(transport: FakeTransport, message: SentMessage, result: unknow
   transport.emit({ id: message.id, result });
 }
 
+function childResponse(child: FakeChildProcess, message: SentMessage, result: unknown): void {
+  child.stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
+}
+
 function turnLifecycle(status: "inProgress" | "completed" | "interrupted" | "failed") {
   return {
     id: "turn-a",
@@ -520,6 +524,175 @@ describe("Codex process groups and version preflight", () => {
     await runtime.dispose();
     expect(order.slice(-2)).toEqual(["kill:4316", "clear:4316"]);
   });
+
+  it("uses one startup deadline across discovery, preflight, and runtime initialization", async () => {
+    vi.useFakeTimers();
+    try {
+      const versionChild = new FakeChildProcess(4318);
+      const appServerChild = new FakeChildProcess(4319);
+      const activeGroups = new Set([4318, 4319]);
+      const signal: CodexProcessSignal = (pid, value) => {
+        const processGroupId = -pid;
+        if (value === "SIGKILL") {
+          activeGroups.delete(processGroupId);
+          return;
+        }
+        if (!activeGroups.has(processGroupId)) throw missingGroupError();
+      };
+      let spawnCount = 0;
+      const canonicalize = vi.fn(
+        (candidate: string) =>
+          new Promise<string>((resolve) => {
+            setTimeout(() => resolve(candidate), 100);
+          }),
+      );
+      const spawnProcess = vi.fn((_executable: string, args: readonly string[]) => {
+        spawnCount += 1;
+        if (spawnCount === 1) {
+          expect(args).toEqual(["--version"]);
+          setTimeout(() => {
+            versionChild.stdout.write("codex-cli 0.147.0\n");
+            versionChild.stdout.end();
+            versionChild.emit("close", 0);
+          }, 100);
+          return versionChild;
+        }
+        expect(args).toEqual(["app-server", "--stdio"]);
+        let input = "";
+        appServerChild.stdin.on("data", (chunk: Buffer) => {
+          input += chunk.toString("utf8");
+          for (;;) {
+            const newline = input.indexOf("\n");
+            if (newline < 0) break;
+            const line = input.slice(0, newline);
+            input = input.slice(newline + 1);
+            const request = JSON.parse(line) as SentMessage;
+            if (isRequest(request, "initialize")) {
+              setTimeout(() => {
+                childResponse(appServerChild, request, {
+                  userAgent: "codex_cli_rs/0.147.0",
+                  codexHome: "/home/tester/.codex",
+                  platformFamily: "unix",
+                  platformOs: "linux",
+                });
+              }, 100);
+            } else if (isRequest(request, "account/read")) {
+              setTimeout(() => {
+                childResponse(appServerChild, request, {
+                  account: { type: "chatgpt", email: "private@example.com", planType: "pro" },
+                  requiresOpenaiAuth: true,
+                });
+              }, 400);
+            }
+          }
+        });
+        return appServerChild;
+      });
+
+      const creating = createProductionCodexRuntime(callbacks(), {
+        platform: "linux",
+        environment: { CODEX_EXECUTABLE: "/opt/codex", PATH: "" },
+        canonicalize,
+        isExecutable: async () => true,
+        spawnProcess: spawnProcess as unknown as typeof nodeSpawn,
+        processSignal: signal,
+        startupTimeoutMs: 500,
+        teardownTimeoutMs: 1,
+      });
+      let failure: unknown;
+      void creating.catch((error: unknown) => {
+        failure = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(501);
+      expect(failure).toMatchObject({ code: "protocol-failed" });
+      expect(canonicalize).toHaveBeenCalledWith("/opt/codex");
+      expect(spawnProcess).toHaveBeenCalledTimes(2);
+      await expect(creating).rejects.toMatchObject({ code: "protocol-failed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses configured operation timeouts in a production-created runtime", async () => {
+    vi.useFakeTimers();
+    try {
+      const versionChild = new FakeChildProcess(4320);
+      const appServerChild = new FakeChildProcess(4321);
+      const activeGroups = new Set([4320, 4321]);
+      const signal: CodexProcessSignal = (pid, value) => {
+        const processGroupId = -pid;
+        if (value === "SIGKILL") {
+          activeGroups.delete(processGroupId);
+          return;
+        }
+        if (!activeGroups.has(processGroupId)) throw missingGroupError();
+      };
+      let spawnCount = 0;
+      const spawnProcess = vi.fn((_executable: string, args: readonly string[]) => {
+        spawnCount += 1;
+        if (spawnCount === 1) {
+          expect(args).toEqual(["--version"]);
+          queueMicrotask(() => {
+            versionChild.stdout.write("codex-cli 0.147.0\n");
+            versionChild.stdout.end();
+            versionChild.emit("close", 0);
+          });
+          return versionChild;
+        }
+        let input = "";
+        appServerChild.stdin.on("data", (chunk: Buffer) => {
+          input += chunk.toString("utf8");
+          for (;;) {
+            const newline = input.indexOf("\n");
+            if (newline < 0) break;
+            const line = input.slice(0, newline);
+            input = input.slice(newline + 1);
+            const request = JSON.parse(line) as SentMessage;
+            if (isRequest(request, "initialize")) {
+              childResponse(appServerChild, request, {
+                userAgent: "codex_cli_rs/0.147.0",
+                codexHome: "/home/tester/.codex",
+                platformFamily: "unix",
+                platformOs: "linux",
+              });
+            } else if (isRequest(request, "account/read")) {
+              childResponse(appServerChild, request, {
+                account: { type: "chatgpt", email: "private@example.com", planType: "pro" },
+                requiresOpenaiAuth: true,
+              });
+            }
+          }
+        });
+        return appServerChild;
+      });
+      const runtime = await createProductionCodexRuntime(callbacks(), {
+        platform: "linux",
+        environment: { CODEX_EXECUTABLE: "/opt/codex", PATH: "" },
+        canonicalize: async (candidate) => candidate,
+        isExecutable: async () => true,
+        spawnProcess: spawnProcess as unknown as typeof nodeSpawn,
+        processSignal: signal,
+        operationTimeoutMs: 40,
+        teardownTimeoutMs: 1,
+      });
+      const starting = runtime.newConversation("/workspace/project");
+      let failure: unknown;
+      void starting.catch((error: unknown) => {
+        failure = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(40);
+      expect(failure).toMatchObject({ code: "conversation-failed" });
+      await expect(starting).rejects.toMatchObject({ code: "conversation-failed" });
+
+      appServerChild.stdout.end();
+      appServerChild.emit("exit", 0);
+      await runtime.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("utility message bounds", () => {
@@ -760,6 +933,82 @@ describe("Codex app-server worker state machine", () => {
     expect(JSON.stringify(value.callbacks.events)).not.toContain("raw-provider-item");
   });
 
+  it("replaces streamed reasoning summaries under one projected message id", async () => {
+    const transport = new FakeTransport(standardResponder);
+    const callbackValue = callbacks();
+    const { runtime } = await startedRuntime(transport, callbackValue);
+    await runtime.newConversation("/workspace/project");
+    const prompting = runtime.prompt("thread-a", "Inspect this workspace");
+    await waitForSent(transport, "turn/start");
+
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "raw-reasoning-item",
+        summaryIndex: 0,
+        delta: "Looking at the workspace. ",
+      },
+    });
+    transport.emit({
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "raw-reasoning-item",
+        summaryIndex: 1,
+        delta: "Checking the package metadata.",
+      },
+    });
+    transport.emit({
+      method: "item/completed",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        item: {
+          type: "reasoning",
+          id: "raw-reasoning-item",
+          summary: ["Workspace and package metadata checked."],
+          content: [],
+        },
+        completedAtMs: 10,
+      },
+    });
+    transport.emit({
+      method: "turn/completed",
+      params: { threadId: "thread-a", turn: turnLifecycle("completed") },
+    });
+    await prompting;
+
+    expect(callbackValue.events).toEqual([
+      {
+        type: "message-update",
+        conversationId: "thread-a",
+        messageId: "codex-item-1",
+        role: "thought",
+        operation: "append",
+        text: "Looking at the workspace. ",
+      },
+      {
+        type: "message-update",
+        conversationId: "thread-a",
+        messageId: "codex-item-1",
+        role: "thought",
+        operation: "append",
+        text: "Checking the package metadata.",
+      },
+      {
+        type: "message-update",
+        conversationId: "thread-a",
+        messageId: "codex-item-1",
+        role: "thought",
+        operation: "replace",
+        text: "Workspace and package metadata checked.",
+      },
+    ]);
+  });
+
   it("fails a turn after the bounded raw-item correlation table is full", async () => {
     const transport = new FakeTransport(standardResponder);
     const callbackValue = callbacks();
@@ -964,6 +1213,57 @@ describe("Codex app-server worker state machine", () => {
     await prompting;
   });
 
+  it("correlates a numeric resolved approval id with its string approval key", async () => {
+    const transport = new FakeTransport(standardResponder);
+    let permissionSignal: AbortSignal | undefined;
+    let resolvePermission: ((value: AiAgentHostPermissionOutcome) => void) | undefined;
+    const callbackValue = callbacks({
+      requestPermission(_request, signal) {
+        permissionSignal = signal;
+        return new Promise((resolve) => {
+          resolvePermission = resolve;
+        });
+      },
+    });
+    const { runtime } = await startedRuntime(transport, callbackValue);
+    await runtime.newConversation("/workspace/project");
+    const prompting = runtime.prompt("thread-a", "Run tests");
+    await waitForSent(transport, "turn/start");
+    transport.emit({
+      id: "rpc-envelope-id",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "raw-command-item",
+        approvalId: "7",
+        environmentId: null,
+        startedAtMs: 10,
+        command: "npm test",
+      },
+    });
+    await vi.waitFor(() => expect(permissionSignal).toBeDefined());
+
+    transport.emit({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-a", requestId: 7 },
+    });
+    await vi.waitFor(() => expect(permissionSignal?.aborted).toBe(true));
+    resolvePermission?.({ outcome: "selected", optionId: "accept" });
+    await Promise.resolve();
+    expect(transport.sent).not.toContainEqual({
+      id: "rpc-envelope-id",
+      result: { decision: "accept" },
+    });
+    expect(callbackValue.onFatal).not.toHaveBeenCalled();
+
+    transport.emit({
+      method: "turn/completed",
+      params: { threadId: "thread-a", turn: turnLifecycle("completed") },
+    });
+    await prompting;
+  });
+
   it("uses locations from the matching projected file item for file approval", async () => {
     const workspacePath = process.cwd();
     const transport = new FakeTransport(standardResponder);
@@ -1030,6 +1330,155 @@ describe("Codex app-server worker state machine", () => {
     await prompting;
   });
 
+  it("waits for a matching file item before prompting and preserves approval order", async () => {
+    const workspacePath = process.cwd();
+    const transport = new FakeTransport(standardResponder);
+    const resolvePermissions: Array<(value: AiAgentHostPermissionOutcome) => void> = [];
+    const seenPermissions: AiAgentHostPermissionRequest[] = [];
+    const callbackValue = callbacks({
+      requestPermission(request) {
+        seenPermissions.push(request);
+        return new Promise((resolve) => {
+          resolvePermissions.push(resolve);
+        });
+      },
+    });
+    const { runtime } = await startedRuntime(transport, callbackValue);
+    await runtime.newConversation(workspacePath);
+    const prompting = runtime.prompt("thread-a", "Edit package metadata, then run tests");
+    await waitForSent(transport, "turn/start");
+
+    transport.emit({
+      id: "rpc-file-approval",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "file-change-item",
+        startedAtMs: 10,
+        reason: null,
+        grantRoot: null,
+      },
+    });
+    transport.emit({
+      id: "rpc-command-approval",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "command-item",
+        approvalId: "command-approval",
+        environmentId: null,
+        startedAtMs: 11,
+        command: "npm test",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seenPermissions).toHaveLength(0);
+    expect(transport.sent).not.toContainEqual({
+      id: "rpc-file-approval",
+      result: { decision: "cancel" },
+    });
+
+    transport.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        item: {
+          type: "fileChange",
+          id: "file-change-item",
+          status: "inProgress",
+          changes: [
+            {
+              path: `${workspacePath}/package.json`,
+              kind: { type: "update", move_path: null },
+              diff: "private patch",
+            },
+          ],
+        },
+        startedAtMs: 12,
+      },
+    });
+    await vi.waitFor(() => expect(seenPermissions).toHaveLength(1));
+    expect(seenPermissions[0]?.tool).toMatchObject({
+      kind: "edit",
+      locations: [{ path: "package.json" }],
+    });
+    resolvePermissions[0]?.({ outcome: "selected", optionId: "accept" });
+    await vi.waitFor(() =>
+      expect(transport.sent).toContainEqual({
+        id: "rpc-file-approval",
+        result: { decision: "accept" },
+      }),
+    );
+    await vi.waitFor(() => expect(seenPermissions).toHaveLength(2));
+    expect(seenPermissions[1]?.tool).toMatchObject({ kind: "execute", title: "npm test" });
+    resolvePermissions[1]?.({ outcome: "selected", optionId: "decline" });
+    await vi.waitFor(() =>
+      expect(transport.sent).toContainEqual({
+        id: "rpc-command-approval",
+        result: { decision: "decline" },
+      }),
+    );
+    transport.emit({
+      method: "turn/completed",
+      params: { threadId: "thread-a", turn: turnLifecycle("completed") },
+    });
+    await prompting;
+  });
+
+  it("fails closed after a matching file item has no locations", async () => {
+    const workspacePath = process.cwd();
+    const transport = new FakeTransport(standardResponder);
+    const callbackValue = callbacks();
+    const { runtime } = await startedRuntime(transport, callbackValue);
+    await runtime.newConversation(workspacePath);
+    const prompting = runtime.prompt("thread-a", "Attempt an empty file change");
+    await waitForSent(transport, "turn/start");
+
+    transport.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        item: {
+          type: "fileChange",
+          id: "empty-file-change-item",
+          status: "inProgress",
+          changes: [],
+        },
+        startedAtMs: 10,
+      },
+    });
+    transport.emit({
+      id: "rpc-empty-file-approval",
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: "thread-a",
+        turnId: "turn-a",
+        itemId: "empty-file-change-item",
+        startedAtMs: 11,
+        reason: null,
+        grantRoot: null,
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(transport.sent).toContainEqual({
+        id: "rpc-empty-file-approval",
+        result: { decision: "cancel" },
+      }),
+    );
+    expect(callbackValue.requestPermission).not.toHaveBeenCalled();
+    transport.emit({
+      method: "turn/completed",
+      params: { threadId: "thread-a", turn: turnLifecycle("completed") },
+    });
+    await prompting;
+  });
+
   it("denies blanket permission profiles with an empty turn-scoped grant", async () => {
     const transport = new FakeTransport(standardResponder);
     const callbackValue = callbacks();
@@ -1073,6 +1522,81 @@ describe("Codex app-server worker state machine", () => {
     await waitForSent(transport, "turn/start");
     await expect(runtime.cancel("thread-a")).resolves.toBeUndefined();
     await expect(prompting).rejects.toMatchObject({ code: "turn-failed" });
+  });
+
+  it("interrupts the real turn after a local unsupported-request failure", async () => {
+    const transport = new FakeTransport((message, target) => {
+      if (isRequest(message, "turn/start") || isRequest(message, "turn/interrupt")) return;
+      standardResponder(message, target);
+    });
+    const callbackValue = callbacks();
+    const { runtime } = await startedRuntime(transport, callbackValue);
+    await runtime.newConversation("/workspace/project");
+    const prompting = runtime.prompt("thread-a", "Use an unsupported tool");
+    const turnStart = await waitForSent(transport, "turn/start");
+
+    transport.emit({
+      id: "unsupported-server-request",
+      method: "item/tool/call",
+      params: {},
+    });
+    await vi.waitFor(() =>
+      expect(transport.sent).toContainEqual({
+        id: "unsupported-server-request",
+        error: { code: -32601, message: "Method not supported" },
+      }),
+    );
+
+    response(transport, turnStart, { turn: { id: "turn-a", status: "inProgress" } });
+    const interrupt = await waitForSent(transport, "turn/interrupt");
+    expect(interrupt).toMatchObject({
+      params: { threadId: "thread-a", turnId: "turn-a" },
+    });
+    response(transport, interrupt, {});
+    transport.emit({
+      method: "turn/completed",
+      params: { threadId: "thread-a", turn: turnLifecycle("interrupted") },
+    });
+
+    await expect(prompting).rejects.toMatchObject({ code: "turn-failed" });
+    expect(callbackValue.onFatal).not.toHaveBeenCalled();
+  });
+
+  it("fails a locally failed turn that never sends terminal completion", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new FakeTransport((message, target) => {
+        if (isRequest(message, "turn/start") || isRequest(message, "turn/interrupt")) return;
+        standardResponder(message, target);
+      });
+      const callbackValue = callbacks();
+      const { runtime } = await startedRuntime(transport, callbackValue);
+      await runtime.newConversation("/workspace/project");
+      const prompting = runtime.prompt("thread-a", "Use an unsupported tool");
+      const turnStart = await waitForSent(transport, "turn/start");
+
+      transport.emit({
+        id: "unsupported-server-request",
+        method: "item/tool/call",
+        params: {},
+      });
+      await vi.waitFor(() =>
+        expect(transport.sent).toContainEqual({
+          id: "unsupported-server-request",
+          error: { code: -32601, message: "Method not supported" },
+        }),
+      );
+      response(transport, turnStart, { turn: { id: "turn-a", status: "inProgress" } });
+      const interrupt = await waitForSent(transport, "turn/interrupt");
+      response(transport, interrupt, {});
+
+      const rejected = expect(prompting).rejects.toMatchObject({ code: "turn-failed" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejected;
+      expect(callbackValue.onFatal).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cancels an approval that arrives after cancellation is requested", async () => {

@@ -9,11 +9,12 @@ import {
   type AiAgentHostPermissionRequest,
   type CreateAiAgentHost,
 } from "./ai-agent-host";
-import { AiChannelController } from "./ai-channel-controller";
+import { AiChannelController, type AiChannelHostPresentation } from "./ai-channel-controller";
 import type { AiChannelPreference } from "./ai-channel-preference-store";
 
 const WORKSPACE = "/private/projects/secret-repo";
 const NOW = new Date("2026-08-11T18:00:00.000Z");
+const CLAUDE_PRESENTATION = { displayName: "Claude Code", executableName: "claude" } as const;
 
 interface Deferred<Value> {
   readonly promise: Promise<Value>;
@@ -108,6 +109,7 @@ interface Harness {
 
 function createHarness(
   loaded: AiChannelPreference = { workspacePath: WORKSPACE, sessionId: null },
+  hostPresentation: AiChannelHostPresentation = CLAUDE_PRESENTATION,
 ): Harness {
   const preferences = new FakePreferenceStore(loaded);
   const host = new FakeHost();
@@ -121,6 +123,7 @@ function createHarness(
   const controller = new AiChannelController({
     preferenceStore: preferences,
     hostFactory,
+    hostPresentation,
     now: () => NOW,
   });
   return {
@@ -211,6 +214,7 @@ describe("AiChannelController", () => {
     const controller = new AiChannelController({
       preferenceStore: preferences,
       hostFactory: async () => new FakeHost(),
+      hostPresentation: CLAUDE_PRESENTATION,
       now: () => NOW,
     });
 
@@ -306,6 +310,50 @@ describe("AiChannelController", () => {
     expect(harness.host.disposeCalls).toBe(1);
   });
 
+  it.each([
+    ["not-installed", "Install Codex and make sure codex is available on PATH, then retry."],
+    ["not-authenticated", "Sign in to Codex, then retry."],
+    ["unsupported-version", "Update Codex to a supported version, then retry."],
+    ["startup-failed", "Codex could not start on this device. Check the installation, then retry."],
+    [
+      "protocol-failed",
+      "Codex could not establish a compatible connection. Update it, then retry.",
+    ],
+  ] as const)(
+    "maps the %s startup failure without exposing provider details",
+    async (code, copy) => {
+      const preferences = new FakePreferenceStore({ workspacePath: WORKSPACE, sessionId: null });
+      const controller = new AiChannelController({
+        preferenceStore: preferences,
+        hostFactory: async () => {
+          throw new AiAgentHostError(code);
+        },
+        hostPresentation: { displayName: "Codex", executableName: "codex" },
+        now: () => NOW,
+      });
+      await controller.initialize();
+
+      const state = await controller.start({ generation: controller.state.generation });
+
+      expect(state).toMatchObject({ status: "unavailable", error: copy });
+      expect(JSON.stringify(state)).not.toContain(code);
+    },
+  );
+
+  it("uses the selected host presentation for conversation errors", async () => {
+    const harness = createHarness(
+      { workspacePath: WORKSPACE, sessionId: "persisted-session" },
+      { displayName: "Codex", executableName: "codex" },
+    );
+    harness.host.resumeError = new AiAgentHostError("not-authenticated");
+
+    const state = await startReady(harness);
+
+    expect(state).toMatchObject({ status: "error", error: "Sign in to Codex, then retry." });
+    expect(harness.host.newConversationCalls).toEqual([]);
+    expect(harness.host.disposeCalls).toBe(1);
+  });
+
   it("projects neutral message, thought, tool, and plan updates without absolute paths", async () => {
     const harness = createHarness();
     harness.host.promptGate = deferred<void>();
@@ -390,6 +438,63 @@ describe("AiChannelController", () => {
     harness.host.promptGate.resolve(undefined);
     await flushPromises();
     expect(harness.controller.state.status).toBe("ready");
+  });
+
+  it("treats an undefined runtime message id as anonymous", async () => {
+    const harness = createHarness();
+    harness.host.promptGate = deferred<void>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Stream",
+    });
+    const callbacks = harness.callbacks();
+    const malformed = {
+      ...textUpdate("new-session", "agent_message_chunk", "Hello "),
+      messageId: undefined,
+    } as unknown as AiAgentHostEvent;
+
+    expect(() => callbacks.onEvent(malformed)).not.toThrow();
+    callbacks.onEvent({
+      ...malformed,
+      text: "world",
+    } as unknown as AiAgentHostEvent);
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "message", role: "assistant", body: "Hello world" }),
+      ]),
+    );
+  });
+
+  it("uses the selected host presentation for untitled tools and prompt failures", async () => {
+    const harness = createHarness(
+      { workspacePath: WORKSPACE, sessionId: null },
+      { displayName: "Codex", executableName: "codex" },
+    );
+    harness.host.promptGate = deferred<void>();
+    await startReady(harness);
+    await harness.controller.sendPrompt({
+      generation: harness.controller.state.generation,
+      prompt: "Run once",
+    });
+    harness.callbacks().onEvent({
+      type: "tool-update",
+      conversationId: "new-session",
+      isCreation: true,
+      tool: { id: "untitled-tool", title: null, kind: "execute", status: "in_progress" },
+    });
+
+    expect(harness.controller.state.entries).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "tool", title: "Codex tool" })]),
+    );
+
+    harness.host.promptGate.reject(new AiAgentHostError("turn-failed"));
+    await flushPromises();
+    expect(harness.controller.state).toMatchObject({
+      status: "error",
+      error: "Codex stopped before completing the prompt.",
+    });
   });
 
   it("redacts paths split across streamed chunks and home-relative paths", async () => {
@@ -963,6 +1068,7 @@ describe("AiChannelController", () => {
         if (host === undefined) throw new Error("Unexpected host creation");
         return host;
       },
+      hostPresentation: CLAUDE_PRESENTATION,
       now: () => NOW,
     });
     await controller.initialize();
@@ -1090,6 +1196,7 @@ describe("AiChannelController", () => {
         callbackCaptures.push(nextCallbacks);
         return host;
       },
+      hostPresentation: CLAUDE_PRESENTATION,
       now: () => NOW,
       reportListenerError: (error) => listenerErrors.push(error),
     });
@@ -1129,6 +1236,7 @@ describe("AiChannelController", () => {
       hostFactory: async () => {
         throw new Error(`missing executable at ${WORKSPACE}/bin/claude`);
       },
+      hostPresentation: CLAUDE_PRESENTATION,
       now: () => NOW,
     });
     await controller.initialize();

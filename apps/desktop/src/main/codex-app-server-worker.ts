@@ -154,6 +154,51 @@ function timerUntil(deadline: number): Promise<void> {
   });
 }
 
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function remainingTimeout(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new CodexWorkerError("startup-failed");
+  return remaining;
+}
+
+function boundedStartupOperation<T>(deadline: number, operation: () => Promise<T>): Promise<T> {
+  const timeoutMs = remainingTimeout(deadline);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new CodexWorkerError("startup-failed"));
+    }, timeoutMs);
+    timeout.unref();
+    let pending: Promise<T>;
+    try {
+      pending = operation();
+    } catch (error) {
+      clearTimeout(timeout);
+      reject(error);
+      return;
+    }
+    void pending.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function confirmCodexProcessGroupExit(
   processGroupId: number,
   deadline: number,
@@ -593,6 +638,8 @@ interface ActiveTurn {
   readonly threadId: string;
   turnId: string | null;
   cancellationRequested: boolean;
+  localFailureRequested: boolean;
+  interruptRequested: boolean;
   responseReceived: boolean;
   terminalStatus: "completed" | "interrupted" | "failed" | null;
   settled: boolean;
@@ -676,6 +723,7 @@ export class CodexAppServerWorkerRuntime {
   readonly #operationTimeoutMs: number;
   readonly #interruptTimeoutMs: number;
   readonly #teardownTimeoutMs: number;
+  readonly #startupDeadline: number | null;
   readonly #onProcessGroupCleared: ((processGroupId: number) => void) | undefined;
   readonly #rawToLocalItem = new Map<string, string>();
   readonly #fileLocationsByRawItem = new Map<string, ProjectedFileLocations>();
@@ -699,11 +747,25 @@ export class CodexAppServerWorkerRuntime {
     transport: CodexByteTransport,
     private readonly callbacks: CodexWorkerCallbacks,
     options: CodexWorkerRuntimeOptions = {},
+    startupDeadline?: number,
   ) {
-    this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    this.#operationTimeoutMs = options.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
-    this.#interruptTimeoutMs = options.interruptTimeoutMs ?? DEFAULT_INTERRUPT_TIMEOUT_MS;
-    this.#teardownTimeoutMs = options.teardownTimeoutMs ?? DEFAULT_TEARDOWN_TIMEOUT_MS;
+    this.#startupTimeoutMs = positiveTimeout(options.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS);
+    this.#operationTimeoutMs = positiveTimeout(
+      options.operationTimeoutMs,
+      DEFAULT_OPERATION_TIMEOUT_MS,
+    );
+    this.#interruptTimeoutMs = positiveTimeout(
+      options.interruptTimeoutMs,
+      DEFAULT_INTERRUPT_TIMEOUT_MS,
+    );
+    this.#teardownTimeoutMs = positiveTimeout(
+      options.teardownTimeoutMs,
+      DEFAULT_TEARDOWN_TIMEOUT_MS,
+    );
+    this.#startupDeadline =
+      startupDeadline !== undefined && Number.isFinite(startupDeadline) && startupDeadline > 0
+        ? startupDeadline
+        : null;
     this.#onProcessGroupCleared = options.onProcessGroupCleared;
     this.#rpc = new CodexRpcConnection(transport, {
       onNotification: (method, params) => this.#notification(method, params),
@@ -714,6 +776,7 @@ export class CodexAppServerWorkerRuntime {
 
   async initialize(): Promise<void> {
     if (this.#disposed || this.#initialized) throw new CodexWorkerError("startup-failed");
+    const startupDeadline = this.#startupDeadline ?? Date.now() + this.#startupTimeoutMs;
     try {
       parseInitializeResult(
         await this.#rpc.request(
@@ -726,12 +789,16 @@ export class CodexAppServerWorkerRuntime {
             },
             capabilities: null,
           },
-          this.#startupTimeoutMs,
+          remainingTimeout(startupDeadline),
         ),
       );
       await this.#rpc.notify("initialized");
       const account = parseAccountResult(
-        await this.#rpc.request("account/read", { refreshToken: false }, this.#startupTimeoutMs),
+        await this.#rpc.request(
+          "account/read",
+          { refreshToken: false },
+          remainingTimeout(startupDeadline),
+        ),
       );
       if (!account.authenticated) throw new CodexWorkerError("not-authenticated");
       this.#initialized = true;
@@ -897,6 +964,8 @@ export class CodexAppServerWorkerRuntime {
       threadId: conversationId,
       turnId: null,
       cancellationRequested: false,
+      localFailureRequested: false,
+      interruptRequested: false,
       responseReceived: false,
       terminalStatus: null,
       settled: false,
@@ -926,6 +995,7 @@ export class CodexAppServerWorkerRuntime {
       active.turnId = result.turnId;
       active.responseReceived = true;
       active.markReady();
+      this.#interruptLocalFailure(active);
       this.#finishTurnIfReady(active);
       await active.completion;
     } catch (error) {
@@ -957,7 +1027,7 @@ export class CodexAppServerWorkerRuntime {
     if (this.#activeTurn === active) this.#activeTurn = null;
     this.#cancelApprovals();
     this.#resetTurnProjectionState();
-    if (active.terminalStatus === "completed") active.resolve();
+    if (active.terminalStatus === "completed" && !active.localFailureRequested) active.resolve();
     else active.reject(new CodexWorkerError("turn-failed"));
   }
 
@@ -969,17 +1039,20 @@ export class CodexAppServerWorkerRuntime {
     this.#cancelApprovals();
     await boundedTimeout(active.ready, this.#interruptTimeoutMs, "turn-failed");
     if (active.turnId === null) throw new CodexWorkerError("turn-failed");
-    try {
-      parseEmptyResult(
-        await this.#rpc.request(
-          "turn/interrupt",
-          { threadId: active.threadId, turnId: active.turnId },
-          this.#interruptTimeoutMs,
-        ),
-      );
-    } catch {
-      // Completion can win the race with the interrupt acknowledgement.
-      if (active.terminalStatus === null) throw new CodexWorkerError("turn-failed");
+    if (!active.interruptRequested) {
+      active.interruptRequested = true;
+      try {
+        parseEmptyResult(
+          await this.#rpc.request(
+            "turn/interrupt",
+            { threadId: active.threadId, turnId: active.turnId },
+            this.#interruptTimeoutMs,
+          ),
+        );
+      } catch {
+        // Completion can win the race with the interrupt acknowledgement.
+        if (active.terminalStatus === null) throw new CodexWorkerError("turn-failed");
+      }
     }
     try {
       await boundedTimeout(active.completion, this.#teardownTimeoutMs, "turn-failed");
@@ -1031,10 +1104,7 @@ export class CodexAppServerWorkerRuntime {
         return;
       case "server-request-resolved": {
         if (notification.threadId !== this.#threadId) return;
-        const approval =
-          typeof notification.approvalKey === "string"
-            ? this.#approvalsByResolutionKey.get(notification.approvalKey)
-            : undefined;
+        const approval = this.#approvalsByResolutionKey.get(String(notification.approvalKey));
         if (approval !== undefined) {
           approval.settled = true;
           approval.controller.abort();
@@ -1070,6 +1140,7 @@ export class CodexAppServerWorkerRuntime {
           return;
         }
         active.turnId = notification.turnId;
+        this.#interruptLocalFailure(active);
         return;
       case "turn-completed":
         if (notification.status === "inProgress") {
@@ -1093,7 +1164,7 @@ export class CodexAppServerWorkerRuntime {
         await this.#emit({
           type: "message-update",
           conversationId: active.threadId,
-          messageId: this.#localItemId(`${notification.itemId}:${notification.summaryIndex}`),
+          messageId: this.#localItemId(notification.itemId),
           role: "thought",
           operation: "append",
           text: truncateCodexUtf8(notification.delta, MAX_CODEX_PROJECTED_TEXT_BYTES),
@@ -1111,10 +1182,12 @@ export class CodexAppServerWorkerRuntime {
           item,
           notification.kind === "item-started" ? "started" : "completed",
         );
-        if (item.type === "tool" && item.toolKind === "edit") {
+        const updatesFileLocations = item.type === "tool" && item.toolKind === "edit";
+        if (updatesFileLocations) {
           this.#rememberFileLocations(item.itemId, item.locations);
         }
         if (event !== null) await this.#emit(event);
+        if (updatesFileLocations) void this.#drainApprovalQueue();
         return;
       }
       case "plan-updated":
@@ -1181,6 +1254,7 @@ export class CodexAppServerWorkerRuntime {
       active === null ||
       active.turnId === null ||
       active.cancellationRequested ||
+      active.localFailureRequested ||
       request.threadId !== active.threadId ||
       request.turnId !== active.turnId
     ) {
@@ -1212,6 +1286,12 @@ export class CodexAppServerWorkerRuntime {
     if (this.#approvalActive) return;
     const approval = this.#approvalQueue.find((candidate) => !candidate.settled);
     if (approval === undefined || this.#workspacePath === null) return;
+    if (
+      approval.request.kind === "file-approval" &&
+      !this.#fileLocationsByRawItem.has(approval.request.itemId)
+    ) {
+      return;
+    }
     this.#approvalActive = true;
     try {
       const tool = codexApprovalTool(
@@ -1258,12 +1338,38 @@ export class CodexAppServerWorkerRuntime {
 
   #failTurn(): void {
     const active = this.#activeTurn;
-    if (active === null || active.settled) return;
-    active.terminalStatus = "failed";
-    active.responseReceived = true;
-    active.markReady();
-    if (active.turnId === null) active.turnId = "local-failed-turn";
-    this.#finishTurnIfReady(active);
+    if (active === null || active.settled || active.localFailureRequested) return;
+    active.localFailureRequested = true;
+    this.#cancelApprovals();
+    this.#interruptLocalFailure(active);
+  }
+
+  #interruptLocalFailure(active: ActiveTurn): void {
+    if (
+      !active.localFailureRequested ||
+      active.interruptRequested ||
+      active.settled ||
+      active.turnId === null ||
+      active.terminalStatus !== null
+    ) {
+      return;
+    }
+    active.interruptRequested = true;
+    void this.#rpc
+      .request(
+        "turn/interrupt",
+        { threadId: active.threadId, turnId: active.turnId },
+        this.#interruptTimeoutMs,
+      )
+      .then((result) => {
+        parseEmptyResult(result);
+        return boundedTimeout(active.completion, this.#teardownTimeoutMs, "turn-failed");
+      })
+      .catch(() => {
+        if (this.#activeTurn === active && !active.settled && active.terminalStatus === null) {
+          this.#fatal();
+        }
+      });
   }
 
   #fatal(): void {
@@ -1275,7 +1381,9 @@ export class CodexAppServerWorkerRuntime {
     if (active !== null && !active.settled) {
       active.settled = true;
       active.markReady();
-      active.reject(new CodexWorkerError("protocol-failed"));
+      active.reject(
+        new CodexWorkerError(active.localFailureRequested ? "turn-failed" : "protocol-failed"),
+      );
       void active.completion.catch(() => undefined);
       this.#activeTurn = null;
     }
@@ -1426,6 +1534,10 @@ function processTransport(
 
 export interface ProductionWorkerDependencies extends CodexExecutableDependencies {
   readonly spawnProcess?: typeof spawn;
+  readonly startupTimeoutMs?: number;
+  readonly operationTimeoutMs?: number;
+  readonly interruptTimeoutMs?: number;
+  readonly teardownTimeoutMs?: number;
   readonly versionTimeoutMs?: number;
   readonly processSignal?: CodexProcessSignal;
   readonly onProcessGroupSpawned?: (processGroupId: number) => boolean | void;
@@ -1444,7 +1556,7 @@ export async function readCodexVersion(
   const environment = dependencies.environment ?? process.env;
   const platform = dependencies.platform ?? process.platform;
   const sendSignal = dependencies.processSignal ?? process.kill;
-  const timeoutMs = Math.max(1, dependencies.versionTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
+  const timeoutMs = positiveTimeout(dependencies.versionTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS);
   const deadline = Date.now() + timeoutMs;
   const cleanupReserve = Math.min(PROCESS_CLEANUP_RESERVE_MS, Math.max(0, timeoutMs - 1));
   const operationCutoff = deadline - cleanupReserve;
@@ -1557,13 +1669,22 @@ export async function createProductionCodexRuntime(
   const environment = dependencies.environment ?? process.env;
   const platform = dependencies.platform ?? process.platform;
   const sendSignal = dependencies.processSignal ?? process.kill;
+  const startupDeadline =
+    Date.now() + positiveTimeout(dependencies.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS);
   if (platform === "win32") throw new CodexWorkerError("startup-failed");
-  const executable = await resolveCodexExecutable({ ...dependencies, environment });
+  const executable = await boundedStartupOperation(startupDeadline, () =>
+    resolveCodexExecutable({ ...dependencies, environment }),
+  );
+  const versionTimeoutMs = remainingTimeout(startupDeadline);
   await readCodexVersion(executable, {
     ...dependencies,
     environment,
     platform,
     processSignal: sendSignal,
+    versionTimeoutMs: Math.min(
+      positiveTimeout(dependencies.versionTimeoutMs, versionTimeoutMs),
+      versionTimeoutMs,
+    ),
   });
   const spawnProcess = dependencies.spawnProcess ?? spawn;
   let child: ChildProcessWithoutNullStreams;
@@ -1594,7 +1715,7 @@ export async function createProductionCodexRuntime(
     killCodexProcessGroup(child, platform, sendSignal);
     await confirmCodexProcessGroupExit(
       processGroupId,
-      Date.now() + DEFAULT_TEARDOWN_TIMEOUT_MS,
+      Date.now() + positiveTimeout(dependencies.teardownTimeoutMs, DEFAULT_TEARDOWN_TIMEOUT_MS),
       sendSignal,
     );
     throw new CodexWorkerError("startup-failed");
@@ -1602,7 +1723,14 @@ export async function createProductionCodexRuntime(
   const runtime = new CodexAppServerWorkerRuntime(
     processTransport(child, platform, sendSignal),
     callbacks,
-    { onProcessGroupCleared: dependencies.onProcessGroupCleared },
+    {
+      startupTimeoutMs: dependencies.startupTimeoutMs,
+      operationTimeoutMs: dependencies.operationTimeoutMs,
+      interruptTimeoutMs: dependencies.interruptTimeoutMs,
+      teardownTimeoutMs: dependencies.teardownTimeoutMs,
+      onProcessGroupCleared: dependencies.onProcessGroupCleared,
+    },
+    startupDeadline,
   );
   try {
     await runtime.initialize();

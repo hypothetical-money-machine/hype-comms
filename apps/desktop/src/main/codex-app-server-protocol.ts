@@ -14,8 +14,6 @@ import type {
  * It intentionally contains only the stable Lite methods used by Hype Comms.
  */
 export const CODEX_APP_SERVER_SCHEMA_VERSION = "0.147.0";
-export const CODEX_APP_SERVER_MINIMUM_VERSION = "0.147.0";
-export const CODEX_APP_SERVER_MAXIMUM_VERSION = "0.147.0";
 
 export const MAX_CODEX_JSONL_LINE_BYTES = 8 * 1_024 * 1_024;
 export const MAX_CODEX_QUEUED_INPUT_BYTES = 16 * 1_024 * 1_024;
@@ -34,6 +32,9 @@ export const MAX_CODEX_ITEM_LOCATIONS = 100;
 export const MAX_CODEX_LOCATION_BYTES = 4_096;
 export const MAX_CODEX_COMMAND_TOKENS = 2_048;
 export const MAX_CODEX_REQUEST_ARRAY_ITEMS = 256;
+
+const MAX_CACHED_CODEX_WORKSPACE_ROOTS = 32;
+const canonicalWorkspaceRoots = new Map<string, string>();
 
 export type CodexRequestId = string | number;
 
@@ -290,19 +291,20 @@ function preflightJsonDepth(source: string): void {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (const character of source) {
+  for (let index = 0; index < source.length; index += 1) {
+    const codeUnit = source.charCodeAt(index);
     if (inString) {
       if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === '"') inString = false;
+      else if (codeUnit === 0x5c) escaped = true;
+      else if (codeUnit === 0x22) inString = false;
       continue;
     }
-    if (character === '"') {
+    if (codeUnit === 0x22) {
       inString = true;
-    } else if (character === "{" || character === "[") {
+    } else if (codeUnit === 0x7b || codeUnit === 0x5b) {
       depth += 1;
       if (depth > MAX_CODEX_JSON_DEPTH) throw new CodexProtocolError("limit-exceeded");
-    } else if (character === "}" || character === "]") {
+    } else if (codeUnit === 0x7d || codeUnit === 0x5d) {
       depth -= 1;
       if (depth < 0) throw new CodexProtocolError("invalid-message");
     }
@@ -477,17 +479,29 @@ function itemStatus(
 }
 
 function sanitizeUnicode(value: string): string {
-  return Array.from(value, (character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    const control =
-      codePoint <= 31 ||
-      (codePoint >= 127 && codePoint <= 159) ||
-      (codePoint >= 0x200b && codePoint <= 0x200f) ||
-      (codePoint >= 0x202a && codePoint <= 0x202e) ||
-      (codePoint >= 0x2060 && codePoint <= 0x206f) ||
-      codePoint === 0xfeff;
-    return control ? " " : character;
-  }).join("");
+  let pieces: string[] | null = null;
+  let segmentStart = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isUnsafeUnicodeCodeUnit(value.charCodeAt(index))) continue;
+    pieces ??= [];
+    if (segmentStart < index) pieces.push(value.slice(segmentStart, index));
+    pieces.push(" ");
+    segmentStart = index + 1;
+  }
+  if (pieces === null) return value;
+  if (segmentStart < value.length) pieces.push(value.slice(segmentStart));
+  return pieces.join("");
+}
+
+function isUnsafeUnicodeCodeUnit(codeUnit: number): boolean {
+  return (
+    codeUnit <= 0x1f ||
+    (codeUnit >= 0x7f && codeUnit <= 0x9f) ||
+    (codeUnit >= 0x200b && codeUnit <= 0x200f) ||
+    (codeUnit >= 0x202a && codeUnit <= 0x202e) ||
+    (codeUnit >= 0x2060 && codeUnit <= 0x206f) ||
+    codeUnit === 0xfeff
+  );
 }
 
 export function truncateCodexUtf8(value: string, maximumBytes: number): string {
@@ -521,7 +535,9 @@ function tokenizeCodexCommand(value: string): readonly string[] | null {
     return tokens.length <= MAX_CODEX_COMMAND_TOKENS;
   };
 
-  for (const character of sanitizeUnicode(value)) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    const character = isUnsafeUnicodeCodeUnit(codeUnit) ? " " : value.charAt(index);
     if (escaped) {
       token += character;
       escaped = false;
@@ -796,6 +812,29 @@ function isContainedPath(root: string, candidate: string): boolean {
   return !(relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
 }
 
+function canonicalWorkspaceRoot(workspacePath: string): string | null {
+  const cached = canonicalWorkspaceRoots.get(workspacePath);
+  if (cached !== undefined) {
+    canonicalWorkspaceRoots.delete(workspacePath);
+    canonicalWorkspaceRoots.set(workspacePath, cached);
+    return cached;
+  }
+
+  let resolved: string;
+  try {
+    resolved = realpathSync.native(workspacePath);
+  } catch {
+    return null;
+  }
+
+  if (canonicalWorkspaceRoots.size >= MAX_CACHED_CODEX_WORKSPACE_ROOTS) {
+    const oldest = canonicalWorkspaceRoots.keys().next().value;
+    if (oldest !== undefined) canonicalWorkspaceRoots.delete(oldest);
+  }
+  canonicalWorkspaceRoots.set(workspacePath, resolved);
+  return resolved;
+}
+
 function workspaceRelativeLocation(candidate: unknown, workspacePath: string): string | null {
   if (
     typeof candidate !== "string" ||
@@ -815,12 +854,10 @@ function workspaceRelativeLocation(candidate: unknown, workspacePath: string): s
     : path.resolve(workspacePath, candidate);
   if (!isContainedPath(workspacePath, lexicalPath)) return null;
 
-  let realWorkspace: string;
-  try {
-    realWorkspace = realpathSync.native(workspacePath);
-  } catch {
-    return null;
-  }
+  // Cache only the canonical security root. Candidate paths are resolved on every use so a stale
+  // cache entry fails closed if the workspace or one of its descendants is replaced by a symlink.
+  const realWorkspace = canonicalWorkspaceRoot(workspacePath);
+  if (realWorkspace === null) return null;
   const realCandidate = realPathIncludingMissingLeaf(lexicalPath);
   if (realCandidate === null || !isContainedPath(realWorkspace, realCandidate)) return null;
 
@@ -1101,11 +1138,10 @@ function projectedItem(value: unknown, workspacePath: string): CodexProjectedIte
       }
       requiredNullableFiniteNumber(item.durationMs);
       const command = sanitizeCodexCommandPreview(requiredString(item.command, 100_000));
-      if (command === null) throw new CodexProtocolError("incompatible-protocol");
       return {
         type: "tool",
         itemId,
-        title: command,
+        title: command ?? "Run a command",
         toolKind: "execute",
         status: itemStatus(item.status),
         locations: [],
