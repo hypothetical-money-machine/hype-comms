@@ -30,6 +30,7 @@ import {
   ConversationEmptyState,
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
+import { MemberListResizeHandle } from "./member-list-resize-handle";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
@@ -1389,116 +1390,122 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           onOpenChange={chrome.onPopoverOpenChange}
         />
 
-        <nav aria-label="Conversations">
-          <div className="nav-heading">
-            <span>AI</span>
-          </div>
-          <button
-            className={
-              destination === "ai"
-                ? "conversation ai-channel-destination active"
-                : "conversation ai-channel-destination"
-            }
-            type="button"
-            aria-current={destination === "ai" ? "page" : undefined}
-            onClick={openAiChannel}
-          >
-            <span className="conversation-label">
-              <AiChannelIcon />
-              <span className="conversation-label-text">AI Channel</span>
-            </span>
-            <span className="ai-channel-local-badge">Local</span>
-          </button>
-
-          <div className="nav-heading">
-            <span>Channels</span>
-            <ChannelCreatePopover
-              canCreateAnnouncements={
-                bootstrap.featureFlags.announcementChannels &&
-                bootstrap.currentUser.role === "owner"
-              }
-              onCreate={createChannel}
-              onOpenChange={chrome.onPopoverOpenChange}
-            />
-          </div>
-          {channels.map((summary) => (
+        <div className="sidebar-split">
+          <nav aria-label="Conversations">
+            <div className="nav-heading">
+              <span>AI</span>
+            </div>
             <button
               className={
-                destination === "workspace" &&
-                summary.conversation.id === runtimeState.selectedConversationId
-                  ? "conversation active"
-                  : "conversation"
+                destination === "ai"
+                  ? "conversation ai-channel-destination active"
+                  : "conversation ai-channel-destination"
               }
               type="button"
-              key={summary.conversation.id}
-              onClick={() => selectConversation(summary.conversation.id)}
+              aria-current={destination === "ai" ? "page" : undefined}
+              onClick={openAiChannel}
             >
-              <span
-                className="conversation-label conversation-label-channel"
-                title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
+              <span className="conversation-label">
+                <AiChannelIcon />
+                <span className="conversation-label-text">AI Channel</span>
+              </span>
+              <span className="ai-channel-local-badge">Local</span>
+            </button>
+
+            <div className="nav-heading">
+              <span>Channels</span>
+              <ChannelCreatePopover
+                canCreateAnnouncements={
+                  bootstrap.featureFlags.announcementChannels &&
+                  bootstrap.currentUser.role === "owner"
+                }
+                onCreate={createChannel}
+                onOpenChange={chrome.onPopoverOpenChange}
+              />
+            </div>
+            {channels.map((summary) => (
+              <button
+                className={
+                  destination === "workspace" &&
+                  summary.conversation.id === runtimeState.selectedConversationId
+                    ? "conversation active"
+                    : "conversation"
+                }
+                type="button"
+                key={summary.conversation.id}
+                onClick={() => selectConversation(summary.conversation.id)}
               >
-                <ChannelIcon
-                  access={summary.conversation.access}
-                  channelMode={summary.conversation.channelMode}
-                />
-                <span className="conversation-label-text">
-                  {summary.conversation.name}
-                  {summary.conversation.isArchived ? " (archived)" : ""}
+                <span
+                  className="conversation-label conversation-label-channel"
+                  title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
+                >
+                  <ChannelIcon
+                    access={summary.conversation.access}
+                    channelMode={summary.conversation.channelMode}
+                  />
+                  <span className="conversation-label-text">
+                    {summary.conversation.name}
+                    {summary.conversation.isArchived ? " (archived)" : ""}
+                  </span>
                 </span>
-              </span>
-              <ConversationBadge
-                unreadCount={summary.unreadCount}
-                mentionCount={summary.mentionCount}
-              />
-            </button>
-          ))}
+                <ConversationBadge
+                  unreadCount={summary.unreadCount}
+                  mentionCount={summary.mentionCount}
+                />
+              </button>
+            ))}
 
-          <div className="nav-heading">
-            <span>Direct messages</span>
-          </div>
-          {directMessages.map((summary) => (
-            <button
-              className={
-                destination === "workspace" &&
-                summary.conversation.id === runtimeState.selectedConversationId
-                  ? "conversation active"
-                  : "conversation"
-              }
-              type="button"
-              key={summary.conversation.id}
-              onClick={() => selectConversation(summary.conversation.id)}
-            >
-              <span
-                className="conversation-label conversation-label-direct-message"
-                title={runtime.conversationName(summary)}
+            <div className="nav-heading">
+              <span>Direct messages</span>
+            </div>
+            {directMessages.map((summary) => (
+              <button
+                className={
+                  destination === "workspace" &&
+                  summary.conversation.id === runtimeState.selectedConversationId
+                    ? "conversation active"
+                    : "conversation"
+                }
+                type="button"
+                key={summary.conversation.id}
+                onClick={() => selectConversation(summary.conversation.id)}
               >
-                <DirectMessageIcon />
-                <span className="conversation-label-text">{runtime.conversationName(summary)}</span>
-              </span>
-              <ConversationBadge
-                unreadCount={summary.unreadCount}
-                mentionCount={summary.mentionCount}
-              />
-            </button>
-          ))}
-        </nav>
+                <span
+                  className="conversation-label conversation-label-direct-message"
+                  title={runtime.conversationName(summary)}
+                >
+                  <DirectMessageIcon />
+                  <span className="conversation-label-text">
+                    {runtime.conversationName(summary)}
+                  </span>
+                </span>
+                <ConversationBadge
+                  unreadCount={summary.unreadCount}
+                  mentionCount={summary.mentionCount}
+                />
+              </button>
+            ))}
+          </nav>
 
-        <section className="member-list" aria-label="Members">
-          <p className="nav-heading">Members</p>
-          {bootstrap.members.map((member) => (
-            <button
-              type="button"
-              key={member.id}
-              onClick={() => void startDirectMessage(member.id)}
-            >
-              <Avatar user={member} />
-              <span>
-                {member.displayName}
-                {member.id === currentUserId ? " (you)" : ""}
-              </span>
-            </button>
-          ))}
-        </section>
+          <MemberListResizeHandle />
+
+          <section id="workspace-members" className="member-list" aria-label="Members">
+            <p className="nav-heading">Members</p>
+            {bootstrap.members.map((member) => (
+              <button
+                type="button"
+                key={member.id}
+                onClick={() => void startDirectMessage(member.id)}
+              >
+                <Avatar user={member} />
+                <span>
+                  {member.displayName}
+                  {member.id === currentUserId ? " (you)" : ""}
+                </span>
+              </button>
+            ))}
+          </section>
+        </div>
 
         <footer className="sidebar-footer">
           <button

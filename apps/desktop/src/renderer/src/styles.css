@@ -3,6 +3,10 @@
      positions, and the slide-out offset all derive from these two values. */
   --rail-width: 68px;
   --sidebar-width: 284px;
+  --member-list-height: 220px;
+  --member-list-min-height: 80px;
+  --conversation-nav-min-height: 96px;
+  --member-list-resize-handle-height: 8px;
   color: var(--theme-text-primary);
   background: var(--theme-surface-canvas);
   font-family:
@@ -247,6 +251,7 @@ html[data-sidebar-position="right"] .shell.thread-open {
   display: flex;
   grid-area: sidebar;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   overflow: visible;
   border-right: 1px solid var(--theme-border-subtle);
@@ -336,10 +341,59 @@ html[data-sidebar-position="right"] .sidebar {
   cursor: pointer;
 }
 
-.sidebar nav {
+.sidebar-split {
+  display: flex;
+  min-height: 0;
   flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar nav {
+  flex: 1 1 0;
+  min-height: var(--conversation-nav-min-height);
   padding: 14px 10px;
   overflow-y: auto;
+}
+
+.member-list-resize-handle {
+  position: relative;
+  flex: 0 0 var(--member-list-resize-handle-height);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.member-list-resize-handle::before {
+  position: absolute;
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--theme-border-subtle);
+  content: "";
+}
+
+.member-list-resize-handle:hover::before,
+.member-list-resize-handle:focus-visible::before,
+html[data-member-list-resizing] .member-list-resize-handle::before {
+  top: 2px;
+  height: 3px;
+  background: var(--theme-border-accent);
+}
+
+.member-list-resize-handle:focus-visible {
+  outline: none;
+}
+
+html[data-member-list-resizing],
+html[data-member-list-resizing] * {
+  cursor: row-resize !important;
+  user-select: none !important;
 }
 
 .nav-heading {
@@ -744,10 +798,13 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .member-list {
-  max-height: 220px;
+  flex: 0 0 var(--member-list-height);
+  min-height: var(--member-list-min-height);
+  max-height: calc(
+    100% - var(--conversation-nav-min-height) - var(--member-list-resize-handle-height)
+  );
   padding: 0 10px 14px;
   overflow-y: auto;
-  border-top: 1px solid var(--theme-border-subtle);
 }
 
 .member-list button {
