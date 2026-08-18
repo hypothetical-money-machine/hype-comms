@@ -104,21 +104,145 @@ describe("MessageBody", () => {
   });
 
   it("leaves non-HTTPS and credential-bearing URLs as inert text", () => {
-    render(
+    const { container } = render(
       createElement(MessageBody, {
         body: "http://example.com https://user:secret@example.com javascript:alert(1)",
       }),
     );
 
     expect(screen.queryByRole("link")).toBeNull();
-    expect(screen.getByText(/http:\/\/example.com/).textContent).toContain(
-      "https://user:secret@example.com",
-    );
+    expect(container.textContent).toContain("http://example.com");
+    expect(container.textContent).toContain("https://user:secret@example.com");
   });
 
   it("preserves multiline message text", () => {
     render(createElement(MessageBody, { body: "First line\nSecond line" }));
 
     expect(screen.getByText(/First line/).textContent).toBe("First line\nSecond line");
+  });
+
+  it("renders CommonMark and GFM formatting", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "## Update\n\nUse **bold**, *emphasis*, and ~~old text~~.\n\n- First\n- Second\n\n`npm test`",
+      }),
+    );
+
+    expect(screen.getByRole("heading", { level: 2, name: "Update" })).toBeTruthy();
+    expect(screen.getByText("bold").tagName).toBe("STRONG");
+    expect(screen.getByText("emphasis").tagName).toBe("EM");
+    expect(screen.getByText("old text").tagName).toBe("DEL");
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByText("npm test").tagName).toBe("CODE");
+    expect(container.querySelector(".markdown-body")).not.toBeNull();
+  });
+
+  it("keeps channel navigation inside formatted text but not links or code", () => {
+    const onOpenChannel = vi.fn();
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "Ask **#general**, keep `#general` literal, or open [#general](https://example.com) and [**#general**](https://example.com/formatted).",
+        channels,
+        onOpenChannel,
+      }),
+    );
+
+    const references = screen.getAllByRole("button", { name: "#general" });
+    expect(references).toHaveLength(1);
+    expect(references[0]?.closest("strong")).not.toBeNull();
+    fireEvent.click(references[0] as HTMLElement);
+    expect(onOpenChannel).toHaveBeenCalledWith(GENERAL_ID);
+    expect(screen.getByText("#general", { selector: "code" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "#general (https://example.com/)" })).toBeTruthy();
+    const formattedLink = screen.getByRole("link", {
+      name: "#general (https://example.com/formatted)",
+    });
+    expect(formattedLink.querySelector("strong")?.textContent).toBe("#general");
+    expect(container.querySelector("a button")).toBeNull();
+  });
+
+  it("preserves raw HTML as literal text without creating HTML elements", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "Use <Foo /> and <b>bold</b> in the renderer",
+      }),
+    );
+
+    expect(container.textContent).toBe("Use <Foo /> and <b>bold</b> in the renderer");
+    expect(container.querySelector("foo")).toBeNull();
+    expect(container.querySelector("b")).toBeNull();
+  });
+
+  it("shows the destination when a Markdown link label could hide it", () => {
+    render(
+      createElement(MessageBody, {
+        body: "[https://bank.example.com](https://evil.example.com/login)",
+      }),
+    );
+
+    const link = screen.getByRole<HTMLAnchorElement>("link");
+    expect(link.textContent).toBe("https://bank.example.com (https://evil.example.com/login)");
+    expect(link.href).toBe("https://evil.example.com/login");
+  });
+
+  it("renders remote images as visible links without loading them", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "![](https://example.com/pixel.png)",
+      }),
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    const link = screen.getByRole<HTMLAnchorElement>("link", {
+      name: "Image (https://example.com/pixel.png)",
+    });
+    expect(link.href).toBe("https://example.com/pixel.png");
+    expect(screen.getByText("Image").classList).toContain("markdown-image-alt");
+  });
+
+  it("does not activate unsafe links", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "[HTTP](http://example.com) [credentials](https://user:secret@example.com)",
+      }),
+    );
+
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.textContent).toBe("HTTP credentials");
+  });
+
+  it("preserves footnote metadata and local navigation", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "A claim.[^1]\n\n[^1]: Supporting detail.",
+      }),
+    );
+
+    const label = container.querySelector<HTMLElement>("#footnote-label");
+    expect(label?.classList).toContain("sr-only");
+    const reference = container.querySelector<HTMLAnchorElement>('a[href="#user-content-fn-1"]');
+    const backReference = container.querySelector<HTMLAnchorElement>(
+      'a[href="#user-content-fnref-1"]',
+    );
+    expect(reference).not.toBeNull();
+    expect(backReference).not.toBeNull();
+  });
+
+  it("only inlines a pending suffix after a final paragraph", () => {
+    const suffix = createElement("span", { className: "pending-status" }, " · sending");
+    const paragraph = render(createElement(MessageBody, { body: "Sending", suffix }));
+    expect(
+      paragraph.container.querySelector(".markdown-body-with-suffix > p:nth-last-child(2)"),
+    ).not.toBeNull();
+    paragraph.unmount();
+
+    const blocks = render(
+      createElement(MessageBody, { body: "Introduction\n\n- One\n- Two", suffix }),
+    );
+    const messageBody = blocks.container.querySelector(".markdown-body-with-suffix");
+    expect(messageBody?.children[messageBody.children.length - 2]?.tagName).toBe("UL");
+    expect(
+      blocks.container.querySelector(".markdown-body-with-suffix > p:nth-last-child(2)"),
+    ).toBeNull();
   });
 });
