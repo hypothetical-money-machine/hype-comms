@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   productRealtimeEventSchema,
@@ -27,7 +28,19 @@ import {
 import { writeEvent, writeResult } from "./output.js";
 import type { CommandContext } from "./types.js";
 
-const WATCH_CAPABILITIES = [REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY].join(",");
+// Negotiated on the ticket request, which is where a websocket connection
+// settles its capabilities; the socket upgrade itself carries no headers.
+// participated-thread-notifications-v1 subscribes to nothing new: a watcher
+// already receives every message.created event for the conversations it
+// belongs to. It only asks the server to annotate the thread replies that land
+// in threads this principal has already written in, which is the difference
+// between a bot that can answer a follow-up and one that has to keep its own
+// ledger of where it has spoken.
+const WATCH_CAPABILITIES = [
+  REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+].join(",");
 
 class ResyncRequiredError extends CliError {
   constructor() {
