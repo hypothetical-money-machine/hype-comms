@@ -10,6 +10,7 @@ export type AiAgentHostErrorCode =
   | "unsupported-version"
   | "startup-failed"
   | "protocol-failed"
+  | "conversation-not-found"
   | "conversation-failed"
   | "turn-failed";
 

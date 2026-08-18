@@ -17,14 +17,15 @@ import {
   type AiChannelToolCall,
 } from "@hype-comms/contracts";
 
-import type {
-  AiAgentHost,
-  AiAgentHostEvent,
-  AiAgentHostExit,
-  AiAgentHostPermissionOutcome,
-  AiAgentHostPermissionRequest,
-  AiAgentHostTool,
-  CreateAiAgentHost,
+import {
+  AiAgentHostError,
+  type AiAgentHost,
+  type AiAgentHostEvent,
+  type AiAgentHostExit,
+  type AiAgentHostPermissionOutcome,
+  type AiAgentHostPermissionRequest,
+  type AiAgentHostTool,
+  type CreateAiAgentHost,
 } from "./ai-agent-host";
 import type { AiChannelPreference, AiChannelPreferenceStore } from "./ai-channel-preference-store";
 
@@ -779,8 +780,11 @@ export class AiChannelController {
       try {
         await host.resumeConversation(workspacePath, sessionId);
         if (!this.#isCurrentHostToken(hostToken)) return null;
-      } catch {
+      } catch (error) {
         if (!this.#isCurrentHostToken(hostToken)) return null;
+        if (!(error instanceof AiAgentHostError) || error.code !== "conversation-not-found") {
+          throw error;
+        }
         this.#acceptedSessionId = null;
         sessionId = null;
         this.#clearConversation();

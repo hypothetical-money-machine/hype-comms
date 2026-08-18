@@ -161,7 +161,10 @@ class ClaudeAiAgentHost implements AiAgentHost {
     try {
       await this.host.loadSession(workspacePath, conversationId);
     } catch (error) {
-      throw neutralError(error, "conversation-failed");
+      // Claude ACP does not distinguish a missing stored session from another load-session failure.
+      // Preserve the existing one-time replacement behavior while the neutral controller limits
+      // that fallback to an explicit missing-conversation result.
+      throw neutralError(error, "conversation-not-found");
     }
   }
 

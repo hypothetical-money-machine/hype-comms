@@ -289,7 +289,7 @@ describe("createClaudeAiAgentHost", () => {
       new AiAgentHostError("turn-failed"),
     );
     await expect(adapter.resumeConversation(WORKSPACE, "claude-session")).rejects.toEqual(
-      new AiAgentHostError("conversation-failed"),
+      new AiAgentHostError("conversation-not-found"),
     );
   });
 });

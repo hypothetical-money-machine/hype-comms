@@ -11,6 +11,7 @@ import {
 import {
   collectPackageFiles,
   excludedPackageDirectories,
+  verifyPackageEntries,
   verifyPackageMetadata,
   verifyUpdateConfiguration,
 } from "./verify-desktop-package.mjs";
@@ -18,6 +19,48 @@ import {
 const missingFile = async () => {
   throw Object.assign(new Error("missing"), { code: "ENOENT" });
 };
+
+const baselinePackageEntries = () =>
+  new Set([
+    "/dist/main/index.js",
+    "/dist/main/claude-acp-worker.js",
+    "/dist/main/codex-app-server-worker.js",
+    "/dist/preload/index.js",
+    "/dist/renderer/index.html",
+    "/dist/renderer/assets/index.js",
+    "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+    "/node_modules/@agentclientprotocol/sdk/package.json",
+    "/node_modules/electron-updater/package.json",
+    "/node_modules/electron-updater/out/main.js",
+  ]);
+
+test("requires the Codex worker without allowing bundled Codex packages or executables", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  assert.doesNotThrow(() => verifyPackageEntries(asarPath, baselinePackageEntries()));
+
+  const missingWorker = baselinePackageEntries();
+  missingWorker.delete("/dist/main/codex-app-server-worker.js");
+  assert.throws(
+    () => verifyPackageEntries(asarPath, missingWorker),
+    /missing \/dist\/main\/codex-app-server-worker\.js/u,
+  );
+
+  const bundledPackage = baselinePackageEntries();
+  bundledPackage.add("/node_modules/@openai/codex/package.json");
+  assert.throws(
+    () => verifyPackageEntries(asarPath, bundledPackage),
+    /contains bundled official Codex packages/u,
+  );
+
+  for (const executable of ["/vendor/codex", "/vendor/codex.exe"]) {
+    const bundledExecutable = baselinePackageEntries();
+    bundledExecutable.add(executable);
+    assert.throws(
+      () => verifyPackageEntries(asarPath, bundledExecutable),
+      /contains a bundled Codex executable/u,
+    );
+  }
+});
 
 test("requires development packages to omit updater configuration", async () => {
   await assert.doesNotReject(

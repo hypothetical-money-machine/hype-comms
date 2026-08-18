@@ -1,12 +1,13 @@
 import { aiChannelStateSchema, type AiChannelState } from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
-import type {
-  AiAgentHost,
-  AiAgentHostCallbacks,
-  AiAgentHostEvent,
-  AiAgentHostPermissionRequest,
-  CreateAiAgentHost,
+import {
+  AiAgentHostError,
+  type AiAgentHost,
+  type AiAgentHostCallbacks,
+  type AiAgentHostEvent,
+  type AiAgentHostPermissionRequest,
+  type CreateAiAgentHost,
 } from "./ai-agent-host";
 import { AiChannelController } from "./ai-channel-controller";
 import type { AiChannelPreference } from "./ai-channel-preference-store";
@@ -268,9 +269,9 @@ describe("AiChannelController", () => {
     expect(statuses).toEqual(["starting", "ready"]);
   });
 
-  it("falls back to exactly one new session when loading fails", async () => {
+  it("falls back to exactly one new session when the persisted conversation is missing", async () => {
     const harness = createHarness({ workspacePath: WORKSPACE, sessionId: "stale-session" });
-    harness.host.resumeError = new Error(`cannot load ${WORKSPACE}`);
+    harness.host.resumeError = new AiAgentHostError("conversation-not-found");
     harness.host.nextConversationId = "replacement-session";
 
     const state = await startReady(harness);
@@ -284,6 +285,25 @@ describe("AiChannelController", () => {
     });
     expect(JSON.stringify(state)).not.toContain("stale-session");
     expect(JSON.stringify(state)).not.toContain("replacement-session");
+  });
+
+  it("does not replace a persisted conversation after another resume failure", async () => {
+    const harness = createHarness({ workspacePath: WORKSPACE, sessionId: "persisted-session" });
+    harness.host.resumeError = new AiAgentHostError("conversation-failed");
+
+    const state = await startReady(harness);
+
+    expect(state).toMatchObject({
+      status: "error",
+      error:
+        "Claude Code could not open the selected workspace. Check Claude Code sign-in and folder access, then retry.",
+    });
+    expect(harness.host.resumeConversationCalls).toEqual([
+      { workspacePath: WORKSPACE, conversationId: "persisted-session" },
+    ]);
+    expect(harness.host.newConversationCalls).toEqual([]);
+    expect(harness.preferences.saves).toEqual([]);
+    expect(harness.host.disposeCalls).toBe(1);
   });
 
   it("projects neutral message, thought, tool, and plan updates without absolute paths", async () => {
