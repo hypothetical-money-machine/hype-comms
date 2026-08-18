@@ -139,9 +139,9 @@ describe("MessageBody", () => {
 
   it("keeps channel navigation inside formatted text but not links or code", () => {
     const onOpenChannel = vi.fn();
-    render(
+    const { container } = render(
       createElement(MessageBody, {
-        body: "Ask **#general**, keep `#general` literal, or open [#general](https://example.com).",
+        body: "Ask **#general**, keep `#general` literal, or open [#general](https://example.com) and [**#general**](https://example.com/formatted).",
         channels,
         onOpenChannel,
       }),
@@ -154,6 +154,11 @@ describe("MessageBody", () => {
     expect(onOpenChannel).toHaveBeenCalledWith(GENERAL_ID);
     expect(screen.getByText("#general", { selector: "code" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "#general (https://example.com/)" })).toBeTruthy();
+    const formattedLink = screen.getByRole("link", {
+      name: "#general (https://example.com/formatted)",
+    });
+    expect(formattedLink.querySelector("strong")?.textContent).toBe("#general");
+    expect(container.querySelector("a button")).toBeNull();
   });
 
   it("preserves raw HTML as literal text without creating HTML elements", () => {

@@ -1,4 +1,12 @@
-import { Children, Fragment, isValidElement, memo, type ReactNode } from "react";
+import {
+  Children,
+  createContext,
+  Fragment,
+  isValidElement,
+  memo,
+  useContext,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -76,6 +84,21 @@ function channelAwareText(
   });
 }
 
+const ChannelReferencesEnabledContext = createContext(true);
+
+function ChannelAwareText({
+  children,
+  channels,
+  onOpenChannel,
+}: {
+  readonly children: ReactNode;
+  readonly channels: readonly ChannelReferenceTarget[];
+  readonly onOpenChannel: ((conversationId: string) => void) | undefined;
+}) {
+  const channelReferencesEnabled = useContext(ChannelReferencesEnabledContext);
+  return channelAwareText(children, channels, channelReferencesEnabled ? onOpenChannel : undefined);
+}
+
 interface MarkdownBodyProps {
   readonly body: string;
   readonly className: string;
@@ -91,8 +114,11 @@ export const MarkdownBody = memo(function MarkdownBody({
   channels = [],
   onOpenChannel,
 }: MarkdownBodyProps) {
-  const renderText = (children: ReactNode): ReactNode =>
-    channelAwareText(children, channels, onOpenChannel);
+  const renderText = (children: ReactNode): ReactNode => (
+    <ChannelAwareText channels={channels} onOpenChannel={onOpenChannel}>
+      {children}
+    </ChannelAwareText>
+  );
   const components: Components = {
     p: ({ children, node, ...props }) => {
       void node;
@@ -148,20 +174,25 @@ export const MarkdownBody = memo(function MarkdownBody({
     },
     a: ({ children, href, node, ...props }) => {
       void node;
+      const linkChildren = (
+        <ChannelReferencesEnabledContext.Provider value={false}>
+          {children}
+        </ChannelReferencesEnabledContext.Provider>
+      );
       const fragmentUrl = normalizeFragmentUrl(href);
       if (fragmentUrl !== null) {
         return (
           <a {...props} href={fragmentUrl}>
-            {children}
+            {linkChildren}
           </a>
         );
       }
       const safeUrl = normalizeHttpsUrl(href);
       return safeUrl === null ? (
-        <span>{children}</span>
+        <span>{linkChildren}</span>
       ) : (
         <a {...props} href={safeUrl} target="_blank" rel="noreferrer noopener">
-          {children}
+          {linkChildren}
           {externalLinkDestination(children, safeUrl)}
         </a>
       );
