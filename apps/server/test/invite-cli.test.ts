@@ -8,7 +8,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
-import { runInviteCli, type InviteCliOutput } from "../src/modules/identity/invite-cli.js";
+import {
+  parseInviteArguments,
+  runInviteCli,
+  type InviteCliOutput,
+} from "../src/modules/identity/invite-cli.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
@@ -45,6 +49,21 @@ class TestOutput {
 class NullEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
+
+describe("invite CLI argument parsing", () => {
+  it("normalizes an email and defaults the role", () => {
+    expect(parseInviteArguments(["--email", "MEMBER@example.com"])).toEqual({
+      email: "member@example.com",
+      role: "member",
+    });
+  });
+
+  it("does not accept an unauthenticated callback selector", () => {
+    expect(() =>
+      parseInviteArguments(["--email", "member@example.com", "--variant", "development"]),
+    ).toThrow(/Unknown argument: --variant/u);
+  });
+});
 
 describeWithPostgres("invite CLI", () => {
   const schemaName = `invite_cli_${process.pid}_${randomUUID().replaceAll("-", "")}`;
@@ -124,6 +143,7 @@ describeWithPostgres("invite CLI", () => {
     expect(exitCode).toBe(0);
     expect(output.stderr).toBe("");
     expect(output.stdout).toContain("Invited: alex@example.com");
+    expect(magicLinkFrom(output).searchParams.has("variant")).toBe(false);
     expect(await service.authenticate(session.token)).toMatchObject({
       email: "alex@example.com",
       role: "member",

@@ -127,6 +127,7 @@ describeWithPostgres("AuthKitRepository", () => {
       providerCodeVerifier,
       desktopCodeChallenge: desktopChallenge,
       desktopState,
+      desktopAuthVariant: "development",
       expiresAt,
     });
 
@@ -151,6 +152,7 @@ describeWithPostgres("AuthKitRepository", () => {
         providerCodeVerifier,
         desktopCodeChallenge: desktopChallenge,
         desktopState,
+        desktopAuthVariant: "development",
         expiresAt,
       },
     ]);
@@ -181,6 +183,7 @@ describeWithPostgres("AuthKitRepository", () => {
       providerCodeVerifier: "provider-verifier-value-that-is-long-enough-456",
       desktopCodeChallenge: desktopChallenge,
       desktopState: "E".repeat(43),
+      desktopAuthVariant: "production",
       expiresAt,
     });
 
@@ -199,6 +202,7 @@ describeWithPostgres("AuthKitRepository", () => {
       providerCodeVerifier: "provider-verifier-value-that-is-long-enough-cleanup",
       desktopCodeChallenge: desktopChallenge,
       desktopState: "F".repeat(43),
+      desktopAuthVariant: "production",
       expiresAt: new Date(now.getTime() + 10 * 60 * 1_000),
     });
     await seedOwner();
@@ -737,6 +741,7 @@ describeWithPostgres("AuthKitRepository", () => {
       providerCodeVerifier: "provider-verifier-value-that-is-long-enough-rollback",
       desktopCodeChallenge: desktopChallenge,
       desktopState: "R".repeat(43),
+      desktopAuthVariant: "production",
       expiresAt: new Date(now.getTime() + 10 * 60 * 1_000),
     });
     await admitAndExchange({

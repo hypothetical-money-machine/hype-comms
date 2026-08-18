@@ -35,7 +35,7 @@ Use Node 24.18.x and npm 11.16.x, then install exactly from the lockfile with `n
 
 - `npm run dev`: start the Fastify server and Electron client together.
 - `npm run dev:server` / `npm run dev:desktop`: run one workspace in watch mode.
-- `npm run check`: run Prettier checks, ESLint, TypeScript, Vitest, and production builds.
+- `npm run check`: run Prettier checks, ESLint, TypeScript, Vitest, and workspace builds.
 - `npm test`: run all workspace tests once.
 - `npm run package:desktop`: create native desktop packages.
 - `npm run package:desktop:appimage`: build only the Linux AppImage.

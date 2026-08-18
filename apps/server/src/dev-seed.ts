@@ -319,7 +319,7 @@ async function issueAuthCallback(
   }
   const token = new URL(sender.sent.url).searchParams.get("token");
   if (token === null) throw new Error("Demo sign-in link did not contain a token");
-  const callback = new URL("hype-comms://auth/callback");
+  const callback = new URL("hype-comms-dev://auth/callback");
   callback.searchParams.set("token", token);
   return callback.toString();
 }

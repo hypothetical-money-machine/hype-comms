@@ -80,6 +80,10 @@ server log. An owner can also issue a manual invitation:
 npm run invite --workspace @hype-comms/server -- --email member@example.com
 ```
 
+The landing page offers both `Hype Comms` and `Hype Comms DEV`. The recipient chooses the
+application because a magic-link request is unauthenticated and cannot safely choose where the
+credential is sent.
+
 To exercise AuthKit locally, register
 `http://127.0.0.1:3000/v1/auth/workos/callback` for a WorkOS test Application and add the optional
 values documented in [docs/workos-authkit.md](docs/workos-authkit.md) to `.env.local`. The WorkOS
@@ -289,7 +293,9 @@ To cut a release:
 2. Review the generated notes scaffold, replace its instructional text, and remove its review
    marker, following the [release-notes guide](docs/releases/README.md). Re-running the command for
    the same version preserves the edited notes.
-3. Run `npm run check` and the native package verification appropriate to the machine.
+3. Run `npm run check`. On a packaging machine, explicitly select the release identity for both
+   commands: `HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop`, then
+   `HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`.
 4. Land that focused version change, then create and push `v<version>` at the exact revision. The
    release workflow rejects a tag whose value does not exactly match the desktop package version or
    whose release notes still contain the review marker.
@@ -365,7 +371,7 @@ gap needs a Windows code-signing certificate.
 ## Verification
 
 Use the fast inner-loop check while iterating. It runs formatting, linting, typechecking, and
-tests, but leaves production builds to the full gate:
+tests, but leaves workspace builds to the full gate:
 
 ```bash
 npm run check:fast
@@ -397,13 +403,20 @@ change both together with the deployment rather than letting them drift apart.
 initialised by a different major version will refuse to start, reporting incompatible database
 files. Recreate it with `docker compose down -v` — that discards local development data only.
 
-Desktop packaging is currently local and unsigned:
+Local desktop packaging defaults to the side-by-side `Hype Comms DEV` identity. macOS DEV packages
+are ad-hoc signed so the modified Electron application can launch, but are not notarized. The DEV
+application has its own native application ID, executable, Linux package, profile, sign-in protocol,
+and output directory. It cannot read the stable profile or install updates from the stable feed.
 
 ```bash
 npm run package:desktop
 npm run package:desktop:appimage
 npm run verify:desktop-package
 ```
+
+Tagged release jobs set `HYPE_COMMS_BUILD_FLAVOR=production` at the job level. That explicit flavor
+retains the existing `Hype Comms` identity, `hype-comms-*` artifact names, release directory, and
+update feed. Do not set the production flavor for an ordinary preview build.
 
 Generated `dist/`, `release/`, coverage, databases, credentials, and installers are never
 committed.
@@ -420,7 +433,11 @@ on the example-project, which is where the registry, the cluster, and the databa
 **GitHub Actions** (`.github/workflows/`) owns repository checks and the desktop client:
 
 - `ci.yml` runs `npm run check` on every pull request and push to `main`.
-- `desktop-package-smoke.yml` packages unsigned artifacts on macOS, Windows, and Ubuntu.
+- `desktop-package-smoke.yml` packages the default DEV artifacts on macOS, Windows, and Ubuntu,
+  then packages production on Linux to check the stable identity and updater feed before a tag.
+  macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu artifacts remain unsigned. Its
+  signed macOS notification-evidence job selects the production identity because that evidence
+  applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
 The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,

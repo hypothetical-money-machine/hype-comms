@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "electron-vite";
 import type { Plugin } from "vite";
 
+import { resolveDesktopBuildFlavor } from "./build-flavor.mjs";
 import {
   DEFAULT_DEVELOPMENT_API_ORIGIN,
   DEFAULT_PRODUCTION_API_ORIGIN,
@@ -22,19 +23,22 @@ import {
 
 const desktopRoot = path.dirname(fileURLToPath(import.meta.url));
 
-const rendererContentSecurityPolicy = (isDevelopment: boolean): Plugin => ({
-  name: "hype-comms-renderer-content-security-policy",
+const rendererDocumentMetadata = (isDevelopment: boolean, productName: string): Plugin => ({
+  name: "hype-comms-renderer-document-metadata",
   transformIndexHtml(html) {
     const policy = isDevelopment
       ? DEVELOPMENT_CONTENT_SECURITY_POLICY
       : PRODUCTION_CONTENT_SECURITY_POLICY;
 
-    return html.replace("__HYPE_COMMS_CONTENT_SECURITY_POLICY__", policy);
+    return html
+      .replace("__HYPE_COMMS_CONTENT_SECURITY_POLICY__", policy)
+      .replace("__HYPE_COMMS_PRODUCT_NAME__", productName);
   },
 });
 
 export default defineConfig(({ command }) => {
   const isDevelopment = command === "serve";
+  const buildFlavor = resolveDesktopBuildFlavor();
   // Native presentation stays compiled off unless an explicit development/test or native-evidence
   // build opts in. The terminal rollout may change this default only after packaged native proof.
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
@@ -61,11 +65,16 @@ export default defineConfig(({ command }) => {
   return {
     main: {
       define: {
+        __HYPE_COMMS_APPLICATION_ID__: JSON.stringify(buildFlavor.appId),
         __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
+        __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__: JSON.stringify(buildFlavor.protocolScheme),
+        __HYPE_COMMS_BUILD_FLAVOR__: JSON.stringify(buildFlavor.name),
+        __HYPE_COMMS_DESKTOP_NAME__: JSON.stringify(buildFlavor.desktopName),
         __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__: JSON.stringify(
           macosNativeNotificationEvidenceEnabled,
         ),
         __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
+        __HYPE_COMMS_PRODUCT_NAME__: JSON.stringify(buildFlavor.productName),
         __HYPE_COMMS_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
       },
       build: {
@@ -102,7 +111,10 @@ export default defineConfig(({ command }) => {
     renderer: {
       root: path.join(desktopRoot, "src/renderer"),
       base: "./",
-      plugins: [react(), rendererContentSecurityPolicy(isDevelopment)],
+      define: {
+        __HYPE_COMMS_PRODUCT_NAME__: JSON.stringify(buildFlavor.productName),
+      },
+      plugins: [react(), rendererDocumentMetadata(isDevelopment, buildFlavor.productName)],
       server: {
         host: "127.0.0.1",
         port: 5173,

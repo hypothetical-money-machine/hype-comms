@@ -109,6 +109,7 @@ class FakeUpdateSource implements UpdateSource {
 }
 
 interface ControllerOverrides {
+  readonly isProductionBuild?: boolean;
   readonly isPackaged?: boolean;
   readonly apiOrigin?: string;
   readonly platform?: NodeJS.Platform;
@@ -124,6 +125,7 @@ function createController(
 ): UpdateController {
   const controller = new UpdateController({
     updater,
+    isProductionBuild: overrides.isProductionBuild ?? true,
     isPackaged: overrides.isPackaged ?? true,
     apiOrigin: overrides.apiOrigin ?? DEFAULT_PRODUCTION_API_ORIGIN,
     platform: overrides.platform ?? "win32",
@@ -145,11 +147,12 @@ afterEach(() => {
 
 describe("UpdateController support", () => {
   it.each([
+    ["a DEV package", { isProductionBuild: false }],
     ["development", { isPackaged: false }],
     ["a non-production API package", { apiOrigin: "https://staging.example" }],
     ["a Linux deb package", { platform: "linux" as const }],
     [
-      "an unsigned macOS package",
+      "a macOS package without a Developer ID signature",
       { platform: "darwin" as const, hasMacDeveloperIdSignature: false },
     ],
   ])("stays inert for %s", async (_description, overrides) => {

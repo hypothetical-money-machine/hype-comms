@@ -25,14 +25,14 @@
     "typecheck": "tsc --build --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --publish never",
-    "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --mac --publish never",
-    "package:win": "npm run build && electron-builder --win --x64 --arm64 --publish never",
-    "package:win:arm64": "npm run build && electron-builder --win nsis:arm64 --publish never",
-    "package:linux": "npm run build && electron-builder --linux --x64 --arm64 --publish never",
-    "package:linux:arm64": "npm run build && electron-builder --linux AppImage:arm64 deb:arm64 --publish never",
-    "package:linux:appimage": "npm run build && electron-builder --linux AppImage --x64 --arm64 --publish never",
-    "package:linux:appimage:arm64": "npm run build && electron-builder --linux AppImage:arm64 --publish never"
+    "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --publish never",
+    "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac --publish never",
+    "package:win": "npm run build && electron-builder --config electron-builder.config.mjs --win --x64 --arm64 --publish never",
+    "package:win:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --win nsis:arm64 --publish never",
+    "package:linux": "npm run build && electron-builder --config electron-builder.config.mjs --linux --x64 --arm64 --publish never",
+    "package:linux:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage:arm64 deb:arm64 --publish never",
+    "package:linux:appimage": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage --x64 --arm64 --publish never",
+    "package:linux:appimage:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage:arm64 --publish never"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
@@ -61,111 +61,5 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "ws": "^8.21.3"
-  },
-  "build": {
-    "appId": "com.hypemm.hypecomms",
-    "productName": "Hype Comms",
-    "executableName": "hype-comms",
-    "artifactName": "hype-comms-${version}-${os}-${arch}.${ext}",
-    "asar": true,
-    "electronFuses": {
-      "runAsNode": false,
-      "enableCookieEncryption": true,
-      "enableNodeOptionsEnvironmentVariable": false,
-      "enableNodeCliInspectArguments": false,
-      "enableEmbeddedAsarIntegrityValidation": true,
-      "onlyLoadAppFromAsar": true,
-      "loadBrowserProcessSpecificV8Snapshot": false,
-      "grantFileProtocolExtraPrivileges": false
-    },
-    "npmRebuild": false,
-    "directories": {
-      "output": "release"
-    },
-    "publish": [
-      {
-        "provider": "generic",
-        "url": "https://updates.hypemm.com/desktop"
-      }
-    ],
-    "files": [
-      "dist/**/*",
-      "package.json",
-      "!node_modules/@anthropic-ai/claude-agent-sdk-*/**"
-    ],
-    "protocols": [
-      {
-        "name": "Hype Comms authentication callback",
-        "schemes": [
-          "hype-comms"
-        ]
-      }
-    ],
-    "mac": {
-      "category": "public.app-category.productivity",
-      "hardenedRuntime": true,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist",
-      "extraResources": [
-        {
-          "from": "native-build/macos/hmm-notification-authorization.node",
-          "to": "hmm-notification-authorization.node"
-        }
-      ],
-      "notarize": true,
-      "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    },
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "buildUniversalInstaller": false,
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
-    },
-    "linux": {
-      "category": "Network;InstantMessaging",
-      "syncDesktopName": true,
-      "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    }
   }
 }

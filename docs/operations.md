@@ -5,7 +5,9 @@ in `docs/architecture.md` is a hosted target, not the current topology.
 
 ## Delivery ownership
 
-- GitHub pull requests run native desktop package smoke. The `CI` workflow also runs the complete
+- GitHub pull requests run native desktop package smoke against the default `Hype Comms DEV`
+  identity on each platform and the production identity on Linux. The production pass checks the
+  stable package metadata and updater feed before a tag. The `CI` workflow also runs the complete
   source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
 - A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
   PostgreSQL 16 service, an immutable-SHA server image build into
@@ -16,10 +18,11 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   `npm run release -- <version>`; aside from an ephemeral local Git lock that serializes concurrent
   preparation, the command only inspects Git and performs no commit, branch, tag, remote, or
   publication operation. Native
-  release jobs package and publish platform artifacts and the platform manifest to the S3-compatible storage update
-  bucket, then attach the verified installers, blockmaps, updater manifests, and release notes to a
-  Hype Comms GitHub Release for that tag. The workflow refuses to publish a body that does not
-  contain the reviewed notes.
+  release jobs explicitly select `HYPE_COMMS_BUILD_FLAVOR=production`, then package and publish
+  platform artifacts and the platform manifest to the S3-compatible storage update bucket. They attach the
+  verified installers, blockmaps, updater manifests, and release notes to a Hype Comms GitHub
+  Release for that tag. The workflow refuses to publish a body that does not contain the reviewed
+  notes.
 - Kubernetes manifests, ingress/TLS, database lifecycle, secret injection, Argo CD health, backup
   scheduling, and production rollback are owned by `deployment-repository`. A release review must link
   evidence from that repository rather than assuming these controls from application code.
@@ -84,6 +87,24 @@ A successful backup job without a tested restore is not a completed durability c
 
 ## Desktop release gaps
 
+### Development and production package identities
+
+An unset `HYPE_COMMS_BUILD_FLAVOR` creates `Hype Comms DEV`. It uses
+`com.hypemm.hypecomms.dev`, the `hype-comms-dev` executable and Linux package, the
+`hype-comms-dev://` sign-in protocol, a separate Electron profile, and a separate package output
+directory. It does not contain the stable update-feed configuration, and main reports updates as
+unsupported. This is the package to install beside a stable Hype Comms installation when reviewing
+client changes.
+
+Only `development` and `production` are accepted build flavors. Release and signed native-evidence
+jobs select `production` explicitly. The production flavor keeps the existing application ID,
+executable, artifacts, profile, `hype-comms://` protocol, and update feed so installed clients keep
+their upgrade path. AuthKit binds its callback variant to the server-side transaction. Magic-link
+requests do not accept a callback variant because they are unauthenticated. Their landing page
+offers both installed applications and requires the recipient to choose one. On a manual-delivery
+server, issue the same chooser link with
+`npm run invite --workspace @hype-comms/server -- --email member@example.com`.
+
 ### Native notification rollout controls
 
 Native notifications are not enabled in ordinary development or ad hoc package builds. The
@@ -115,9 +136,9 @@ renderer performs replica-first HTTP catch-up, an authoritative snapshot, and fi
 opens a fresh realtime epoch. Default-off macOS builds retain last-window realtime stop; Windows
 and Linux stop realtime and quit on their last window.
 
-On Windows, main sets Electron Builder's exact
-`com.hypemm.hypecomms` AppUserModelID before the first `BrowserWindow`. The source
-identity is covered by a deterministic
+On Windows, main sets the selected Electron Builder application ID before the first
+`BrowserWindow`: `com.hypemm.hypecomms` for production and `com.hypemm.hypecomms.dev` for DEV. The
+source identity is covered by a deterministic
 [test](../apps/desktop/src/main/application-identity.test.ts), but stable attribution and click
 handling still require an installed NSIS evidence run. Electron 43 exposes portable native-support
 detection but no portable OS permission query. Signed packaged macOS builds therefore load a

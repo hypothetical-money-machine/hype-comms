@@ -6,6 +6,7 @@ import {
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
   currentUserSchema,
+  desktopAuthVariantSchema,
   exchangeAuthHandoffRequestSchema,
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
@@ -16,6 +17,7 @@ import {
   type CreateDesktopAuthorizationRequest,
   type CreateDesktopAuthorizationResponse,
   type CurrentUser,
+  type DesktopAuthVariant,
   type ExchangeAuthHandoffRequest,
   type MagicLinkDeliveryState,
   type MagicLinkToken,
@@ -131,6 +133,7 @@ async function readErrorMessage(response: Response, fallback: string): Promise<s
  */
 export class ChatSession {
   readonly #apiOrigin: string;
+  readonly #authVariant: DesktopAuthVariant;
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
   readonly #identitySessionUrl: string;
@@ -147,8 +150,14 @@ export class ChatSession {
   #renewalFailures = 0;
   #logoutUrl: AuthKitLogoutUrl | null = null;
 
-  constructor(options: { apiOrigin: string; cookies: SessionCookieStore; request: SessionFetch }) {
+  constructor(options: {
+    apiOrigin: string;
+    authVariant: DesktopAuthVariant;
+    cookies: SessionCookieStore;
+    request: SessionFetch;
+  }) {
     this.#apiOrigin = options.apiOrigin;
+    this.#authVariant = desktopAuthVariantSchema.parse(options.authVariant);
     this.#cookies = options.cookies;
     this.#request = options.request;
     this.#identitySessionUrl = createIdentitySessionUrl(options.apiOrigin);
@@ -262,7 +271,7 @@ export class ChatSession {
   }
 
   async requestMagicLink(input: { email: string }): Promise<MagicLinkDeliveryState> {
-    const request = requestMagicLinkSchema.parse(input);
+    const request = requestMagicLinkSchema.parse({ email: input.email });
 
     let response: Response;
     try {
@@ -312,7 +321,11 @@ export class ChatSession {
   async beginDesktopAuthorization(
     input: CreateDesktopAuthorizationRequest,
   ): Promise<CreateDesktopAuthorizationResponse> {
-    const request = createDesktopAuthorizationRequestSchema.parse(input);
+    const request = createDesktopAuthorizationRequestSchema.parse({
+      codeChallenge: input.codeChallenge,
+      state: input.state,
+      ...(this.#authVariant === "development" ? { variant: this.#authVariant } : {}),
+    });
     let response: Response;
     try {
       response = await this.#fetch(this.#desktopAuthorizationUrl, {

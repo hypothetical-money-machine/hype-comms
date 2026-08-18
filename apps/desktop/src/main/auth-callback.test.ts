@@ -6,15 +6,17 @@ import {
   parseAuthKitCallback,
   processAuthCallback,
 } from "./auth-callback";
+import { AUTH_PROTOCOL_SCHEMES } from "./security";
 
 const TOKEN = "A".repeat(43);
+const PRODUCTION_SCHEME = AUTH_PROTOCOL_SCHEMES.production;
 
 describe("magic-link callback processing", () => {
   it("exchanges exactly one valid callback token", async () => {
     const exchange = vi.fn(async () => undefined);
 
     await expect(
-      processAuthCallback(`hype-comms://auth/callback?token=${TOKEN}`, exchange),
+      processAuthCallback(`hype-comms://auth/callback?token=${TOKEN}`, PRODUCTION_SCHEME, exchange),
     ).resolves.toBe("succeeded");
     expect(exchange).toHaveBeenCalledOnce();
     expect(exchange).toHaveBeenCalledWith(TOKEN);
@@ -30,8 +32,8 @@ describe("magic-link callback processing", () => {
   ])("ignores an invalid callback without attempting an exchange: %s", async (url) => {
     const exchange = vi.fn(async () => undefined);
 
-    expect(parseAuthCallbackToken(url)).toBeNull();
-    await expect(processAuthCallback(url, exchange)).resolves.toBe("ignored");
+    expect(parseAuthCallbackToken(url, PRODUCTION_SCHEME)).toBeNull();
+    await expect(processAuthCallback(url, PRODUCTION_SCHEME, exchange)).resolves.toBe("ignored");
     expect(exchange).not.toHaveBeenCalled();
   });
 
@@ -42,6 +44,7 @@ describe("magic-link callback processing", () => {
 
     const outcome = await processAuthCallback(
       `hype-comms://auth/callback?token=${TOKEN}`,
+      PRODUCTION_SCHEME,
       exchange,
     );
 
@@ -53,6 +56,7 @@ describe("magic-link callback processing", () => {
     expect(
       parseAuthCallback(
         `hype-comms://auth/callback?token=${TOKEN}&code=legacy-metadata&state=legacy-metadata`,
+        PRODUCTION_SCHEME,
       ),
     ).toEqual({ kind: "magic_link", token: TOKEN });
   });
@@ -65,8 +69,8 @@ describe("AuthKit callback parsing", () => {
   it("parses one strict HMM handoff code and desktop state", () => {
     const value = `hype-comms://auth/callback?code=${code}&state=${state}`;
 
-    expect(parseAuthKitCallback(value)).toEqual({ code, state });
-    expect(parseAuthCallback(value)).toEqual({
+    expect(parseAuthKitCallback(value, PRODUCTION_SCHEME)).toEqual({ code, state });
+    expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toEqual({
       kind: "authkit",
       callback: { code, state },
     });
@@ -75,11 +79,11 @@ describe("AuthKit callback parsing", () => {
   it("parses only the fixed credential-free terminal error", () => {
     const value = `hype-comms://auth/callback?error=authentication_failed&state=${state}`;
 
-    expect(parseAuthKitCallback(value)).toEqual({
+    expect(parseAuthKitCallback(value, PRODUCTION_SCHEME)).toEqual({
       error: "authentication_failed",
       state,
     });
-    expect(parseAuthCallback(value)).toEqual({
+    expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toEqual({
       kind: "authkit",
       callback: { error: "authentication_failed", state },
     });
@@ -99,7 +103,19 @@ describe("AuthKit callback parsing", () => {
     `hype-comms://auth:8443/callback?code=${code}&state=${state}`,
     `hype-comms://auth/callback?code=${code}&state=${state}#fragment`,
   ])("rejects a malformed, ambiguous, or provider-detail callback: %s", (value) => {
-    expect(parseAuthKitCallback(value)).toBeNull();
-    expect(parseAuthCallback(value)).toBeNull();
+    expect(parseAuthKitCallback(value, PRODUCTION_SCHEME)).toBeNull();
+    expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toBeNull();
+  });
+
+  it("accepts only the callback scheme owned by this build", () => {
+    const development = `hype-comms-dev://auth/callback?code=${code}&state=${state}`;
+    const production = `hype-comms://auth/callback?code=${code}&state=${state}`;
+
+    expect(parseAuthKitCallback(development, AUTH_PROTOCOL_SCHEMES.development)).toEqual({
+      code,
+      state,
+    });
+    expect(parseAuthKitCallback(development, PRODUCTION_SCHEME)).toBeNull();
+    expect(parseAuthKitCallback(production, AUTH_PROTOCOL_SCHEMES.development)).toBeNull();
   });
 });

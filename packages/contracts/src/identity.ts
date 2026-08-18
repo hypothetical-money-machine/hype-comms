@@ -29,7 +29,21 @@ export const sessionTokenSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{43,86}$/, "Expected a base64url session token");
 
-export const requestMagicLinkSchema = z.object({ email: emailSchema }).strict();
+export const requestMagicLinkSchema = z
+  .object({
+    email: emailSchema,
+  })
+  .strict();
+
+/**
+ * Unknown keys are stripped because old links may contain callback hints and mail providers may
+ * append tracking parameters. Neither is allowed to choose where the credential is sent.
+ */
+export const magicLinkLandingQuerySchema = z
+  .object({
+    token: magicLinkTokenSchema,
+  })
+  .strip();
 
 export const verifyMagicLinkSchema = z.object({ token: magicLinkTokenSchema }).strict();
 
@@ -89,6 +103,7 @@ export type Email = z.infer<typeof emailSchema>;
 export type MagicLinkToken = z.infer<typeof magicLinkTokenSchema>;
 export type SessionToken = z.infer<typeof sessionTokenSchema>;
 export type RequestMagicLink = z.infer<typeof requestMagicLinkSchema>;
+export type MagicLinkLandingQuery = z.infer<typeof magicLinkLandingQuerySchema>;
 export type VerifyMagicLink = z.infer<typeof verifyMagicLinkSchema>;
 export type DeviceSession = z.infer<typeof deviceSessionSchema>;
 export type CurrentUser = z.infer<typeof currentUserSchema>;
