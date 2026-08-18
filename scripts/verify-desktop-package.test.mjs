@@ -61,7 +61,7 @@ test("requires packaged metadata to carry the selected native identity", () => {
       JSON.stringify({
         name: "hype-comms-dev",
         productName: "Hype Comms DEV",
-        desktopName: "hype-comms-dev",
+        desktopName: "hype-comms-dev.desktop",
       }),
     );
   assert.doesNotThrow(() =>

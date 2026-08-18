@@ -6,8 +6,9 @@ in `docs/architecture.md` is a hosted target, not the current topology.
 ## Delivery ownership
 
 - GitHub pull requests run native desktop package smoke against the default `Hype Comms DEV`
-  identity. The `CI` workflow also runs the complete source gate and all PostgreSQL integration
-  tests on an isolated job-scoped PostgreSQL 16 cluster.
+  identity on each platform and the production identity on Linux. The production pass checks the
+  stable package metadata and updater feed before a tag. The `CI` workflow also runs the complete
+  source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
 - A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
   PostgreSQL 16 service, an immutable-SHA server image build into
   `registry.example.invalid/example-project/hype-comms`, then a GitOps image promotion in
@@ -98,11 +99,11 @@ client changes.
 Only `development` and `production` are accepted build flavors. Release and signed native-evidence
 jobs select `production` explicitly. The production flavor keeps the existing application ID,
 executable, artifacts, profile, `hype-comms://` protocol, and update feed so installed clients keep
-their upgrade path. A DEV sign-in requires a server version that accepts the optional desktop auth
-variant; older production clients omit that field and continue to use the production callback.
-On a manual-delivery server, issue the DEV link with
-`npm run invite --workspace @hype-comms/server -- --email member@example.com --variant development`.
-Omitting `--variant` keeps the stable production callback.
+their upgrade path. AuthKit binds its callback variant to the server-side transaction. Magic-link
+requests do not accept a callback variant because they are unauthenticated. Their landing page
+offers both installed applications and requires the recipient to choose one. On a manual-delivery
+server, issue the same chooser link with
+`npm run invite --workspace @hype-comms/server -- --email member@example.com`.
 
 ### Native notification rollout controls
 

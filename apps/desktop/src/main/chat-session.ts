@@ -271,10 +271,7 @@ export class ChatSession {
   }
 
   async requestMagicLink(input: { email: string }): Promise<MagicLinkDeliveryState> {
-    const request = requestMagicLinkSchema.parse({
-      email: input.email,
-      ...(this.#authVariant === "development" ? { variant: this.#authVariant } : {}),
-    });
+    const request = requestMagicLinkSchema.parse({ email: input.email });
 
     let response: Response;
     try {

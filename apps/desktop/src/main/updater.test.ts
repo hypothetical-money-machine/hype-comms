@@ -152,7 +152,7 @@ describe("UpdateController support", () => {
     ["a non-production API package", { apiOrigin: "https://staging.example" }],
     ["a Linux deb package", { platform: "linux" as const }],
     [
-      "an unsigned macOS package",
+      "a macOS package without a Developer ID signature",
       { platform: "darwin" as const, hasMacDeveloperIdSignature: false },
     ],
   ])("stays inert for %s", async (_description, overrides) => {

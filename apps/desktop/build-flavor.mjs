@@ -8,7 +8,7 @@ export const DEVELOPMENT_DESKTOP_BUILD_FLAVOR = Object.freeze({
   productName: "Hype Comms DEV",
   executableName: "hype-comms-dev",
   artifactName: "hype-comms-dev-${version}-${os}-${arch}.${ext}",
-  desktopName: "hype-comms-dev",
+  desktopName: "hype-comms-dev.desktop",
   linuxPackageName: "hype-comms-dev",
   protocolScheme: "hype-comms-dev",
   releaseDirectory: "release/dev",

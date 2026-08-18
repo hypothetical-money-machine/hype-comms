@@ -313,12 +313,7 @@ async function issueAuthCallback(
     () => new Date(),
     config.publicApiUrl,
   );
-  await service.requestMagicLink(
-    fixture.email,
-    `demo-${fixture.profile}`,
-    undefined,
-    "development",
-  );
+  await service.requestMagicLink(fixture.email, `demo-${fixture.profile}`);
   if (sender.sent === null) {
     throw new Error(`Could not issue the ${fixture.displayName} demo sign-in link`);
   }

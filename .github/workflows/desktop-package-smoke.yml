@@ -119,12 +119,16 @@ jobs:
         shell: cmd
         run: npm ci
 
-      - name: Package unsigned desktop application
+      - name: Package DEV desktop application
         if: matrix.platform != 'Windows'
+        env:
+          # electron-builder skips all macOS signing in PR jobs before reading identity: "-"
+          # unless this is enabled. Fork PRs never reach this job, and identity discovery is off.
+          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && 'true' || 'false' }}
         shell: sh
         run: npm run package:desktop
 
-      - name: Package unsigned desktop application on Windows
+      - name: Package DEV desktop application on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
         run: npm run package:desktop
@@ -137,6 +141,23 @@ jobs:
       - name: Verify packaged application contents, updater, and fuses on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
+        run: npm run verify:desktop-package
+
+      # Keep the default DEV smoke above while checking the released identity and updater feed
+      # before a tag. Linux is sufficient for the shared package metadata/feed gate and avoids
+      # invoking production macOS signing or duplicating the full native matrix.
+      - name: Package production desktop application on Linux
+        if: matrix.platform == 'Linux'
+        env:
+          HYPE_COMMS_BUILD_FLAVOR: production
+        shell: sh
+        run: npm run package:desktop:linux
+
+      - name: Verify production desktop package on Linux
+        if: matrix.platform == 'Linux'
+        env:
+          HYPE_COMMS_BUILD_FLAVOR: production
+        shell: sh
         run: npm run verify:desktop-package
 
   macos-native-notification-evidence:

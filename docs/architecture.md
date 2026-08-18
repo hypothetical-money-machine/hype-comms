@@ -652,8 +652,9 @@ service and reported alongside error rates rather than inferred from anecdotes.
 
 ## Signing, distribution, and compatibility
 
-Pull requests build unsigned smoke packages on native self-hosted runners. Only a version tag on
-`main` whose name matches the desktop package version may invoke release jobs and credentials.
+Pull requests build DEV smoke packages on native self-hosted runners: macOS packages are ad-hoc
+signed, while Windows and Linux packages remain unsigned. Only a version tag on `main` whose name
+matches the desktop package version may invoke release jobs and credentials.
 The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
 feed. Its platform-signature status is:
 

@@ -77,11 +77,12 @@ In console delivery mode, request a magic link in the app and copy the loopback 
 server log. An owner can also issue a manual invitation:
 
 ```bash
-npm run invite --workspace @hype-comms/server -- --email member@example.com --variant development
+npm run invite --workspace @hype-comms/server -- --email member@example.com
 ```
 
-The local command targets the default `Hype Comms DEV` client. Omit `--variant development` when
-the recipient will sign in with the stable `Hype Comms` application instead.
+The landing page offers both `Hype Comms` and `Hype Comms DEV`. The recipient chooses the
+application because a magic-link request is unauthenticated and cannot safely choose where the
+credential is sent.
 
 To exercise AuthKit locally, register
 `http://127.0.0.1:3000/v1/auth/workos/callback` for a WorkOS test Application and add the optional
@@ -370,7 +371,7 @@ gap needs a Windows code-signing certificate.
 ## Verification
 
 Use the fast inner-loop check while iterating. It runs formatting, linting, typechecking, and
-tests, but leaves production builds to the full gate:
+tests, but leaves workspace builds to the full gate:
 
 ```bash
 npm run check:fast
@@ -402,10 +403,10 @@ change both together with the deployment rather than letting them drift apart.
 initialised by a different major version will refuse to start, reporting incompatible database
 files. Recreate it with `docker compose down -v` — that discards local development data only.
 
-Local desktop packaging is unsigned and defaults to the side-by-side `Hype Comms DEV` identity.
-The DEV application has its own native application ID, executable, Linux package, profile, sign-in
-protocol, and output directory. It cannot read the stable profile or install updates from the stable
-feed.
+Local desktop packaging defaults to the side-by-side `Hype Comms DEV` identity. macOS DEV packages
+are ad-hoc signed so the modified Electron application can launch, but are not notarized. The DEV
+application has its own native application ID, executable, Linux package, profile, sign-in protocol,
+and output directory. It cannot read the stable profile or install updates from the stable feed.
 
 ```bash
 npm run package:desktop
@@ -432,9 +433,11 @@ on the example-project, which is where the registry, the cluster, and the databa
 **GitHub Actions** (`.github/workflows/`) owns repository checks and the desktop client:
 
 - `ci.yml` runs `npm run check` on every pull request and push to `main`.
-- `desktop-package-smoke.yml` packages the default unsigned DEV artifacts on macOS, Windows, and
-  Ubuntu. Its signed macOS notification-evidence job selects the production identity because that
-  evidence applies to a release candidate.
+- `desktop-package-smoke.yml` packages the default DEV artifacts on macOS, Windows, and Ubuntu,
+  then packages production on Linux to check the stable identity and updater feed before a tag.
+  macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu artifacts remain unsigned. Its
+  signed macOS notification-evidence job selects the production identity because that evidence
+  applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
 The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,

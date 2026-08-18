@@ -20,7 +20,6 @@ import {
   sessionTokenSchema,
   verifyMagicLinkSchema,
   type CurrentUser,
-  type DesktopAuthVariant,
   type SessionToken,
 } from "@hype-comms/contracts";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
@@ -45,7 +44,7 @@ const MAGIC_LINK_PAGE_HEADERS = {
 const DESKTOP_CALLBACK_SCHEMES = {
   production: "hype-comms",
   development: "hype-comms-dev",
-} as const satisfies Record<DesktopAuthVariant, string>;
+} as const;
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
@@ -150,21 +149,29 @@ function escapeHtml(value: string): string {
   );
 }
 
-function magicLinkPage(target: string): string {
-  const escapedTarget = escapeHtml(target);
+function magicLinkPage(token: string): string {
+  const productionTarget = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
+  productionTarget.searchParams.set("token", token);
+  const developmentTarget = new URL(`${DESKTOP_CALLBACK_SCHEMES.development}://auth/callback`);
+  developmentTarget.searchParams.set("token", token);
+  const escapedProductionTarget = escapeHtml(productionTarget.toString());
+  const escapedDevelopmentTarget = escapeHtml(developmentTarget.toString());
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="0; url=${escapedTarget}">
   <title>Open Hype Comms</title>
 </head>
 <body>
   <main>
     <h1>Open Hype Comms</h1>
-    <p>Continue in the desktop app to finish signing in.</p>
-    <p><a href="${escapedTarget}">Open Hype Comms</a></p>
+    <p>Choose the app where you want to finish signing in.</p>
+    <ul>
+      <li><a href="${escapedProductionTarget}">Open Hype Comms</a></li>
+      <li><a href="${escapedDevelopmentTarget}">Open Hype Comms DEV</a></li>
+    </ul>
+    <p>Use Hype Comms DEV only when you are testing a preview build.</p>
   </main>
 </body>
 </html>`;
@@ -194,10 +201,9 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send(invalidMagicLinkPage());
     }
 
-    const variant = result.data.variant ?? "production";
-    const target = new URL(`${DESKTOP_CALLBACK_SCHEMES[variant]}://auth/callback`);
-    target.searchParams.set("token", result.data.token);
-    return reply.code(200).send(magicLinkPage(target.toString()));
+    // A magic-link request has no authenticated client identity, so only the recipient may choose
+    // which installed app receives the credential. Unknown query keys are stripped by the schema.
+    return reply.code(200).send(magicLinkPage(result.data.token));
   });
 };
 
@@ -221,12 +227,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     }
     const result = requestMagicLinkSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid magic-link request");
-    const response = await service.requestMagicLink(
-      result.data.email,
-      request.ip,
-      request.log,
-      result.data.variant,
-    );
+    const response = await service.requestMagicLink(result.data.email, request.ip, request.log);
     return reply.code(202).send(magicLinkRequestedSchema.parse(response));
   });
 

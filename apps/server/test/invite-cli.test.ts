@@ -51,21 +51,17 @@ class NullEmailSender implements EmailSender {
 }
 
 describe("invite CLI argument parsing", () => {
-  it("defaults links to the stable production callback", () => {
+  it("normalizes an email and defaults the role", () => {
     expect(parseInviteArguments(["--email", "MEMBER@example.com"])).toEqual({
       email: "member@example.com",
       role: "member",
-      variant: "production",
     });
   });
 
-  it("accepts only the development callback variant as an explicit alternative", () => {
-    expect(
-      parseInviteArguments(["--email", "member@example.com", "--variant", "development"]),
-    ).toMatchObject({ variant: "development" });
+  it("does not accept an unauthenticated callback selector", () => {
     expect(() =>
-      parseInviteArguments(["--email", "member@example.com", "--variant", "preview"]),
-    ).toThrow(/--variant must be production or development/u);
+      parseInviteArguments(["--email", "member@example.com", "--variant", "development"]),
+    ).toThrow(/Unknown argument: --variant/u);
   });
 });
 
@@ -152,23 +148,6 @@ describeWithPostgres("invite CLI", () => {
       email: "alex@example.com",
       role: "member",
     });
-  });
-
-  it("prints a development magic link for the side-by-side DEV application", async () => {
-    await seedOwner();
-    const output = new TestOutput();
-
-    const exitCode = await runInviteCli(
-      ["--email", "dev-preview@example.com", "--variant", "development"],
-      cliEnv(),
-      output.streams,
-    );
-    const link = magicLinkFrom(output);
-
-    expect(exitCode).toBe(0);
-    expect(output.stderr).toBe("");
-    expect(link.searchParams.get("variant")).toBe("development");
-    expect(magicLinkTokenSchema.safeParse(link.searchParams.get("token")).success).toBe(true);
   });
 
   it("issues repeated owner sign-in links without inviting or changing the owner", async () => {

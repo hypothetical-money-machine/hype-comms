@@ -19,7 +19,7 @@ test("defaults desktop builds to the isolated development identity", () => {
     productName: "Hype Comms DEV",
     executableName: "hype-comms-dev",
     artifactName: "hype-comms-dev-${version}-${os}-${arch}.${ext}",
-    desktopName: "hype-comms-dev",
+    desktopName: "hype-comms-dev.desktop",
     linuxPackageName: "hype-comms-dev",
     protocolScheme: "hype-comms-dev",
     releaseDirectory: "release/dev",
@@ -66,7 +66,7 @@ test("maps build flavors to separate native package identities", async () => {
       executableName: "hype-comms-dev",
       artifactName: "hype-comms-dev-${version}-${os}-${arch}.${ext}",
       output: "release/dev",
-      desktopName: "hype-comms-dev",
+      desktopName: "hype-comms-dev.desktop",
       linuxPackageName: "hype-comms-dev",
       protocolScheme: "hype-comms-dev",
       publish: null,
@@ -114,8 +114,8 @@ test("maps build flavors to separate native package identities", async () => {
   );
 
   assert.deepEqual(development.electronFuses, production.electronFuses);
-  assert.equal(development.mac.hardenedRuntime, true);
-  assert.equal(development.mac.identity, null);
+  assert.equal(development.mac.hardenedRuntime, false);
+  assert.equal(development.mac.identity, "-");
   assert.equal(development.mac.notarize, false);
   assert.equal(production.mac.hardenedRuntime, true);
   assert.equal(production.mac.identity, undefined);

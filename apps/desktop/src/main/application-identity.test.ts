@@ -4,7 +4,7 @@ import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./appl
 
 const developmentIdentity = {
   appId: "com.hypemm.hypecomms.dev",
-  desktopName: "hype-comms-dev",
+  desktopName: "hype-comms-dev.desktop",
   isProductionBuild: false,
   productName: "Hype Comms DEV",
 } as const;
@@ -47,7 +47,7 @@ describe("configureApplicationIdentity", () => {
     );
 
     expect(setName).toHaveBeenCalledWith("Hype Comms DEV");
-    expect(setDesktopName).toHaveBeenCalledWith("hype-comms-dev");
+    expect(setDesktopName).toHaveBeenCalledWith("hype-comms-dev.desktop");
     expect(setAppUserModelId).not.toHaveBeenCalled();
   });
 

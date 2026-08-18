@@ -191,7 +191,19 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     smokePackageJob,
     /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
   );
-  assert.doesNotMatch(smokePackageJob, /HYPE_COMMS_BUILD_FLAVOR/u);
+  assert.doesNotMatch(smokePackageJob, /^ {6}HYPE_COMMS_BUILD_FLAVOR:/mu);
+  assert.match(
+    smokePackageJob,
+    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
+  );
+  assert.match(
+    smokePackageJob,
+    /name: Package production desktop application on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {8}shell: sh\n {8}run: npm run package:desktop:linux/u,
+  );
+  assert.match(
+    smokePackageJob,
+    /name: Verify production desktop package on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {8}shell: sh\n {8}run: npm run verify:desktop-package/u,
+  );
   assert.match(
     packageSmokeWorkflow,
     /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,

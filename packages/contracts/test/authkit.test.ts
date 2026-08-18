@@ -42,7 +42,7 @@ describe("AuthKit contracts", () => {
     ).toMatchObject({ authorizationUrl: expect.stringContaining("https://api.workos.com/") });
   });
 
-  it("allowlists desktop callback variants without changing the production wire default", () => {
+  it("allowlists AuthKit callback variants without exposing a magic-link selector", () => {
     expect(desktopAuthVariantSchema.parse("production")).toBe("production");
     expect(desktopAuthVariantSchema.parse("development")).toBe("development");
     expect(() => desktopAuthVariantSchema.parse("preview")).toThrow();
@@ -57,25 +57,25 @@ describe("AuthKit contracts", () => {
     expect(requestMagicLinkSchema.parse({ email: "MEMBER@example.com" })).toEqual({
       email: "member@example.com",
     });
-    expect(
+    expect(() =>
       requestMagicLinkSchema.parse({
         email: "member@example.com",
         variant: "development",
       }),
-    ).toEqual({ email: "member@example.com", variant: "development" });
+    ).toThrow();
     expect(
       magicLinkLandingQuerySchema.parse({
         token: BASE64_URL_VALUE,
         variant: "development",
         utm_source: "mail",
       }),
-    ).toEqual({ token: BASE64_URL_VALUE, variant: "development" });
+    ).toEqual({ token: BASE64_URL_VALUE });
     expect(() =>
       requestMagicLinkSchema.parse({ email: "member@example.com", variant: "preview" }),
     ).toThrow();
-    expect(() =>
+    expect(
       magicLinkLandingQuerySchema.parse({ token: BASE64_URL_VALUE, variant: "preview" }),
-    ).toThrow();
+    ).toEqual({ token: BASE64_URL_VALUE });
   });
 
   it("rejects unknown start fields, insecure URLs, credentials in URLs, and malformed PKCE", () => {

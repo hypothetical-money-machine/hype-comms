@@ -1,13 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  desktopAuthVariantSchema,
-  emailSchema,
-  type DesktopAuthVariant,
-  type Email,
-  type Invitation,
-} from "@hype-comms/contracts";
+import { emailSchema, type Email, type Invitation } from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { loadConfig } from "../../config.js";
@@ -20,7 +14,7 @@ import { IdentityRepository } from "./repository.js";
 import { IdentityService } from "./service.js";
 
 const USAGE =
-  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member] [--variant production|development]";
+  "Usage: npm run invite --workspace @hype-comms/server -- --email <address> [--role member]";
 const CLI_CLIENT_IP = "invite-cli";
 
 export interface InviteCliOutput {
@@ -31,7 +25,6 @@ export interface InviteCliOutput {
 export interface InviteArguments {
   readonly email: Email;
   readonly role: "member";
-  readonly variant: DesktopAuthVariant;
 }
 
 class CapturingEmailSender implements EmailSender {
@@ -45,11 +38,10 @@ class CapturingEmailSender implements EmailSender {
 export function parseInviteArguments(argv: readonly string[]): InviteArguments {
   let email: string | undefined;
   let role: string | undefined;
-  let variant: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag !== "--email" && flag !== "--role" && flag !== "--variant") {
+    if (flag !== "--email" && flag !== "--role") {
       throw new Error(`Unknown argument: ${flag ?? ""}\n${USAGE}`);
     }
     const value = argv[index + 1];
@@ -62,9 +54,6 @@ export function parseInviteArguments(argv: readonly string[]): InviteArguments {
     } else if (flag === "--role") {
       if (role !== undefined) throw new Error(`--role may only be specified once\n${USAGE}`);
       role = value;
-    } else {
-      if (variant !== undefined) throw new Error(`--variant may only be specified once\n${USAGE}`);
-      variant = value;
     }
     index += 1;
   }
@@ -74,11 +63,7 @@ export function parseInviteArguments(argv: readonly string[]): InviteArguments {
   if (!emailResult.success) throw new Error(`Invalid email address\n${USAGE}`);
   const roleResult = z.literal("member").safeParse(role ?? "member");
   if (!roleResult.success) throw new Error(`--role must be member\n${USAGE}`);
-  const variantResult = desktopAuthVariantSchema.safeParse(variant ?? "production");
-  if (!variantResult.success) {
-    throw new Error(`--variant must be production or development\n${USAGE}`);
-  }
-  return { email: emailResult.data, role: roleResult.data, variant: variantResult.data };
+  return { email: emailResult.data, role: roleResult.data };
 }
 
 async function createOrReuseInvitation(
@@ -153,18 +138,13 @@ export async function runInviteCli(
     // requestMagicLink answers identically whether or not it issued a link, and swallows failures
     // so that the HTTP path cannot leak which addresses are real. For an operator command that
     // silence is unhelpful, so surface the underlying cause on stderr.
-    await service.requestMagicLink(
-      input.email,
-      CLI_CLIENT_IP,
-      {
-        error: (details, message) => {
-          const cause = details.err;
-          const reason = cause instanceof Error ? cause.message : "unknown cause";
-          output.stderr.write(`${message}: ${reason}\n`);
-        },
+    await service.requestMagicLink(input.email, CLI_CLIENT_IP, {
+      error: (details, message) => {
+        const cause = details.err;
+        const reason = cause instanceof Error ? cause.message : "unknown cause";
+        output.stderr.write(`${message}: ${reason}\n`);
       },
-      input.variant,
-    );
+    });
     const captured = sender.captured;
     if (captured === null) {
       throw new Error(

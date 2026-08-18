@@ -140,7 +140,7 @@ describe("desktop authentication landing", () => {
   const token = "t".repeat(43);
   const identity = { service: {} as IdentityService };
 
-  it("defaults old magic links to production and routes development links independently", async () => {
+  it("lets the recipient choose either app without trusting the requested variant", async () => {
     const app = await buildApp({ identity });
     apps.push(app);
 
@@ -154,10 +154,10 @@ describe("desktop authentication landing", () => {
 
     expect(production.statusCode).toBe(200);
     expect(production.body).toContain(`hype-comms://auth/callback?token=${token}`);
-    expect(production.body).not.toContain("hype-comms-dev://");
+    expect(production.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
+    expect(production.body).not.toContain('http-equiv="refresh"');
     expect(development.statusCode).toBe(200);
-    expect(development.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
-    expect(development.body).not.toContain("hype-comms://auth/callback");
+    expect(development.body).toBe(production.body);
   });
 
   it("keeps accepting production links with appended mail tracking parameters", async () => {
@@ -171,22 +171,24 @@ describe("desktop authentication landing", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(response.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
     expect(response.body).not.toContain("utm_source");
     expect(response.body).not.toContain("utm_campaign");
   });
 
-  it("rejects unknown callback variants without reflecting the credential", async () => {
+  it("ignores old or attacker-supplied callback selectors", async () => {
     const app = await buildApp({ identity });
     apps.push(app);
 
     const response = await app.inject({
       method: "GET",
-      url: `/auth/magic-link?token=${token}&variant=preview`,
+      url: `/auth/magic-link?token=${token}&variant=attacker-selected-scheme`,
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toContain("This link is not valid.");
-    expect(response.body).not.toContain(token);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(response.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
+    expect(response.body).not.toContain("attacker-selected-scheme");
   });
 });
 

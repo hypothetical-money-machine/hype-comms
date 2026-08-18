@@ -3,7 +3,6 @@ import { z } from "zod";
 import { entityIdSchema, isoDateTimeSchema } from "./common.js";
 import { invitationSchema, userSchema, workspaceRoleSchema } from "./entities.js";
 import { agentCurrentPrincipalSchema } from "./agents.js";
-import { desktopAuthVariantSchema } from "./authkit.js";
 
 const humanUserSchema = userSchema.extend({ kind: z.literal("human").default("human") });
 
@@ -33,18 +32,16 @@ export const sessionTokenSchema = z
 export const requestMagicLinkSchema = z
   .object({
     email: emailSchema,
-    variant: desktopAuthVariantSchema.optional(),
   })
   .strict();
 
 /**
- * The credential-bearing landing URL carries the selected callback identity to the browser.
- * Unknown keys are stripped because mail providers may append tracking parameters to a valid link.
+ * Unknown keys are stripped because old links may contain callback hints and mail providers may
+ * append tracking parameters. Neither is allowed to choose where the credential is sent.
  */
 export const magicLinkLandingQuerySchema = z
   .object({
     token: magicLinkTokenSchema,
-    variant: desktopAuthVariantSchema.optional(),
   })
   .strip();
 

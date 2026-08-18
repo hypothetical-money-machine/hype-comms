@@ -50,8 +50,9 @@ export function createElectronBuilderConfiguration(value) {
     ],
     mac: {
       category: "public.app-category.productivity",
-      hardenedRuntime: true,
-      ...(flavor.isProduction ? { notarize: true } : { identity: null, notarize: false }),
+      ...(flavor.isProduction
+        ? { hardenedRuntime: true, notarize: true }
+        : { hardenedRuntime: false, identity: "-", notarize: false }),
       entitlements: "build/entitlements.mac.plist",
       entitlementsInherit: "build/entitlements.mac.plist",
       extraResources: [

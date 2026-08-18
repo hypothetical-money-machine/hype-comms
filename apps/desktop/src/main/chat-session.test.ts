@@ -494,7 +494,7 @@ describe("ChatSession magic links", () => {
     expect(bodies).toEqual([{ email: "morgan@example.com" }]);
   });
 
-  it("selects development magic-link callbacks without trusting a caller-supplied variant", async () => {
+  it("never lets the build flavor select a magic-link callback", async () => {
     const bodies: unknown[] = [];
     const session = createSession(
       async (_url, init) => {
@@ -506,7 +506,7 @@ describe("ChatSession magic links", () => {
     );
 
     await session.requestMagicLink({ email: "morgan@example.com" });
-    expect(bodies).toEqual([{ email: "morgan@example.com", variant: "development" }]);
+    expect(bodies).toEqual([{ email: "morgan@example.com" }]);
   });
 });
 
