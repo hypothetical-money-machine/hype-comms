@@ -51,6 +51,7 @@ class FakeMessageEvent:
     message_id: Optional[str] = None
     timestamp: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    channel_prompt: Optional[str] = None
 
 
 @dataclass
@@ -159,7 +160,19 @@ PEER_AGENT_DM_ID = "00000000-0000-4000-8000-000000000023"
 NEW_CHANNEL_ID = "00000000-0000-4000-8000-000000000024"
 UNKNOWN_CHANNEL_ID = "00000000-0000-4000-8000-000000000025"
 MESSAGE_ID = "00000000-0000-4000-8000-000000000030"
+THREAD_ROOT_ID = "00000000-0000-4000-8000-000000000031"
+CHUNK_ONE_ID = "00000000-0000-4000-8000-000000000041"
+CHUNK_TWO_ID = "00000000-0000-4000-8000-000000000042"
+CHUNK_THREE_ID = "00000000-0000-4000-8000-000000000043"
+CHUNK_FOUR_ID = "00000000-0000-4000-8000-000000000044"
+CHUNK_FIVE_ID = "00000000-0000-4000-8000-000000000045"
 ORIGIN = "https://chat.example.test"
+
+
+def message_id_for(cursor: str) -> str:
+    """The message ID `message_event()` mints for a given watch cursor."""
+
+    return f"{MESSAGE_ID[:-3]}{int(cursor):03d}"
 
 
 def user(user_id: str, username: str, display_name: str) -> dict[str, Any]:
@@ -273,20 +286,30 @@ def message_event(
     *,
     mentions: Optional[list[str]] = None,
     body: str = "hello",
+    thread_root_id: Optional[str] = None,
+    reason: Optional[str] = None,
 ) -> dict[str, Any]:
+    # threadRootId is a required, nullable key of messageSchema, so real
+    # message.created payloads always carry it -- null for a top-level
+    # message, the root's ID for a reply.
     return event(
         "message.created",
         cursor,
         {
             "message": {
-                "id": f"{MESSAGE_ID[:-3]}{int(cursor):03d}",
+                "id": message_id_for(cursor),
                 "conversationId": conversation_id,
                 "conversationSequence": cursor,
                 "authorId": author_id,
                 "body": body,
+                "threadRootId": thread_root_id,
                 "createdAt": "2026-07-26T12:00:00.000Z",
             },
             "mentionedUserIds": list(mentions or []),
+            # The server omits recipientNotificationReason entirely unless the
+            # watching client negotiated the capability and the row applies to
+            # it, so absence -- not null -- is the ordinary shape.
+            **({"recipientNotificationReason": reason} if reason is not None else {}),
         },
     )
 
@@ -429,6 +452,24 @@ def directory_reload_specs(
     ]
 
 
+def send_spec(
+    conversation_id: str,
+    *,
+    thread_root_id: Optional[str] = None,
+    message_id: str = MESSAGE_ID,
+    cursor: str = "101",
+) -> ProcessSpec:
+    """One `messages send` call, pinning the exact argv the adapter must emit."""
+
+    args = ("messages", "send", conversation_id, "--json")
+    if thread_root_id is not None:
+        args += ("--thread-root-id", thread_root_id)
+    return ProcessSpec(
+        args,
+        json_process({"message": {"id": message_id}, "syncCursor": cursor}),
+    )
+
+
 def startup_specs(cursor: str = "100") -> list[ProcessSpec]:
     return [
         ProcessSpec(("auth", "whoami", "--json"), json_process(principal())),
@@ -458,6 +499,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 "HYPE_COMMS_ALLOWED_USERS": USER_ID,
                 "HYPE_COMMS_ALLOW_ALL_USERS": "false",
                 "HYPE_COMMS_CLI_PATH": "hype-comms-cli",
+                # Pinned to their documented defaults so a developer who has
+                # either switch exported does not silently run a different
+                # suite from CI.
+                "HYPE_COMMS_THREAD_REPLIES": "true",
+                "HYPE_COMMS_THREAD_FOLLOWUPS": "false",
             },
         )
         self.env.start()
@@ -468,12 +514,17 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory: FakeProcessFactory,
         *,
         config: Optional[FakePlatformConfig] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> Any:
-        return adapter_module.HypeCommsAdapter(
-            config or FakePlatformConfig(),
-            process_factory=factory,
-            state_dir=Path(self.temp.name),
-        )
+        # The optional switches are read once, in __init__, so an override has
+        # to be in place before construction rather than around the call under
+        # test.
+        with patch.dict(os.environ, env or {}):
+            return adapter_module.HypeCommsAdapter(
+                config or FakePlatformConfig(),
+                process_factory=factory,
+                state_dir=Path(self.temp.name),
+            )
 
     def prepare_adapter(self, adapter: Any, cursor: str = "100") -> None:
         adapter._api_origin = ORIGIN
@@ -1333,6 +1384,928 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(too_long.success)
         self.assertEqual(too_long.error_kind, "too_long")
 
+    async def test_reply_to_a_top_level_message_threads_to_that_message_id(self) -> None:
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID, thread_root_id=anchor_id)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                mentions=[AGENT_ID],
+                body="what is the deploy status?",
+            )
+        )
+
+        sent = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(
+            factory.calls[0]["args"],
+            ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+        )
+        # The thread root is a server-minted UUID and may ride on argv; the
+        # message body must never leave private stdin.
+        self.assertEqual(factory.calls[0]["process"].input, b"the answer")
+        self.assertNotIn("the answer", factory.calls[0]["args"])
+        for call in factory.calls:
+            self.assertNotIn("unit-test-token", call["args"])
+
+    async def test_fallback_delivery_threads_from_the_metadata_anchor(self) -> None:
+        # This adapter defines no edit_message, so Hermes's streaming path
+        # abandons editing after the first preview fragment and delivers the
+        # real answer through _send_fallback_final. That call passes NO
+        # reply_to; it carries the same anchor UUID as
+        # metadata["reply_to_message_id"] (_metadata_for_send). Reading only
+        # reply_to would thread the truncated preview and drop the answer
+        # itself flat into the conversation underneath it.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory(
+            [
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                mentions=[AGENT_ID],
+                body="explain the outage",
+            )
+        )
+        preview = await adapter.send(
+            CHANNEL_ID,
+            "working on it",
+            reply_to=anchor_id,
+            metadata={"reply_to_message_id": anchor_id, "expect_edits": True},
+        )
+        final = await adapter.send(
+            CHANNEL_ID,
+            "the whole answer",
+            metadata={"reply_to_message_id": anchor_id, "notify": True},
+        )
+
+        self.assertTrue(preview.success)
+        self.assertTrue(final.success)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id)] * 2,
+        )
+        self.assertEqual(factory.calls[1]["process"].input, b"the whole answer")
+        self.assertNotIn("the whole answer", factory.calls[1]["args"])
+
+    async def test_metadata_anchor_from_another_conversation_sends_flat(self) -> None:
+        # The metadata anchor gets the same conversation guard as reply_to: a
+        # root borrowed across conversations violates the composite foreign
+        # key on (thread_root_id, conversation_id) and would lose the reply.
+        channel_anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(DM_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="@hermes here")
+        )
+        sent = await adapter.send(
+            DM_ID,
+            "answer in the wrong lane",
+            metadata={"reply_to_message_id": channel_anchor_id},
+        )
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", DM_ID, "--json"))
+
+    async def test_reply_to_a_thread_reply_threads_to_its_root_not_its_own_id(self) -> None:
+        # The depth trap. Hype Comms threads are exactly one level deep: the
+        # Postgres trigger enforce_message_thread_depth rejects a thread root
+        # that is itself a reply, and the server pre-checks the same rule with
+        # a 404 that would drop the reply outright. Hermes hands back the
+        # triggering message's own ID as reply_to, so when the agent is woken
+        # INSIDE an existing thread the correct root is that message's
+        # threadRootId -- passing reply_to straight through is exactly wrong.
+        reply_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID, thread_root_id=THREAD_ROOT_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID, mentions=[AGENT_ID],
+                body="following up inside the thread",
+                thread_root_id=THREAD_ROOT_ID,
+            )
+        )
+        sent = await adapter.send(CHANNEL_ID, "still inside the thread", reply_to=reply_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(
+            factory.calls[0]["args"],
+            ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", THREAD_ROOT_ID),
+        )
+        self.assertNotIn(reply_id, factory.calls[0]["args"])
+
+    async def test_send_without_a_reply_anchor_stays_flat(self) -> None:
+        # Cron delivery, synthetic wakes and tool-progress bubbles all reach
+        # send() with reply_to=None, and must keep today's flat argv exactly.
+        factory = FakeProcessFactory([send_spec(DM_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(message_event("101", DM_ID, USER_ID))
+        sent = await adapter.send(DM_ID, "unprompted body")
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", DM_ID, "--json"))
+        self.assertNotIn("--thread-root-id", factory.calls[0]["args"])
+        self.assertEqual(factory.calls[0]["process"].input, b"unprompted body")
+        self.assertNotIn("unprompted body", factory.calls[0]["args"])
+
+    async def test_unresolvable_reply_anchor_sends_flat_and_keeps_the_chain_flat(self) -> None:
+        # An anchor the adapter never dispatched (a message that predates this
+        # process, or one filtered out as un-mentioned channel traffic) must
+        # degrade to a flat send rather than guessing a root. Because Hermes
+        # chains streamed chunks -- chunk 2 arrives anchored to chunk 1's own
+        # ID -- a flat first chunk must NOT be recorded, or chunk 2 would open
+        # a bot-only thread rooted at chunk 1 that nobody asked for.
+        unknown_anchor_id = message_id_for("900")
+        factory = FakeProcessFactory(
+            [
+                send_spec(DM_ID, message_id=CHUNK_ONE_ID),
+                send_spec(DM_ID, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        first = await adapter.send(DM_ID, "chunk one", reply_to=unknown_anchor_id)
+        second = await adapter.send(DM_ID, "chunk two", reply_to=first.message_id)
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(second.message_id, CHUNK_TWO_ID)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [
+                ("messages", "send", DM_ID, "--json"),
+                ("messages", "send", DM_ID, "--json"),
+            ],
+        )
+        self.assertEqual(adapter._thread_roots, {})
+
+    async def test_chunked_reply_keeps_every_chunk_on_the_same_thread_root(self) -> None:
+        # gateway/stream_consumer.py chains an overflowing streamed reply: it
+        # re-anchors chunk N+1 to chunk N's returned message ID instead of
+        # re-sending the original anchor. Recording our own outbound sends is
+        # what keeps the whole chain on one root instead of threading chunk 1
+        # and dropping the rest flat.
+        #
+        # Only the sealed HEAD chunks are chained that way. The trailing chunk
+        # goes out through the ordinary send path anchored at the original
+        # message, and every later overflow burst restarts its chain from that
+        # same original anchor -- _initial_reply_to_id is never reassigned. All
+        # three shapes have to land on one root.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory(
+            [
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_TWO_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_THREE_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_FOUR_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_FIVE_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                mentions=[AGENT_ID],
+                body="tell me everything",
+            )
+        )
+        # First burst: two sealed heads, chained.
+        first = await adapter.send(CHANNEL_ID, "chunk one", reply_to=anchor_id)
+        second = await adapter.send(CHANNEL_ID, "chunk two", reply_to=first.message_id)
+        # The burst's tail returns to the original anchor.
+        tail = await adapter.send(CHANNEL_ID, "chunk three", reply_to=anchor_id)
+        # A later burst restarts its own chain from the original anchor.
+        fourth = await adapter.send(CHANNEL_ID, "chunk four", reply_to=anchor_id)
+        fifth = await adapter.send(CHANNEL_ID, "chunk five", reply_to=fourth.message_id)
+
+        for result in (first, second, tail, fourth, fifth):
+            self.assertTrue(result.success)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id)] * 5,
+        )
+        # No chunk is ever rooted at a sibling chunk, which the one-level
+        # depth trigger would reject outright.
+        for chunk_id in (
+            CHUNK_ONE_ID,
+            CHUNK_TWO_ID,
+            CHUNK_THREE_ID,
+            CHUNK_FOUR_ID,
+            CHUNK_FIVE_ID,
+        ):
+            for call in factory.calls:
+                self.assertNotIn(chunk_id, call["args"])
+        for call in factory.calls:
+            self.assertNotIn("chunk one", call["args"])
+
+    async def test_a_live_reply_anchor_survives_eviction_while_the_reply_lands(self) -> None:
+        # Hermes re-uses the original anchor for the trailing chunk of a split
+        # reply, so busy inbound traffic during a long reply must not evict the
+        # very entry that reply is still resolving against. Each threaded send
+        # re-records its anchor, keeping it at the tail of the eviction order.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory(
+            [
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        with patch.object(adapter_module, "MAX_THREAD_ROOTS", 4):
+            await adapter._accept_event(
+                message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="explain")
+            )
+            head = await adapter.send(CHANNEL_ID, "chunk one", reply_to=anchor_id)
+            # Enough unrelated traffic to evict the anchor's original slot.
+            for sequence in ("102", "103", "104"):
+                await adapter._accept_event(
+                    message_event(sequence, CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+                )
+            tail = await adapter.send(CHANNEL_ID, "chunk two", reply_to=anchor_id)
+
+        self.assertTrue(head.success)
+        self.assertTrue(tail.success)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id)] * 2,
+        )
+
+    async def test_resync_between_chunks_sends_the_rest_flat(self) -> None:
+        # Pinned degradation, not a goal. The watch loop runs concurrently
+        # with a reply in flight, so a resync can land between two chunks of
+        # one split reply. Clearing the map is deliberate -- a root recorded
+        # before a gap the adapter cannot see is not re-asserted -- and the
+        # accepted cost is that the remainder of that reply lands flat instead
+        # of in the thread.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory(
+            [
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                mentions=[AGENT_ID],
+                body="tell me everything",
+            )
+        )
+        first = await adapter.send(CHANNEL_ID, "chunk one", reply_to=anchor_id)
+        await adapter._accept_event(
+            event("system.resync_required", "102", {"reason": "cursor_expired"})
+        )
+        second = await adapter.send(CHANNEL_ID, "chunk two", reply_to=first.message_id)
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [
+                ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                ("messages", "send", CHANNEL_ID, "--json"),
+            ],
+        )
+
+    async def test_reply_anchor_from_another_conversation_sends_flat(self) -> None:
+        # thread_root_id carries a composite foreign key on
+        # (thread_root_id, conversation_id), so a root borrowed from another
+        # conversation is a hard 404 that loses the reply entirely. Degrade to
+        # a flat send instead.
+        channel_anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(DM_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="@hermes here")
+        )
+        self.assertIn(channel_anchor_id, adapter._thread_roots)
+
+        sent = await adapter.send(DM_ID, "answer in the wrong lane", reply_to=channel_anchor_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", DM_ID, "--json"))
+
+    async def test_resync_required_clears_the_thread_root_map(self) -> None:
+        # The supervisor rebuilds the member and conversation caches from
+        # _load_directory on a resync; roots recorded before the gap the
+        # resync covers can no longer be trusted to describe the server state.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID]))
+        self.assertIn(anchor_id, adapter._thread_roots)
+
+        outcome = await adapter._accept_event(
+            event("system.resync_required", "102", {"reason": "cursor_expired"})
+        )
+
+        self.assertEqual(outcome, "resync")
+        self.assertEqual(adapter._thread_roots, {})
+        sent = await adapter.send(CHANNEL_ID, "post-resync answer", reply_to=anchor_id)
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", CHANNEL_ID, "--json"))
+
+    async def test_thread_root_map_is_bounded_and_evicts_oldest_first(self) -> None:
+        # Sustained traffic must not grow the map without limit. Eviction is
+        # FIFO by count, and an evicted anchor degrades to a flat send exactly
+        # like an anchor the adapter never saw.
+        bound = adapter_module.MAX_THREAD_ROOTS
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        first_cursor = 101
+        last_cursor = first_cursor + bound
+        for sequence in range(first_cursor, last_cursor + 1):
+            await adapter._accept_event(
+                message_event(str(sequence), CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+            )
+
+        self.assertEqual(len(adapter._thread_roots), bound)
+        evicted_id = message_id_for(str(first_cursor))
+        self.assertNotIn(evicted_id, adapter._thread_roots)
+        self.assertIn(message_id_for(str(first_cursor + 1)), adapter._thread_roots)
+        self.assertIn(message_id_for(str(last_cursor)), adapter._thread_roots)
+
+        sent = await adapter.send(
+            CHANNEL_ID, "answering a long-evicted message", reply_to=evicted_id
+        )
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", CHANNEL_ID, "--json"))
+
+    async def test_message_event_with_a_bad_thread_root_id_shape_is_fatal(self) -> None:
+        # threadRootId is a required, nullable key of the strict messageSchema.
+        # A non-string value is a broken contract; so is an absent key, which
+        # would otherwise read as "top-level" and root a reply at itself --
+        # the one shape the depth rule forbids. Both are rejected alongside
+        # the id/body/mention checks rather than threaded by guesswork.
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        wrong_type = message_event("101", DM_ID, USER_ID)
+        wrong_type["payload"]["message"]["threadRootId"] = 7
+        absent = message_event("101", DM_ID, USER_ID)
+        del absent["payload"]["message"]["threadRootId"]
+
+        for malformed in (wrong_type, absent):
+            with self.assertRaises(adapter_module.CliFailure) as caught:
+                await adapter._accept_event(malformed)
+            self.assertEqual(caught.exception.code, "INVALID_MESSAGE_EVENT")
+
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(adapter._thread_roots, {})
+        self.assertEqual(adapter._cursor, "100")
+
+    async def test_cli_without_the_flag_retries_flat_and_stops_threading(self) -> None:
+        # The adapter is copied out of this repo and runs against whatever
+        # hype-comms-cli is on PATH. A build that predates
+        # `messages send --thread-root-id` rejects the argv with the usage
+        # exit before issuing any request. Losing the agent's answer to a
+        # presentational flag is not acceptable: retry with the argv this
+        # adapter used before threading existed, then stop offering the flag
+        # so the extra subprocess is paid once rather than per reply.
+        anchor_id = message_id_for("101")
+        usage_failure = FakeProcess(
+            stderr=json.dumps(
+                {"error": {"code": "USAGE", "message": "Unknown option --thread-root-id"}}
+            ).encode("utf-8"),
+            returncode=2,
+        )
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    usage_failure,
+                ),
+                send_spec(CHANNEL_ID, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        first = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+        second = await adapter.send(CHANNEL_ID, "another answer", reply_to=anchor_id)
+
+        self.assertTrue(first.success)
+        self.assertEqual(first.message_id, CHUNK_ONE_ID)
+        self.assertTrue(second.success)
+        # The second reply never re-offers the flag, and the retry's body
+        # still travels on private stdin.
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [
+                ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                ("messages", "send", CHANNEL_ID, "--json"),
+                ("messages", "send", CHANNEL_ID, "--json"),
+            ],
+        )
+        self.assertEqual(factory.calls[1]["process"].input, b"the answer")
+        self.assertFalse(adapter._thread_root_supported)
+        self.assertEqual(adapter._thread_roots, {})
+
+    async def test_rejected_thread_root_retries_flat_and_forgets_that_anchor(self) -> None:
+        # A 404 from the server's thread-root pre-check runs before the insert,
+        # so a flat retry cannot duplicate a post. Only the refused anchor is
+        # forgotten: threading stays on for every other conversation, and the
+        # unrecorded flat send keeps the rest of the chunk chain flat too.
+        anchor_id = message_id_for("101")
+        not_found = FakeProcess(
+            stderr=json.dumps(
+                {
+                    "error": {
+                        "code": "NOT_FOUND",
+                        "message": "Thread root not found",
+                        "httpStatus": 404,
+                    }
+                }
+            ).encode("utf-8"),
+            returncode=4,
+        )
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    not_found,
+                ),
+                send_spec(CHANNEL_ID, message_id=CHUNK_ONE_ID),
+                send_spec(CHANNEL_ID, message_id=CHUNK_TWO_ID),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        first = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+        second = await adapter.send(CHANNEL_ID, "the rest of it", reply_to=first.message_id)
+
+        self.assertTrue(first.success)
+        self.assertEqual(first.message_id, CHUNK_ONE_ID)
+        self.assertTrue(second.success)
+        self.assertEqual(
+            [call["args"] for call in factory.calls],
+            [
+                ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                ("messages", "send", CHANNEL_ID, "--json"),
+                ("messages", "send", CHANNEL_ID, "--json"),
+            ],
+        )
+        self.assertNotIn(anchor_id, adapter._thread_roots)
+        # A refused root is not evidence that the CLI lacks the flag.
+        self.assertTrue(adapter._thread_root_supported)
+
+    async def test_a_transient_threaded_send_failure_is_not_retried_flat(self) -> None:
+        # The flat retry exists for a refused thread root, not as a general
+        # second attempt. A rate limit, an auth failure or a 5xx must surface
+        # to Hermes with its own classification and retry budget, and must not
+        # silently post the same body twice.
+        anchor_id = message_id_for("101")
+        rate_limited = FakeProcess(
+            stderr=json.dumps(
+                {
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "message": "slow down",
+                        "httpStatus": 429,
+                        "retryAfterMs": 2500,
+                    }
+                }
+            ).encode("utf-8"),
+            returncode=5,
+        )
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    rate_limited,
+                )
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        failed = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertFalse(failed.success)
+        self.assertTrue(failed.retryable)
+        self.assertEqual(failed.error_kind, "rate_limited")
+        self.assertEqual(failed.retry_after, 2.5)
+        self.assertEqual(len(factory.calls), 1)
+        self.assertTrue(adapter._thread_root_supported)
+        self.assertIn(anchor_id, adapter._thread_roots)
+
+    async def test_a_failing_flat_retry_reports_the_flat_failure(self) -> None:
+        # If the flat retry fails too, the flag was not the problem: report
+        # the retry's own classification and keep threading enabled.
+        anchor_id = message_id_for("101")
+        usage_error = json.dumps(
+            {"error": {"code": "USAGE", "message": "Unknown option --thread-root-id"}}
+        ).encode("utf-8")
+        forbidden = json.dumps(
+            {"error": {"code": "FORBIDDEN", "message": "not a participant", "httpStatus": 403}}
+        ).encode("utf-8")
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    FakeProcess(stderr=usage_error, returncode=2),
+                ),
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json"),
+                    FakeProcess(stderr=forbidden, returncode=3),
+                ),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        failed = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertFalse(failed.success)
+        self.assertEqual(failed.error_kind, "forbidden")
+        self.assertFalse(failed.retryable)
+        self.assertEqual(len(factory.calls), 2)
+        self.assertTrue(adapter._thread_root_supported)
+
+    async def test_a_direct_message_reply_is_never_threaded(self) -> None:
+        # Threading is right for a channel and wrong for a direct message. Once
+        # a client negotiates threads-v1 the desktop drops every message with a
+        # thread root out of the main timeline (visibleTimelineMessages in
+        # apps/desktop/src/renderer/src/App.tsx), which in a DM would leave the
+        # human reading a column of their own questions with the answers filed
+        # behind reply chips.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(DM_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(message_event("101", DM_ID, USER_ID, body="what broke?"))
+
+        # No anchor is recorded at all, so the send degrades through the same
+        # path as an anchor the adapter never saw.
+        self.assertEqual(adapter._thread_roots, {})
+        sent = await adapter.send(DM_ID, "the answer", reply_to=anchor_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", DM_ID, "--json"))
+
+    async def test_thread_replies_can_be_switched_off_for_channels_too(self) -> None:
+        # Threading is presentation, so turning it off has to restore exactly
+        # the flat send this adapter shipped with rather than fail anything.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_REPLIES": "false"})
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="@hermes status?")
+        )
+        sent = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["args"], ("messages", "send", CHANNEL_ID, "--json"))
+
+    async def test_an_unmentioned_thread_follow_up_is_ignored_by_default(self) -> None:
+        # The shipped promise is that unmentioned channel traffic never reaches
+        # Hermes. Receiving the annotation is not the same as acting on it.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        seen: list[Any] = []
+        adapter.handle_message = lambda event: seen.append(event)
+
+        outcome = await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                body="still broken",
+                thread_root_id=THREAD_ROOT_ID,
+                reason="participated_thread_reply",
+            )
+        )
+
+        self.assertEqual(outcome, "accepted")
+        self.assertEqual(seen, [])
+        self.assertEqual(adapter._thread_roots, {})
+
+    async def test_an_unmentioned_thread_follow_up_wakes_the_agent_when_enabled(self) -> None:
+        # With follow-ups on, a reply inside a thread this agent already spoke
+        # in wakes it without a mention, and the reply it writes still threads
+        # under that thread's root rather than under the follow-up.
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID, thread_root_id=THREAD_ROOT_ID)])
+        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        self.prepare_adapter(adapter)
+        seen: list[Any] = []
+
+        async def capture(event: Any) -> None:
+            seen.append(event)
+
+        adapter.handle_message = capture
+
+        await adapter._accept_event(
+            message_event(
+                "101",
+                CHANNEL_ID,
+                USER_ID,
+                body="still broken",
+                thread_root_id=THREAD_ROOT_ID,
+                reason="participated_thread_reply",
+            )
+        )
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].text, "still broken")
+        sent = await adapter.send(CHANNEL_ID, "looking now", reply_to=message_id_for("101"))
+
+        self.assertTrue(sent.success)
+        self.assertEqual(
+            factory.calls[0]["args"],
+            ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", THREAD_ROOT_ID),
+        )
+
+    async def test_unmentioned_top_level_channel_traffic_stays_ignored_when_enabled(self) -> None:
+        # The server only annotates thread replies, so an ordinary unmentioned
+        # channel message carries no reason and must stay out of Hermes even
+        # with follow-ups switched on.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        self.prepare_adapter(adapter)
+        seen: list[Any] = []
+        adapter.handle_message = lambda event: seen.append(event)
+
+        outcome = await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, body="unrelated chatter")
+        )
+
+        self.assertEqual(outcome, "accepted")
+        self.assertEqual(seen, [])
+
+    async def test_an_unrecognized_notification_reason_is_fatal(self) -> None:
+        # Absence is the whole legacy shape and is accepted. Any other value
+        # means messageCreatedEventSchema moved underneath this adapter, and a
+        # gate that decides who may wake the agent must not guess.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(
+                message_event(
+                    "101",
+                    CHANNEL_ID,
+                    USER_ID,
+                    mentions=[AGENT_ID],
+                    thread_root_id=THREAD_ROOT_ID,
+                    reason="local_guess",
+                )
+            )
+
+        self.assertEqual(raised.exception.code, "INVALID_MESSAGE_EVENT")
+
+    async def test_the_channel_prompt_names_the_agent_only_when_follow_ups_are_on(self) -> None:
+        # metadata and raw_message reach no prompt, and platform_hint is fixed
+        # at plugin registration, so channel_prompt is the only place this
+        # adapter can tell the model its own handle and the silence rule. The
+        # default configuration sets none of it.
+        quiet = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(quiet)
+        self.assertIsNone(quiet._channel_prompt())
+
+        adapter = self.new_adapter(
+            FakeProcessFactory([]), env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"}
+        )
+        self.prepare_adapter(adapter)
+        prompt = adapter._channel_prompt()
+
+        self.assertIsNotNone(prompt)
+        self.assertIn("@hermes", prompt)
+        self.assertIn("NO_REPLY", prompt)
+        # Hermes keys its agent cache on the merged ephemeral prompt, so this
+        # text must not vary between messages.
+        self.assertEqual(prompt, adapter._channel_prompt())
+
+    async def test_an_intentional_silence_marker_is_never_posted(self) -> None:
+        # Hermes blanks a silent turn before delivery, but its streaming path
+        # can seal a segment mid-turn and hand the bare marker to send() as
+        # ordinary text. A posted Hype Comms message cannot be retracted from
+        # here, so the marker must not reach the CLI at all.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        for marker in ("NO_REPLY", "no_reply", "  [SILENT] ", "*NO_REPLY*", "NO REPLY"):
+            sent = await adapter.send(CHANNEL_ID, marker)
+            self.assertTrue(sent.success, marker)
+            self.assertIsNone(sent.message_id, marker)
+
+        self.assertEqual(factory.calls, [])
+
+    async def test_prose_that_merely_mentions_a_silence_marker_is_delivered(self) -> None:
+        # The suppression mirrors Hermes's own whole-response rule. An answer
+        # that explains NO_REPLY is an answer.
+        body = "Reply with exactly NO_REPLY when a thread follow-up needs nothing from you."
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        sent = await adapter.send(CHANNEL_ID, body)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["process"].input, body.encode())
+
+    async def test_the_adapter_declares_that_it_cannot_edit_messages(self) -> None:
+        # Hype Comms exposes no edit operation through the CLI. Without this
+        # flag Hermes opens a streaming preview, sends a partial first message,
+        # discovers the failed edit, and leaves the partial beside the answer.
+        self.assertIs(adapter_module.HypeCommsAdapter.SUPPORTS_MESSAGE_EDITING, False)
+
+    async def test_a_dispatched_event_carries_the_channel_prompt(self) -> None:
+        # channel_prompt is the only seam that reaches the model; metadata and
+        # raw_message do not. Asserting it on the event, rather than on the
+        # helper, is what keeps the wiring from being deleted silently.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="@hermes ping")
+        )
+
+        self.assertEqual(len(adapter.handled_events), 1)
+        prompt = adapter.handled_events[0].channel_prompt
+        self.assertIsNotNone(prompt)
+        self.assertIn("@hermes", prompt)
+        self.assertIn("NO_REPLY", prompt)
+
+    async def test_a_dispatched_event_carries_no_channel_prompt_by_default(self) -> None:
+        # The default configuration must leave the prompt exactly as it was
+        # before follow-ups existed, because a changed ephemeral prompt costs
+        # a fresh agent and a cold provider prompt cache.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="@hermes ping")
+        )
+
+        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertIsNone(adapter.handled_events[0].channel_prompt)
+
+    async def test_short_prose_naming_a_marker_is_still_delivered(self) -> None:
+        # The long-prose case passes on the 64-character cap alone. This one is
+        # inside the cap, so it can only pass on the whole-response rule.
+        body = "Answer NO_REPLY when idle."
+        self.assertLess(len(body), adapter_module.MAX_SILENCE_MARKER_LENGTH)
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        sent = await adapter.send(CHANNEL_ID, body)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["process"].input, body.encode())
+
+    async def test_a_bracketed_marker_does_not_decay_when_it_is_malformed(self) -> None:
+        # Hermes keeps square brackets structural precisely so "[SILENT" is not
+        # silence. Diverging here would drop a real message.
+        factory = FakeProcessFactory([send_spec(CHANNEL_ID)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        sent = await adapter.send(CHANNEL_ID, "[SILENT")
+
+        self.assertTrue(sent.success)
+        self.assertEqual(factory.calls[0]["process"].input, b"[SILENT")
+
+    async def test_the_agent_username_filter_matches_the_wire_contract(self) -> None:
+        # The handle lands inside model-visible instructions, so it is filtered
+        # even though it arrives from a validated directory response. The cap
+        # has to match userSchema.username or a legal agent silently loses its
+        # whole channel prompt.
+        safe = adapter_module._safe_username
+        self.assertEqual(safe("hermes"), "hermes")
+        self.assertEqual(safe("  hermes  "), "hermes")
+        self.assertEqual(safe("a" * 80), "a" * 80)
+        self.assertIsNone(safe("a" * 81))
+        self.assertIsNone(safe(None))
+        self.assertIsNone(safe(""))
+        self.assertIsNone(safe("   "))
+        # Anything that could restructure the surrounding sentence is dropped
+        # rather than escaped.
+        self.assertEqual(safe("her\nmes"), "hermes")
+        self.assertEqual(safe("her mes"), "hermes")
+        self.assertEqual(safe("her\u200bmes"), "hermes")
+
+    async def test_a_notification_reason_without_a_thread_root_is_fatal(self) -> None:
+        # The wire contract refuses this pairing, and this field decides who may
+        # wake the agent, so the adapter refuses it too rather than trusting
+        # that someone upstream checked.
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        self.prepare_adapter(adapter)
+
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(
+                message_event(
+                    "101",
+                    CHANNEL_ID,
+                    USER_ID,
+                    body="not really a thread reply",
+                    reason="participated_thread_reply",
+                )
+            )
+
+        self.assertEqual(raised.exception.code, "INVALID_MESSAGE_EVENT")
+
+    async def test_a_spawn_failure_does_not_latch_threading_off(self) -> None:
+        # The adapter mints the CLI's usage exit code for its own pre-spawn
+        # failures. Reading one of those as "this CLI has no --thread-root-id"
+        # would let a momentary fd shortage disable threading for the life of
+        # the gateway and blame a CLI that is fine.
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    OSError(24, "Too many open files"),
+                ),
+                send_spec(CHANNEL_ID, thread_root_id=anchor_id),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        failed = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        # The spawn failure is reported as a failure rather than retried flat,
+        # because nothing about it says the thread root was the problem.
+        self.assertFalse(failed.success)
+        self.assertTrue(adapter._thread_root_supported)
+        self.assertIn(anchor_id, adapter._thread_roots)
+
+        # The next reply still threads.
+        sent = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertTrue(sent.success)
+        self.assertEqual(
+            factory.calls[1]["args"],
+            ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+        )
+
     async def test_lock_conflict_stops_before_watch(self) -> None:
         factory = FakeProcessFactory(startup_specs())
         adapter = self.new_adapter(
@@ -1386,6 +2359,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             "HYPE_COMMS_HOME_CONVERSATION",
         )
         self.assertTrue(callable(context.kwargs["standalone_sender_fn"]))
+        # The hint is the agent's whole model of the platform. It has to say
+        # where a reply lands and, more importantly, that the agent goes deaf
+        # in the thread it just opened unless a follow-up mentions it again.
+        hint = context.kwargs["platform_hint"]
+        self.assertIn("threaded reply", hint)
+        self.assertIn("one level deep", hint)
+        self.assertIn("mention", hint)
+        self.assertIn("4,000 characters", hint)
 
 
 if __name__ == "__main__":

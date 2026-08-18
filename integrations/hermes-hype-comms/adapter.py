@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import tempfile
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,21 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_CLI_OUTPUT_BYTES = 1_048_576
 MAX_DIAGNOSTIC_BYTES = 65_536
 MAX_MESSAGE_LENGTH = 4_000
+MAX_THREAD_ROOTS = 512
+MAX_SILENCE_MARKER_LENGTH = 64
+# userSchema.username in packages/contracts/src/entities.ts, so a valid agent
+# handle is never rejected here.
+MAX_AGENT_USERNAME_LENGTH = 80
+# The single value messageCreatedEventSchema allows for the optional
+# per-recipient annotation (packages/contracts/src/workspace.ts).
+PARTICIPATED_THREAD_REPLY = "participated_thread_reply"
+# Whole responses Hermes reads as "the model chose not to speak"
+# (gateway/response_filters.py at the pinned Hermes commit).
+SILENCE_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+# Failures this adapter raises with the CLI's usage exit code before, or
+# instead of, running the CLI. They say nothing about the argv they were
+# carrying.
+PRE_SPAWN_FAILURE_CODES = frozenset({"CLI_NOT_FOUND", "CLI_START_FAILED", "CONFIG_INVALID"})
 CURSOR_FILE_VERSION = 1
 REQUIRED_AGENT_SCOPES = frozenset({"workspace:read", "messages:write"})
 CONVERSATION_SESSION_EXTRA = {
@@ -71,6 +87,10 @@ _TRACEBACK_PATTERN = re.compile(
 )
 
 ProcessFactory = Callable[..., Awaitable[Any]]
+# Conversation ID and resolved thread root recorded for one observed message
+# ID. The conversation is kept because thread_root_id is constrained by a
+# composite foreign key on (thread_root_id, conversation_id).
+ThreadAnchor = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -102,8 +122,106 @@ class CliFailure(Exception):
         return metadata
 
 
+@dataclass(frozen=True)
+class ResolvedThreadRoot:
+    """A Hermes reply anchor that resolved to a Hype Comms thread root.
+
+    The anchor is kept alongside the root so a send that the CLI or the server
+    rejects can forget exactly the entry it used, and so a successful send can
+    refresh that entry's position in the bounded map.
+    """
+
+    anchor: str
+    thread_root: str
+
+
+def _rejects_thread_root(failure: CliFailure) -> bool:
+    """True when a failed threaded send may be retried without the root.
+
+    Restricted to the two failures that provably happen before the server
+    creates a message, so the flat retry can never duplicate a post: exit code
+    2 is the CLI's usage exit, raised while parsing argv and before any
+    request; a 404 is the server's thread-root pre-check, which runs before
+    the insert. An API or contract failure is deliberately excluded -- a
+    message may already exist behind it.
+
+    Exit code 2 alone is not enough, because this adapter mints it too, for
+    failures that never reached the CLI's argument parser at all. Treating a
+    transient spawn failure as a usage error would let one unlucky OSError
+    latch threading off for the life of the process and blame a CLI that is
+    working; a genuine usage exit can only come back from a process that
+    actually started.
+    """
+
+    if failure.error_kind == "not_found":
+        return True
+    return failure.exit_code == 2 and failure.code not in PRE_SPAWN_FAILURE_CODES
+
+
 def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in _TRUE_VALUES
+
+
+def _enabled(name: str, *, default: bool) -> bool:
+    """Read an optional boolean switch, keeping an unset variable at ``default``."""
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    return _truthy(raw)
+
+
+def _safe_username(value: object) -> Optional[str]:
+    """Return a username safe to interpolate into a prompt, or None.
+
+    The value comes from a validated CLI response rather than from message
+    text, but it still ends up inside model-visible instructions, so newlines
+    and control characters are dropped and the result is length-capped.
+    """
+
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(
+        character
+        for character in value
+        if character.isprintable() and not character.isspace()
+    ).strip()
+    if not cleaned or len(cleaned) > MAX_AGENT_USERNAME_LENGTH:
+        return None
+    return cleaned
+
+
+def _is_silence_marker(content: str) -> bool:
+    """Return True when ``content`` is exactly one of Hermes's silence markers.
+
+    Mirrors ``is_intentional_silence_response`` in gateway/response_filters.py
+    at the pinned Hermes commit: whole response only, case-insensitive,
+    internal whitespace collapsed, and length-capped so prose that merely
+    quotes a marker is still delivered. Edge punctuation is stripped for a
+    second attempt with square brackets kept structural, so a malformed
+    ``[SILENT`` does not decay into ``SILENT``.
+    """
+
+    stripped = content.strip()
+    if not stripped or len(stripped) > MAX_SILENCE_MARKER_LENGTH:
+        return False
+    canonical = " ".join(stripped.upper().split())
+    if canonical in SILENCE_MARKERS:
+        return True
+    start, end = 0, len(canonical)
+    while (
+        start < end
+        and canonical[start] not in "[]"
+        and unicodedata.category(canonical[start]).startswith("P")
+    ):
+        start += 1
+    while (
+        end > start
+        and canonical[end - 1] not in "[]"
+        and unicodedata.category(canonical[end - 1]).startswith("P")
+    ):
+        end -= 1
+    return canonical[start:end].strip() in SILENCE_MARKERS
 
 
 def _safe_text(value: object, *, fallback: str = "Hype Comms CLI failed") -> str:
@@ -418,6 +536,14 @@ class HypeCommsAdapter(BasePlatformAdapter):
     """Persistent Hype Comms participant backed by ``hype-comms-cli``."""
 
     supports_code_blocks = True
+    # Hype Comms exposes no message-edit operation through the CLI and this
+    # adapter implements none, so it inherits the base class's edit_message,
+    # which reports failure. Declaring that up front makes Hermes skip the
+    # streaming preview entirely (gateway/run.py:21359 at the pinned commit)
+    # rather than send a partial first message, discover the edit failure, and
+    # leave that partial sitting beside the finished answer. It also keeps the
+    # answer on the single delivery path this adapter can reason about.
+    SUPPORTS_MESSAGE_EDITING = False
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
@@ -453,6 +579,24 @@ class HypeCommsAdapter(BasePlatformAdapter):
         self._agent_user: Dict[str, Any] = {}
         self._members: Dict[str, Dict[str, Any]] = {}
         self._conversations: Dict[str, Dict[str, Any]] = {}
+        self._thread_roots: Dict[str, ThreadAnchor] = {}
+        # `messages send --thread-root-id` is newer than the rest of the argv
+        # this adapter uses, and the CLI is whatever build is on PATH. Latched
+        # off for the life of the adapter the first time a threaded send is
+        # rejected as a usage error and the same send then succeeds flat, so a
+        # CLI without the flag costs one extra subprocess once rather than one
+        # per reply. A restart re-tries the flag.
+        self._thread_root_supported = True
+        # Threading is presentational and reversible, so it is a switch rather
+        # than a rebuild: turning it off restores the flat sends this adapter
+        # shipped with. Follow-ups default off because they widen what reaches
+        # Hermes past explicit mentions and cost one inference turn per ambient
+        # message; see this directory's README.
+        self._thread_replies_enabled = _enabled("HYPE_COMMS_THREAD_REPLIES", default=True)
+        self._thread_followups_enabled = _enabled(
+            "HYPE_COMMS_THREAD_FOLLOWUPS", default=False
+        )
+        self._channel_prompt_text: Optional[str] = None
         self._cursor: Optional[str] = None
         self._cursor_path: Optional[Path] = None
         self._watch_process: Any = None
@@ -768,6 +912,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
             principal = await self._command(["auth", "whoami", "--json"])
             self._agent_user, self._workspace_id = self._agent_identity(principal)
             self._agent_user_id = str(self._agent_user["id"])
+            # Rebuilt on the next dispatch from whatever username this
+            # connection resolved, so a renamed agent stops introducing itself
+            # by its old handle.
+            self._channel_prompt_text = None
             bootstrap_cursor = await self._load_directory()
 
             lock_identity = f"{self._api_origin}\0{self._agent_user_id}"
@@ -1246,6 +1394,171 @@ class HypeCommsAdapter(BasePlatformAdapter):
             "participantIds": participant_ids,
         }
 
+    def _threading_enabled_for(self, chat_type: str) -> bool:
+        """Return True when a reply inside ``chat_type`` should open a thread.
+
+        Direct messages are deliberately excluded. Once a client negotiates
+        threads-v1 the desktop drops every message carrying a thread root out
+        of the main timeline (``visibleTimelineMessages`` in
+        apps/desktop/src/renderer/src/App.tsx), which is the intended shape in
+        a channel -- the root keeps its place and grows a reply chip -- and the
+        wrong shape in a direct message, where it would leave the human reading
+        a column of their own questions with the answers filed out of sight.
+
+        Recording the root is the only gate needed for a reply's placement. An
+        anchor that was never recorded resolves to None in
+        ``_thread_root_for_reply`` and the reply goes out flat, which is
+        exactly what this adapter did before threading existed. The latch is
+        checked here as well so that a CLI without ``--thread-root-id`` stops
+        the bookkeeping too: ``_thread_root_for_reply`` returns None on its
+        first line once the latch is off, so every entry recorded after that
+        point would be refilled and evicted without ever being read.
+        """
+
+        return (
+            self._thread_replies_enabled
+            and self._thread_root_supported
+            and chat_type == "channel"
+        )
+
+    def _channel_prompt(self) -> Optional[str]:
+        """Per-message instructions Hermes merges into the ephemeral prompt.
+
+        ``MessageEvent.channel_prompt`` (gateway/platforms/base.py at the
+        pinned Hermes commit) is applied at API-call time and never persisted
+        to transcript history. It is the only seam an adapter has for text the
+        model will actually read: ``metadata`` and ``raw_message`` reach no
+        prompt, and ``platform_hint`` is captured once at plugin registration,
+        so it cannot name this workspace's agent username.
+
+        Returned only while thread follow-ups are enabled, which keeps the
+        default configuration byte-identical to the mention-only behaviour
+        this adapter shipped with. The text is constant for the life of the
+        adapter on purpose: Hermes keys its agent cache on the merged
+        ephemeral prompt, so a prompt that varied per message would rebuild
+        the agent and miss the provider prompt cache on every turn.
+        """
+
+        if not self._thread_followups_enabled:
+            return None
+        if self._channel_prompt_text is not None:
+            return self._channel_prompt_text
+        username = _safe_username(self._agent_user.get("username"))
+        if username is None:
+            # The directory has not resolved the agent's own record yet. Skip
+            # rather than cache a placeholder; a later message rebuilds it.
+            return None
+        self._channel_prompt_text = (
+            f"You are @{username} on Hype Comms. Direct messages, and channel "
+            f"messages that mention @{username}, are addressed to you: answer "
+            "them. You are also woken by follow-ups inside threads you have "
+            "already replied in, and most of those are people talking to each "
+            "other rather than to you. When a message that woke you needs "
+            "nothing from you, reply with exactly NO_REPLY and nothing else; "
+            "that reply is delivered to nobody. Never put NO_REPLY in the same "
+            "message as other text -- it only counts as silence on its own."
+        )
+        return self._channel_prompt_text
+
+    @staticmethod
+    def _resolve_thread_root(message: Mapping[str, Any]) -> str:
+        """Return the thread root a reply to ``message`` must be filed under.
+
+        Hype Comms threads are exactly one level deep. The Postgres trigger
+        enforce_message_thread_depth (apps/server/src/db/migrations/
+        0009_message_threads.sql) raises
+        'messages_thread_root_must_be_top_level' whenever a thread root is
+        itself a reply, and the server pre-checks the same rule and answers
+        404 NOT_FOUND. Hermes hands us the triggering message's own ID as
+        ``reply_to``, so passing that value through as the thread root is
+        correct only while the agent is answering a top-level message and
+        wrong exactly when it was woken inside an existing thread. The root of
+        a reply is that reply's own root; the root of a top-level message is
+        the message itself.
+        """
+
+        thread_root_id = message.get("threadRootId")
+        if isinstance(thread_root_id, str) and thread_root_id:
+            return thread_root_id
+        return str(message["id"])
+
+    def _remember_thread_root(
+        self,
+        conversation_id: str,
+        message_id: str,
+        thread_root: str,
+    ) -> None:
+        """Record the root a reply to ``message_id`` must carry.
+
+        The map is bounded with FIFO eviction because lookups are
+        overwhelmingly for the most recent messages. Eviction is by count
+        rather than age on purpose: one logical Hermes reply can span several
+        send attempts across tens of seconds of retry backoff, and every one
+        of them has to resolve to the same root.
+        """
+
+        self._thread_roots.pop(message_id, None)
+        self._thread_roots[message_id] = (conversation_id, thread_root)
+        while len(self._thread_roots) > MAX_THREAD_ROOTS:
+            self._thread_roots.pop(next(iter(self._thread_roots)))
+
+    @staticmethod
+    def _reply_anchors(
+        reply_to: object,
+        metadata: Optional[Mapping[str, Any]],
+    ) -> tuple[str, ...]:
+        """Return the anchor IDs Hermes offered for one send, best first.
+
+        Hermes carries the anchor on two different keywords. Ordinary and
+        chunk-chained sends pass ``reply_to``. The fallback delivery path --
+        the one that actually carries the answer for an adapter that cannot
+        edit messages, which this adapter cannot -- passes no ``reply_to`` at
+        all and supplies the same UUID as ``metadata["reply_to_message_id"]``
+        (``_metadata_for_send`` in gateway/stream_consumer.py at the pinned
+        Hermes commit; see this directory's README Compatibility section).
+        Reading only ``reply_to`` would thread the streamed preview and then
+        post the answer itself flat underneath it.
+
+        Neither value is trusted: both are looked up in the recorded map and
+        anything that misses is discarded. This is not a "reply to the latest
+        message" guess -- both are anchors Hermes was handed by this adapter.
+        """
+
+        candidates: List[str] = []
+        raw = (reply_to, (metadata or {}).get("reply_to_message_id"))
+        for value in raw:
+            if isinstance(value, str) and value and value not in candidates:
+                candidates.append(value)
+        return tuple(candidates)
+
+    def _thread_root_for_reply(
+        self,
+        chat_id: str,
+        anchors: tuple[str, ...],
+    ) -> Optional[ResolvedThreadRoot]:
+        """Resolve Hermes's reply anchors to a Hype Comms thread root.
+
+        Returns None whenever every anchor is absent or unrecognized, which
+        keeps today's flat send as the fallback. There is deliberately no
+        "reply to the latest message" guess.
+        """
+
+        if not self._thread_root_supported:
+            return None
+        for anchor in anchors:
+            recorded = self._thread_roots.get(anchor)
+            if recorded is None:
+                continue
+            conversation_id, thread_root = recorded
+            if conversation_id != chat_id:
+                # thread_root_id carries a composite foreign key on
+                # (thread_root_id, conversation_id), so a root borrowed from
+                # another conversation is a hard failure that would drop the
+                # reply instead of degrading it. Send flat rather than lose it.
+                continue
+            return ResolvedThreadRoot(anchor=anchor, thread_root=thread_root)
+        return None
+
     async def _dispatch_message(self, event: Mapping[str, Any]) -> None:
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -1262,8 +1575,33 @@ class HypeCommsAdapter(BasePlatformAdapter):
             or not isinstance(message.get("id"), str)
             or not isinstance(message.get("conversationId"), str)
             or not isinstance(message.get("body"), str)
+            # threadRootId is a required, nullable key of messageSchema
+            # (packages/contracts/src/entities.ts), which is strict, so every
+            # conforming message.created payload carries it -- null for a
+            # top-level message, the root's ID for a reply. Absence is
+            # rejected exactly like a wrong type: a missing key silently reads
+            # as "top-level", which for a message that is really a thread
+            # reply produces a root the depth rule forbids.
+            or "threadRootId" not in message
+            or not isinstance(message["threadRootId"], (str, type(None)))
             or not isinstance(mentioned_user_ids, list)
             or not all(isinstance(item, str) for item in mentioned_user_ids)
+            # recipientNotificationReason is optional in
+            # messageCreatedEventSchema (packages/contracts/src/workspace.ts)
+            # and carries exactly one literal. Absence is the whole legacy
+            # shape, so it is accepted; any other value means the contract
+            # moved underneath this adapter and must not be guessed at.
+            or payload.get("recipientNotificationReason", PARTICIPATED_THREAD_REPLY)
+            != PARTICIPATED_THREAD_REPLY
+            # The same schema refuses the annotation on a message with no
+            # thread root. Re-checking the pairing here matters because this
+            # is the field that decides whether an unmentioned message may
+            # wake the agent, and a gate does not get to assume its input was
+            # validated somewhere upstream.
+            or (
+                "recipientNotificationReason" in payload
+                and message["threadRootId"] is None
+            )
         ):
             raise CliFailure(
                 6,
@@ -1295,8 +1633,29 @@ class HypeCommsAdapter(BasePlatformAdapter):
             logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
             return
         if chat_info["type"] == "channel" and self._agent_user_id not in mentioned_user_ids:
-            return
+            # A participated-thread reply is a follow-up inside a thread this
+            # agent has already spoken in. The server annotates it per
+            # recipient and only for a client that negotiated
+            # participated-thread-notifications-v1, so the flag below is the
+            # only thing standing between "answer when named" and "listen to
+            # every thread you have ever touched". Waking here costs a full
+            # inference turn even when the model decides to stay quiet, so it
+            # stays opt-in.
+            if not (
+                self._thread_followups_enabled
+                and payload.get("recipientNotificationReason") == PARTICIPATED_THREAD_REPLY
+            ):
+                return
 
+        # Record only the messages Hermes actually sees. Anything filtered out
+        # above can never come back as a reply_to anchor, so an entry for it
+        # would just consume the bound.
+        if self._threading_enabled_for(str(chat_info["type"])):
+            self._remember_thread_root(
+                conversation_id,
+                str(message["id"]),
+                self._resolve_thread_root(message),
+            )
         source = self.build_source(
             chat_id=conversation_id,
             chat_name=chat_info["name"],
@@ -1328,6 +1687,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 "hype_comms_conversation_sequence": message.get("conversationSequence"),
             },
         )
+        # metadata and raw_message never reach the model; channel_prompt is
+        # Hermes's supported per-message seam for text it will actually read.
+        normalized.channel_prompt = self._channel_prompt()
         await self.handle_message(normalized)
 
     async def _accept_event(self, event: Mapping[str, Any]) -> str:
@@ -1362,6 +1724,23 @@ class HypeCommsAdapter(BasePlatformAdapter):
             )
         cursor = self._checked_cursor(event.get("workspaceSequence"))
         if event_type == "system.resync_required":
+            # The supervisor rebuilds the member and conversation caches from
+            # _load_directory before resuming. Drop the thread-root map with
+            # them: the gap the resync covers may contain messages the adapter
+            # never observed, and a root recorded before it can no longer be
+            # trusted to describe what the server now holds. Clearing here
+            # rather than in _load_directory keeps ordinary directory
+            # refreshes (member.updated, membership changes) from discarding
+            # roots that are still live.
+            #
+            # Accepted consequence: the watch loop runs concurrently with a
+            # reply in flight, so a resync between two chunks of one split
+            # reply drops the anchor mid-chain and the remaining chunks land
+            # flat in the conversation instead of in the thread. A split reply
+            # is preferred here over a root asserted across a gap the adapter
+            # cannot see. test_resync_between_chunks_sends_the_rest_flat pins
+            # the behavior.
+            self._thread_roots.clear()
             return "resync"
         if self._cursor is not None and int(cursor) <= int(self._cursor):
             return "duplicate"
@@ -1403,6 +1782,70 @@ class HypeCommsAdapter(BasePlatformAdapter):
         self._persist_cursor(cursor)
         return "accepted"
 
+    async def _send_once(
+        self,
+        conversation_id: str,
+        content: str,
+        resolved: Optional[ResolvedThreadRoot],
+    ) -> SendResult:
+        """Issue one `messages send`, threaded when ``resolved`` is given."""
+
+        args = ["messages", "send", conversation_id, "--json"]
+        if resolved is not None:
+            # A thread root is a server-minted UUID, never user content, so it
+            # is safe on argv. The body still travels on private stdin.
+            args.extend(["--thread-root-id", resolved.thread_root])
+        result = await self._command(args, stdin_text=content)
+        message_id = _message_id(result)
+        if resolved is not None:
+            # Hermes chains the chunks of one overflowing streamed reply:
+            # chunk N+1 arrives with reply_to set to chunk N's message ID
+            # (gateway/stream_consumer.py:817-843 at the pinned Hermes commit;
+            # see this directory's README Compatibility section), not to the
+            # original anchor. Recording our own outbound message keeps every
+            # chunk on the same root. Flat sends are deliberately not
+            # recorded, so a reply that began flat stays flat instead of
+            # opening a bot-only thread nobody asked for.
+            self._remember_thread_root(conversation_id, message_id, resolved.thread_root)
+            # Re-record the anchor last so it sits at the tail of the eviction
+            # order. Hermes re-uses the original anchor for the trailing chunk
+            # of a split reply, and a long reply must not evict the entry it
+            # is still resolving against.
+            self._remember_thread_root(conversation_id, resolved.anchor, resolved.thread_root)
+        return SendResult(success=True, message_id=message_id)
+
+    def _degrade_to_flat_send(self, resolved: ResolvedThreadRoot, failure: CliFailure) -> None:
+        """Record that a thread root was refused, after a flat retry worked.
+
+        Threading is presentation; the answer is not. Before this adapter
+        threaded anything the same reply posted flat and succeeded, so a root
+        the CLI or the server refuses must cost the reply's placement, never
+        the reply. Only the failure code is logged -- no root, no body.
+
+        Exit code 2 is the CLI's usage exit, raised while parsing argv. Every
+        other argument in the threaded send is byte-identical to the flat one
+        that just succeeded, so the flag is the only possible cause: this
+        build of hype-comms-cli predates `messages send --thread-root-id`.
+        Latch threading off rather than pay a rejected send on every reply. A
+        404 is narrower -- the server refused this particular root -- so only
+        that anchor is forgotten.
+        """
+
+        self._thread_roots.pop(resolved.anchor, None)
+        if failure.exit_code == 2:
+            self._thread_root_supported = False
+            self._thread_roots.clear()
+            logger.warning(
+                "Hype Comms CLI rejected --thread-root-id (%s); "
+                "sending all replies flat until restart",
+                _safe_text(failure.code),
+            )
+            return
+        logger.warning(
+            "Hype Comms refused a thread root (%s); sent this reply flat",
+            _safe_text(failure.code),
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -1410,7 +1853,6 @@ class HypeCommsAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        del reply_to, metadata
         if self.message_len_fn(content) > MAX_MESSAGE_LENGTH:
             return SendResult(
                 success=False,
@@ -1418,12 +1860,33 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 retryable=False,
                 error_kind="too_long",
             )
+        if _is_silence_marker(content):
+            # Hermes blanks an intentionally silent turn before delivery, so
+            # this should be unreachable while SUPPORTS_MESSAGE_EDITING keeps
+            # the streaming path closed: that path can seal a segment
+            # mid-turn and hand the bare marker to send() as ordinary text.
+            # A posted Hype Comms message cannot be retracted from here, so
+            # the marker is dropped rather than published. Reported as a
+            # success with no message ID -- nothing failed, and there is no
+            # message for a later chunk to anchor to.
+            return SendResult(success=True, message_id=None)
+        conversation_id = str(chat_id)
+        resolved = self._thread_root_for_reply(
+            conversation_id,
+            self._reply_anchors(reply_to, metadata),
+        )
         try:
-            result = await self._command(
-                ["messages", "send", str(chat_id), "--json"],
-                stdin_text=content,
-            )
-            return SendResult(success=True, message_id=_message_id(result))
+            try:
+                return await self._send_once(conversation_id, content, resolved)
+            except CliFailure as failure:
+                if resolved is None or not _rejects_thread_root(failure):
+                    raise
+                # The root, not the message, was rejected. Retry the argv this
+                # adapter used before threading existed. The retry is not
+                # recorded, so the rest of a chunk chain stays flat too.
+                flat = await self._send_once(conversation_id, content, None)
+                self._degrade_to_flat_send(resolved, failure)
+                return flat
         except CliFailure as failure:
             return SendResult(
                 success=False,
@@ -1545,10 +2008,24 @@ def register(ctx: Any) -> None:
         emoji="💭",
         pii_safe=False,
         allow_update_command=True,
+        # Captured once at registration, so this text has to hold for every
+        # deployment: it must stay true whether or not the operator enabled
+        # thread follow-ups. The parts that depend on configuration, and the
+        # agent's own username, travel per message on channel_prompt instead.
         platform_hint=(
             "You are chatting through Hype Comms. Direct messages always wake you; "
-            "channel messages wake you only when they explicitly mention your Hype Comms user. "
-            "Replies return to the same conversation. Hype Comms supports markdown and limits "
-            "each message to 4,000 characters."
+            "channel messages wake you when they explicitly mention your Hype Comms user. "
+            "Where the operator has enabled thread follow-ups, a reply inside a thread you "
+            "have already replied in also wakes you without mentioning you; where they have "
+            "not, a reply inside that thread reaches you only if it mentions you again, so "
+            "never assume you will see what is said under your own answer. Unless the "
+            "operator turned threading off, a reply in a channel attaches as a threaded "
+            "reply to the message that woke you and stays in that thread; Hype Comms "
+            "threads are exactly one level deep, so there are no threads inside threads. "
+            "Replies in a direct message are never threaded. If a "
+            "thread follow-up wakes you and needs nothing from you, reply with exactly "
+            "NO_REPLY and nothing else, which is delivered to nobody; answer everything "
+            "else. Hype Comms supports markdown and limits each message to 4,000 "
+            "characters."
         ),
     )

@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
-import { REACTION_EVENTS_CAPABILITY, READ_STATE_EVENTS_CAPABILITY } from "@hype-comms/contracts";
+import {
+  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+  REACTION_EVENTS_CAPABILITY,
+  READ_STATE_EVENTS_CAPABILITY,
+} from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
 import {
@@ -103,7 +107,11 @@ describe("watch", () => {
       if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
       if (url.pathname === "/v1/realtime/tickets") {
         expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-          `${REACTION_EVENTS_CAPABILITY},${READ_STATE_EVENTS_CAPABILITY}`,
+          [
+            REACTION_EVENTS_CAPABILITY,
+            READ_STATE_EVENTS_CAPABILITY,
+            PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+          ].join(","),
         );
         return jsonResponse({
           ticket: "ticket_value_that_is_at_least_32_chars",
