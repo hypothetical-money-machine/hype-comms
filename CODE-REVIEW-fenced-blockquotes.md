@@ -48,14 +48,14 @@ radio directly, which a keyboard user cannot reach by tabbing.
 otherwise tests the raw line, which cannot match anything beginning with `>`. So a code fence
 opened inside a container whose closing fence uses different spacing never closes. Given
 
-```
+````
 """
 > ```text
 > code
 >```
 Still quoted
 """
-```
+````
 
 `codeFence` stays non-null through end of input, `findClosingQuoteFence` returns -1, and the
 whole message renders with literal `"""` markers. The same happens for an unterminated fence
