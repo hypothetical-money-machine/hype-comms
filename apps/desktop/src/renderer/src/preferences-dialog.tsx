@@ -12,6 +12,8 @@ import { createPortal } from "react-dom";
 import type { DesktopPlatform, NotificationTransport } from "../../shared/desktop-api";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CompactModeToggle } from "./compact-mode-toggle";
+import { FencedBlockquoteControl } from "./fenced-blockquote-control";
+import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { NotificationSettings } from "./notification-settings";
 import { SidebarPositionControl } from "./sidebar-position-control";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
@@ -24,6 +26,7 @@ interface PreferencesDialogProps {
   readonly open: boolean;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
@@ -32,13 +35,21 @@ interface PreferencesDialogProps {
   readonly onOpenChange?: (open: boolean) => void;
 }
 
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'input:not([disabled]):not([type="radio"]):not([tabindex="-1"])',
+  'input[type="radio"]:checked:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
+  '[href]:not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
 
 export function PreferencesDialog({
   open,
   theme,
   compactMode,
+  fencedBlockquotes,
   sidebarPosition,
   notifications,
   platform,
@@ -228,6 +239,10 @@ export function PreferencesDialog({
               <h3 id="preferences-layout-title">Layout</h3>
               <SidebarPositionControl sidebarPosition={sidebarPosition} />
               <CompactModeToggle compactMode={compactMode} platform={platform} />
+            </section>
+            <section aria-labelledby="preferences-messages-title">
+              <h3 id="preferences-messages-title">Messages</h3>
+              <FencedBlockquoteControl runtime={fencedBlockquotes} />
             </section>
             <section aria-labelledby="preferences-notifications-title">
               <h3 id="preferences-notifications-title">Notifications</h3>

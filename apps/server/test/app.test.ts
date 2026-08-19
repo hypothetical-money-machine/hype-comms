@@ -10,6 +10,7 @@ import WebSocket from "ws";
 import { buildApp } from "../src/app.js";
 import { Lifecycle } from "../src/lifecycle.js";
 import { MetricsRegistry } from "../src/metrics.js";
+import type { IdentityService } from "../src/modules/identity/service.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -132,6 +133,62 @@ describe("operational routes", () => {
     expect(allowed.headers["access-control-allow-origin"]).toBe("app://bundle");
     expect(allowed.headers["access-control-allow-credentials"]).toBeUndefined();
     expect(rejected.statusCode).toBe(403);
+  });
+});
+
+describe("desktop authentication landing", () => {
+  const token = "t".repeat(43);
+  const identity = { service: {} as IdentityService };
+
+  it("lets the recipient choose either app without trusting the requested variant", async () => {
+    const app = await buildApp({ identity });
+    apps.push(app);
+
+    const [production, development] = await Promise.all([
+      app.inject({ method: "GET", url: `/auth/magic-link?token=${token}` }),
+      app.inject({
+        method: "GET",
+        url: `/auth/magic-link?token=${token}&variant=development`,
+      }),
+    ]);
+
+    expect(production.statusCode).toBe(200);
+    expect(production.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(production.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
+    expect(production.body).not.toContain('http-equiv="refresh"');
+    expect(development.statusCode).toBe(200);
+    expect(development.body).toBe(production.body);
+  });
+
+  it("keeps accepting production links with appended mail tracking parameters", async () => {
+    const app = await buildApp({ identity });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/auth/magic-link?token=${token}&utm_source=mail&utm_campaign=invite`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(response.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
+    expect(response.body).not.toContain("utm_source");
+    expect(response.body).not.toContain("utm_campaign");
+  });
+
+  it("ignores old or attacker-supplied callback selectors", async () => {
+    const app = await buildApp({ identity });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/auth/magic-link?token=${token}&variant=attacker-selected-scheme`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(`hype-comms://auth/callback?token=${token}`);
+    expect(response.body).toContain(`hype-comms-dev://auth/callback?token=${token}`);
+    expect(response.body).not.toContain("attacker-selected-scheme");
   });
 });
 

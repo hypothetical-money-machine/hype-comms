@@ -5,7 +5,7 @@ import {
   type MagicLinkToken,
 } from "@hype-comms/contracts";
 
-import { normalizeAuthCallbackUrl } from "./security";
+import { normalizeAuthCallbackUrl, type AuthProtocolScheme } from "./security";
 
 export type AuthCallbackOutcome = "ignored" | "succeeded" | "failed";
 
@@ -13,8 +13,11 @@ export type ParsedAuthCallback =
   | { readonly kind: "magic_link"; readonly token: MagicLinkToken }
   | { readonly kind: "authkit"; readonly callback: DesktopAuthCallbackParameters };
 
-export function parseAuthCallbackToken(value: string): MagicLinkToken | null {
-  const normalized = normalizeAuthCallbackUrl(value);
+export function parseAuthCallbackToken(
+  value: string,
+  scheme: AuthProtocolScheme,
+): MagicLinkToken | null {
+  const normalized = normalizeAuthCallbackUrl(value, scheme);
   if (normalized === null) {
     return null;
   }
@@ -28,8 +31,11 @@ export function parseAuthCallbackToken(value: string): MagicLinkToken | null {
   return parsed.success ? parsed.data : null;
 }
 
-export function parseAuthKitCallback(value: string): DesktopAuthCallbackParameters | null {
-  const normalized = normalizeAuthCallbackUrl(value);
+export function parseAuthKitCallback(
+  value: string,
+  scheme: AuthProtocolScheme,
+): DesktopAuthCallbackParameters | null {
+  const normalized = normalizeAuthCallbackUrl(value, scheme);
   if (normalized === null) {
     return null;
   }
@@ -49,21 +55,25 @@ export function parseAuthKitCallback(value: string): DesktopAuthCallbackParamete
   return parsed.success ? parsed.data : null;
 }
 
-export function parseAuthCallback(value: string): ParsedAuthCallback | null {
-  const token = parseAuthCallbackToken(value);
+export function parseAuthCallback(
+  value: string,
+  scheme: AuthProtocolScheme,
+): ParsedAuthCallback | null {
+  const token = parseAuthCallbackToken(value, scheme);
   if (token !== null) {
     return { kind: "magic_link", token };
   }
 
-  const callback = parseAuthKitCallback(value);
+  const callback = parseAuthKitCallback(value, scheme);
   return callback === null ? null : { kind: "authkit", callback };
 }
 
 export async function processAuthCallback(
   value: string,
+  scheme: AuthProtocolScheme,
   exchange: (token: MagicLinkToken) => Promise<void>,
 ): Promise<AuthCallbackOutcome> {
-  const token = parseAuthCallbackToken(value);
+  const token = parseAuthCallbackToken(value, scheme);
   if (token === null) {
     return "ignored";
   }

@@ -62,7 +62,7 @@ describeWithPostgres("development demo seed", () => {
     ]);
     for (const client of [...first.clients, ...second.clients]) {
       const callback = new URL(client.authCallbackUrl);
-      expect(callback.protocol).toBe("hype-comms:");
+      expect(callback.protocol).toBe("hype-comms-dev:");
       expect(callback.hostname).toBe("auth");
       expect(callback.pathname).toBe("/callback");
       expect(callback.searchParams.get("token")).not.toBeNull();

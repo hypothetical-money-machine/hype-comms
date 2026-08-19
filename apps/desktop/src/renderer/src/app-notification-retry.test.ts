@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
 
@@ -374,6 +375,14 @@ function createSidebarPosition(): SidebarPositionRuntime {
   } as unknown as SidebarPositionRuntime;
 }
 
+function createFencedBlockquotes(): FencedBlockquoteRuntime {
+  return {
+    mode: "off",
+    subscribe: () => () => undefined,
+    setMode: () => undefined,
+  } as unknown as FencedBlockquoteRuntime;
+}
+
 afterEach(() => cleanup());
 
 describe("App notification session recovery", () => {
@@ -384,6 +393,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
     );
@@ -432,6 +442,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
     );
@@ -479,6 +490,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
     );
@@ -523,6 +535,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
     );
@@ -552,6 +565,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
     );
@@ -568,7 +582,9 @@ describe("App notification session recovery", () => {
     general.focus();
     fireEvent.click(general);
     await screen.findByRole("heading", { name: "# General" });
-    expect(document.activeElement).toBe(general);
+    // Landing on a conversation from the AI pane focuses its composer, ready for typing
+    // (see app-composer-focus.test.ts).
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" }));
     expect(document.querySelector(".ai-channel")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector<HTMLTextAreaElement>("#ai-channel-prompt")?.value).toBe(
       "Keep this local draft",

@@ -22,7 +22,7 @@ export interface InviteCliOutput {
   readonly stderr: Pick<NodeJS.WritableStream, "write">;
 }
 
-interface InviteArguments {
+export interface InviteArguments {
   readonly email: Email;
   readonly role: "member";
 }
@@ -35,7 +35,7 @@ class CapturingEmailSender implements EmailSender {
   }
 }
 
-function parseArguments(argv: readonly string[]): InviteArguments {
+export function parseInviteArguments(argv: readonly string[]): InviteArguments {
   let email: string | undefined;
   let role: string | undefined;
 
@@ -51,7 +51,7 @@ function parseArguments(argv: readonly string[]): InviteArguments {
     if (flag === "--email") {
       if (email !== undefined) throw new Error(`--email may only be specified once\n${USAGE}`);
       email = value;
-    } else {
+    } else if (flag === "--role") {
       if (role !== undefined) throw new Error(`--role may only be specified once\n${USAGE}`);
       role = value;
     }
@@ -103,7 +103,7 @@ export async function runInviteCli(
     if (env.HYPE_COMMS_DATABASE_URL === undefined || env.HYPE_COMMS_DATABASE_URL === "") {
       throw new Error("HYPE_COMMS_DATABASE_URL is required");
     }
-    const input = parseArguments(argv);
+    const input = parseInviteArguments(argv);
     const config = loadConfig(env);
     if (config.database === undefined) throw new Error("HYPE_COMMS_DATABASE_URL is required");
 

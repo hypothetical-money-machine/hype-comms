@@ -67,6 +67,7 @@ interface ActiveDownload {
 
 interface UpdateControllerOptions {
   readonly updater: UpdateSource;
+  readonly isProductionBuild: boolean;
   readonly isPackaged: boolean;
   readonly apiOrigin: string;
   readonly platform: NodeJS.Platform;
@@ -75,6 +76,10 @@ interface UpdateControllerOptions {
 }
 
 function isSupported(options: UpdateControllerOptions): boolean {
+  if (!options.isProductionBuild) {
+    return false;
+  }
+
   if (!options.isPackaged) {
     return false;
   }

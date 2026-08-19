@@ -212,6 +212,7 @@ function createTransport(request: SessionFetch): {
 } {
   const session = new ChatSession({
     apiOrigin: API_ORIGIN,
+    authVariant: "production",
     cookies: new MemoryCookies(),
     request,
   });

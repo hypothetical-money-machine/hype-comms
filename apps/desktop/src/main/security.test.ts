@@ -14,6 +14,7 @@ import {
 } from "../shared/api-origin";
 import { PRODUCTION_CONTENT_SECURITY_POLICY } from "../shared/security-policy";
 import {
+  AUTH_PROTOCOL_SCHEMES,
   createProtocolClientRegistration,
   findAuthCallbackUrl,
   isTrustedRendererUrl,
@@ -81,8 +82,10 @@ describe("isTrustedRendererUrl", () => {
 describe("authentication callback validation", () => {
   it("accepts only the dedicated auth callback route", () => {
     const callback = "hype-comms://auth/callback?code=opaque&state=opaque";
-    expect(normalizeAuthCallbackUrl(callback)).toBe(callback);
-    expect(findAuthCallbackUrl(["--flag", callback])).toBe(callback);
+    expect(normalizeAuthCallbackUrl(callback, AUTH_PROTOCOL_SCHEMES.production)).toBe(callback);
+    expect(findAuthCallbackUrl(["--flag", callback], AUTH_PROTOCOL_SCHEMES.production)).toBe(
+      callback,
+    );
   });
 
   it.each([
@@ -91,33 +94,58 @@ describe("authentication callback validation", () => {
     "hype-comms://settings/callback",
     "hype-comms://user:secret@auth/callback",
   ])("rejects unexpected callback URL %s", (url) => {
-    expect(normalizeAuthCallbackUrl(url)).toBeNull();
+    expect(normalizeAuthCallbackUrl(url, AUTH_PROTOCOL_SCHEMES.production)).toBeNull();
   });
 
   it("keeps route normalization compatible with legacy and AuthKit callback shapes", () => {
     const magicLink = `hype-comms://auth/callback?token=${"m".repeat(43)}`;
     const authKit = `hype-comms://auth/callback?code=${"c".repeat(43)}&state=${"s".repeat(43)}`;
 
-    expect(normalizeAuthCallbackUrl(magicLink)).toBe(magicLink);
-    expect(normalizeAuthCallbackUrl(authKit)).toBe(authKit);
-    expect(findAuthCallbackUrl([magicLink, authKit])).toBe(magicLink);
+    expect(normalizeAuthCallbackUrl(magicLink, AUTH_PROTOCOL_SCHEMES.production)).toBe(magicLink);
+    expect(normalizeAuthCallbackUrl(authKit, AUTH_PROTOCOL_SCHEMES.production)).toBe(authKit);
+    expect(findAuthCallbackUrl([magicLink, authKit], AUTH_PROTOCOL_SCHEMES.production)).toBe(
+      magicLink,
+    );
+  });
+
+  it("isolates production and development callbacks by scheme", () => {
+    const production = `hype-comms://auth/callback?token=${"p".repeat(43)}`;
+    const development = `hype-comms-dev://auth/callback?token=${"d".repeat(43)}`;
+
+    expect(normalizeAuthCallbackUrl(production, AUTH_PROTOCOL_SCHEMES.production)).toBe(production);
+    expect(normalizeAuthCallbackUrl(development, AUTH_PROTOCOL_SCHEMES.development)).toBe(
+      development,
+    );
+    expect(normalizeAuthCallbackUrl(production, AUTH_PROTOCOL_SCHEMES.development)).toBeNull();
+    expect(normalizeAuthCallbackUrl(development, AUTH_PROTOCOL_SCHEMES.production)).toBeNull();
+    expect(findAuthCallbackUrl([production, development], AUTH_PROTOCOL_SCHEMES.development)).toBe(
+      development,
+    );
   });
 });
 
 describe("authentication protocol registration", () => {
   it("keeps packaged registration on the scheme-only Electron path", () => {
     expect(
-      createProtocolClientRegistration(true, "/Applications/Hype Comms", [
+      createProtocolClientRegistration(
+        true,
         "/Applications/Hype Comms",
-      ]),
+        ["/Applications/Hype Comms"],
+        AUTH_PROTOCOL_SCHEMES.production,
+      ),
     ).toEqual({ scheme: "hype-comms" });
   });
 
   it("registers an unpackaged Electron executable with its app script", () => {
     expect(
-      createProtocolClientRegistration(false, "/opt/electron", ["/opt/electron", "./apps/desktop"]),
+      createProtocolClientRegistration(
+        false,
+        "/opt/electron",
+        ["/opt/electron", "./apps/desktop"],
+        AUTH_PROTOCOL_SCHEMES.development,
+      ),
     ).toEqual({
-      scheme: "hype-comms",
+      scheme: "hype-comms-dev",
       executablePath: "/opt/electron",
       arguments: [path.resolve("./apps/desktop")],
     });

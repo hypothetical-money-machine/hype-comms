@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createDecipheriv, createHash } from "node:crypto";
 
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
@@ -49,6 +49,7 @@ describe("AuthKitRepository crypto boundary", () => {
       providerCodeVerifier: providerVerifier,
       desktopCodeChallenge,
       desktopState,
+      desktopAuthVariant: "production",
       expiresAt,
     });
 
@@ -63,7 +64,32 @@ describe("AuthKitRepository crypto boundary", () => {
     expect((parameters[4] as Buffer).byteLength).toBe(16);
     expect(parameters).not.toContain(providerState);
     expect(parameters).not.toContain(providerVerifier);
-    expect(parameters.slice(5)).toEqual([desktopCodeChallenge, desktopState, expiresAt]);
+    expect(parameters.slice(5)).toEqual([
+      desktopCodeChallenge,
+      desktopState,
+      "production",
+      expiresAt,
+    ]);
+
+    // Production keeps the pre-migration v1 AAD so an authorization encrypted by the previous
+    // release remains decryptable after the variant column is added.
+    const oldAssociatedData = Buffer.from(
+      [
+        "hype-comms:authkit-transaction:v1",
+        parameters[0],
+        (parameters[1] as Buffer).toString("base64url"),
+        desktopCodeChallenge,
+        desktopState,
+        expiresAt.toISOString(),
+      ].join("\0"),
+      "utf8",
+    );
+    const decipher = createDecipheriv("aes-256-gcm", Buffer.alloc(32, 7), parameters[2] as Buffer);
+    decipher.setAAD(oldAssociatedData);
+    decipher.setAuthTag(parameters[4] as Buffer);
+    expect(
+      Buffer.concat([decipher.update(parameters[3] as Buffer), decipher.final()]).toString("utf8"),
+    ).toBe(providerVerifier);
   });
 
   it("rejects malformed provider and desktop binding material before persistence", async () => {
@@ -77,6 +103,7 @@ describe("AuthKitRepository crypto boundary", () => {
         providerCodeVerifier: providerVerifier,
         desktopCodeChallenge: deriveAuthKitPkceCodeChallenge(desktopVerifier),
         desktopState,
+        desktopAuthVariant: "production",
         expiresAt,
       }),
     ).rejects.toThrow(/OAuth state/);
@@ -86,9 +113,20 @@ describe("AuthKitRepository crypto boundary", () => {
         providerCodeVerifier: "not-a-verifier",
         desktopCodeChallenge: deriveAuthKitPkceCodeChallenge(desktopVerifier),
         desktopState,
+        desktopAuthVariant: "production",
         expiresAt,
       }),
     ).rejects.toThrow(/code verifier/);
+    await expect(
+      repository.createTransaction({
+        providerState,
+        providerCodeVerifier: providerVerifier,
+        desktopCodeChallenge: deriveAuthKitPkceCodeChallenge(desktopVerifier),
+        desktopState,
+        desktopAuthVariant: "preview" as "production",
+        expiresAt,
+      }),
+    ).rejects.toThrow(/production.*development/);
     expect(query).not.toHaveBeenCalled();
   });
 

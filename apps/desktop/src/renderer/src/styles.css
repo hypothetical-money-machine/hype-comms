@@ -247,6 +247,7 @@ html[data-sidebar-position="right"] .shell.thread-open {
   display: flex;
   grid-area: sidebar;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   overflow: visible;
   border-right: 1px solid var(--theme-border-subtle);
@@ -347,6 +348,7 @@ html[data-sidebar-position="right"] .sidebar {
 
 .sidebar nav {
   flex: 1;
+  min-height: 0;
   padding: 14px 10px;
   overflow-y: auto;
 }
@@ -1948,6 +1950,10 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .preferences-dialog .sidebar-position-control {
+  margin-top: 10px;
+}
+
+.preferences-dialog .fenced-blockquote-control {
   margin-top: 10px;
 }
 
@@ -4076,6 +4082,48 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
   margin: 0;
   padding: 0;
   accent-color: var(--theme-border-accent);
+}
+
+.fenced-blockquote-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+}
+
+.fenced-blockquote-options {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fenced-blockquote-options label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.fenced-blockquote-options input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--theme-border-accent);
+}
+
+.fenced-blockquote-options code {
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+}
+
+.fenced-blockquote-control p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--theme-text-subtle);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 /* AI Channel is intentionally a self-contained conversation pane. Claude runs in the privileged

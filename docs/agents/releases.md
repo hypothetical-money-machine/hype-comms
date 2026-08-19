@@ -68,14 +68,20 @@ the current conversation. If the merge list is empty, say so and do not invent H
 
 ## Check
 
-Run `npm run check`. On a machine that can package, also run the native verification appropriate
-to that OS (`npm run verify:desktop-package`, plus
-`npm run verify:desktop-package:macos-release` on a signed macOS host). The release workflow is
-the real packaging gate; do not block the prep PR on a full local installer if this host cannot
+Run `npm run check`. On a machine that can package, explicitly select the production identity for
+both the native package and its verification:
+
+```bash
+HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop
+HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package
+```
+
+Also run `npm run verify:desktop-package:macos-release` on a signed macOS host. The release workflow
+is the real packaging gate; do not block the prep PR on a full local installer if this host cannot
 build one.
 
-The prep PR must be green before merge. The PostgreSQL CI job can flake with 5s timeouts on
-`bot-cli` / `migrate` when the self-hosted runner is busy. Rerun the failed job; do not "fix"
+The prep PR must be green before merge. The PostgreSQL CI job can occasionally time out on
+`bot-cli` / `migrate` when the self-hosted runner is busy. Rerun the failed job; do not change
 timeouts inside the version-bump PR.
 
 ## Land, then tag

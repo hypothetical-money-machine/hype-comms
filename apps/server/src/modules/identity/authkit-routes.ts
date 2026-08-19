@@ -4,8 +4,10 @@ import {
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
   currentUserSchema,
+  desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
   exchangeAuthHandoffRequestSchema,
+  type DesktopAuthVariant,
 } from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
 
@@ -14,6 +16,11 @@ import { FixedWindowAttemptThrottle } from "../../throttle.js";
 import { desktopCurrentUserResponse, setSessionCookie } from "./routes.js";
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService } from "./service.js";
+
+const DESKTOP_CALLBACK_SCHEMES = {
+  production: "hype-comms",
+  development: "hype-comms-dev",
+} as const satisfies Record<DesktopAuthVariant, string>;
 
 interface AuthKitRoutesOptions {
   readonly authKitService?: AuthKitService;
@@ -70,6 +77,7 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
       await authKitService.beginDesktopAuthorization({
         codeChallenge: result.data.codeChallenge,
         desktopState: result.data.state,
+        desktopAuthVariant: result.data.variant ?? "production",
       }),
     );
     return reply.code(201).send(response);
@@ -103,7 +111,8 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
         ? { code: completion.handoffCode, state: completion.desktopState }
         : { error: "authentication_failed", state: completion.desktopState },
     );
-    const callbackUrl = new URL("hype-comms://auth/callback");
+    const callbackVariant = desktopAuthVariantSchema.parse(completion.desktopAuthVariant);
+    const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES[callbackVariant]}://auth/callback`);
     if ("code" in parameters) {
       callbackUrl.searchParams.set("code", parameters.code);
     } else {

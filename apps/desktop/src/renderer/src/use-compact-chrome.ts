@@ -45,9 +45,11 @@ export interface CompactChrome {
   readonly notifyUnread: () => void;
   readonly onPopoverOpenChange: (open: boolean) => void;
   /**
-   * Hides the chrome immediately, overriding the hover/focus keep-open checks. Call when the
-   * user navigates somewhere (quick switcher pick, search result) — a pointer left resting on
-   * the overlay would otherwise keep it covering the destination indefinitely.
+   * Hides the chrome immediately, overriding the hover/focus keep-open checks, and discards any
+   * focus-within record. Call when the user navigates somewhere (quick switcher pick, search
+   * result) — a pointer left resting on the overlay would otherwise keep it covering the
+   * destination indefinitely, and a focus record stranded by the navigation's unmount would
+   * otherwise pin the chrome revealed.
    */
   readonly collapse: () => void;
   readonly chromeProps: CompactChromeProps;
@@ -140,10 +142,22 @@ export function useCompactChrome(active: boolean): CompactChrome {
     commit({ revealed: true, attention: false });
   }, [cancelAttention, cancelHide, commit]);
 
-  const collapse = useCallback(() => {
+  const hide = useCallback(() => {
     cancelHide();
     commit({ ...stateRef.current, revealed: false });
   }, [cancelHide, commit]);
+
+  const collapse = useCallback(() => {
+    // Collapse accompanies a navigation: a focused chrome-anchored element (the quick-switcher
+    // input, the search box) is about to unmount without firing focusout, and the app may park
+    // focus on the destination's composer before the next hide check runs — so the destroyed-focus
+    // self-heal never fires and a stale flag would pin the chrome open forever. Focus that
+    // genuinely lands back inside the chrome re-sets the flag via onFocusCapture. The hotzone
+    // toggle hides via `hide` instead: it is not a navigation, so a live focus-inside-chrome
+    // record must survive it.
+    focusWithinRef.current = false;
+    hide();
+  }, [hide]);
 
   const onPopoverOpenChange = useCallback(
     (open: boolean) => {
@@ -244,13 +258,13 @@ export function useCompactChrome(active: boolean): CompactChrome {
       onBlur: scheduleHideCheck,
       onClick: () => {
         if (stateRef.current.revealed) {
-          collapse();
+          hide();
         } else {
           reveal();
         }
       },
     }),
-    [collapse, reveal, scheduleHideCheck],
+    [hide, reveal, scheduleHideCheck],
   );
 
   return useMemo(

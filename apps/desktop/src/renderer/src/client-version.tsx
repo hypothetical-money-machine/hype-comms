@@ -4,7 +4,15 @@ import type { DesktopApi } from "../../shared/desktop-api";
 
 type VersionClient = Pick<DesktopApi, "getAppVersion">;
 
-export function ClientVersion({ client }: { readonly client: VersionClient }) {
+const COMPILED_PRODUCT_NAME =
+  typeof __HYPE_COMMS_PRODUCT_NAME__ === "string" ? __HYPE_COMMS_PRODUCT_NAME__ : "Hype Comms DEV";
+
+interface ClientVersionProps {
+  readonly client: VersionClient;
+  readonly productName?: string;
+}
+
+export function ClientVersion({ client, productName = COMPILED_PRODUCT_NAME }: ClientVersionProps) {
   const [version, setVersion] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
@@ -34,9 +42,9 @@ export function ClientVersion({ client }: { readonly client: VersionClient }) {
     <p className="client-version" aria-live="polite">
       {version === null
         ? unavailable
-          ? "Hype Comms · version unavailable"
-          : "Hype Comms · checking version…"
-        : `Hype Comms · v${version}`}
+          ? `${productName} · version unavailable`
+          : `${productName} · checking version…`
+        : `${productName} · v${version}`}
     </p>
   );
 }

@@ -9,11 +9,13 @@ import {
 
 import {
   authKitProviderSessionIdSchema,
+  desktopAuthVariantSchema,
   emailSchema,
   entityIdSchema,
   isoDateTimeSchema,
   sessionTokenSchema,
   type EntityId,
+  type DesktopAuthVariant,
   type IsoDateTime,
   type SessionToken,
 } from "@hype-comms/contracts";
@@ -41,6 +43,7 @@ interface AuthKitTransactionRow extends QueryResultRow {
   readonly verifier_authentication_tag: Buffer | null;
   readonly desktop_code_challenge: string;
   readonly desktop_state: string;
+  readonly desktop_auth_variant: unknown;
   readonly expires_at: Date;
 }
 
@@ -114,6 +117,7 @@ export interface CreateAuthKitTransactionInput {
   readonly providerCodeVerifier: string;
   readonly desktopCodeChallenge: string;
   readonly desktopState: string;
+  readonly desktopAuthVariant: DesktopAuthVariant;
   readonly expiresAt: Date;
 }
 
@@ -226,11 +230,19 @@ function transactionAssociatedData(input: {
   readonly providerStateHash: Uint8Array;
   readonly desktopCodeChallenge: string;
   readonly desktopState: string;
+  readonly desktopAuthVariant: DesktopAuthVariant;
   readonly expiresAt: Date;
 }): Buffer {
+  // Production retains the original AAD exactly so an in-flight transaction encrypted before the
+  // variant migration can still finish after deployment. Development uses a new, variant-bound
+  // format so its callback identity cannot be changed independently of the encrypted verifier.
+  const variantBinding =
+    input.desktopAuthVariant === "production"
+      ? ["hype-comms:authkit-transaction:v1"]
+      : ["hype-comms:authkit-transaction:v2", input.desktopAuthVariant];
   return Buffer.from(
     [
-      "hype-comms:authkit-transaction:v1",
+      ...variantBinding,
       input.id,
       Buffer.from(input.providerStateHash).toString("base64url"),
       input.desktopCodeChallenge,
@@ -495,6 +507,7 @@ export class AuthKitRepository {
       PKCE_VALUE_PATTERN,
       "a desktop OAuth state value",
     );
+    const desktopAuthVariant = desktopAuthVariantSchema.parse(input.desktopAuthVariant);
     const expiresAt = requireDate(input.expiresAt, "a transaction expiry date");
     const id = randomUUID();
     const providerStateHash = hashCredential(providerState);
@@ -503,6 +516,7 @@ export class AuthKitRepository {
       providerStateHash,
       desktopCodeChallenge,
       desktopState,
+      desktopAuthVariant,
       expiresAt,
     });
     const encrypted = encryptVerifier(this.#encryptionKey, providerCodeVerifier, associatedData);
@@ -516,9 +530,10 @@ export class AuthKitRepository {
          verifier_authentication_tag,
          desktop_code_challenge,
          desktop_state,
+         desktop_auth_variant,
          expires_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         id,
         providerStateHash,
@@ -527,6 +542,7 @@ export class AuthKitRepository {
         encrypted.authenticationTag,
         desktopCodeChallenge,
         desktopState,
+        desktopAuthVariant,
         expiresAt,
       ],
     );
@@ -553,6 +569,7 @@ export class AuthKitRepository {
                 verifier_authentication_tag,
                 desktop_code_challenge,
                 desktop_state,
+                desktop_auth_variant,
                 expires_at
            FROM authkit_transactions
           WHERE provider_state_hash = $1
@@ -571,11 +588,13 @@ export class AuthKitRepository {
         throw new Error("Unconsumed AuthKit transaction has no encrypted verifier");
       }
 
+      const desktopAuthVariant = desktopAuthVariantSchema.parse(row.desktop_auth_variant);
       const associatedData = transactionAssociatedData({
         id: row.id,
         providerStateHash: row.provider_state_hash,
         desktopCodeChallenge: row.desktop_code_challenge,
         desktopState: row.desktop_state,
+        desktopAuthVariant,
         expiresAt: row.expires_at,
       });
       const providerCodeVerifier = requirePattern(
@@ -617,6 +636,7 @@ export class AuthKitRepository {
           PKCE_VALUE_PATTERN,
           "a desktop OAuth state value",
         ),
+        desktopAuthVariant,
         expiresAt: row.expires_at,
       };
     });

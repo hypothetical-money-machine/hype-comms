@@ -14,7 +14,7 @@ import {
   listAgentsResponseSchema,
   listAgentTokensResponseSchema,
   listInvitationsResponseSchema,
-  magicLinkTokenSchema,
+  magicLinkLandingQuerySchema,
   magicLinkRequestedSchema,
   requestMagicLinkSchema,
   sessionTokenSchema,
@@ -40,6 +40,10 @@ const MAGIC_LINK_PAGE_HEADERS = {
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
+} as const;
+const DESKTOP_CALLBACK_SCHEMES = {
+  production: "hype-comms",
+  development: "hype-comms-dev",
 } as const;
 
 interface IdentityRoutesOptions {
@@ -145,21 +149,29 @@ function escapeHtml(value: string): string {
   );
 }
 
-function magicLinkPage(target: string): string {
-  const escapedTarget = escapeHtml(target);
+function magicLinkPage(token: string): string {
+  const productionTarget = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
+  productionTarget.searchParams.set("token", token);
+  const developmentTarget = new URL(`${DESKTOP_CALLBACK_SCHEMES.development}://auth/callback`);
+  developmentTarget.searchParams.set("token", token);
+  const escapedProductionTarget = escapeHtml(productionTarget.toString());
+  const escapedDevelopmentTarget = escapeHtml(developmentTarget.toString());
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="0; url=${escapedTarget}">
   <title>Open Hype Comms</title>
 </head>
 <body>
   <main>
     <h1>Open Hype Comms</h1>
-    <p>Continue in the desktop app to finish signing in.</p>
-    <p><a href="${escapedTarget}">Open Hype Comms</a></p>
+    <p>Choose the app where you want to finish signing in.</p>
+    <ul>
+      <li><a href="${escapedProductionTarget}">Open Hype Comms</a></li>
+      <li><a href="${escapedDevelopmentTarget}">Open Hype Comms DEV</a></li>
+    </ul>
+    <p>Use Hype Comms DEV only when you are testing a preview build.</p>
   </main>
 </body>
 </html>`;
@@ -175,11 +187,7 @@ function invalidMagicLinkPage(): string {
 
 export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
   app.get("/auth/magic-link", async (request, reply) => {
-    const query =
-      typeof request.query === "object" && request.query !== null && "token" in request.query
-        ? request.query.token
-        : undefined;
-    const result = magicLinkTokenSchema.safeParse(query);
+    const result = magicLinkLandingQuerySchema.safeParse(request.query);
     const contentSecurityPolicy =
       "default-src 'none'; style-src 'none'; img-src 'none'; script-src 'none'; " +
       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
@@ -193,9 +201,9 @@ export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send(invalidMagicLinkPage());
     }
 
-    const target = new URL("hype-comms://auth/callback");
-    target.searchParams.set("token", result.data);
-    return reply.code(200).send(magicLinkPage(target.toString()));
+    // A magic-link request has no authenticated client identity, so only the recipient may choose
+    // which installed app receives the credential. Unknown query keys are stripped by the schema.
+    return reply.code(200).send(magicLinkPage(result.data.token));
   });
 };
 

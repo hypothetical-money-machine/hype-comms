@@ -200,6 +200,47 @@ describe("useCompactChrome", () => {
     expect(result.current.getState().revealed).toBe(false);
   });
 
+  it("releases a stranded focus flag on collapse so the chrome can auto-hide again", () => {
+    const { result } = renderHook(() => useCompactChrome(true));
+    // Focus lands inside the chrome (the quick-switcher input); picking a conversation collapses
+    // the chrome while that input unmounts without a focusout, and the app then parks focus on
+    // the destination composer — so the destroyed-focus self-heal never applies (activeElement is
+    // the focusHolder, not <body>).
+    act(() => result.current.chromeProps.onFocusCapture());
+    act(() => result.current.collapse());
+
+    act(() => result.current.hotzoneProps.onMouseEnter());
+    expect(result.current.getState().revealed).toBe(true);
+    act(() => result.current.hotzoneProps.onMouseLeave());
+    act(() => vi.advanceTimersByTime(300));
+    expect(result.current.getState().revealed).toBe(false);
+    expect(document.documentElement.hasAttribute("data-chrome-revealed")).toBe(false);
+  });
+
+  it("keeps a live focus record across the hotzone toggle", () => {
+    // The hotzone toggle is not a navigation: hiding through it must not discard the record of
+    // focus genuinely resting inside the chrome, or the re-revealed chrome would auto-hide out
+    // from under a keyboard user.
+    const focusHolder = document.createElement("input");
+    document.body.append(focusHolder);
+    try {
+      const { result } = renderHook(() => useCompactChrome(true));
+      focusHolder.focus();
+      act(() => result.current.chromeProps.onFocusCapture());
+      expect(result.current.getState().revealed).toBe(true);
+
+      act(() => result.current.hotzoneProps.onClick());
+      expect(result.current.getState().revealed).toBe(false);
+
+      act(() => result.current.hotzoneProps.onMouseEnter());
+      act(() => result.current.hotzoneProps.onMouseLeave());
+      act(() => vi.advanceTimersByTime(300));
+      expect(result.current.getState().revealed).toBe(true);
+    } finally {
+      focusHolder.remove();
+    }
+  });
+
   it("stays collapsed when the pinning popover closes after a quick-switcher selection", () => {
     const { result } = renderHook(() => useCompactChrome(true));
     act(() => result.current.chromeProps.onMouseEnter());

@@ -20,9 +20,11 @@ local revocation. Existing magic links remain compatible during rollout.
    exact active-member email is accepted; otherwise an exact, pending, unexpired local invitation
    is activated transactionally under the 25-principal workspace cap. Impersonation and
    unverified email are rejected.
-6. The server redirects to only
-   `hype-comms://auth/callback?code=<hype-comms-handoff>&state=<desktop-state>`. Provider codes, tokens,
-   errors, and email never enter that URL.
+6. The server redirects to the callback scheme stored with the desktop transaction. The omitted
+   or production variant uses
+   `hype-comms://auth/callback?code=<hype-comms-handoff>&state=<desktop-state>`; the development
+   variant uses `hype-comms-dev://auth/callback` with the same query shape. Provider codes, tokens,
+   errors, and email never enter either URL.
 7. Electron constant-time matches state, deletes its pending verifier before exchange, and sends
    the five-minute handoff plus verifier to `POST /v1/auth/exchange`. The server consumes it once
    and creates the existing 30-day rotating `hype_comms_session` device session.

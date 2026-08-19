@@ -1,6 +1,7 @@
 import {
   authKitLogoutUrlSchema,
   authKitProviderSessionIdSchema,
+  desktopAuthVariantSchema,
   type AuthDesktopState,
   type AuthKitLogoutUrl,
   type AuthKitProviderSessionId,
@@ -9,6 +10,7 @@ import {
   type AuthProviderAuthorizationCode,
   type AuthProviderState,
   type CreateDesktopAuthorizationResponse,
+  type DesktopAuthVariant,
   type ExchangeAuthHandoffRequest,
 } from "@hype-comms/contracts";
 
@@ -24,8 +26,13 @@ export type AuthKitCallbackCompletion =
       readonly kind: "success";
       readonly handoffCode: AuthHandoffCode;
       readonly desktopState: AuthDesktopState;
+      readonly desktopAuthVariant: DesktopAuthVariant;
     }
-  | { readonly kind: "error"; readonly desktopState: AuthDesktopState };
+  | {
+      readonly kind: "error";
+      readonly desktopState: AuthDesktopState;
+      readonly desktopAuthVariant: DesktopAuthVariant;
+    };
 
 export interface AuthKitSessionReconciliationResult {
   readonly checked: number;
@@ -52,6 +59,7 @@ export class AuthKitService {
   async beginDesktopAuthorization(input: {
     readonly codeChallenge: AuthPkceCodeChallenge;
     readonly desktopState: AuthDesktopState;
+    readonly desktopAuthVariant: DesktopAuthVariant;
   }): Promise<CreateDesktopAuthorizationResponse> {
     try {
       const authorization = await this.#provider.createAuthorization();
@@ -61,6 +69,7 @@ export class AuthKitService {
         providerCodeVerifier: authorization.codeVerifier,
         desktopCodeChallenge: input.codeChallenge,
         desktopState: input.desktopState,
+        desktopAuthVariant: desktopAuthVariantSchema.parse(input.desktopAuthVariant),
         expiresAt: new Date(createdAt.getTime() + PROVIDER_TRANSACTION_TTL_MS),
       });
       return { authorizationUrl: authorization.authorizationUrl };
@@ -95,7 +104,11 @@ export class AuthKitService {
       throw new ApiError(403, "FORBIDDEN", "Authentication could not be completed");
     }
     if (input.kind === "error") {
-      return { kind: "error", desktopState: transaction.desktopState };
+      return {
+        kind: "error",
+        desktopState: transaction.desktopState,
+        desktopAuthVariant: transaction.desktopAuthVariant,
+      };
     }
 
     try {
@@ -116,11 +129,16 @@ export class AuthKitService {
         kind: "success",
         handoffCode: admitted.handoffCode,
         desktopState: transaction.desktopState,
+        desktopAuthVariant: transaction.desktopAuthVariant,
       };
     } catch {
       // Once provider state is consumed every failure is terminal. Collapse identity, admission,
       // capacity, and dependency details into the same credential-free desktop callback.
-      return { kind: "error", desktopState: transaction.desktopState };
+      return {
+        kind: "error",
+        desktopState: transaction.desktopState,
+        desktopAuthVariant: transaction.desktopAuthVariant,
+      };
     }
   }
 

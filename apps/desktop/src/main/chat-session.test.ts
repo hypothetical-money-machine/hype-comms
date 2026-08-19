@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { MagicLinkToken } from "@hype-comms/contracts";
+import type { DesktopAuthVariant, MagicLinkToken } from "@hype-comms/contracts";
 
 import {
   AUTHKIT_FAILED_MESSAGE,
@@ -76,8 +76,12 @@ function emptyResponse(status = 204): Response {
   return new Response(null, { status });
 }
 
-function createSession(request: SessionFetch, cookies = new MemoryCookies()): ChatSession {
-  return new ChatSession({ apiOrigin: API_ORIGIN, cookies, request });
+function createSession(
+  request: SessionFetch,
+  cookies = new MemoryCookies(),
+  authVariant: DesktopAuthVariant = "production",
+): ChatSession {
+  return new ChatSession({ apiOrigin: API_ORIGIN, authVariant, cookies, request });
 }
 
 /** A jar holding a credential that is still valid for the full 30-day window. */
@@ -478,11 +482,31 @@ describe("ChatSession magic links", () => {
   });
 
   it("maps an accepted email request to the waiting-for-link state", async () => {
-    const session = createSession(async () => jsonResponse({ status: "accepted" }, 202));
+    const bodies: unknown[] = [];
+    const session = createSession(async (_url, init) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return jsonResponse({ status: "accepted" }, 202);
+    });
 
     await expect(session.requestMagicLink({ email: "morgan@example.com" })).resolves.toEqual({
       status: "email-sent",
     });
+    expect(bodies).toEqual([{ email: "morgan@example.com" }]);
+  });
+
+  it("never lets the build flavor select a magic-link callback", async () => {
+    const bodies: unknown[] = [];
+    const session = createSession(
+      async (_url, init) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return jsonResponse({ status: "accepted" }, 202);
+      },
+      new MemoryCookies(),
+      "development",
+    );
+
+    await session.requestMagicLink({ email: "morgan@example.com" });
+    expect(bodies).toEqual([{ email: "morgan@example.com" }]);
   });
 });
 
@@ -525,6 +549,33 @@ describe("ChatSession AuthKit", () => {
       codeChallenge: AUTHKIT_CHALLENGE,
       state: AUTHKIT_STATE,
     });
+  });
+
+  it("binds development AuthKit starts to the development callback identity", async () => {
+    const bodies: unknown[] = [];
+    const session = createSession(
+      async (_url, init) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return jsonResponse(
+          { authorizationUrl: "https://api.workos.com/user_management/authorize" },
+          201,
+        );
+      },
+      new MemoryCookies(),
+      "development",
+    );
+
+    await session.beginDesktopAuthorization({
+      codeChallenge: AUTHKIT_CHALLENGE,
+      state: AUTHKIT_STATE,
+    });
+    expect(bodies).toEqual([
+      {
+        codeChallenge: AUTHKIT_CHALLENGE,
+        state: AUTHKIT_STATE,
+        variant: "development",
+      },
+    ]);
   });
 
   it("exchanges a one-use handoff into the existing cookie identity", async () => {

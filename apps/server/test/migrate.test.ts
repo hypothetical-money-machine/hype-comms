@@ -75,6 +75,10 @@ async function withoutTechnicalRebrandMigration(fn: (migrationsDirectory: URL) =
   await withoutMigration("0018_hype_comms_technical_rebrand.sql", fn);
 }
 
+async function withoutDesktopAuthVariantMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
+  await withoutMigration("0019_desktop_auth_variants.sql", fn);
+}
+
 describeWithPostgres("runMigrations", () => {
   it("applies migrations cleanly and is idempotent", async () => {
     await withFreshSchema(async (pool) => {
@@ -99,6 +103,7 @@ describeWithPostgres("runMigrations", () => {
           "0016_announcement_channels.sql",
           "0017_workos_authkit.sql",
           "0018_hype_comms_technical_rebrand.sql",
+          "0019_desktop_auth_variants.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -126,6 +131,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0016_announcement_channels.sql" },
         { filename: "0017_workos_authkit.sql" },
         { filename: "0018_hype_comms_technical_rebrand.sql" },
+        { filename: "0019_desktop_auth_variants.sql" },
       ]);
 
       const userId = randomUUID();
@@ -276,6 +282,63 @@ describeWithPostgres("runMigrations", () => {
              author_id, thread_root_id, body, body_format
            ) VALUES ($1, $2, $3, 3, 5, $4, $5, $6, $1, 'Self thread', 'hype_comms_markdown_v1')`,
           [selfReplyId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+    });
+  });
+
+  it("defaults existing and previous-server AuthKit transactions to production", async () => {
+    await withFreshSchema(async (pool) => {
+      await withoutDesktopAuthVariantMigration(async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+      const existingId = randomUUID();
+      const createdAt = new Date("2026-08-15T12:00:00.000Z");
+      const expiresAt = new Date(createdAt.getTime() + 10 * 60_000);
+      await pool.query(
+        `INSERT INTO authkit_transactions (
+           id, provider_state_hash, verifier_nonce, verifier_ciphertext,
+           verifier_authentication_tag, desktop_code_challenge, desktop_state,
+           expires_at, consumed_at, created_at
+         ) VALUES ($1, $2, NULL, NULL, NULL, $3, $4, $5, $6, $6)`,
+        [existingId, Buffer.alloc(32, 1), "c".repeat(43), "s".repeat(43), expiresAt, createdAt],
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0019_desktop_auth_variants.sql"],
+      });
+
+      const previousServerId = randomUUID();
+      await pool.query(
+        `INSERT INTO authkit_transactions (
+           id, provider_state_hash, verifier_nonce, verifier_ciphertext,
+           verifier_authentication_tag, desktop_code_challenge, desktop_state,
+           expires_at, consumed_at, created_at
+         ) VALUES ($1, $2, NULL, NULL, NULL, $3, $4, $5, $6, $6)`,
+        [
+          previousServerId,
+          Buffer.alloc(32, 2),
+          "d".repeat(43),
+          "t".repeat(43),
+          expiresAt,
+          createdAt,
+        ],
+      );
+      const variants = await pool.query<{ id: string; desktop_auth_variant: string }>(
+        `SELECT id, desktop_auth_variant
+           FROM authkit_transactions
+          ORDER BY id`,
+      );
+      expect(new Map(variants.rows.map((row) => [row.id, row.desktop_auth_variant]))).toEqual(
+        new Map([
+          [existingId, "production"],
+          [previousServerId, "production"],
+        ]),
+      );
+      await expect(
+        pool.query(
+          `UPDATE authkit_transactions SET desktop_auth_variant = 'preview' WHERE id = $1`,
+          [existingId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
     });
