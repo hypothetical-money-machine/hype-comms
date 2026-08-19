@@ -169,6 +169,30 @@ describe("MessageBody", () => {
     ).toEqual(["First paragraph.", "Second paragraph."]);
   });
 
+  it("keeps text after a closing quote fence outside the blockquote", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: '"""\nQuoted\n"""\nNot quoted',
+        fencedBlockquoteMode: "double-quote",
+      }),
+    );
+
+    expect(container.querySelector("blockquote")?.textContent.trim()).toBe("Quoted");
+    expect(screen.getByText("Not quoted").closest("blockquote")).toBeNull();
+  });
+
+  it("keeps a fenced blockquote inside its list item", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: '- item\n  """\n  Quoted\n  """',
+        fencedBlockquoteMode: "double-quote",
+      }),
+    );
+
+    expect(container.querySelector("li blockquote")?.textContent.trim()).toBe("Quoted");
+    expect(container.querySelector(".markdown-body > blockquote")).toBeNull();
+  });
+
   it("keeps triple double quotes literal when fenced blockquotes are off", () => {
     const { container } = render(
       createElement(MessageBody, {

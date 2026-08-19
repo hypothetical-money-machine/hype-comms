@@ -57,10 +57,8 @@ function openingCodeFence(line: string): CodeFence | null {
 }
 
 function closesCodeFence(line: string, fence: CodeFence): boolean {
-  const content =
-    fence.continuationPrefix !== "" && line.startsWith(fence.continuationPrefix)
-      ? line.slice(fence.continuationPrefix.length)
-      : line;
+  const content = stripCodeContinuation(line, fence.continuationPrefix);
+  if (content === null) return false;
   const match = /^ {0,3}(`+|~+)[\t ]*$/u.exec(content);
   const candidate = match?.[1];
   return (
@@ -68,25 +66,58 @@ function closesCodeFence(line: string, fence: CodeFence): boolean {
   );
 }
 
-function isQuoteFence(line: string, marker: string): boolean {
-  const match = /^ {0,3}(\S+)[\t ]*$/u.exec(line);
-  return match?.[1] === marker;
+function stripCodeContinuation(line: string, prefix: string): string | null {
+  if (prefix === "") return line;
+  const blockquoteDepth = Array.from(prefix).filter((character) => character === ">").length;
+  if (blockquoteDepth === 0) return line.startsWith(prefix) ? line.slice(prefix.length) : null;
+
+  let cursor = /^ {0,3}/u.exec(line)?.[0].length ?? 0;
+  for (let depth = 0; depth < blockquoteDepth; depth += 1) {
+    if (line[cursor] !== ">") return null;
+    cursor += 1;
+    if (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
+    cursor += /^ {0,3}/u.exec(line.slice(cursor))?.[0].length ?? 0;
+  }
+  return line.slice(cursor);
 }
 
-function findClosingQuoteFence(lines: readonly string[], start: number, marker: string): number {
+function codeFenceContainerEnded(line: string, fence: CodeFence): boolean {
+  return (
+    fence.continuationPrefix !== "" &&
+    stripCodeContinuation(line, fence.continuationPrefix) === null
+  );
+}
+
+function quoteFenceIndent(line: string, marker: string): string | null {
+  const match = /^( {0,3})(\S+)[\t ]*$/u.exec(line);
+  return match?.[2] === marker ? (match[1] ?? "") : null;
+}
+
+function findClosingQuoteFence(
+  lines: readonly string[],
+  start: number,
+  marker: string,
+  quoteIndent: string,
+): number {
   let codeFence: CodeFence | null = null;
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
+    const content =
+      quoteIndent !== "" && line.startsWith(quoteIndent) ? line.slice(quoteIndent.length) : line;
     if (codeFence !== null) {
-      if (closesCodeFence(line, codeFence)) codeFence = null;
-      continue;
+      if (closesCodeFence(content, codeFence)) {
+        codeFence = null;
+        continue;
+      }
+      if (!codeFenceContainerEnded(content, codeFence)) continue;
+      codeFence = null;
     }
-    const openedCodeFence = openingCodeFence(line);
+    const openedCodeFence = openingCodeFence(content);
     if (openedCodeFence !== null) {
       codeFence = openedCodeFence;
       continue;
     }
-    if (isQuoteFence(line, marker)) return index;
+    if (quoteFenceIndent(line, marker) !== null) return index;
   }
   return -1;
 }
@@ -114,9 +145,16 @@ export function expandFencedBlockquotes(source: string, mode: FencedBlockquoteMo
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     if (codeFence !== null) {
-      output.push(line);
-      if (closesCodeFence(line, codeFence)) codeFence = null;
-      continue;
+      if (closesCodeFence(line, codeFence)) {
+        output.push(line);
+        codeFence = null;
+        continue;
+      }
+      if (!codeFenceContainerEnded(line, codeFence)) {
+        output.push(line);
+        continue;
+      }
+      codeFence = null;
     }
 
     const openedCodeFence = openingCodeFence(line);
@@ -126,13 +164,14 @@ export function expandFencedBlockquotes(source: string, mode: FencedBlockquoteMo
       continue;
     }
 
-    if (!isQuoteFence(line, marker)) {
+    const quoteIndent = quoteFenceIndent(line, marker);
+    if (quoteIndent === null) {
       output.push(line);
       continue;
     }
 
-    const closingIndex = findClosingQuoteFence(lines, index + 1, marker);
-    if (closingIndex === -1) {
+    const closingIndex = findClosingQuoteFence(lines, index + 1, marker, quoteIndent);
+    if (closingIndex === -1 || closingIndex === index + 1) {
       output.push(line);
       continue;
     }
@@ -140,8 +179,14 @@ export function expandFencedBlockquotes(source: string, mode: FencedBlockquoteMo
     changed = true;
     for (let quoteIndex = index + 1; quoteIndex < closingIndex; quoteIndex += 1) {
       const quotedLine = lines[quoteIndex] ?? "";
-      output.push(quotedLine === "" ? ">" : `> ${quotedLine}`);
+      const content =
+        quoteIndent !== "" && quotedLine.startsWith(quoteIndent)
+          ? quotedLine.slice(quoteIndent.length)
+          : quotedLine;
+      output.push(content === "" ? `${quoteIndent}>` : `${quoteIndent}> ${content}`);
     }
+    const nextLine = lines[closingIndex + 1];
+    if (nextLine !== undefined && !/^[\t ]*$/u.test(nextLine)) output.push("");
     index = closingIndex;
   }
 

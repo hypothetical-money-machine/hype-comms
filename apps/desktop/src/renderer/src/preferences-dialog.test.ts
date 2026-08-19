@@ -292,7 +292,7 @@ describe("PreferencesDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
     const dialog = screen.getByRole("dialog", { name: "Preferences" });
     const first = screen.getByRole("button", { name: "Close preferences" });
-    const last = screen.getByRole("radio", { name: ">>>" });
+    const last = screen.getByRole("radio", { name: "Off" });
 
     last.focus();
     fireEvent.keyDown(dialog, { key: "Tab" });

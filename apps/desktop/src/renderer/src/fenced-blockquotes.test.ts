@@ -28,6 +28,12 @@ describe("expandFencedBlockquotes", () => {
     );
   });
 
+  it("separates an expanded quote from following text", () => {
+    expect(expandFencedBlockquotes('"""\nQuoted\n"""\nNot quoted', "double-quote")).toBe(
+      "> Quoted\n\nNot quoted",
+    );
+  });
+
   it("leaves unclosed fences literal", () => {
     const source = '"""\nNot closed';
     expect(expandFencedBlockquotes(source, "double-quote")).toBe(source);
@@ -60,6 +66,29 @@ describe("expandFencedBlockquotes", () => {
     expect(
       expandFencedBlockquotes('"""\n> ```text\n> """\n> ```\nStill quoted\n"""', "double-quote"),
     ).toBe('> > ```text\n> > """\n> > ```\n> Still quoted');
+  });
+
+  it("recognizes a nested blockquote code fence closing with different spacing", () => {
+    expect(
+      expandFencedBlockquotes('"""\n> ```text\n> code\n>```\nStill quoted\n"""', "double-quote"),
+    ).toBe("> > ```text\n> > code\n> >```\n> Still quoted");
+  });
+
+  it("ends an unclosed code fence when its list container ends", () => {
+    expect(expandFencedBlockquotes('"""\n- ```text\nStill quoted\n"""', "double-quote")).toBe(
+      "> - ```text\n> Still quoted",
+    );
+  });
+
+  it("keeps a quote fence nested inside a list item", () => {
+    expect(expandFencedBlockquotes('- item\n  """\n  Quoted\n  """', "double-quote")).toBe(
+      "- item\n  > Quoted",
+    );
+  });
+
+  it("leaves an empty fence pair literal", () => {
+    const source = '"""\n"""';
+    expect(expandFencedBlockquotes(source, "double-quote")).toBe(source);
   });
 
   it("preserves CRLF line endings when expanding a quote", () => {

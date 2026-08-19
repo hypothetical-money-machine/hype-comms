@@ -35,8 +35,15 @@ interface PreferencesDialogProps {
   readonly onOpenChange?: (open: boolean) => void;
 }
 
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'input:not([disabled]):not([type="radio"]):not([tabindex="-1"])',
+  'input[type="radio"]:checked:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
+  '[href]:not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
 
 export function PreferencesDialog({
   open,
