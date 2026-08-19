@@ -4,6 +4,8 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
 import { CompactModeRuntime } from "./compact-mode-runtime";
+import { FencedBlockquoteProvider } from "./fenced-blockquote-context";
+import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { restoreMemberListHeight } from "./member-list-height";
 import { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeRuntime } from "./theme-runtime";
@@ -15,6 +17,7 @@ if (rootElement === null) {
 
 const theme = new ThemeRuntime(window.hypeComms, document.documentElement);
 const compactMode = new CompactModeRuntime(window.hypeComms, document.documentElement);
+const fencedBlockquotes = new FencedBlockquoteRuntime();
 const sidebarPosition = new SidebarPositionRuntime(document.documentElement);
 restoreMemberListHeight(document.documentElement);
 
@@ -22,12 +25,15 @@ void theme.start();
 void compactMode.start();
 createRoot(rootElement).render(
   <StrictMode>
-    <App
-      client={window.hypeComms}
-      theme={theme}
-      compactMode={compactMode}
-      sidebarPosition={sidebarPosition}
-    />
+    <FencedBlockquoteProvider runtime={fencedBlockquotes}>
+      <App
+        client={window.hypeComms}
+        theme={theme}
+        compactMode={compactMode}
+        fencedBlockquotes={fencedBlockquotes}
+        sidebarPosition={sidebarPosition}
+      />
+    </FencedBlockquoteProvider>
   </StrictMode>,
 );
 
@@ -36,6 +42,7 @@ window.addEventListener(
   () => {
     theme.dispose();
     compactMode.dispose();
+    fencedBlockquotes.dispose();
     sidebarPosition.dispose();
   },
   { once: true },

@@ -11,6 +11,9 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { segmentMessageBody, type ChannelReferenceTarget } from "./channel-references";
+import { useFencedBlockquoteMode } from "./fenced-blockquote-context";
+import type { FencedBlockquoteMode } from "./fenced-blockquote-runtime";
+import { expandFencedBlockquotes } from "./fenced-blockquotes";
 
 interface MarkdownSyntaxNode {
   children?: MarkdownSyntaxNode[];
@@ -102,6 +105,7 @@ function ChannelAwareText({
 interface MarkdownBodyProps {
   readonly body: string;
   readonly className: string;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
   readonly suffix?: ReactNode;
   readonly channels?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
@@ -110,10 +114,16 @@ interface MarkdownBodyProps {
 export const MarkdownBody = memo(function MarkdownBody({
   body,
   className,
+  fencedBlockquoteMode,
   suffix,
   channels = [],
   onOpenChannel,
 }: MarkdownBodyProps) {
+  const contextualFencedBlockquoteMode = useFencedBlockquoteMode();
+  const renderedBody = expandFencedBlockquotes(
+    body,
+    fencedBlockquoteMode ?? contextualFencedBlockquoteMode,
+  );
   const renderText = (children: ReactNode): ReactNode => (
     <ChannelAwareText channels={channels} onOpenChannel={onOpenChannel}>
       {children}
@@ -222,7 +232,7 @@ export const MarkdownBody = memo(function MarkdownBody({
         skipHtml
         components={components}
       >
-        {body}
+        {renderedBody}
       </ReactMarkdown>
       {suffix}
     </div>
@@ -237,11 +247,13 @@ export const MarkdownBody = memo(function MarkdownBody({
  */
 export const MessageBody = memo(function MessageBody({
   body,
+  fencedBlockquoteMode,
   suffix,
   channels = [],
   onOpenChannel,
 }: {
   readonly body: string;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
   readonly suffix?: ReactNode;
   readonly channels?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
@@ -250,6 +262,7 @@ export const MessageBody = memo(function MessageBody({
     <MarkdownBody
       body={body}
       className="message-body"
+      fencedBlockquoteMode={fencedBlockquoteMode}
       suffix={suffix}
       channels={channels}
       onOpenChannel={onOpenChannel}

@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
 
@@ -339,6 +340,7 @@ async function renderWorkspace(): Promise<Harness> {
       client: harness.client,
       theme: createTheme(),
       compactMode: createCompactMode(),
+      fencedBlockquotes: new FencedBlockquoteRuntime(null),
       sidebarPosition: createSidebarPosition(),
     }),
   );

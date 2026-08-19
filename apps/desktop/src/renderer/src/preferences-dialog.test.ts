@@ -21,6 +21,7 @@ import type {
 } from "../../shared/desktop-api";
 import { getThemeDefinition } from "../../shared/theme";
 import { CompactModeRuntime } from "./compact-mode-runtime";
+import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { PreferencesDialog } from "./preferences-dialog";
 import { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeRuntime } from "./theme-runtime";
@@ -168,6 +169,7 @@ class PreferencesNotificationTransport implements NotificationTransport {
 interface PreferencesHarnessProps {
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
@@ -177,6 +179,7 @@ interface PreferencesHarnessProps {
 function PreferencesHarness({
   theme,
   compactMode,
+  fencedBlockquotes,
   sidebarPosition,
   notifications,
   platform,
@@ -202,6 +205,7 @@ function PreferencesHarness({
       open,
       theme,
       compactMode,
+      fencedBlockquotes,
       sidebarPosition,
       notifications,
       platform,
@@ -217,6 +221,7 @@ async function renderPreferences(notifications?: NotificationTransport) {
   const compactModeClient = new PreferencesCompactModeTransport();
   const theme = new ThemeRuntime(themeClient, document.documentElement);
   const compactMode = new CompactModeRuntime(compactModeClient, document.documentElement);
+  const fencedBlockquotes = new FencedBlockquoteRuntime(null);
   const sidebarPosition = new SidebarPositionRuntime(document.documentElement, null);
   await theme.start();
   await compactMode.start();
@@ -225,6 +230,7 @@ async function renderPreferences(notifications?: NotificationTransport) {
     createElement(PreferencesHarness, {
       theme,
       compactMode,
+      fencedBlockquotes,
       sidebarPosition,
       notifications,
       platform: "linux",
@@ -235,6 +241,7 @@ async function renderPreferences(notifications?: NotificationTransport) {
     ...rendered,
     compactMode,
     compactModeClient,
+    fencedBlockquotes,
     onOpenChange,
     sidebarPosition,
     theme,
@@ -285,7 +292,7 @@ describe("PreferencesDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
     const dialog = screen.getByRole("dialog", { name: "Preferences" });
     const first = screen.getByRole("button", { name: "Close preferences" });
-    const last = screen.getByRole("checkbox", { name: "Compact mode" });
+    const last = screen.getByRole("radio", { name: "Off" });
 
     last.focus();
     fireEvent.keyDown(dialog, { key: "Tab" });
@@ -446,7 +453,8 @@ describe("PreferencesDialog", () => {
   });
 
   it("renders every preference section and reflects live runtime changes", async () => {
-    const { compactModeClient, sidebarPosition, themeClient } = await renderPreferences();
+    const { compactModeClient, fencedBlockquotes, sidebarPosition, themeClient } =
+      await renderPreferences();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
 
     expect(screen.getByRole("heading", { name: "Appearance", level: 3 })).toBeTruthy();
@@ -455,6 +463,9 @@ describe("PreferencesDialog", () => {
     expect(screen.getByRole("group", { name: "Sidebar position" })).toBeTruthy();
     expect((screen.getByRole("radio", { name: "Left" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("checkbox", { name: "Compact mode" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Messages", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Fenced blockquotes" })).toBeTruthy();
+    expect((screen.getByRole("radio", { name: "Off" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("heading", { name: "Notifications", level: 3 })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe(
       "Notifications are unavailable in this build.",
@@ -467,6 +478,8 @@ describe("PreferencesDialog", () => {
     });
     compactModeClient.emit(true);
     sidebarPosition.setPosition("right");
+    fireEvent.click(screen.getByRole("radio", { name: '"""' }));
+    expect(fencedBlockquotes.mode).toBe("double-quote");
 
     await waitFor(() => {
       expect(
@@ -476,6 +489,7 @@ describe("PreferencesDialog", () => {
         (screen.getByRole("checkbox", { name: "Compact mode" }) as HTMLInputElement).checked,
       ).toBe(true);
       expect((screen.getByRole("radio", { name: "Right" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("radio", { name: '"""' }) as HTMLInputElement).checked).toBe(true);
     });
   });
 
