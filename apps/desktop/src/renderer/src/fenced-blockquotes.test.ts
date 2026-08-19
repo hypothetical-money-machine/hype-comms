@@ -50,6 +50,18 @@ describe("expandFencedBlockquotes", () => {
     ).toBe('>   ```text\n> """\n>    ```\n> Still quoted');
   });
 
+  it("does not close a quote on its marker inside a list code fence", () => {
+    expect(
+      expandFencedBlockquotes('"""\n- ```text\n  """\n  ```\nStill quoted\n"""', "double-quote"),
+    ).toBe('> - ```text\n>   """\n>   ```\n> Still quoted');
+  });
+
+  it("does not close a quote on its marker inside a nested blockquote code fence", () => {
+    expect(
+      expandFencedBlockquotes('"""\n> ```text\n> """\n> ```\nStill quoted\n"""', "double-quote"),
+    ).toBe('> > ```text\n> > """\n> > ```\n> Still quoted');
+  });
+
   it("preserves CRLF line endings when expanding a quote", () => {
     expect(expandFencedBlockquotes('"""\r\nFirst\r\n\r\nSecond\r\n"""', "double-quote")).toBe(
       "> First\r\n>\r\n> Second",

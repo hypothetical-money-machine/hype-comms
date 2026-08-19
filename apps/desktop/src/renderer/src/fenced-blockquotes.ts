@@ -1,22 +1,67 @@
 import type { FencedBlockquoteMode } from "./fenced-blockquote-runtime";
 
 interface CodeFence {
+  readonly continuationPrefix: string;
   readonly length: number;
   readonly marker: "`" | "~";
 }
 
+function splitCodeContainer(line: string): {
+  readonly content: string;
+  readonly continuationPrefix: string;
+} {
+  let cursor = /^ {0,3}/u.exec(line)?.[0].length ?? 0;
+  const initialIndent = line.slice(0, cursor);
+  let continuationPrefix = "";
+  let hasContainer = false;
+
+  while (cursor < line.length) {
+    if (line[cursor] === ">") {
+      if (!hasContainer) continuationPrefix = initialIndent;
+      hasContainer = true;
+      continuationPrefix += ">";
+      cursor += 1;
+      if (line[cursor] === " " || line[cursor] === "\t") {
+        continuationPrefix += line[cursor];
+        cursor += 1;
+      }
+      const indent = /^ {0,3}/u.exec(line.slice(cursor))?.[0] ?? "";
+      continuationPrefix += indent;
+      cursor += indent.length;
+      continue;
+    }
+
+    const listMarker = /^(?:[*+-]|\d{1,9}[.)])[\t ]{1,4}/u.exec(line.slice(cursor))?.[0];
+    if (listMarker === undefined) break;
+    if (!hasContainer) continuationPrefix = initialIndent;
+    hasContainer = true;
+    continuationPrefix += " ".repeat(listMarker.length);
+    cursor += listMarker.length;
+  }
+
+  return {
+    content: line.slice(cursor),
+    continuationPrefix: hasContainer ? continuationPrefix : "",
+  };
+}
+
 function openingCodeFence(line: string): CodeFence | null {
-  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+  const { content, continuationPrefix } = splitCodeContainer(line);
+  const match = /^(`{3,}|~{3,})(.*)$/u.exec(content);
   const fence = match?.[1];
   if (fence === undefined) return null;
   const marker = fence[0];
   if (marker !== "`" && marker !== "~") return null;
   if (marker === "`" && match?.[2]?.includes("`")) return null;
-  return { marker, length: fence.length };
+  return { continuationPrefix, marker, length: fence.length };
 }
 
 function closesCodeFence(line: string, fence: CodeFence): boolean {
-  const match = /^ {0,3}(`+|~+)[\t ]*$/u.exec(line);
+  const content =
+    fence.continuationPrefix !== "" && line.startsWith(fence.continuationPrefix)
+      ? line.slice(fence.continuationPrefix.length)
+      : line;
+  const match = /^ {0,3}(`+|~+)[\t ]*$/u.exec(content);
   const candidate = match?.[1];
   return (
     candidate !== undefined && candidate[0] === fence.marker && candidate.length >= fence.length

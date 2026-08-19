@@ -195,6 +195,20 @@ describe("MessageBody", () => {
     expect(container.querySelector("blockquote")?.textContent.trim()).toBe("Now quoted");
   });
 
+  it("keeps quote markers inside nested list code fences as code", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: '"""\n- ```text\n  """\n  ```\nStill quoted\n"""',
+        fencedBlockquoteMode: "double-quote",
+      }),
+    );
+
+    const quote = container.querySelector("blockquote");
+    expect(container.querySelectorAll("blockquote")).toHaveLength(1);
+    expect(quote?.querySelector("pre code")?.textContent).toContain('"""');
+    expect(quote?.textContent).toContain("Still quoted");
+  });
+
   it("keeps channel navigation inside formatted text but not links or code", () => {
     const onOpenChannel = vi.fn();
     const { container } = render(
