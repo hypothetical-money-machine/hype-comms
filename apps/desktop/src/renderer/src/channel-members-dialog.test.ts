@@ -249,4 +249,25 @@ describe("ChannelMembersDialog", () => {
     );
     expect(document.activeElement).toBe(triggerRef.current);
   });
+
+  it("reports compact-chrome open and close around its mount lifetime", () => {
+    const onOpenChange = vi.fn();
+    const { unmount } = render(
+      createElement(ChannelMembersDialog, {
+        source: "workspace",
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        onOpenChange,
+      }),
+    );
+
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    unmount();
+    expect(onOpenChange).toHaveBeenNthCalledWith(2, false);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
 });
