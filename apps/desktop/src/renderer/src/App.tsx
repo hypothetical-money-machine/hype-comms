@@ -16,6 +16,7 @@ import type {
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
+import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
@@ -309,14 +310,6 @@ function SignIn({
   );
 }
 
-function Avatar({ user }: { user: User | undefined }) {
-  return (
-    <span className="avatar" aria-hidden="true">
-      {(user?.displayName ?? "?").slice(0, 1).toUpperCase()}
-    </span>
-  );
-}
-
 function AiChannelIcon() {
   return (
     <svg className="ai-channel-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -537,6 +530,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
+  const peopleTrigger = useRef<HTMLButtonElement>(null);
+  const channelMembersTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
   const [destination, setDestination] = useState<"workspace" | "ai">("workspace");
   const [aiChannelVisited, setAiChannelVisited] = useState(false);
@@ -1591,12 +1586,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           </div>
           <div className="workspace-header-actions">
             <button
+              ref={peopleTrigger}
               className="quiet-button"
               type="button"
-              onClick={() => {
-                setPeopleSource("workspace");
-                chrome.collapse();
-              }}
+              onClick={() => setPeopleSource("workspace")}
             >
               People
             </button>
@@ -1810,6 +1803,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 {selectedSummary.conversation.kind === "channel" && (
                   <>
                     <button
+                      ref={channelMembersTrigger}
                       className="quiet-button"
                       type="button"
                       onClick={() => setPeopleSource("channel")}
@@ -2212,8 +2206,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           source="workspace"
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
+          triggerRef={peopleTrigger}
           onClose={() => setPeopleSource(null)}
           onMessage={messageDirectoryMember}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
       )}
       {peopleSource === "channel" && selectedSummary?.conversation.kind === "channel" && (
@@ -2225,8 +2221,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           conversationId={selectedSummary.conversation.id}
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
+          triggerRef={channelMembersTrigger}
           onClose={() => setPeopleSource(null)}
           onMessage={messageDirectoryMember}
+          onOpenChange={chrome.onPopoverOpenChange}
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}

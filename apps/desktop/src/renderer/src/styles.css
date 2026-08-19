@@ -1079,7 +1079,7 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .channel-members-dialog {
-  width: min(620px, 100%);
+  width: min(680px, 100%);
   max-height: min(720px, calc(100vh - 64px));
   overflow-y: auto;
   padding: 22px;
@@ -2161,7 +2161,8 @@ html[data-sidebar-position="right"] .sidebar {
 
 .channel-member-list li {
   min-height: 58px;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 9px 4px;
   border-bottom: 1px solid var(--theme-border-subtle);
 }
@@ -2169,15 +2170,23 @@ html[data-sidebar-position="right"] .sidebar {
 .channel-member-identity {
   display: grid;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 8rem;
+}
+
+.channel-member-identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .channel-member-list .member-kind,
 .channel-member-list .channel-role {
+  flex: 0 0 auto;
   padding: 3px 7px;
   border-radius: 999px;
   background: var(--theme-surface-selected);
   color: var(--theme-text-secondary);
+  font-size: 12px;
   text-transform: capitalize;
 }
 
@@ -2187,9 +2196,11 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .channel-member-actions {
+  flex: 1 0 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+  margin-left: auto;
 }
 
 .channel-members-dialog .danger-button,

@@ -162,6 +162,7 @@ describe("renderer theme CSS", () => {
     expect(actionRailRule?.groups?.body).toContain("opacity: 0");
     expect(actionRevealRule?.groups?.body).toContain("opacity: 1");
     expect(memberRoleRule?.groups?.body).toContain("color: var(--theme-text-secondary)");
+    expect(memberRoleRule?.groups?.body).toContain("font-size: 12px");
   });
 
   it("keeps the minimum-height sign-in surface vertically reachable", () => {

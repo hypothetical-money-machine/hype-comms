@@ -3,14 +3,19 @@ import type {
   ChannelMembersResponse,
   User,
 } from "@hype-comms/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+
+import { Avatar } from "./avatar";
+import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface PeopleDirectorySharedProps {
   readonly currentUserId: string;
   readonly workspaceMembers: readonly User[];
+  readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onClose: () => void;
   readonly onMessage: (memberId: string) => void;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
 interface ChannelPeopleDialogProps extends PeopleDirectorySharedProps {
@@ -40,6 +45,9 @@ interface DirectoryEntry {
   readonly role: "owner" | "member" | null;
 }
 
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message !== ""
     ? error.message
@@ -57,17 +65,20 @@ function canMessage(user: User): boolean {
 }
 
 export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
-  const { currentUserId, workspaceMembers, onClose, onMessage, source } = props;
+  const { currentUserId, workspaceMembers, triggerRef, onClose, onMessage, source, onOpenChange } =
+    props;
+  const dialogRef = useRef<HTMLElement>(null);
   const [details, setDetails] = useState<ChannelMembersResponse | null>(null);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const isChannel = source === "channel";
-  const channelName = source === "channel" ? props.channelName : null;
   const conversationId = source === "channel" ? props.conversationId : null;
   const load = source === "channel" ? props.load : null;
   const upsert = source === "channel" ? props.upsert : null;
   const remove = source === "channel" ? props.remove : null;
+
+  useOpenChangeNotifier(true, onOpenChange);
 
   useEffect(() => {
     if (load === null || conversationId === null) return;
@@ -91,6 +102,16 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [busyUserId, onClose]);
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    const firstFocusable = dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    firstFocusable?.focus();
+    if (firstFocusable === null) dialog?.focus();
+    return () => {
+      triggerRef.current?.focus();
+    };
+  }, [triggerRef]);
 
   const availableMembers = useMemo(() => {
     const current = new Set(details?.members.map((member) => member.user.id) ?? []);
@@ -129,21 +150,23 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   return createPortal(
     <div className="dialog-backdrop" onMouseDown={busyUserId === null ? onClose : undefined}>
       <section
+        ref={dialogRef}
         className="channel-members-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         aria-busy={busyUserId !== null}
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
           <div>
             <p className="eyebrow">{isChannel ? "Channel access" : "Workspace"}</p>
-            <h2 id={titleId}>{channelName === null ? "People" : `#${channelName}`}</h2>
+            <h2 id={titleId}>{source === "channel" ? `#${props.channelName}` : "People"}</h2>
           </div>
           <button
             type="button"
-            aria-label="Close people"
+            aria-label={isChannel ? "Close channel access" : "Close people"}
             disabled={busyUserId !== null}
             onClick={onClose}
           >
@@ -199,9 +222,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
               const kind = kindLabel(entry.user.kind);
               return (
                 <li key={entry.user.id}>
-                  <span className="avatar" aria-hidden="true">
-                    {entry.user.displayName.slice(0, 1).toUpperCase()}
-                  </span>
+                  <Avatar user={entry.user} />
                   <div className="channel-member-identity">
                     <strong>
                       {entry.user.displayName}

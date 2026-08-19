@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ChannelMembersResponse, User } from "@hype-comms/contracts";
-import { createElement } from "react";
+import { createElement, createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ChannelMembersDialog } from "./channel-members-dialog";
@@ -42,6 +42,8 @@ const initial: ChannelMembersResponse = {
   canManage: true,
 };
 
+const unusedTrigger = { current: null };
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -64,6 +66,7 @@ describe("ChannelMembersDialog", () => {
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
         workspaceMembers: [owner, member],
+        triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage: vi.fn(),
         load,
@@ -86,6 +89,7 @@ describe("ChannelMembersDialog", () => {
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
         workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage: vi.fn(),
         load: vi.fn().mockResolvedValue(initial),
@@ -110,6 +114,7 @@ describe("ChannelMembersDialog", () => {
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
         workspaceMembers: [owner, member],
+        triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage: vi.fn(),
         load: vi.fn().mockResolvedValue({
@@ -136,6 +141,7 @@ describe("ChannelMembersDialog", () => {
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
         workspaceMembers: [owner, agent, bot],
+        triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage,
         load: vi.fn().mockResolvedValue({
@@ -169,6 +175,7 @@ describe("ChannelMembersDialog", () => {
         source: "workspace",
         currentUserId: OWNER_ID,
         workspaceMembers: [owner, agent, bot],
+        triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage,
       }),
@@ -184,5 +191,62 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Message" })[0]!);
     expect(onMessage).toHaveBeenCalledWith(OWNER_ID);
     expect(screen.getAllByRole("button", { name: "Message" })).toHaveLength(2);
+  });
+
+  it("names the close control after the dialog variant", async () => {
+    const { rerender } = render(
+      createElement(ChannelMembersDialog, {
+        source: "workspace",
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Close people" })).toBeTruthy();
+
+    rerender(
+      createElement(ChannelMembersDialog, {
+        source: "channel",
+        channelName: "leadership",
+        conversationId: CONVERSATION_ID,
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        load: vi.fn().mockResolvedValue(initial),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Close channel access" })).toBeTruthy();
+  });
+
+  it("restores focus to the trigger when unmounted", () => {
+    const triggerRef = createRef<HTMLButtonElement>();
+    const dialog = createElement(ChannelMembersDialog, {
+      source: "workspace",
+      currentUserId: OWNER_ID,
+      workspaceMembers: [owner],
+      triggerRef,
+      onClose: vi.fn(),
+      onMessage: vi.fn(),
+    });
+    const { rerender } = render(
+      createElement("div", null, [
+        createElement("button", { key: "trigger", ref: triggerRef, type: "button" }, "People"),
+        dialog,
+      ]),
+    );
+
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close people" }));
+    rerender(
+      createElement("div", null, [
+        createElement("button", { key: "trigger", ref: triggerRef, type: "button" }, "People"),
+      ]),
+    );
+    expect(document.activeElement).toBe(triggerRef.current);
   });
 });
