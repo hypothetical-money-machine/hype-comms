@@ -568,7 +568,9 @@ describe("App notification session recovery", () => {
     general.focus();
     fireEvent.click(general);
     await screen.findByRole("heading", { name: "# General" });
-    expect(document.activeElement).toBe(general);
+    // Landing on a conversation from the AI pane focuses its composer, ready for typing
+    // (see app-composer-focus.test.ts).
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" }));
     expect(document.querySelector(".ai-channel")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector<HTMLTextAreaElement>("#ai-channel-prompt")?.value).toBe(
       "Keep this local draft",

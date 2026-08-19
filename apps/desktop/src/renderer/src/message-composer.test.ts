@@ -87,6 +87,34 @@ describe("MessageComposer", () => {
     expect(textbox.placeholder).toBe("Message # Launch Planning");
   });
 
+  it("leaves focus where the user put it across prop changes and remounts", () => {
+    // Focus placement is the App's decision (see the conversation-change effect in App.tsx and
+    // app-composer-focus.test.ts). The shared composer itself must never grab focus — not when it
+    // re-enables after a snapshot refresh, not on a conversation rename, and not when a pane
+    // toggle remounts it — or it steals focus from wherever the user is typing.
+    const otherControl = document.createElement("button");
+    document.body.append(otherControl);
+    try {
+      const { rerender, unmount, props } = renderComposer({ disabled: true });
+      otherControl.focus();
+
+      rerender(
+        createElement(MessageComposer, {
+          ...props,
+          disabled: false,
+          conversationName: "# Launch Planning",
+        }),
+      );
+      expect(document.activeElement).toBe(otherControl);
+
+      unmount();
+      render(createElement(MessageComposer, props));
+      expect(document.activeElement).toBe(otherControl);
+    } finally {
+      otherControl.remove();
+    }
+  });
+
   it("supports a focused thread-reply variant without losing shared composer behavior", () => {
     const inputRef = createRef<HTMLTextAreaElement>();
     const { props } = renderComposer({
