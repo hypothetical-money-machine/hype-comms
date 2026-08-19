@@ -30,6 +30,7 @@ import {
   ConversationEmptyState,
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
+import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MemberListResizeHandle } from "./member-list-resize-handle";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
@@ -70,6 +71,7 @@ interface AppProps {
   readonly client: DesktopApi;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
 }
 
@@ -517,7 +519,7 @@ function isTextEntryControl(element: Element): boolean {
 // re-enabling the composer) minutes after the navigation must not move focus.
 const FOCUS_INTENT_TTL_MS = 15_000;
 
-export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
+export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosition }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const isHeadless = client.isHeadless === true;
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
@@ -2227,6 +2229,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
         open={showPreferences}
         theme={theme}
         compactMode={compactMode}
+        fencedBlockquotes={fencedBlockquotes}
         sidebarPosition={sidebarPosition}
         notifications={notificationTransport ?? undefined}
         platform={client.platform}

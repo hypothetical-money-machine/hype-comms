@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { FencedBlockquoteProvider } from "./fenced-blockquote-context";
+import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MessageBody } from "./message-body";
 
 const GENERAL_ID = "10000000-0000-4000-8000-000000000001";
@@ -135,6 +137,62 @@ describe("MessageBody", () => {
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getByText("npm test").tagName).toBe("CODE");
     expect(container.querySelector(".markdown-body")).not.toBeNull();
+  });
+
+  it("renders triple double quotes as one multiline blockquote when selected", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: '"""\nFirst paragraph with **formatting**.\n\n- Second item\n"""',
+        fencedBlockquoteMode: "double-quote",
+      }),
+    );
+
+    const quote = container.querySelector("blockquote");
+    expect(container.querySelectorAll("blockquote")).toHaveLength(1);
+    expect(quote?.querySelector("strong")?.textContent).toBe("formatting");
+    expect(quote?.querySelector("li")?.textContent).toBe("Second item");
+    expect(quote?.textContent).not.toContain('"""');
+  });
+
+  it("renders triple greater-than signs as one multiline blockquote when selected", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: ">>>\nFirst paragraph.\n\nSecond paragraph.\n>>>",
+        fencedBlockquoteMode: "greater-than",
+      }),
+    );
+
+    const quote = container.querySelector("blockquote");
+    expect(container.querySelectorAll("blockquote")).toHaveLength(1);
+    expect(
+      Array.from(quote?.querySelectorAll("p") ?? [], (paragraph) => paragraph.textContent),
+    ).toEqual(["First paragraph.", "Second paragraph."]);
+  });
+
+  it("keeps triple double quotes literal when fenced blockquotes are off", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: '"""\nNot a quote\n"""',
+        fencedBlockquoteMode: "off",
+      }),
+    );
+
+    expect(container.querySelector("blockquote")).toBeNull();
+    expect(container.textContent).toContain('"""');
+  });
+
+  it("rerenders an existing message when the fenced blockquote preference changes", () => {
+    const runtime = new FencedBlockquoteRuntime(null);
+    const { container } = render(
+      createElement(FencedBlockquoteProvider, {
+        runtime,
+        children: createElement(MessageBody, { body: '"""\nNow quoted\n"""' }),
+      }),
+    );
+
+    expect(container.querySelector("blockquote")).toBeNull();
+    act(() => runtime.setMode("double-quote"));
+    expect(container.querySelector("blockquote")?.textContent.trim()).toBe("Now quoted");
   });
 
   it("keeps channel navigation inside formatted text but not links or code", () => {
