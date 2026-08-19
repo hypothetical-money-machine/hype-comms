@@ -523,7 +523,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
   const [composerError, setComposerError] = useState("");
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
-  const [showChannelMembers, setShowChannelMembers] = useState(false);
+  const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
@@ -540,7 +540,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
         if (result === "discarded") return;
         setDestination("workspace");
         setPaneView("chat");
-        setShowChannelMembers(false);
+        setPeopleSource(null);
         setShowPreferences(false);
       },
     });
@@ -585,7 +585,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     setAiChannelVisited(true);
     setDestination("ai");
     setPaneView("chat");
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setShowPreferences(false);
     runtime.closeThread();
   }, [runtime]);
@@ -811,7 +811,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
         );
 
   useEffect(() => {
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setPaneView("chat");
     setTimelineAtLiveTail(false);
     setThreadAtLiveTail(false);
@@ -1222,6 +1222,14 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
     [runtime],
   );
 
+  const messageDirectoryMember = useCallback(
+    (memberId: string) => {
+      setPeopleSource(null);
+      void startDirectMessage(memberId);
+    },
+    [startDirectMessage],
+  );
+
   const rebuildLocalCache = (signedIn: SignedInSession): Promise<void> =>
     startWorkspaceSession(signedIn, { resetLocalCache: true });
 
@@ -1344,9 +1352,21 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
             <p className="eyebrow">Workspace</p>
             <h1>{bootstrap.workspace.name}</h1>
           </div>
-          <button className="quiet-button" type="button" onClick={() => void signOut()}>
-            {signingOut ? "…" : "Sign out"}
-          </button>
+          <div className="workspace-header-actions">
+            <button
+              className="quiet-button"
+              type="button"
+              onClick={() => {
+                setPeopleSource("workspace");
+                chrome.collapse();
+              }}
+            >
+              People
+            </button>
+            <button className="quiet-button" type="button" onClick={() => void signOut()}>
+              {signingOut ? "…" : "Sign out"}
+            </button>
+          </div>
         </header>
 
         <ConversationSwitcher
@@ -1483,23 +1503,6 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           ))}
         </nav>
 
-        <section className="member-list" aria-label="Members">
-          <p className="nav-heading">Members</p>
-          {bootstrap.members.map((member) => (
-            <button
-              type="button"
-              key={member.id}
-              onClick={() => void startDirectMessage(member.id)}
-            >
-              <Avatar user={member} />
-              <span>
-                {member.displayName}
-                {member.id === currentUserId ? " (you)" : ""}
-              </span>
-            </button>
-          ))}
-        </section>
-
         <footer className="sidebar-footer">
           <button
             ref={preferencesTrigger}
@@ -1573,7 +1576,7 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
                     <button
                       className="quiet-button"
                       type="button"
-                      onClick={() => setShowChannelMembers(true)}
+                      onClick={() => setPeopleSource("channel")}
                     >
                       {selectedSummary.conversation.access === "members"
                         ? `${String(selectedSummary.participantIds.length)} members`
@@ -1961,14 +1964,26 @@ export function App({ client, theme, compactMode, sidebarPosition }: AppProps) {
           )}
         </aside>
       )}
-      {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (
+      {peopleSource === "workspace" && (
         <ChannelMembersDialog
+          source="workspace"
+          currentUserId={currentUserId}
+          workspaceMembers={bootstrap.members}
+          onClose={() => setPeopleSource(null)}
+          onMessage={messageDirectoryMember}
+        />
+      )}
+      {peopleSource === "channel" && selectedSummary?.conversation.kind === "channel" && (
+        <ChannelMembersDialog
+          source="channel"
           channelName={
             selectedSummary.conversation.name ?? selectedSummary.conversation.slug ?? "channel"
           }
           conversationId={selectedSummary.conversation.id}
+          currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
-          onClose={() => setShowChannelMembers(false)}
+          onClose={() => setPeopleSource(null)}
+          onMessage={messageDirectoryMember}
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}
