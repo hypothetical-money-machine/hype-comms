@@ -44,6 +44,7 @@ export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
 export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
+export { MESSAGE_RETRACT_WINDOW_MS } from "./entities.js";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -461,6 +462,19 @@ export const sendMessageResponseSchema = z
   })
   .strict();
 
+/**
+ * `DELETE /v1/messages/:id` with `messages:write`.
+ *
+ * - Author + `created_at` still inside {@link MESSAGE_RETRACT_WINDOW_MS}: `200` tombstone.
+ * - Other author: `403 FORBIDDEN`.
+ * - Own message past the window: `409 CONFLICT`.
+ * - Repeat delete: same tombstone (`deletedAt` set, `body` empty).
+ * - No request body. No edit path. No admin override.
+ *
+ * Live peers that advertised {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} also receive
+ * `message.retracted` with `{ messageId, deletedAt }` only. Apply that event or this response;
+ * do not invent a local-only delete.
+ */
 export const retractMessageResponseSchema = z
   .object({
     message: messageSchema,

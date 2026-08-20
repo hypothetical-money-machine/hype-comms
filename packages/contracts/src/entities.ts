@@ -148,7 +148,13 @@ const messageWireBodySchema = z
   .max(4_000)
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 
-/** Authors may retract their own message during this window; after it the row is immutable. */
+/**
+ * Author-only retract window for `DELETE /v1/messages/:id`.
+ *
+ * The server compares `clock_timestamp()` to `created_at`, not the client's clock. After this
+ * window the row is immutable. This constant is for UI enablement only; `403` / `409` are
+ * authoritative. Disappearing-TTL purge of the tombstone is a later slice, not this contract.
+ */
 export const MESSAGE_RETRACT_WINDOW_MS = 5 * 60 * 1_000;
 
 export const messageSchema = z

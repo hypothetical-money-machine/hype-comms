@@ -5,6 +5,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MESSAGE_RETRACT_WINDOW_MS,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -44,6 +45,7 @@ import {
   moveTaskOperationSchema,
   reactionEmojiSchema,
   reactionSchema,
+  retractMessageResponseSchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
@@ -1042,6 +1044,30 @@ describe("transport contracts", () => {
         payload: { message: { id: MESSAGE_ID, body: "leaked" } },
       }),
     ).toThrow();
+    expect(MESSAGE_RETRACT_WINDOW_MS).toBe(5 * 60 * 1_000);
+    expect(
+      retractMessageResponseSchema.parse({
+        message: {
+          id: MESSAGE_ID,
+          conversationId: CONVERSATION_ID,
+          conversationSequence: "42",
+          version: 2,
+          clientMessageId: MESSAGE_ID,
+          authorId: USER_ID,
+          threadRootId: null,
+          body: "",
+          bodyFormat: "hype_comms_markdown_v1",
+          editedAt: null,
+          deletedAt: NOW,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+        syncCursor: "44",
+      }),
+    ).toMatchObject({
+      message: { id: MESSAGE_ID, body: "", deletedAt: NOW },
+      syncCursor: "44",
+    });
   });
 
   it("validates reaction sync events with their target message sequence", () => {
