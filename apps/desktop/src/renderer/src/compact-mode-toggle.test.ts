@@ -60,6 +60,11 @@ describe("CompactModeToggle", () => {
     const checkbox = screen.getByRole("checkbox", { name: "Compact mode" });
     expect((checkbox as HTMLInputElement).checked).toBe(false);
     expect(screen.getByText("Ctrl+Shift+S").tagName).toBe("KBD");
+    expect(
+      screen.getByText(
+        "Tighter message, sidebar, and chrome spacing. The rail and sidebar hide until you reveal them.",
+      ).className,
+    ).toBe("compact-mode-control-hint");
     compactMode.dispose();
   });
 

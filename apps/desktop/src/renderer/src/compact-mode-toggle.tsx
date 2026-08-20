@@ -49,6 +49,10 @@ export function CompactModeToggle({ compactMode, platform }: CompactModeTogglePr
         Compact mode
       </label>
       <kbd>{compactModeShortcutLabel(platform)}</kbd>
+      <p className="compact-mode-control-hint">
+        Tighter message, sidebar, and chrome spacing. The rail and sidebar hide until you reveal
+        them.
+      </p>
       {error !== "" && (
         <p className="compact-mode-control-error" role="alert">
           {error}
