@@ -21,9 +21,12 @@ env:
 jobs:
   validate:
     name: Validate release version
+    # This job uses only the read-only token, so it can run on the shared Lenovo CI pool.
     runs-on:
       group: hmm-linux-x64-ci
       labels: hmm-ci
+    permissions:
+      contents: read
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
@@ -77,11 +80,10 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    # GitHub-hosted jobs are unavailable while organization billing is blocked. Metadata work does
-    # not need the native ARM64 release runner, so use the shared Lenovo pool instead.
-    runs-on:
-      group: hmm-linux-x64-ci
-      labels: hmm-ci
+    # GitHub-hosted jobs are unavailable while organization billing is blocked. This job writes
+    # GitHub Release metadata, so it stays on the isolated ARM64 release runner rather than the
+    # shared Lenovo CI pool, which executes collaborator pull-request code.
+    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
     timeout-minutes: 5
     permissions:
       contents: write
@@ -552,9 +554,8 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    runs-on:
-      group: hmm-linux-x64-ci
-      labels: hmm-ci
+    # Publishing uses a contents:write token. Keep it off the shared Lenovo CI pool.
+    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
     timeout-minutes: 10
     permissions:
       contents: write

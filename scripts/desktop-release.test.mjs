@@ -76,6 +76,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     "utf8",
   );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
+  const releaseValidationJob = workflowJob(releaseWorkflow, "validate");
   const releasePackageJob = workflowJob(releaseWorkflow, "package");
   const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
   const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
@@ -123,13 +124,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     releaseWorkflow,
     /^ {2}validate:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
   );
+  assert.match(releaseValidationJob, /^ {4}permissions:\n {6}contents: read$/mu);
   assert.match(
     releaseWorkflow,
-    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
+    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]$/mu,
   );
   assert.match(
     releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
+    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]$/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.match(
