@@ -117,15 +117,19 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(releaseWorkflow, /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production$/mu);
   assert.match(
     releaseWorkflow,
-    /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u,
+    /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
   );
   assert.match(
     releaseWorkflow,
-    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
+    /^ {2}validate:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
   );
   assert.match(
     releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
+    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
+  );
+  assert.match(
+    releaseWorkflow,
+    /^ {2}github-release:[\s\S]*?^ {4}runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci$/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.match(

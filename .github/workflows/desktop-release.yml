@@ -21,7 +21,9 @@ env:
 jobs:
   validate:
     name: Validate release version
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    runs-on:
+      group: hmm-linux-x64-ci
+      labels: hmm-ci
     timeout-minutes: 5
     outputs:
       desktop-version: ${{ steps.version.outputs.desktop-version }}
@@ -75,9 +77,11 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    # GitHub-hosted jobs are unavailable while organization billing is blocked. Keep metadata work
-    # on the release runner and install the pinned GitHub CLI instead of relying on its host image.
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    # GitHub-hosted jobs are unavailable while organization billing is blocked. Metadata work does
+    # not need the native ARM64 release runner, so use the shared Lenovo pool instead.
+    runs-on:
+      group: hmm-linux-x64-ci
+      labels: hmm-ci
     timeout-minutes: 5
     permissions:
       contents: write
@@ -548,7 +552,9 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    runs-on:
+      group: hmm-linux-x64-ci
+      labels: hmm-ci
     timeout-minutes: 10
     permissions:
       contents: write
