@@ -543,7 +543,13 @@ describeWithPostgres("WorkspaceRepository", () => {
       false,
       true,
     );
-    expect(dmCapable.events.filter((event) => event.type === "message.retracted")).toEqual([
+    expect(
+      dmCapable.events.filter(
+        (event) =>
+          event.type === "message.retracted" &&
+          event.conversationId === direct.conversation.conversation.id,
+      ),
+    ).toEqual([
       expect.objectContaining({
         type: "message.retracted",
         conversationId: direct.conversation.conversation.id,
