@@ -847,8 +847,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
     (message) =>
-      message.deletedAt === null &&
-      message.conversationId === runtimeState.selectedConversationId,
+      message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
   );
   const messages = visibleTimelineMessages(
     runtimeState.messages,

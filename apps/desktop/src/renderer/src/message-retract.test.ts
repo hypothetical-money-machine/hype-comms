@@ -27,9 +27,9 @@ const message: Message = {
 describe("canRetractOwnMessage", () => {
   it("allows the author only inside the five-minute window", () => {
     expect(canRetractOwnMessage(message, USER_ID, CREATED_AT_MS)).toBe(true);
-    expect(
-      canRetractOwnMessage(message, USER_ID, CREATED_AT_MS + MESSAGE_RETRACT_WINDOW_MS),
-    ).toBe(true);
+    expect(canRetractOwnMessage(message, USER_ID, CREATED_AT_MS + MESSAGE_RETRACT_WINDOW_MS)).toBe(
+      true,
+    );
     expect(
       canRetractOwnMessage(message, USER_ID, CREATED_AT_MS + MESSAGE_RETRACT_WINDOW_MS + 1),
     ).toBe(false);
@@ -44,8 +44,8 @@ describe("canRetractOwnMessage", () => {
 
   it("does not treat a missing createdAt as still retractable", () => {
     expect(retractWindowRemainingMs("not-a-date", CREATED_AT_MS)).toBe(0);
-    expect(canRetractOwnMessage({ ...message, createdAt: "not-a-date" }, USER_ID, CREATED_AT_MS)).toBe(
-      false,
-    );
+    expect(
+      canRetractOwnMessage({ ...message, createdAt: "not-a-date" }, USER_ID, CREATED_AT_MS),
+    ).toBe(false);
   });
 });

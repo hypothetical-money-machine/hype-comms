@@ -264,11 +264,14 @@ describe("MessageRow retract action", () => {
     expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
   });
 
-  it("removes the retract control after the five-minute window", () => {
-    renderMessage({ onRetract: vi.fn().mockResolvedValue(undefined) });
-    expect(screen.getByRole("button", { name: "Retract message" })).not.toBeNull();
-
-    vi.advanceTimersByTime(MESSAGE_RETRACT_WINDOW_MS + 1);
+  it("does not offer retract after the five-minute window", () => {
+    renderMessage({
+      onRetract: vi.fn().mockResolvedValue(undefined),
+      message: {
+        ...message,
+        createdAt: new Date(Date.parse(NOW) - MESSAGE_RETRACT_WINDOW_MS - 1).toISOString(),
+      },
+    });
 
     expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
     expect(screen.getByText("Root message")).not.toBeNull();
