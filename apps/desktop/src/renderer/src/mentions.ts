@@ -29,7 +29,7 @@ export function mentionQueryAt(text: string, cursor: number): MentionQuery | nul
   const prefix = text.slice(0, cursor);
   const match = /(^|[^\p{L}\p{N}_])@([\p{L}\p{N}_-]*)$/u.exec(prefix);
   if (match === null) return null;
-  return { start: match.index + match[1].length, query: match[2] ?? "" };
+  return { start: match.index + (match[1] ?? "").length, query: match[2] ?? "" };
 }
 
 export function filterMentionMembers(members: readonly User[], query: string): readonly User[] {
@@ -51,7 +51,7 @@ export function insertMention(
   const mention = `@${username}`;
   const queryEnd = query.start + 1 + query.query.length;
   const after = text.slice(queryEnd);
-  const spacer = after === "" || /^\s/u.test(after) ? "" : " ";
+  const spacer = /^\s/u.test(after) ? "" : " ";
   return {
     text: `${text.slice(0, query.start)}${mention}${spacer}${after}`,
     cursor: query.start + mention.length + spacer.length,

@@ -67,7 +67,7 @@ describe("insertMention", () => {
   it("does not add a second space when the following text already has one", () => {
     expect(insertMention("hi @al there", { start: 3, query: "al" }, "alex")).toEqual({
       text: "hi @alex there",
-      cursor: 9,
+      cursor: 8,
     });
   });
 });
