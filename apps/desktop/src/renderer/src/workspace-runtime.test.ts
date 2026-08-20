@@ -18,6 +18,7 @@ import type {
   ConversationSummary,
   CreateChannelOperation,
   CreateTaskOperation,
+  DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
@@ -87,6 +88,9 @@ const PEER_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000b";
 const CONNECTED_EVENT_ID = "20000000-0000-4000-8000-00000000000c";
 const CONNECTION_ID = "20000000-0000-4000-8000-00000000000d";
 const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
+const DIRECT_CONVERSATION_ID = "20000000-0000-4000-8000-000000000033";
+const DIRECT_MESSAGE_ID = "20000000-0000-4000-8000-000000000034";
+const DIRECT_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-000000000035";
 const REACTION_ID = "20000000-0000-4000-8000-000000000011";
 const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
 const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
@@ -144,6 +148,16 @@ const user = {
   kind: "human",
   username: "morgan",
   displayName: "Morgan",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
+
+const peer = {
+  id: PEER_ID,
+  kind: "human",
+  username: "cpo",
+  displayName: "CPO",
   avatarUrl: null,
   createdAt: NOW,
   updatedAt: NOW,
@@ -968,6 +982,10 @@ class FakeDesktopApi implements DesktopApi {
   readonly acknowledged: string[] = [];
   readonly sent: SendMessageOperation[] = [];
   readonly createdChannels: CreateChannelOperation[] = [];
+  readonly createdDirectConversations: string[] = [];
+  readonly directConversationResults: (
+    ConversationMutationResponse | Promise<ConversationMutationResponse>
+  )[] = [];
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
   readonly historyRequests: string[] = [];
@@ -1391,8 +1409,13 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not remove channel members");
   }
 
-  async createDirectConversation(): Promise<ConversationMutationResponse> {
-    throw new Error("The runtime test does not create direct conversations");
+  async createDirectConversation(
+    input: DirectConversationRequest,
+  ): Promise<ConversationMutationResponse> {
+    this.createdDirectConversations.push(input.memberId);
+    const result = this.directConversationResults.shift();
+    if (result === undefined) throw new Error("The test queued no direct conversation result");
+    return await result;
   }
 
   async advanceReadCursor(
@@ -3494,6 +3517,143 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.stale).toBe(true);
     expect(runtime.state.error).toMatch(/local cache needs repair/);
     expect(cache.cursor).toBe("10");
+  });
+
+  it("opens a cached direct message immediately without a snapshot or history refresh", async () => {
+    const peerDm = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]);
+    const cachedDirectMessage: Message = {
+      ...peerMessage,
+      id: DIRECT_MESSAGE_ID,
+      clientMessageId: DIRECT_CLIENT_MESSAGE_ID,
+      conversationId: DIRECT_CONVERSATION_ID,
+      body: "Cached CPO thread",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        members: [user, peer],
+        conversations: [channel(CONVERSATION_ID, "general"), peerDm],
+      }),
+    );
+    api.histories.set(DIRECT_CONVERSATION_ID, {
+      messages: [cachedDirectMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const bootstrapRequestsAfterStart = api.bootstrapRequests;
+    const historyRequestsAfterStart = api.historyRequests.length;
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.messages).toContainEqual(cachedDirectMessage);
+
+    await runtime.createDirectConversation(PEER_ID);
+
+    expect(api.createdDirectConversations).toEqual([]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([cachedDirectMessage]);
+
+    runtime.selectConversation(CONVERSATION_ID);
+    runtime.selectConversation(DIRECT_CONVERSATION_ID);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+  });
+
+  it("projects a new direct message and hydrates its history after first paint", async () => {
+    const createdDm = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]);
+    const hydratedMessage: Message = {
+      ...peerMessage,
+      id: DIRECT_MESSAGE_ID,
+      clientMessageId: DIRECT_CLIENT_MESSAGE_ID,
+      conversationId: DIRECT_CONVERSATION_ID,
+      body: "Hydrated after first paint",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const delayedHistory = deferred<MessageHistoryResponse>();
+    api.directConversationResults.push({ conversation: createdDm, syncCursor: "12" });
+    api.historyResults.set(DIRECT_CONVERSATION_ID, [delayedHistory.promise]);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const bootstrapRequestsAfterStart = api.bootstrapRequests;
+    const historyRequestsAfterStart = api.historyRequests.length;
+
+    const opening = runtime.createDirectConversation(PEER_ID);
+    await settle(() => api.createdDirectConversations.length === 1, "direct conversation request");
+    await opening;
+
+    expect(api.createdDirectConversations).toEqual([PEER_ID]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+    expect(runtime.state.bootstrap?.conversations.map((item) => item.conversation.id)).toEqual([
+      CONVERSATION_ID,
+      DIRECT_CONVERSATION_ID,
+    ]);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([]);
+    await settle(
+      () => api.historyRequests.length === historyRequestsAfterStart + 1,
+      "lazy direct-message history fetch",
+    );
+    expect(api.historyRequests.at(-1)).toBe(DIRECT_CONVERSATION_ID);
+
+    delayedHistory.resolve({
+      messages: [hydratedMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await settle(
+      () => runtime.state.messages.some((item) => item.id === DIRECT_MESSAGE_ID),
+      "lazy-hydrated direct-message history",
+    );
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([hydratedMessage]);
+    expect(
+      (await cache.load()).bootstrap?.conversations.map((item) => item.conversation.id),
+    ).toContain(DIRECT_CONVERSATION_ID);
+    expect((await cache.load()).messages).toContainEqual(hydratedMessage);
+  });
+
+  it("rejects direct-message creation before bootstrap without contacting the server", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await expect(runtime.createDirectConversation(PEER_ID)).rejects.toThrow(
+      "Workspace is still loading",
+    );
+    expect(api.createdDirectConversations).toEqual([]);
+  });
+
+  it("does not project a successful direct conversation into a replacement session", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    let resolveResult: ((result: ConversationMutationResponse) => void) | undefined;
+    api.directConversationResults.push(
+      new Promise((resolve) => {
+        resolveResult = resolve;
+      }),
+    );
+    const opening = runtime.createDirectConversation(PEER_ID);
+    await settle(() => api.createdDirectConversations.length === 1, "direct conversation request");
+    await runtime.stop();
+    resolveResult?.({
+      conversation: directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]),
+      syncCursor: "12",
+    });
+
+    await expect(opening).resolves.toBeUndefined();
+    expect(runtime.state.bootstrap).toBeNull();
+    expect(runtime.state.selectedConversationId).toBeNull();
   });
 
   it("rearms the retry timer so a retryable send is redelivered with no user action", async () => {
