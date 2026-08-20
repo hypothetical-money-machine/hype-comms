@@ -730,6 +730,20 @@ html[data-member-list-resizing] * {
   color: var(--theme-text-accent-muted);
 }
 
+.unreads-nav-icon {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  padding: 2px;
+  fill: none;
+  stroke: currentColor;
+  color: var(--theme-text-muted);
+}
+
+.unreads-destination.active .unreads-nav-icon {
+  color: var(--theme-text-accent);
+}
+
 .ai-channel-destination {
   margin-bottom: 5px;
 }
@@ -822,6 +836,119 @@ html[data-member-list-resizing] * {
 
 .conversation-pane[hidden] {
   display: none;
+}
+
+.unreads-view {
+  display: grid;
+  grid-area: conversation;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--theme-surface-content);
+}
+
+.unreads-view[hidden] {
+  display: none;
+}
+
+.unreads-header {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--theme-border-subtle);
+}
+
+.unreads-header h2 {
+  margin: 0;
+}
+
+.unreads-subtitle {
+  margin: 6px 0 0;
+  color: var(--theme-text-subtle);
+  font-size: 12px;
+}
+
+.unreads-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 18px 24px;
+}
+
+.unreads-section {
+  margin: 8px 0 18px;
+}
+
+.unreads-section-heading {
+  margin: 8px 6px;
+  color: var(--theme-text-subtle);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.unreads-section-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.unreads-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  margin: 0 0 4px;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.unreads-item:hover {
+  border-color: var(--theme-border-subtle);
+  background: var(--theme-surface-hover);
+}
+
+.unreads-item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.unreads-item-copy strong {
+  overflow: hidden;
+  color: var(--theme-text-strong);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unreads-item-kind,
+.unreads-item-preview {
+  overflow: hidden;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unreads-item-meta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.unreads-item-meta time {
+  color: var(--theme-text-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .conversation-header {

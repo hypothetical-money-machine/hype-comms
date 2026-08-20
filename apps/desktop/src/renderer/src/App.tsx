@@ -52,7 +52,9 @@ import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
+import { listUnreadConversations, unreadBadgeTotals } from "./unread-conversations";
 import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
+import { UnreadsIcon, UnreadsView } from "./unreads-view";
 import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
@@ -66,6 +68,7 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
+type WorkspaceDestination = "workspace" | "ai" | "unreads";
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -539,7 +542,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
-  const [destination, setDestination] = useState<"workspace" | "ai">("workspace");
+  const [destination, setDestination] = useState<WorkspaceDestination>("workspace");
   const [aiChannelVisited, setAiChannelVisited] = useState(false);
   const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
   const notificationBindingGeneration = useRef(0);
@@ -605,6 +608,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     setShowPreferences(false);
     runtime.closeThread();
   }, [runtime]);
+
+  const openUnreads = useCallback((): void => {
+    setDestination("unreads");
+    setPaneView("chat");
+    setShowChannelMembers(false);
+    setShowPreferences(false);
+    runtime.closeThread();
+    chrome.collapse();
+  }, [chrome, runtime]);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -1070,7 +1082,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   useEffect(() => {
     if (notificationSession === null || notificationContext?.status !== "active") return;
     const view =
-      destination === "ai"
+      destination !== "workspace"
         ? ({ pane: "none" } as const)
         : createNotificationActivityView({
             pane: paneView,
@@ -1553,11 +1565,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
   );
   const currentUserId = bootstrap.currentUser.user.id;
+  const unreadItems = listUnreadConversations(bootstrap.conversations, (summary) =>
+    runtime.conversationName(summary),
+  );
+  const unreadTotals = unreadBadgeTotals(unreadItems);
 
   return (
     <main
       className={
-        destination === "ai" || selectedThreadRootId === null ? "shell" : "shell thread-open"
+        destination !== "workspace" || selectedThreadRootId === null ? "shell" : "shell thread-open"
       }
       data-testid="workspace-ready"
     >
@@ -1629,6 +1645,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
         <div className="sidebar-split">
           <nav aria-label="Conversations">
+            <div className="nav-heading">
+              <span>Catch up</span>
+            </div>
+            <button
+              className={
+                destination === "unreads"
+                  ? "conversation unreads-destination active"
+                  : "conversation unreads-destination"
+              }
+              type="button"
+              aria-current={destination === "unreads" ? "page" : undefined}
+              onClick={openUnreads}
+            >
+              <span className="conversation-label">
+                <UnreadsIcon />
+                <span className="conversation-label-text">Unreads</span>
+              </span>
+              <ConversationBadge
+                unreadCount={unreadTotals.unreadCount}
+                mentionCount={unreadTotals.mentionCount}
+              />
+            </button>
+
             <div className="nav-heading">
               <span>AI</span>
             </div>
@@ -1762,7 +1801,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       </aside>
 
       {aiChannelVisited && <AiChannel transport={client} active={destination === "ai"} />}
-      <section className="conversation-pane" hidden={destination === "ai"}>
+      <UnreadsView
+        items={unreadItems}
+        active={destination === "unreads"}
+        onOpen={selectConversation}
+      />
+      <section className="conversation-pane" hidden={destination !== "workspace"}>
         <header className="conversation-header">
           <div>
             <h2>
