@@ -1632,6 +1632,31 @@ export class WorkspaceRuntime {
     this.#setState({ outbox: this.#withoutOutbox([clientMessageId]) });
   }
 
+  async retractMessage(messageId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
+    const current = this.#state.messages.find((message) => message.id === messageId);
+    const conversationId = current?.conversationId ?? this.#state.selectedConversationId;
+    if (conversationId === null) throw new Error("Message is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    const result = await this.#client.retractMessage(messageId);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    await this.#serialize(async () => {
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const persisted = await cache.upsertHistory(
+        conversationId,
+        [result.message],
+        undefined,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
+      this.#applyRetractedMessage(result.message);
+    });
+  }
+
   async addReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
     const cache = this.#cache;
     if (cache === null || this.#state.bootstrap === null) {
@@ -3017,6 +3042,28 @@ export class WorkspaceRuntime {
     this.#projectEvent(event);
   }
 
+  #applyRetractedMessage(tombstone: Message): void {
+    const snapshot = this.#state.bootstrap;
+    this.#setState({
+      messages: mergeMessages(this.#state.messages, [tombstone]),
+      threadSummaries: this.#state.threadSummaries.map((summary) =>
+        summary.latestReply.id === tombstone.id ? { ...summary, latestReply: tombstone } : summary,
+      ),
+      attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
+      conversationFiles: this.#state.conversationFiles.filter(
+        (attachment) => attachment.messageId !== tombstone.id,
+      ),
+      bootstrap:
+        snapshot === null
+          ? null
+          : replaceConversation(snapshot, tombstone.conversationId, (summary) => {
+              if (summary === undefined) return null;
+              if (summary.lastMessage?.id !== tombstone.id) return summary;
+              return { ...summary, lastMessage: tombstone };
+            }),
+    });
+  }
+
   #projectEvent(event: WorkspaceEvent): void {
     const snapshot = this.#state.bootstrap;
     if (event.type === "message.created") {
@@ -3041,27 +3088,7 @@ export class WorkspaceRuntime {
       const source =
         current ?? (lastMessage?.id === event.payload.messageId ? lastMessage : undefined);
       if (source === undefined) return;
-      const tombstone = tombstoneMessage(source, event);
-      this.#setState({
-        messages: mergeMessages(this.#state.messages, [tombstone]),
-        threadSummaries: this.#state.threadSummaries.map((summary) =>
-          summary.latestReply.id === tombstone.id
-            ? { ...summary, latestReply: tombstone }
-            : summary,
-        ),
-        attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
-        conversationFiles: this.#state.conversationFiles.filter(
-          (attachment) => attachment.messageId !== tombstone.id,
-        ),
-        bootstrap:
-          snapshot === null
-            ? null
-            : replaceConversation(snapshot, event.conversationId, (summary) => {
-                if (summary === undefined) return null;
-                if (summary.lastMessage?.id !== tombstone.id) return summary;
-                return { ...summary, lastMessage: tombstone };
-              }),
-      });
+      this.#applyRetractedMessage(tombstoneMessage(source, event));
       return;
     }
     if (event.type === "reaction.added") {

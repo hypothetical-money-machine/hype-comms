@@ -39,6 +39,7 @@ import type {
   ReactionEmoji,
   RealtimeAcknowledgement,
   RemoveReactionResponse,
+  RetractMessageResponse,
   RealtimeConnectionState,
   RealtimeSessionScope,
   SendAttemptResult,
@@ -948,6 +949,8 @@ class FakeDesktopApi implements DesktopApi {
   readonly removeReactionResults: RemoveReactionResponse[] = [];
   readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
+  readonly retractResults: RetractMessageResponse[] = [];
+  readonly retractedMessageIds: string[] = [];
   readonly syncResults: (SyncAttemptResult | Promise<SyncAttemptResult>)[] = [];
   readonly sendResults: (
     | SendAttemptResult
@@ -1226,6 +1229,13 @@ class FakeDesktopApi implements DesktopApi {
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
     return { attachments: [], ...response };
+  }
+
+  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    this.retractedMessageIds.push(messageId);
+    const result = this.retractResults.shift();
+    if (result === undefined) throw new Error("The test queued no retract-message result");
+    return result;
   }
 
   async getMessageById(messageId: string): Promise<MessageByIdResponse> {
@@ -2309,6 +2319,35 @@ describe("WorkspaceRuntime", () => {
       }),
     );
     expect(runtime.state.attachments).toEqual([]);
+  });
+
+  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.retractResults.push({
+      message: { ...ownMessage, deletedAt: NOW, version: 2, updatedAt: NOW },
+      syncCursor: "11",
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    runtime.selectConversation(CONVERSATION_ID);
+
+    await runtime.retractMessage(OWN_MESSAGE_ID);
+
+    expect(api.retractedMessageIds).toEqual([OWN_MESSAGE_ID]);
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
   });
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {

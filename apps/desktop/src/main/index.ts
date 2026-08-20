@@ -1538,6 +1538,13 @@ function registerIpcHandlers(): void {
     return workspaceTransport.messageById(entityIdSchema.parse(id));
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageRetract);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageRetract, async (event, id: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace retract sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.retractMessage(entityIdSchema.parse(id));
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSearch);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSearch, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");

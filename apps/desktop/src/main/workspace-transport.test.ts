@@ -286,6 +286,34 @@ describe("WorkspaceTransport threads", () => {
     await expect(transport.messageById(THREAD_REPLY.id)).rejects.toThrow();
   });
 
+  it("retracts a message with DELETE and keeps the stored body on the tombstone", async () => {
+    const retracted = { ...THREAD_REPLY, deletedAt: NOW, version: 2, updatedAt: NOW };
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ message: retracted, syncCursor: "44" });
+    });
+
+    await expect(transport.retractMessage(THREAD_REPLY.id)).resolves.toEqual({
+      message: retracted,
+      syncCursor: "44",
+    });
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/messages/${THREAD_REPLY.id}`,
+        init: expect.objectContaining({ method: "DELETE" }),
+      },
+    ]);
+  });
+
+  it("rejects a retract response that empties deletedAt", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ message: THREAD_REPLY, syncCursor: "44" }),
+    );
+
+    await expect(transport.retractMessage(THREAD_REPLY.id)).rejects.toThrow();
+  });
+
   it("advertises thread support when requesting conversation history", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
