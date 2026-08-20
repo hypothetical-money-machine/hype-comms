@@ -2695,12 +2695,12 @@ describeWithPostgres("WorkspaceRepository", () => {
       statusCode: 404,
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
-    await expect(repository.listMessageAttachments(member, [sent.message.id])).rejects.toMatchObject(
-      {
-        statusCode: 404,
-        code: "NOT_FOUND",
-      } satisfies Partial<ApiError>,
-    );
+    await expect(
+      repository.listMessageAttachments(member, [sent.message.id]),
+    ).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
     await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
       statusCode: 404,
       code: "NOT_FOUND",
