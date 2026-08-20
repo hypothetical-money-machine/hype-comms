@@ -4,6 +4,7 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -328,6 +329,40 @@ describe("entity contracts", () => {
         updatedAt: NOW,
       }),
     ).toMatchObject({ body: "Hello" });
+    expect(
+      messageSchema.parse({
+        id: MESSAGE_ID,
+        conversationId: CONVERSATION_ID,
+        conversationSequence: "42",
+        version: 2,
+        clientMessageId: MESSAGE_ID,
+        authorId: USER_ID,
+        threadRootId: null,
+        body: "",
+        bodyFormat: "hype_comms_markdown_v1",
+        editedAt: null,
+        deletedAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toMatchObject({ body: "", deletedAt: NOW });
+    expect(() =>
+      messageSchema.parse({
+        id: MESSAGE_ID,
+        conversationId: CONVERSATION_ID,
+        conversationSequence: "42",
+        version: 2,
+        clientMessageId: MESSAGE_ID,
+        authorId: USER_ID,
+        threadRootId: null,
+        body: "still visible",
+        bodyFormat: "hype_comms_markdown_v1",
+        editedAt: null,
+        deletedAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown fields so wire-shape changes are deliberate", () => {
@@ -979,6 +1014,36 @@ describe("transport contracts", () => {
     }
   });
 
+  it("accepts a body-free message.retracted tombstone", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000015",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "44",
+      conversationSequence: "42",
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: MESSAGE_ID, deletedAt: NOW },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { messageId: MESSAGE_ID, deletedAt: NOW, body: "leaked" },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { message: { id: MESSAGE_ID, body: "leaked" } },
+      }),
+    ).toThrow();
+  });
+
   it("validates reaction sync events with their target message sequence", () => {
     const event = {
       version: 1,
@@ -1143,7 +1208,7 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}`,
       ),
     ).toEqual([
       REACTION_EVENTS_CAPABILITY,
@@ -1152,6 +1217,7 @@ describe("transport contracts", () => {
       THREADS_CAPABILITY,
       PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
       ATTACHMENTS_CAPABILITY,
+      MESSAGE_RETRACT_EVENTS_CAPABILITY,
     ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();

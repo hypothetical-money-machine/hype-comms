@@ -223,6 +223,24 @@ class FakeWorkspaceRepository {
       updatedAt: now,
     },
   }));
+  readonly retractMessage = vi.fn(async () => ({
+    message: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 2,
+      clientMessageId: messageId,
+      authorId: userId,
+      threadRootId: null,
+      body: "",
+      bodyFormat: "hype_comms_markdown_v1",
+      editedAt: null,
+      deletedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+    syncCursor: "3",
+  }));
   readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
     message: {
       id: replyId,
@@ -413,6 +431,7 @@ describe("event capability routes", () => {
       true,
       false,
       true,
+      false,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
@@ -421,6 +440,7 @@ describe("event capability routes", () => {
       true,
       false,
       true,
+      false,
     );
   });
 
@@ -445,6 +465,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
       false,
@@ -838,6 +859,35 @@ describe("message thread routes", () => {
       expect.objectContaining({ currentUser }),
       messageId,
     );
+  });
+
+  it("forwards an authorized retract and rejects a malformed target", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
+
+    const retracted = await app.inject({
+      method: "DELETE",
+      url: `/v1/messages/${messageId}`,
+      headers,
+    });
+    const malformed = await app.inject({
+      method: "DELETE",
+      url: "/v1/messages/not-a-uuid",
+      headers,
+    });
+
+    expect(retracted.statusCode).toBe(200);
+    expect(retracted.json()).toMatchObject({
+      message: { id: messageId, body: "", deletedAt: now },
+      syncCursor: "3",
+    });
+    expect(repository.retractMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+    );
+    expect(malformed.statusCode).toBe(400);
+    expect(repository.retractMessage).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a malformed exact-message target before repository access", async () => {

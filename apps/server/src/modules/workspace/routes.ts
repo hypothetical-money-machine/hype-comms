@@ -1,6 +1,7 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -317,6 +318,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     );
   });
 
+  app.delete("/messages/:id", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
+    const { id } = parameters(request.params);
+    return repository.retractMessage(identity, id);
+  });
+
   app.get("/search", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
@@ -587,6 +595,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(TASK_EVENTS_CAPABILITY),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+      supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
     );
   });
 
@@ -601,6 +610,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(TASK_EVENTS_CAPABILITY),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+      supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
     );
   });
 };

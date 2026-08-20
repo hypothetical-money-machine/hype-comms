@@ -43,6 +43,7 @@ export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
+export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -460,6 +461,29 @@ export const sendMessageResponseSchema = z
   })
   .strict();
 
+export const retractMessageResponseSchema = z
+  .object({
+    message: messageSchema,
+    syncCursor: sequenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.message.deletedAt === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["message", "deletedAt"],
+        message: "A retracted message must include deletedAt",
+      });
+    }
+    if (value.message.body.length !== 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["message", "body"],
+        message: "A retracted message cannot retain a body",
+      });
+    }
+  });
+
 export const advanceReadCursorRequestSchema = z
   .object({
     lastReadMessageId: entityIdSchema,
@@ -644,6 +668,18 @@ export const messageCreatedEventSchema = workspaceEventBaseSchema
     }
   });
 
+export const messageRetractedEventSchema = workspaceEventBaseSchema.extend({
+  type: z.literal("message.retracted"),
+  conversationId: entityIdSchema,
+  conversationSequence: sequenceSchema,
+  payload: z
+    .object({
+      messageId: entityIdSchema,
+      deletedAt: isoDateTimeSchema,
+    })
+    .strict(),
+});
+
 const reactionChangedEventBaseSchema = workspaceEventBaseSchema.extend({
   conversationId: entityIdSchema,
   conversationSequence: sequenceSchema,
@@ -703,6 +739,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   conversationUpdatedEventSchema,
   channelMembershipChangedEventSchema,
   messageCreatedEventSchema,
+  messageRetractedEventSchema,
   reactionAddedEventSchema,
   reactionRemovedEventSchema,
   readCursorUpdatedEventSchema,
@@ -799,6 +836,7 @@ export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;
 export type SendConversationMessageRequest = z.infer<typeof sendConversationMessageRequestSchema>;
 export type SendMessageOperation = z.infer<typeof sendMessageOperationSchema>;
 export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
+export type RetractMessageResponse = z.infer<typeof retractMessageResponseSchema>;
 export type AdvanceReadCursorRequest = z.infer<typeof advanceReadCursorRequestSchema>;
 export type AdvanceReadCursorResponse = z.infer<typeof advanceReadCursorResponseSchema>;
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;

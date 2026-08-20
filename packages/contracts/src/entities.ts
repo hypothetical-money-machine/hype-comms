@@ -143,6 +143,14 @@ export const messageBodySchema = z
   .refine((body) => body.trim().length > 0, "Message body cannot be blank")
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 
+const messageWireBodySchema = z
+  .string()
+  .max(4_000)
+  .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
+
+/** Authors may retract their own message during this window; after it the row is immutable. */
+export const MESSAGE_RETRACT_WINDOW_MS = 5 * 60 * 1_000;
+
 export const messageSchema = z
   .object({
     id: entityIdSchema,
@@ -152,13 +160,29 @@ export const messageSchema = z
     clientMessageId: clientMessageIdSchema,
     authorId: entityIdSchema.nullable(),
     threadRootId: entityIdSchema.nullable(),
-    body: messageBodySchema,
+    body: messageWireBodySchema,
     bodyFormat: messageBodyFormatSchema,
     editedAt: isoDateTimeSchema.nullable(),
     deletedAt: isoDateTimeSchema.nullable(),
     ...timestampsShape,
   })
-  .strict();
+  .strict()
+  .superRefine((message, context) => {
+    if (message.deletedAt === null && message.body.trim().length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["body"],
+        message: "Message body cannot be blank",
+      });
+    }
+    if (message.deletedAt !== null && message.body.length !== 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["body"],
+        message: "A retracted message cannot retain a body",
+      });
+    }
+  });
 
 export const sendMessageRequestSchema = z
   .object({

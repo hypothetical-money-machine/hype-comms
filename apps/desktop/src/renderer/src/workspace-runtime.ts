@@ -38,6 +38,8 @@ import {
   compareTasks,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  preferRetainedMessage,
+  tombstoneMessage,
   type CachedWorkspaceState,
   type MembershipRepairMarker,
   type OutboxItem,
@@ -198,7 +200,9 @@ function mergeMessages(
 ): readonly Message[] {
   if (incoming.length === 0) return messages;
   const byId = new Map(messages.map((message) => [message.id, message]));
-  for (const message of incoming) byId.set(message.id, message);
+  for (const message of incoming) {
+    byId.set(message.id, preferRetainedMessage(byId.get(message.id), message));
+  }
   return [...byId.values()].sort((left, right) =>
     compareSequence(left.conversationSequence, right.conversationSequence),
   );
@@ -3025,6 +3029,39 @@ export class WorkspaceRuntime {
         bootstrap: snapshot === null ? null : countMessage(snapshot, event),
       });
       void this.#hydrateCreatedMessageAttachments(message);
+      return;
+    }
+    if (event.type === "message.retracted") {
+      const current = this.#state.messages.find(
+        (message) => message.id === event.payload.messageId,
+      );
+      const lastMessage = snapshot?.conversations.find(
+        (summary) => summary.conversation.id === event.conversationId,
+      )?.lastMessage;
+      const source =
+        current ?? (lastMessage?.id === event.payload.messageId ? lastMessage : undefined);
+      if (source === undefined) return;
+      const tombstone = tombstoneMessage(source, event);
+      this.#setState({
+        messages: mergeMessages(this.#state.messages, [tombstone]),
+        threadSummaries: this.#state.threadSummaries.map((summary) =>
+          summary.latestReply.id === tombstone.id
+            ? { ...summary, latestReply: tombstone }
+            : summary,
+        ),
+        attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
+        conversationFiles: this.#state.conversationFiles.filter(
+          (attachment) => attachment.messageId !== tombstone.id,
+        ),
+        bootstrap:
+          snapshot === null
+            ? null
+            : replaceConversation(snapshot, event.conversationId, (summary) => {
+                if (summary === undefined) return null;
+                if (summary.lastMessage?.id !== tombstone.id) return summary;
+                return { ...summary, lastMessage: tombstone };
+              }),
+      });
       return;
     }
     if (event.type === "reaction.added") {
