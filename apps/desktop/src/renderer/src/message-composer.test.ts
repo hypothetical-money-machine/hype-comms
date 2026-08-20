@@ -4,7 +4,21 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { createElement, createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { Attachment } from "@hype-comms/contracts";
+
 import { MessageComposer } from "./message-composer";
+
+const pendingAttachment: Attachment = {
+  id: "10000000-0000-4000-8000-000000000010",
+  messageId: null,
+  uploadedBy: "10000000-0000-4000-8000-000000000001",
+  fileName: "launch-notes.pdf",
+  contentType: "application/pdf",
+  sizeBytes: 2048,
+  status: "ready",
+  downloadUrl: null,
+  createdAt: "2026-08-04T12:00:00.000Z",
+};
 
 afterEach(cleanup);
 
@@ -143,5 +157,25 @@ describe("MessageComposer", () => {
 
     rerender(createElement(MessageComposer, { ...props, disabled: true }));
     expect(screen.getByRole("textbox", { name: "Message" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("lets a pending attachment send without a draft", () => {
+    const { props } = renderComposer({
+      draft: "",
+      pendingAttachments: [pendingAttachment],
+      onAttach: vi.fn().mockResolvedValue(undefined),
+    });
+    expect(screen.getByText("launch-notes.pdf")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(props.onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("exposes an attach action that does not submit the draft", () => {
+    const onAttach = vi.fn().mockResolvedValue(undefined);
+    const { props } = renderComposer({ draft: "A useful update", onAttach });
+    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+    expect(onAttach).toHaveBeenCalledOnce();
+    expect(props.onSubmit).not.toHaveBeenCalled();
   });
 });

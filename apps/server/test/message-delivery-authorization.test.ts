@@ -141,7 +141,8 @@ describeWithPostgres("message-delivery authorization", () => {
   beforeEach(async () => {
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions, messages,
+               sync_events, conversation_read_cursors, message_reactions, message_mentions,
+               attachments, messages,
                conversation_memberships, conversations, device_sessions, magic_link_tokens,
                invitations, workspace_memberships, workspaces, users
       CASCADE

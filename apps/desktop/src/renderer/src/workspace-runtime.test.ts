@@ -4,6 +4,7 @@ import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
   AiChannelState,
+  Attachment,
   CacheCryptoStatus,
   CacheDecryptBatchResponse,
   CacheEncryptBatchResponse,
@@ -11,6 +12,7 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ChatSessionState,
+  ConversationFilesResponse,
   ConversationMutationResponse,
   ConversationSummary,
   CreateChannelOperation,
@@ -18,6 +20,7 @@ import type {
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
+  ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   Message,
@@ -27,6 +30,7 @@ import type {
   MessageSearchResponse,
   MoveTaskOperation,
   MessageThreadResponse,
+  OpenAttachmentResponse,
   NotificationAction as ExactNotificationAction,
   NotificationContext,
   ProductRealtimeEvent,
@@ -900,8 +904,25 @@ class FakeDesktopApi implements DesktopApi {
   /** When set, every handshake reports itself live first, exactly as the real server does. */
   connectedOnStart = false;
   readonly conversationPages = new Map<string, ListConversationsResponse>();
-  readonly histories = new Map<string, MessageHistoryResponse>();
-  readonly threadResults: MessageThreadResponse[] = [];
+  readonly histories = new Map<
+    string,
+    Omit<MessageHistoryResponse, "attachments"> & { readonly attachments?: Attachment[] }
+  >();
+  readonly attachments: Attachment[] = [];
+  readonly attachmentResults: (
+    ListMessageAttachmentsResponse | Promise<ListMessageAttachmentsResponse>
+  )[] = [];
+  readonly attachmentRequests: string[][] = [];
+  readonly conversationFileResults: (
+    ConversationFilesResponse | Promise<ConversationFilesResponse>
+  )[] = [];
+  readonly conversationFileRequests: string[] = [];
+  readonly uploadedFiles: string[] = [];
+  readonly openedFiles: string[] = [];
+  chooseAndUploadResult: Attachment | null | Promise<Attachment | null> = null;
+  readonly threadResults: Array<
+    Omit<MessageThreadResponse, "attachments"> & { readonly attachments?: Attachment[] }
+  > = [];
   readonly threadRequests: {
     readonly messageId: string;
     readonly before?: string;
@@ -917,7 +938,18 @@ class FakeDesktopApi implements DesktopApi {
   readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly syncResults: (SyncAttemptResult | Promise<SyncAttemptResult>)[] = [];
-  readonly sendResults: (SendAttemptResult | Promise<SendAttemptResult>)[] = [];
+  readonly sendResults: (
+    | SendAttemptResult
+    | Promise<SendAttemptResult>
+    | {
+        readonly status: "accepted";
+        readonly response: {
+          readonly message: Message;
+          readonly syncCursor: string;
+          readonly attachments?: readonly Attachment[];
+        };
+      }
+  )[] = [];
   readonly channelResults: (
     ConversationMutationResponse | Promise<ConversationMutationResponse>
   )[] = [];
@@ -932,7 +964,10 @@ class FakeDesktopApi implements DesktopApi {
     string,
     (MessageHistoryResponse | Promise<MessageHistoryResponse>)[]
   >();
-  readonly messageByIdResults: (MessageByIdResponse | Promise<MessageByIdResponse>)[] = [];
+  readonly messageByIdResults: Array<
+    | (Omit<MessageByIdResponse, "attachments"> & { readonly attachments?: Attachment[] })
+    | Promise<Omit<MessageByIdResponse, "attachments"> & { readonly attachments?: Attachment[] }>
+  > = [];
   readonly messageByIdRequests: string[] = [];
   messageByIdFailures = 0;
   readonly searchResults: (MessageSearchResponse | Promise<MessageSearchResponse>)[] = [];
@@ -1160,6 +1195,7 @@ class FakeDesktopApi implements DesktopApi {
     return {
       threadSummaries: [],
       threadsSupported: true,
+      attachments: [],
       messages: [],
       nextCursor: null,
       ...this.histories.get(input.conversationId),
@@ -1174,7 +1210,7 @@ class FakeDesktopApi implements DesktopApi {
     this.threadRequests.push(input);
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
-    return response;
+    return { attachments: [], ...response };
   }
 
   async getMessageById(messageId: string): Promise<MessageByIdResponse> {
@@ -1187,7 +1223,7 @@ class FakeDesktopApi implements DesktopApi {
     if (response === undefined) {
       throw new Error("The workspace runtime test queued no exact-message response");
     }
-    return await response;
+    return { attachments: [], ...(await response) };
   }
 
   async listMessageReactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
@@ -1221,6 +1257,40 @@ class FakeDesktopApi implements DesktopApi {
     const response = this.searchResults.shift();
     if (response === undefined) throw new Error("The test queued no search result");
     return await response;
+  }
+
+  async listConversationFiles(conversationId: string): Promise<ConversationFilesResponse> {
+    this.conversationFileRequests.push(conversationId);
+    return (
+      (await this.conversationFileResults.shift()) ?? {
+        files: [],
+        nextCursor: null,
+        hasMore: false,
+      }
+    );
+  }
+
+  async listMessageAttachments(
+    messageIds: readonly string[],
+  ): Promise<ListMessageAttachmentsResponse> {
+    this.attachmentRequests.push([...messageIds]);
+    const queued = this.attachmentResults.shift();
+    if (queued !== undefined) return queued;
+    return {
+      attachments: this.attachments.filter(
+        (attachment) => attachment.messageId !== null && messageIds.includes(attachment.messageId),
+      ),
+    };
+  }
+
+  async chooseAndUploadConversationFile(conversationId: string): Promise<Attachment | null> {
+    this.uploadedFiles.push(conversationId);
+    return this.chooseAndUploadResult;
+  }
+
+  async openConversationFile(attachmentId: string): Promise<OpenAttachmentResponse> {
+    this.openedFiles.push(attachmentId);
+    return { opened: true };
   }
 
   async listConversationTasks(
@@ -1274,6 +1344,7 @@ class FakeDesktopApi implements DesktopApi {
       status: "accepted",
       response: {
         ...result.response,
+        attachments: [...(result.response.attachments ?? [])],
         message: { ...result.response.message, clientMessageId: input.message.clientMessageId },
       },
     };
@@ -2880,7 +2951,7 @@ describe("WorkspaceRuntime", () => {
     // The send is allocated workspace sequence 12 while a peer's event 11 is still in flight.
     api.sendResults.push({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
     await settle(() => runtime.state.outbox.length === 0, "send acknowledgement");
@@ -2898,6 +2969,73 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("sends attachment ids and hydrates files from history and live messages", async () => {
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "launch-notes.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [attachment],
+      nextCursor: null,
+    });
+    api.sendResults.push({
+      status: "accepted",
+      response: {
+        message: { ...ownMessage, id: "20000000-0000-4000-8000-0000000000ab" },
+        attachments: [
+          {
+            ...attachment,
+            id: "20000000-0000-4000-8000-0000000000ac",
+            messageId: "20000000-0000-4000-8000-0000000000ab",
+          },
+        ],
+        syncCursor: "11",
+      },
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.attachments).toEqual([attachment]);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Notes", [], null, [attachment.id]);
+    await settle(() => runtime.state.outbox.length === 0, "attached send acknowledgement");
+    expect(api.sent[0]?.message.attachmentIds).toEqual([attachment.id]);
+    expect(runtime.state.attachments.map((item) => item.fileName)).toContain("launch-notes.pdf");
+
+    const liveAttachment: Attachment = {
+      ...attachment,
+      id: "20000000-0000-4000-8000-0000000000ad",
+      messageId: PEER_MESSAGE_ID,
+      fileName: "dm-clip.webm",
+    };
+    api.attachmentResults.push({ attachments: [liveAttachment] });
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(
+      () => runtime.state.attachments.some((item) => item.id === liveAttachment.id),
+      "live attachment hydration",
+    );
+    expect(runtime.state.attachments.some((item) => item.fileName === "dm-clip.webm")).toBe(true);
+
+    api.conversationFileResults.push({
+      files: [attachment, liveAttachment],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await runtime.loadConversationFiles(CONVERSATION_ID);
+    expect(runtime.state.conversationFiles).toEqual([attachment, liveAttachment]);
   });
 
   it("counts out-of-order replies once across HTTP and realtime delivery", async () => {
@@ -3301,7 +3439,7 @@ describe("WorkspaceRuntime", () => {
       api.sendResults.push({ status: "retryable", reason: "network", retryAfterMs: 5_000 });
       api.sendResults.push({
         status: "accepted",
-        response: { message: ownMessage, syncCursor: "11" },
+        response: { message: ownMessage, attachments: [], syncCursor: "11" },
       });
 
       await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
@@ -3322,7 +3460,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -3341,7 +3479,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     await drain();
 
@@ -3399,7 +3537,7 @@ describe("WorkspaceRuntime", () => {
 
     replacementSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     await settle(() => api.sent.length === 3, "replacement owner second conversation send");
     await restarted;
@@ -3427,7 +3565,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -3454,7 +3592,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     await drain();
 
@@ -3766,7 +3904,7 @@ describe("WorkspaceRuntime", () => {
       reason: "credential_store_unavailable",
     };
     await runtime.start(otherSession);
-    hydration.resolve({ message: peerMessage });
+    hydration.resolve({ message: peerMessage, attachments: [] });
     await opening;
 
     expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
@@ -4216,6 +4354,7 @@ describe("WorkspaceRuntime", () => {
       messages: [olderPrivateMessage],
       threadSummaries: [],
       threadsSupported: true,
+      attachments: [],
       nextCursor: null,
     });
     await loading;
@@ -4490,6 +4629,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });
@@ -4554,6 +4694,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });
@@ -4607,6 +4748,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });

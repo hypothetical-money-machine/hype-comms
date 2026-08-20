@@ -5,6 +5,7 @@ import {
   type CacheScope,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type Attachment,
   type ChannelAccess,
   type ChannelMode,
   type ChatSessionState,
@@ -54,6 +55,10 @@ export interface WorkspaceRuntimeState {
   readonly threadSummaries: readonly MessageThreadSummary[];
   readonly threadsSupported: boolean;
   readonly reactions: readonly Reaction[];
+  readonly attachments: readonly Attachment[];
+  readonly conversationFiles: readonly Attachment[];
+  readonly conversationFilesBusy: boolean;
+  readonly conversationFilesError: string | null;
   readonly tasks: readonly Task[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
@@ -124,6 +129,10 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   // Conservative until history negotiation succeeds: previous servers keep replies inline.
   threadsSupported: false,
   reactions: [],
+  attachments: [],
+  conversationFiles: [],
+  conversationFilesBusy: false,
+  conversationFilesError: null,
   tasks: [],
   outbox: [],
   selectedConversationId: null,
@@ -273,6 +282,36 @@ function replaceMessageReactions(
   return mergeReactions(
     reactions.filter((reaction) => !replaced.has(reaction.messageId)),
     incoming,
+  );
+}
+
+function mergeAttachments(
+  attachments: readonly Attachment[],
+  incoming: readonly Attachment[],
+): readonly Attachment[] {
+  if (incoming.length === 0) return attachments;
+  const byId = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+  for (const attachment of incoming) byId.set(attachment.id, attachment);
+  return [...byId.values()];
+}
+
+function replaceMessageAttachments(
+  attachments: readonly Attachment[],
+  messageIds: readonly string[],
+  incoming: readonly Attachment[],
+): readonly Attachment[] {
+  const replaced = new Set(messageIds);
+  return mergeAttachments(
+    attachments.filter(
+      (attachment) => attachment.messageId === null || !replaced.has(attachment.messageId),
+    ),
+    incoming,
+  );
+}
+
+function attachedConversationFiles(attachments: readonly Attachment[]): readonly Attachment[] {
+  return attachments.filter(
+    (attachment) => attachment.status === "ready" && attachment.messageId !== null,
   );
 }
 
@@ -835,6 +874,7 @@ export class WorkspaceRuntime {
     body: string,
     mentionedUserIds: readonly string[],
     threadRootId: string | null = null,
+    attachmentIds: readonly string[] = [],
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -865,7 +905,7 @@ export class WorkspaceRuntime {
         bodyFormat: "hype_comms_markdown_v1",
         clientMessageId,
         mentionedUserIds: [...mentionedUserIds],
-        attachmentIds: [],
+        attachmentIds: [...attachmentIds],
       },
     });
     const createdAt = new Date().toISOString();
@@ -1117,6 +1157,64 @@ export class WorkspaceRuntime {
     return applied;
   }
 
+  async loadConversationFiles(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    this.#setState({ conversationFilesBusy: true, conversationFilesError: null });
+    try {
+      const files: Attachment[] = [];
+      let before: string | undefined;
+      for (;;) {
+        const page = await this.#client.listConversationFiles(conversationId, {
+          ...(before === undefined ? {} : { before }),
+          limit: 50,
+        });
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        files.push(...page.files);
+        if (!page.hasMore || page.nextCursor === null || page.nextCursor === before) break;
+        before = page.nextCursor;
+      }
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      this.#setState({ conversationFiles: files });
+    } catch (error) {
+      if (projection.generation === this.#generation) {
+        this.#setState({
+          conversationFilesError: errorMessage(error, "Could not load shared files"),
+        });
+      }
+      throw error;
+    } finally {
+      if (projection.generation === this.#generation) {
+        this.#setState({ conversationFilesBusy: false });
+      }
+    }
+  }
+
+  async attachFile(conversationId: string): Promise<Attachment | null> {
+    return this.#client.chooseAndUploadConversationFile(conversationId);
+  }
+
+  async openFile(attachmentId: string): Promise<void> {
+    await this.#client.openConversationFile(attachmentId);
+  }
+
+  openAttachmentSource(attachment: Attachment): void {
+    if (attachment.messageId === null) return;
+    const message = this.#state.messages.find((candidate) => candidate.id === attachment.messageId);
+    this.#setState({
+      selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
+      focusedMessageId:
+        message === undefined || message.threadRootId === null ? attachment.messageId : null,
+      selectedThreadRootId: message?.threadRootId ?? null,
+      focusedThreadMessageId:
+        message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
+      threadLoading: false,
+      threadError: null,
+    });
+  }
+
   async loadConversationTasks(conversationId: string): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -1307,7 +1405,10 @@ export class WorkspaceRuntime {
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       // Keep the query inside the event queue. Events already received are applied first, while
       // events committed during the query queue behind this projection and therefore win after it.
-      const hydrated = await this.#client.listMessageReactions([result.message.id]);
+      const [hydrated, files] = await Promise.all([
+        this.#client.listMessageReactions([result.message.id]),
+        this.#client.listMessageAttachments([result.message.id]),
+      ]);
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       const persisted = await cache.upsertHistory(
         conversationId,
@@ -1323,6 +1424,11 @@ export class WorkspaceRuntime {
           this.#state.reactions,
           [result.message.id],
           hydrated.reactions,
+        ),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          [result.message.id],
+          files.attachments,
         ),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
@@ -1407,6 +1513,11 @@ export class WorkspaceRuntime {
         this.#setState({
           messages: mergeMessages(this.#state.messages, messages),
           reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+          attachments: replaceMessageAttachments(
+            this.#state.attachments,
+            messageIds,
+            thread.attachments ?? [],
+          ),
           ...(this.#state.selectedThreadRootId === threadRootId
             ? { threadLoading: false, threadError: null }
             : {}),
@@ -1475,6 +1586,11 @@ export class WorkspaceRuntime {
         threadSummaries: [],
         threadsSupported: false,
         reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          messageIds,
+          history.attachments ?? [],
+        ),
         selectedThreadRootId: null,
         focusedThreadMessageId: null,
         threadLoading: false,
@@ -1730,6 +1846,11 @@ export class WorkspaceRuntime {
               threadError: null,
             }),
         reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          messageIds,
+          history.attachments ?? [],
+        ),
       });
     });
   }
@@ -1888,6 +2009,7 @@ export class WorkspaceRuntime {
     const messages: Message[] = [];
     const threadSummaries: MessageThreadSummary[] = [];
     const reactions: Reaction[] = [];
+    const attachments: Attachment[] = [];
     const tasks: Task[] = [];
     const seenTaskIds = new Set<string>();
     let threadsSupported = true;
@@ -1905,6 +2027,7 @@ export class WorkspaceRuntime {
       historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
       threadSummaries.push(...history.threadSummaries);
+      attachments.push(...(history.attachments ?? []));
       threadsSupported &&= history.threadsSupported;
       if (history.messages.length > 0) {
         const hydrated = await this.#client.listMessageReactions(
@@ -1984,6 +2107,15 @@ export class WorkspaceRuntime {
           !refreshedMessageIds.has(reaction.messageId),
       ),
     );
+    let refreshedAttachments: readonly Attachment[] = mergeAttachments(
+      attachments,
+      this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null &&
+          queuedThreadRootIds.has(attachment.messageId) &&
+          !refreshedMessageIds.has(attachment.messageId),
+      ),
+    );
     const selectedConversationStillVisible =
       openThreadConversationId !== null && visibleConversationIds.has(openThreadConversationId);
     if (threadsSupported && openThreadRootId !== null && selectedConversationStillVisible) {
@@ -2003,6 +2135,11 @@ export class WorkspaceRuntime {
         refreshedReactions,
         threadMessages.map((message) => message.id),
         hydrated.reactions,
+      );
+      refreshedAttachments = replaceMessageAttachments(
+        refreshedAttachments,
+        threadMessages.map((message) => message.id),
+        thread.attachments ?? [],
       );
     }
     if (!isCurrent()) return false;
@@ -2050,6 +2187,7 @@ export class WorkspaceRuntime {
       threadSummaries,
       threadsSupported,
       reactions: loaded.reactions,
+      attachments: refreshedAttachments,
       tasks: loaded.tasks,
       outbox: loaded.outbox,
       selectedConversationId,
@@ -2731,6 +2869,14 @@ export class WorkspaceRuntime {
         visibleMessageIds.has(summary.threadRootId),
       ),
       reactions: state.reactions,
+      attachments: this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null && visibleMessageIds.has(attachment.messageId),
+      ),
+      conversationFiles:
+        selectedConversationId === this.#state.selectedConversationId
+          ? this.#state.conversationFiles
+          : [],
       tasks: state.tasks,
       outbox: state.outbox,
       selectedConversationId,
@@ -2788,6 +2934,11 @@ export class WorkspaceRuntime {
         messageIds.has(summary.threadRootId),
       ),
       reactions: this.#state.reactions.filter((reaction) => messageIds.has(reaction.messageId)),
+      attachments: this.#state.attachments.filter(
+        (attachment) => attachment.messageId !== null && messageIds.has(attachment.messageId),
+      ),
+      conversationFiles:
+        this.#state.selectedConversationId === conversationId ? [] : this.#state.conversationFiles,
       tasks: this.#state.tasks.filter((task) => task.conversationId !== conversationId),
       outbox: this.#state.outbox.filter((item) => item.operation.conversationId !== conversationId),
       selectedConversationId,
@@ -2873,6 +3024,7 @@ export class WorkspaceRuntime {
         outbox: this.#withoutOutbox([message.clientMessageId]),
         bootstrap: snapshot === null ? null : countMessage(snapshot, event),
       });
+      void this.#hydrateCreatedMessageAttachments(message);
       return;
     }
     if (event.type === "reaction.added") {
@@ -3006,7 +3158,7 @@ export class WorkspaceRuntime {
           ) {
             return;
           }
-          this.#acceptMessage(result.response.message, id);
+          this.#acceptMessage(result.response.message, id, result.response.attachments ?? []);
           continue;
         }
         if (result.status === "authentication_required") {
@@ -3076,7 +3228,11 @@ export class WorkspaceRuntime {
     }
   }
 
-  #acceptMessage(message: Message, clientMessageId: string): void {
+  #acceptMessage(
+    message: Message,
+    clientMessageId: string,
+    attachments: readonly Attachment[] = [],
+  ): void {
     const snapshot = this.#state.bootstrap;
     const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
     const bootstrap =
@@ -3089,11 +3245,38 @@ export class WorkspaceRuntime {
     this.#setState({
       messages: mergeMessages(this.#state.messages, [message]),
       threadSummaries: projectReplySummary(this.#state.threadSummaries, message, newlyObserved),
+      attachments: mergeAttachments(this.#state.attachments, attachments),
+      conversationFiles:
+        this.#state.selectedConversationId === message.conversationId
+          ? mergeAttachments(this.#state.conversationFiles, attachedConversationFiles(attachments))
+          : this.#state.conversationFiles,
       // Both ids are dropped so a server that does not echo the client id cannot leave the
       // delivered item queued and spin the flush loop.
       outbox: this.#withoutOutbox([clientMessageId, message.clientMessageId]),
       bootstrap,
     });
+  }
+
+  async #hydrateCreatedMessageAttachments(message: Message): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    try {
+      const result = await this.#client.listMessageAttachments([message.id]);
+      if (!this.#isProjectionCurrent(projection, message.conversationId)) return;
+      this.#setState({
+        attachments: mergeAttachments(this.#state.attachments, result.attachments),
+        conversationFiles:
+          this.#state.selectedConversationId === message.conversationId
+            ? mergeAttachments(
+                this.#state.conversationFiles,
+                attachedConversationFiles(result.attachments),
+              )
+            : this.#state.conversationFiles,
+      });
+    } catch {
+      // Live chips catch up on the next history read.
+    }
   }
 
   #withoutOutbox(clientMessageIds: readonly string[]): readonly OutboxItem[] {
@@ -3154,6 +3337,11 @@ export class WorkspaceRuntime {
       messages: loaded.messages,
       threadSummaries,
       reactions: loaded.reactions,
+      attachments: this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null &&
+          loaded.messages.some((message) => message.id === attachment.messageId),
+      ),
       tasks: loaded.tasks,
       outbox: loaded.outbox,
     });

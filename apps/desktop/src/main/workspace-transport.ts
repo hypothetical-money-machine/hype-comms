@@ -1,5 +1,9 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -7,6 +11,12 @@ import {
   THREADS_CAPABILITY,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
+  attachmentSchema,
+  completeFileUploadResponseSchema,
+  conversationFilesQuerySchema,
+  conversationFilesResponseSchema,
+  createFileUploadResponseSchema,
+  listMessageAttachmentsResponseSchema,
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -31,6 +41,10 @@ import {
   taskMutationResponseSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type Attachment,
+  type ConversationFilesQuery,
+  type ConversationFilesResponse,
+  type ListMessageAttachmentsResponse,
   type ArchiveChannelRequest,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
@@ -72,6 +86,7 @@ const CLIENT_CAPABILITIES = [
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -437,6 +452,7 @@ export class WorkspaceTransport {
           headers: {
             "content-type": "application/json",
             "idempotency-key": input.idempotencyKey,
+            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
           },
           body: JSON.stringify(input.message),
         },
@@ -538,6 +554,117 @@ export class WorkspaceTransport {
     };
   }
 
+  async conversationFiles(
+    conversationId: string,
+    input: Partial<ConversationFilesQuery> = {},
+  ): Promise<ConversationFilesResponse> {
+    const query = conversationFilesQuerySchema.parse(input);
+    const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/files`);
+    if (query.before !== undefined) url.searchParams.set("before", query.before);
+    url.searchParams.set("limit", String(query.limit));
+    const response = await this.session.fetch(url.href, {
+      method: "GET",
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
+    });
+    return conversationFilesResponseSchema.parse(await this.#payload(response));
+  }
+
+  async attachments(messageIds: readonly string[]): Promise<ListMessageAttachmentsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/attachments/query").href, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
+      },
+      body: JSON.stringify({ messageIds }),
+    });
+    return listMessageAttachmentsResponseSchema.parse(await this.#payload(response));
+  }
+
+  async uploadLocalFile(conversationId: string, filePath: string): Promise<Attachment> {
+    const bytes = await readFile(filePath);
+    const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
+    const contentType = contentTypeForFileName(fileName);
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const created = createFileUploadResponseSchema.parse(
+      await this.#payload(
+        await this.#fetchIdempotentMutation(this.#url("/v1/files/uploads").href, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": crypto.randomUUID(),
+          },
+          body: JSON.stringify({
+            conversationId,
+            fileName,
+            contentType,
+            sizeBytes: bytes.byteLength,
+            contentSha256,
+          }),
+        }),
+      ),
+    );
+    const uploaded = await this.session.fetch(
+      this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/content`).href,
+      {
+        method: "PUT",
+        headers: { "content-type": contentType },
+        body: bytes,
+      },
+    );
+    if (!uploaded.ok) {
+      throw new WorkspaceRequestError(
+        `Workspace request failed (${uploaded.status})`,
+        uploaded.status,
+        retryAfter(uploaded),
+      );
+    }
+    const completed = completeFileUploadResponseSchema.parse(
+      await this.#payload(
+        await this.#fetchIdempotentMutation(
+          this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/complete`).href,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": crypto.randomUUID(),
+            },
+            body: JSON.stringify({
+              sizeBytes: bytes.byteLength,
+              contentSha256,
+            }),
+          },
+        ),
+      ),
+    );
+    return attachmentSchema.parse(completed.attachment);
+  }
+
+  async downloadFile(attachmentId: string): Promise<{
+    readonly fileName: string;
+    readonly contentType: string;
+    readonly bytes: Buffer;
+  }> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/files/${encodeURIComponent(attachmentId)}/content`).href,
+      { method: "GET" },
+    );
+    if (!response.ok) {
+      throw new WorkspaceRequestError(
+        `Workspace request failed (${response.status})`,
+        response.status,
+        retryAfter(response),
+      );
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    const fileName = fileNameFromDisposition(
+      response.headers.get("content-disposition"),
+      "download",
+    );
+    return { fileName, contentType, bytes };
+  }
+
   async ticket(): Promise<RealtimeTicketResponse> {
     const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
       method: "POST",
@@ -556,4 +683,59 @@ export class WorkspaceRequestError extends Error {
     super(message);
     this.name = "WorkspaceRequestError";
   }
+}
+
+function contentTypeForFileName(fileName: string): string {
+  const extension = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined;
+  switch (extension) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    case "txt":
+    case "md":
+    case "log":
+      return "text/plain";
+    case "json":
+      return "application/json";
+    case "csv":
+      return "text/csv";
+    case "mp4":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "m4a":
+      return "audio/mp4";
+    case "mp3":
+      return "audio/mpeg";
+    case "wav":
+      return "audio/wav";
+    case "zip":
+      return "application/zip";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function fileNameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) {
+    return fallback;
+  }
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (encoded?.[1] !== undefined) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch {
+      // Fall through to the quoted filename or the caller-supplied fallback.
+    }
+  }
+  const quoted = /filename="([^"]+)"/i.exec(header);
+  return quoted?.[1] ?? fallback;
 }

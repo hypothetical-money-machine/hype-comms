@@ -245,6 +245,10 @@ function createHarness(): Harness {
       };
     },
     listMessageReactions: async () => ({ reactions: [] }),
+    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listMessageAttachments: async () => ({ attachments: [] }),
+    chooseAndUploadConversationFile: async () => null,
+    openConversationFile: async () => ({ opened: true }),
     searchMessages: async () => ({
       results: [{ message: launchMessage }, { message: threadReply }],
       nextCursor: null,

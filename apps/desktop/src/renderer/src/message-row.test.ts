@@ -113,6 +113,40 @@ describe("MessageRow thread action", () => {
     expect(onOpenThread).toHaveBeenCalledOnce();
   });
 
+  it("shows in-thread attachment chips that open the file", () => {
+    const onOpenAttachment = vi.fn().mockResolvedValue(undefined);
+    render(
+      createElement(MessageRow, {
+        message,
+        members: [user],
+        reactions: [],
+        attachments: [
+          {
+            id: "10000000-0000-4000-8000-000000000010",
+            messageId: MESSAGE_ID,
+            uploadedBy: USER_ID,
+            fileName: "launch-notes.pdf",
+            contentType: "application/pdf",
+            sizeBytes: 2048,
+            status: "ready",
+            downloadUrl: null,
+            createdAt: NOW,
+          },
+        ],
+        currentUserId: USER_ID,
+        reactionsDisabled: false,
+        onAddReaction: vi.fn().mockResolvedValue(undefined),
+        onRemoveReaction: vi.fn().mockResolvedValue(undefined),
+        onOpenAttachment,
+        highlighted: false,
+        continuation: false,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "launch-notes.pdf" }));
+    expect(onOpenAttachment).toHaveBeenCalledWith("10000000-0000-4000-8000-000000000010");
+  });
+
   it("does not expose a nested reply action when the caller omits it", () => {
     renderMessage({});
 

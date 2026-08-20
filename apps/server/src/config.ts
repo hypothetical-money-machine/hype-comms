@@ -59,6 +59,7 @@ const rawConfigSchema = z
     ),
     workosWebhookSecret: optionalString(z.string().min(16).max(512)),
     trustedProxies: optionalString(z.string().min(1)),
+    attachmentDir: optionalString(z.string().min(1)),
   })
   .strict();
 
@@ -185,6 +186,8 @@ export interface ServerConfig {
     readonly workspaceSlug: string;
   };
   /** Server-only WorkOS AuthKit integration. No value in this object crosses into Electron. */
+  /** Directory for staged and ready attachment bytes. */
+  readonly attachmentDir: string;
   readonly workos?: {
     readonly apiKey: string;
     readonly clientId: string;
@@ -233,6 +236,7 @@ export function loadConfig(
     workosWebhookSecret: env.WORKOS_WEBHOOK_SECRET,
     trustedProxies: env.HYPE_COMMS_TRUSTED_PROXIES,
     webRoot: env.HYPE_COMMS_WEB_ROOT,
+    attachmentDir: env.HYPE_COMMS_ATTACHMENT_DIR,
   });
 
   if (!result.success) {
@@ -496,5 +500,10 @@ export function loadConfig(
           },
         }),
     ...(workos === undefined ? {} : { workos }),
+    attachmentDir:
+      result.data.attachmentDir ??
+      (result.data.nodeEnv === "production"
+        ? "/var/lib/hype-comms/attachments"
+        : `${process.cwd()}/data/attachments`),
   };
 }

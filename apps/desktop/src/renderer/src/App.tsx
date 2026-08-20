@@ -1,17 +1,19 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import type {
-  AuthCapabilities,
-  ChannelAccess,
-  ChannelMode,
-  ChatSessionState,
-  Message,
-  NotificationContext,
-  Reaction,
-  ReactionEmoji,
-  Task,
-  UpdateState,
-  User,
+import {
+  ATTACHMENTS_PER_MESSAGE_MAX,
+  type Attachment,
+  type AuthCapabilities,
+  type ChannelAccess,
+  type ChannelMode,
+  type ChatSessionState,
+  type Message,
+  type NotificationContext,
+  type Reaction,
+  type ReactionEmoji,
+  type Task,
+  type UpdateState,
+  type User,
 } from "@hype-comms/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
@@ -30,6 +32,7 @@ import {
   ConversationEmptyState,
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
+import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MemberListResizeHandle } from "./member-list-resize-handle";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
@@ -345,10 +348,12 @@ export function MessageRow({
   message,
   members,
   reactions,
+  attachments = [],
   currentUserId,
   reactionsDisabled,
   onAddReaction,
   onRemoveReaction,
+  onOpenAttachment,
   onCreateTask,
   highlighted,
   continuation,
@@ -361,10 +366,12 @@ export function MessageRow({
   readonly message: Message;
   readonly members: readonly User[];
   readonly reactions: readonly Reaction[];
+  readonly attachments?: readonly Attachment[];
   readonly currentUserId: string;
   readonly reactionsDisabled: boolean;
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
+  readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
   readonly onCreateTask?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
@@ -406,6 +413,21 @@ export function MessageRow({
           channels={channelReferences}
           onOpenChannel={onOpenChannel}
         />
+        {attachments.length > 0 && (
+          <ul className="message-attachments" aria-label="Attachments">
+            {attachments.map((attachment) => (
+              <li key={attachment.id}>
+                <button
+                  type="button"
+                  className="message-attachment"
+                  onClick={() => void onOpenAttachment?.(attachment.id)}
+                >
+                  <span>{attachment.fileName}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <MessageReactions
           reactions={reactions}
           members={members}
@@ -541,7 +563,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [showChannelMembers, setShowChannelMembers] = useState(false);
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
-  const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
+  const [paneView, setPaneView] = useState<"chat" | "tasks" | "files">("chat");
+  const [pendingAttachments, setPendingAttachments] = useState<
+    Readonly<Record<string, readonly Attachment[]>>
+  >({});
   const [destination, setDestination] = useState<WorkspaceDestination>("workspace");
   const [aiChannelVisited, setAiChannelVisited] = useState(false);
   const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
@@ -765,6 +790,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     }
     return grouped;
   }, [runtimeState.reactions]);
+  const attachmentsByMessage = useMemo(() => {
+    const grouped = new Map<string, Attachment[]>();
+    for (const attachment of runtimeState.attachments) {
+      if (attachment.messageId === null) continue;
+      const values = grouped.get(attachment.messageId) ?? [];
+      values.push(attachment);
+      grouped.set(attachment.messageId, values);
+    }
+    return grouped;
+  }, [runtimeState.attachments]);
   const pending = runtimeState.outbox.filter(
     (item) =>
       item.operation.conversationId === runtimeState.selectedConversationId &&
@@ -853,6 +888,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : runtime.loadConversationTasks(conversationId);
     void request.catch(() => undefined);
   }, [paneView, runtime, runtimeState.selectedConversationId, selectedIsPersonal, tasksAvailable]);
+
+  useEffect(() => {
+    const conversationId = runtimeState.selectedConversationId;
+    if (paneView !== "files" || conversationId === null) return;
+    void runtime.loadConversationFiles(conversationId).catch(() => undefined);
+  }, [paneView, runtime, runtimeState.selectedConversationId]);
 
   useBackgroundUnreadSignal(
     bootstrap?.conversations ?? null,
@@ -1085,11 +1126,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       destination !== "workspace"
         ? ({ pane: "none" } as const)
         : createNotificationActivityView({
-            pane: paneView,
+            pane: paneView === "tasks" ? "tasks" : "chat",
             conversationId: runtimeState.selectedConversationId,
-            timelineAtLiveTail,
+            timelineAtLiveTail: paneView === "chat" && timelineAtLiveTail,
             threadRootId: selectedThreadRootId,
-            threadAtLiveTail,
+            threadAtLiveTail: paneView === "chat" && threadAtLiveTail,
           });
     void notificationSession.report(view).catch(() => undefined);
   }, [
@@ -1351,10 +1392,57 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     selectedThreadRootId,
   ]);
 
+  const composerAttachments =
+    runtimeState.selectedConversationId === null
+      ? []
+      : (pendingAttachments[runtimeState.selectedConversationId] ?? []);
+  const threadComposerKey =
+    runtimeState.selectedConversationId === null || selectedThreadRootId === null
+      ? null
+      : `${runtimeState.selectedConversationId}:${selectedThreadRootId}`;
+  const threadComposerAttachments =
+    threadComposerKey === null ? [] : (pendingAttachments[threadComposerKey] ?? []);
+
+  const replacePendingAttachments = (
+    key: string,
+    updater: (current: readonly Attachment[]) => readonly Attachment[],
+  ): void => {
+    setPendingAttachments((current) => ({
+      ...current,
+      [key]: updater(current[key] ?? []),
+    }));
+  };
+
+  const attachToComposer = async (key: string): Promise<void> => {
+    const conversationId = runtimeState.selectedConversationId;
+    if (conversationId === null) return;
+    const current = pendingAttachments[key] ?? [];
+    if (current.length >= ATTACHMENTS_PER_MESSAGE_MAX) {
+      setComposerError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
+      return;
+    }
+    try {
+      const attachment = await runtime.attachFile(conversationId);
+      if (attachment === null) return;
+      replacePendingAttachments(key, (pending) =>
+        pending.some((existing) => existing.id === attachment.id)
+          ? pending
+          : [...pending, attachment].slice(0, ATTACHMENTS_PER_MESSAGE_MAX),
+      );
+      setComposerError("");
+      setThreadComposerError("");
+    } catch (error) {
+      const message = errorMessage(error, "Could not attach the file");
+      if (key === conversationId) setComposerError(message);
+      else setThreadComposerError(message);
+    }
+  };
+
   const send = async (): Promise<void> => {
     const submittedDraft = draft;
-    const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
+    const attachments = conversationId === null ? [] : (pendingAttachments[conversationId] ?? []);
+    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
     if (body === "" || conversationId === null || bootstrap === null) return;
     const mentionedUserIds = mentionedMemberIds(
       body,
@@ -1363,12 +1451,19 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     );
     try {
       if (editingClientMessageId === null) {
-        await runtime.sendMessage(conversationId, body, mentionedUserIds);
+        await runtime.sendMessage(
+          conversationId,
+          body,
+          mentionedUserIds,
+          null,
+          attachments.map((attachment) => attachment.id),
+        );
       } else {
         await runtime.replaceFailedMessage(editingClientMessageId, body, mentionedUserIds);
         setEditingClientMessageId(null);
       }
       clearDraft(submittedDraft);
+      replacePendingAttachments(conversationId, () => []);
       setComposerError("");
     } catch (error) {
       setComposerError(errorMessage(error, "Could not queue the message"));
@@ -1400,9 +1495,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const sendThreadReply = async (): Promise<void> => {
     const submittedDraft = threadDraft;
-    const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
     const threadRootId = runtimeState.selectedThreadRootId;
+    const key =
+      conversationId === null || threadRootId === null ? null : `${conversationId}:${threadRootId}`;
+    const attachments = key === null ? [] : (pendingAttachments[key] ?? []);
+    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
     if (body === "" || conversationId === null || threadRootId === null || bootstrap === null) {
       return;
     }
@@ -1413,7 +1511,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     );
     try {
       if (threadEditingClientMessageId === null) {
-        await runtime.sendMessage(conversationId, body, mentionedUserIds, threadRootId);
+        await runtime.sendMessage(
+          conversationId,
+          body,
+          mentionedUserIds,
+          threadRootId,
+          attachments.map((attachment) => attachment.id),
+        );
       } else {
         await runtime.replaceFailedMessage(threadEditingClientMessageId, body, mentionedUserIds);
         setThreadEditingClientMessageId(null);
@@ -1424,10 +1528,17 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         delete next[threadRootId];
         return next;
       });
+      if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
     } catch (error) {
       setThreadComposerError(errorMessage(error, "Could not queue the reply"));
     }
+  };
+
+  const openAttachmentSource = (attachment: Attachment): void => {
+    setDestination("workspace");
+    setPaneView("chat");
+    runtime.openAttachmentSource(attachment);
   };
 
   const createChannel = useCallback(
@@ -1835,58 +1946,100 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               onCheckForUpdates={client.checkForUpdates}
             />
           </div>
-          {selectedSummary !== undefined &&
-            (tasksAvailable || selectedSummary.conversation.kind === "channel") && (
-              <div className="conversation-header-actions">
+          {selectedSummary !== undefined && (
+            <div className="conversation-header-actions">
+              <div className="pane-toggle" aria-label="Conversation view">
+                <button
+                  type="button"
+                  className={paneView === "chat" ? "active" : ""}
+                  onClick={() => setPaneView("chat")}
+                >
+                  Chat
+                </button>
                 {tasksAvailable && (
-                  <div className="pane-toggle" aria-label="Conversation view">
-                    <button
-                      type="button"
-                      className={paneView === "chat" ? "active" : ""}
-                      onClick={() => setPaneView("chat")}
-                    >
-                      Chat
-                    </button>
-                    <button
-                      type="button"
-                      className={paneView === "tasks" ? "active" : ""}
-                      onClick={() => setPaneView("tasks")}
-                    >
-                      Tasks
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    className={paneView === "tasks" ? "active" : ""}
+                    onClick={() => setPaneView("tasks")}
+                  >
+                    Tasks
+                  </button>
                 )}
-                {selectedSummary.conversation.kind === "channel" && (
-                  <>
-                    <button
-                      className="quiet-button"
-                      type="button"
-                      onClick={() => setShowChannelMembers(true)}
-                    >
-                      {selectedSummary.conversation.access === "members"
-                        ? `${String(selectedSummary.participantIds.length)} members`
-                        : "Everyone"}
-                    </button>
-                    {selectedSummary.conversation.slug !== "general" &&
-                      !selectedSummary.conversation.isArchived &&
-                      bootstrap.currentUser.role === "owner" && (
-                        <button
-                          className="quiet-button"
-                          type="button"
-                          onClick={() =>
-                            void runtime.archiveChannel(selectedSummary.conversation.id)
-                          }
-                        >
-                          Archive
-                        </button>
-                      )}
-                  </>
-                )}
+                <button
+                  type="button"
+                  className={paneView === "files" ? "active" : ""}
+                  onClick={() => setPaneView("files")}
+                >
+                  Files
+                </button>
               </div>
-            )}
+              {selectedSummary.conversation.kind === "channel" && (
+                <>
+                  <button
+                    className="quiet-button"
+                    type="button"
+                    onClick={() => setShowChannelMembers(true)}
+                  >
+                    {selectedSummary.conversation.access === "members"
+                      ? `${String(selectedSummary.participantIds.length)} members`
+                      : "Everyone"}
+                  </button>
+                  {selectedSummary.conversation.slug !== "general" &&
+                    !selectedSummary.conversation.isArchived &&
+                    bootstrap.currentUser.role === "owner" && (
+                      <button
+                        className="quiet-button"
+                        type="button"
+                        onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
+                      >
+                        Archive
+                      </button>
+                    )}
+                </>
+              )}
+            </div>
+          )}
         </header>
 
-        {paneView === "tasks" && tasksAvailable && selectedSummary !== undefined ? (
+        {paneView === "files" && selectedSummary !== undefined ? (
+          <>
+            <FilesView
+              conversationName={runtime.conversationName(selectedSummary)}
+              files={runtimeState.conversationFiles}
+              members={bootstrap.members}
+              busy={runtimeState.conversationFilesBusy}
+              error={runtimeState.conversationFilesError}
+              onOpen={(attachmentId) => runtime.openFile(attachmentId)}
+              onOpenSource={openAttachmentSource}
+            />
+            {selectedSummary.conversation.isArchived === true ? (
+              <ArchivedConversationNotice />
+            ) : selectedIsAnnouncement && !canPublishBulletins ? (
+              <AnnouncementPostingNotice />
+            ) : (
+              <MessageComposer
+                conversationName={runtime.conversationName(selectedSummary)}
+                draft={draft}
+                pendingAttachments={composerAttachments}
+                disabled={false}
+                attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
+                error={composerError}
+                inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
+                inputRef={attachComposerInput}
+                placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
+                submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
+                onDraftChange={setDraft}
+                onAttach={() => attachToComposer(selectedSummary.conversation.id)}
+                onRemoveAttachment={(attachmentId) =>
+                  replacePendingAttachments(selectedSummary.conversation.id, (current) =>
+                    current.filter((attachment) => attachment.id !== attachmentId),
+                  )
+                }
+                onSubmit={send}
+              />
+            )}
+          </>
+        ) : paneView === "tasks" && tasksAvailable && selectedSummary !== undefined ? (
           <TasksView
             conversationId={selectedSummary.conversation.id}
             personal={selectedIsPersonal === true}
@@ -1970,7 +2123,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       message={message}
                       members={bootstrap.members}
                       reactions={reactionsByMessage.get(message.id) ?? []}
+                      attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
+                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
@@ -2055,13 +2210,26 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
                 }
                 draft={draft}
+                pendingAttachments={composerAttachments}
                 disabled={selectedSummary === undefined}
+                attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 onDraftChange={setDraft}
+                onAttach={
+                  selectedSummary === undefined
+                    ? undefined
+                    : () => attachToComposer(selectedSummary.conversation.id)
+                }
+                onRemoveAttachment={(attachmentId) => {
+                  if (runtimeState.selectedConversationId === null) return;
+                  replacePendingAttachments(runtimeState.selectedConversationId, (current) =>
+                    current.filter((attachment) => attachment.id !== attachmentId),
+                  );
+                }}
                 onSubmit={send}
               />
             )}
@@ -2119,7 +2287,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   message={threadRoot}
                   members={bootstrap.members}
                   reactions={reactionsByMessage.get(threadRoot.id) ?? []}
+                  attachments={attachmentsByMessage.get(threadRoot.id) ?? []}
                   currentUserId={currentUserId}
+                  onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                   reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                   onAddReaction={(emoji) => runtime.addReaction(threadRoot.id, emoji)}
                   onRemoveReaction={(emoji) => runtime.removeReaction(threadRoot.id, emoji)}
@@ -2156,7 +2326,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       message={message}
                       members={bootstrap.members}
                       reactions={reactionsByMessage.get(message.id) ?? []}
+                      attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
+                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
@@ -2237,7 +2409,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             <MessageComposer
               conversationName={null}
               draft={threadDraft}
+              pendingAttachments={threadComposerAttachments}
               disabled={threadRoot === undefined}
+              attachDisabled={threadComposerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
               error={threadComposerError}
               inputId="thread-message-composer"
               inputLabel="Reply"
@@ -2251,6 +2425,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   [selectedThreadRootId]: value,
                 }))
               }
+              onAttach={
+                threadComposerKey === null ? undefined : () => attachToComposer(threadComposerKey)
+              }
+              onRemoveAttachment={(attachmentId) => {
+                if (threadComposerKey === null) return;
+                replacePendingAttachments(threadComposerKey, (current) =>
+                  current.filter((attachment) => attachment.id !== attachmentId),
+                );
+              }}
               onSubmit={sendThreadReply}
             />
           )}

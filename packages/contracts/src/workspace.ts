@@ -8,6 +8,7 @@ import {
 } from "./common.js";
 import { channelSlugSchema } from "./channel-slug.js";
 import {
+  attachmentSchema,
   channelAccessSchema,
   channelModeSchema,
   conversationMembershipRoleSchema,
@@ -20,6 +21,7 @@ import {
   userSchema,
   workspaceSchema,
 } from "./entities.js";
+import { ATTACHMENTS_PER_MESSAGE_MAX } from "./files.js";
 import { currentPrincipalSchema, currentUserSchema } from "./identity.js";
 import {
   realtimeEventEnvelopeSchema,
@@ -41,6 +43,7 @@ export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
+export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -260,6 +263,10 @@ export const messageHistoryResponseSchema = z
     messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     threadSummaries: z.array(messageThreadSummarySchema).max(MESSAGE_HISTORY_MAX_LIMIT).default([]),
     threadsSupported: z.boolean().default(false),
+    attachments: z
+      .array(attachmentSchema)
+      .max(MESSAGE_HISTORY_MAX_LIMIT * ATTACHMENTS_PER_MESSAGE_MAX)
+      .default([]),
     nextCursor: paginationCursorSchema.nullable(),
   })
   .strict()
@@ -302,6 +309,10 @@ export const messageThreadResponseSchema = z
   .object({
     root: messageSchema,
     replies: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
+    attachments: z
+      .array(attachmentSchema)
+      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * ATTACHMENTS_PER_MESSAGE_MAX)
+      .default([]),
     nextCursor: paginationCursorSchema.nullable(),
   })
   .strict()
@@ -335,6 +346,7 @@ export const messageThreadResponseSchema = z
 export const messageByIdResponseSchema = z
   .object({
     message: messageSchema,
+    attachments: z.array(attachmentSchema).max(ATTACHMENTS_PER_MESSAGE_MAX).default([]),
   })
   .strict();
 
@@ -443,6 +455,7 @@ export const sendMessageOperationSchema = z
 export const sendMessageResponseSchema = z
   .object({
     message: messageSchema,
+    attachments: z.array(attachmentSchema).max(ATTACHMENTS_PER_MESSAGE_MAX).default([]),
     syncCursor: sequenceSchema,
   })
   .strict();

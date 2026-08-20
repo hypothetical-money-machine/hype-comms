@@ -246,6 +246,10 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
       reactionHydrations += 1;
       return { reactions: [] };
     },
+    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listMessageAttachments: async () => ({ attachments: [] }),
+    chooseAndUploadConversationFile: async () => null,
+    openConversationFile: async () => ({ opened: true }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     syncWorkspace: async (after: string) =>
       ({

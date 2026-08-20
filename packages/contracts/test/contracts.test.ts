@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  ATTACHMENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -23,6 +24,7 @@ import {
   currentAgentPrincipalSchema,
   currentPrincipalSchema,
   createChannelOperationSchema,
+  createFileUploadRequestSchema,
   createTaskOperationSchema,
   currentUserSchema,
   displayNameSchema,
@@ -724,11 +726,18 @@ describe("transport contracts", () => {
         threadsSupported: true,
         nextCursor: null,
       }),
-    ).toEqual({ messages: [], threadSummaries: [], threadsSupported: true, nextCursor: null });
+    ).toEqual({
+      messages: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: null,
+    });
     expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
       messages: [],
       threadSummaries: [],
       threadsSupported: false,
+      attachments: [],
       nextCursor: null,
     });
     expect(() =>
@@ -779,6 +788,7 @@ describe("transport contracts", () => {
       messages: [root, reply],
       threadSummaries: [],
       threadsSupported: false,
+      attachments: [],
       nextCursor: null,
     });
     expect(
@@ -1133,7 +1143,7 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}`,
       ),
     ).toEqual([
       REACTION_EVENTS_CAPABILITY,
@@ -1141,6 +1151,7 @@ describe("transport contracts", () => {
       TASK_EVENTS_CAPABILITY,
       THREADS_CAPABILITY,
       PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+      ATTACHMENTS_CAPABILITY,
     ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
@@ -1237,6 +1248,29 @@ describe("transport contracts", () => {
       createChannelOperationSchema.parse({ ...operation, idempotencyKey: "bad key" }),
     ).toThrow();
     expect(() => createChannelOperationSchema.parse({ ...operation, unexpected: true })).toThrow();
+  });
+
+  it("accepts a staged file upload and rejects executables at the name/type boundary", () => {
+    const request = createFileUploadRequestSchema.parse({
+      conversationId: CONVERSATION_ID,
+      fileName: "clip.webm",
+      contentType: "video/webm",
+      sizeBytes: 2048,
+      contentSha256: "a".repeat(64),
+    });
+    expect(request.fileName).toBe("clip.webm");
+    expect(() =>
+      createFileUploadRequestSchema.parse({
+        ...request,
+        fileName: "nested/clip.webm",
+      }),
+    ).toThrow();
+    expect(() =>
+      createFileUploadRequestSchema.parse({
+        ...request,
+        sizeBytes: 26 * 1024 * 1024,
+      }),
+    ).toThrow();
   });
 
   it("paginates conversation listing instead of capping it above what the server can return", () => {

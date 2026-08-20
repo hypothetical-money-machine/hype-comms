@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { realpath, stat } from "node:fs/promises";
+import { realpath, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -31,6 +32,8 @@ import {
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
+  conversationFilesQuerySchema,
+  listMessageAttachmentsRequestSchema,
   listMessageReactionsRequestSchema,
   messageThreadRequestSchema,
   messageReactionTargetSchema,
@@ -1533,6 +1536,69 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAttachmentsList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceAttachmentsList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace attachments sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const request = listMessageAttachmentsRequestSchema.parse(input);
+    return workspaceTransport.attachments(request.messageIds);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationFilesList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationFilesList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted conversation files sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !("conversationId" in input) ||
+      !("query" in input)
+    ) {
+      throw new Error("Invalid conversation files request");
+    }
+    return workspaceTransport.conversationFiles(
+      entityIdSchema.parse(input.conversationId),
+      conversationFilesQuerySchema.parse(input.query),
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileUpload);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileUpload, async (event, conversationId: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file upload sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const window = mainWindow;
+    const options: OpenDialogOptions = {
+      title: "Attach a file",
+      buttonLabel: "Attach",
+      properties: ["openFile"],
+    };
+    const selection =
+      window === null || window.isDestroyed()
+        ? await dialog.showOpenDialog(options)
+        : await dialog.showOpenDialog(window, options);
+    const selectedPath = selection.filePaths[0];
+    if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
+      return null;
+    }
+    return workspaceTransport.uploadLocalFile(entityIdSchema.parse(conversationId), selectedPath);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileOpen);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileOpen, async (event, attachmentId: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file open sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const id = entityIdSchema.parse(attachmentId);
+    const file = await workspaceTransport.downloadFile(id);
+    const safeName = file.fileName.replace(/[\\/]/g, "_");
+    const destination = path.join(tmpdir(), `hype-comms-${id}-${safeName}`);
+    await writeFile(destination, file.bytes);
+    const openError = await shell.openPath(destination);
+    if (openError !== "") {
+      throw new Error(openError);
+    }
+    return { opened: true };
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTasksList);

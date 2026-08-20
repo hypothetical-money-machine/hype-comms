@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
@@ -18,8 +21,10 @@ import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
+import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
 import {
   type AnnouncementAuditRecord,
+  type WorkspaceRepositoryHooks,
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 
@@ -155,6 +160,14 @@ describeWithPostgres("WorkspaceRepository", () => {
   let adminPool: Pool;
   let pool: Pool;
   let repository: WorkspaceRepository;
+  let attachmentRoot: string;
+  let attachmentStore: LocalAttachmentStore;
+
+  function repositoryHooks(
+    overrides: Omit<WorkspaceRepositoryHooks, "attachmentStore"> = {},
+  ): WorkspaceRepositoryHooks {
+    return { ...overrides, attachmentStore };
+  }
 
   beforeAll(async () => {
     if (testDatabaseUrl === undefined) return;
@@ -162,13 +175,17 @@ describeWithPostgres("WorkspaceRepository", () => {
     await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
     pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
     await runMigrations(pool);
-    repository = new WorkspaceRepository(pool);
+    attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
+    attachmentStore = new LocalAttachmentStore(attachmentRoot);
+    repository = new WorkspaceRepository(pool, repositoryHooks());
   });
 
   beforeEach(async () => {
+    repository = new WorkspaceRepository(pool, repositoryHooks());
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions, messages,
+               sync_events, conversation_read_cursors, message_reactions, message_mentions,
+               attachments, messages,
                conversation_memberships, conversations, device_sessions, magic_link_tokens,
                invitations,
                workspace_memberships, workspaces, users
@@ -212,6 +229,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.end();
     await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
     await adminPool.end();
+    if (attachmentRoot !== undefined) await rm(attachmentRoot, { recursive: true, force: true });
   });
 
   async function seedChannels(count: number): Promise<void> {
@@ -483,10 +501,13 @@ describeWithPostgres("WorkspaceRepository", () => {
 
   it("enforces announcement publishing while preserving threads, reactions, and replay", async () => {
     const audits: AnnouncementAuditRecord[] = [];
-    repository = new WorkspaceRepository(pool, {
-      announcementChannelsEnabled: true,
-      onAnnouncementAudit: (record) => audits.push(record),
-    });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({
+        announcementChannelsEnabled: true,
+        onAnnouncementAudit: (record) => audits.push(record),
+      }),
+    );
     const created = await repository.createChannel(
       owner,
       {
@@ -640,7 +661,10 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   it("rejects every task access path and hides legacy task rows in announcements", async () => {
-    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ announcementChannelsEnabled: true }),
+    );
     const created = await repository.createChannel(
       owner,
       {
@@ -720,7 +744,10 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   it("serializes announcement sends behind archive, private removal, and owner demotion", async () => {
-    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ announcementChannelsEnabled: true }),
+    );
     const observe = <T>(promise: Promise<T>) => {
       let settled = false;
       const outcome = promise
@@ -1446,6 +1473,7 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     await expect(repository.messageById(owner, sent.message.id)).resolves.toEqual({
       message: sent.message,
+      attachments: [],
     });
     await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
       statusCode: 404,
@@ -1455,6 +1483,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
     await expect(repository.messageById(member, sent.message.id)).resolves.toEqual({
       message: sent.message,
+      attachments: [],
     });
 
     await repository.removeChannelMember(owner, conversationId, memberId);
@@ -2355,5 +2384,113 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.revalidateRealtimePrincipal({ ...ownerPrincipal, workspaceId: randomUUID() }),
     ).resolves.toEqual({ status: "invalid", reason: "membership_inactive" });
+  });
+
+  async function stageReadyFile(
+    conversationId: string,
+    fileName: string,
+    body: string,
+  ): Promise<string> {
+    const bytes = Buffer.from(body);
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId,
+        fileName,
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    const completed = await repository.completeFileUpload(
+      owner,
+      staged.attachment.id,
+      { sizeBytes: bytes.byteLength, contentSha256 },
+      randomUUID(),
+    );
+    expect(completed.attachment.status).toBe("ready");
+    expect(completed.attachment.messageId).toBeNull();
+    return completed.attachment.id;
+  }
+
+  it("attaches a ready file to a channel message and lists it for the conversation", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Sharing the brief"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    expect(sent.attachments).toEqual([
+      expect.objectContaining({
+        id: attachmentId,
+        messageId: sent.message.id,
+        fileName: "brief.txt",
+        status: "ready",
+        downloadUrl: null,
+      }),
+    ]);
+
+    const history = await repository.history(owner, generalId, undefined, 50);
+    expect(history.attachments.map((attachment) => attachment.id)).toEqual([attachmentId]);
+
+    const files = await repository.listConversationFiles(owner, generalId, undefined, 50);
+    expect(files.files.map((file) => file.fileName)).toEqual(["brief.txt"]);
+    expect(files.hasMore).toBe(false);
+
+    const downloaded = await repository.readFileContent(member, attachmentId);
+    expect(downloaded.bytes.toString()).toBe("channel notes");
+  });
+
+  it("attaches a ready file to a DM and hides it from a third member", async () => {
+    const dm = await repository.createDirectConversation(owner, { memberId });
+    const conversationId = dm.conversation.conversation.id;
+    const attachmentId = await stageReadyFile(conversationId, "clip.txt", "dm only");
+    await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "A private file"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+
+    const ownerFiles = await repository.listConversationFiles(owner, conversationId, undefined, 50);
+    expect(ownerFiles.files).toHaveLength(1);
+    await expect(
+      repository.listConversationFiles(observer, conversationId, undefined, 50),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    await expect(repository.readFileContent(observer, attachmentId)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+  });
+
+  it("rejects executables and attaching a file twice", async () => {
+    await expect(
+      repository.createFileUpload(
+        owner,
+        {
+          conversationId: generalId,
+          fileName: "setup.exe",
+          contentType: "application/x-msdownload",
+          sizeBytes: 12,
+          contentSha256: "a".repeat(64),
+        },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, message: "Executable files are not allowed" });
+
+    const attachmentId = await stageReadyFile(generalId, "once.txt", "one use");
+    await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "first"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    await expect(
+      repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "second"),
+        mentionedUserIds: [],
+        attachmentIds: [attachmentId],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 });

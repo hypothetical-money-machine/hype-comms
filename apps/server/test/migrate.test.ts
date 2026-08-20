@@ -104,6 +104,7 @@ describeWithPostgres("runMigrations", () => {
           "0017_workos_authkit.sql",
           "0018_hype_comms_technical_rebrand.sql",
           "0019_desktop_auth_variants.sql",
+          "0020_message_attachments.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -132,6 +133,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0017_workos_authkit.sql" },
         { filename: "0018_hype_comms_technical_rebrand.sql" },
         { filename: "0019_desktop_auth_variants.sql" },
+        { filename: "0020_message_attachments.sql" },
       ]);
 
       const userId = randomUUID();

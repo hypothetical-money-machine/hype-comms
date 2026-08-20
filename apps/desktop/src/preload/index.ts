@@ -39,8 +39,14 @@ import {
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMembersResponseSchema,
+  attachmentSchema,
+  conversationFilesQuerySchema,
+  conversationFilesResponseSchema,
+  listMessageAttachmentsRequestSchema,
+  listMessageAttachmentsResponseSchema,
   listMessageReactionsRequestSchema,
   listMessageReactionsResponseSchema,
+  openAttachmentResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
@@ -88,6 +94,7 @@ import {
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
   type CacheScope,
+  type ConversationFilesQuery,
   type CreateChannelOperation,
   type CreateTaskOperation,
   type DirectConversationRequest,
@@ -559,6 +566,36 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.workspaceMessageSearch,
           messageSearchQuerySchema.parse(input),
+        ),
+      ),
+    listConversationFiles: async (
+      conversationId: string,
+      input: Partial<ConversationFilesQuery> = {},
+    ) =>
+      conversationFilesResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceConversationFilesList, {
+          conversationId,
+          query: conversationFilesQuerySchema.parse(input),
+        }),
+      ),
+    listMessageAttachments: async (messageIds: readonly string[]) => {
+      const request = listMessageAttachmentsRequestSchema.parse({ messageIds });
+      return listMessageAttachmentsResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAttachmentsList, request),
+      );
+    },
+    chooseAndUploadConversationFile: async (conversationId: string) => {
+      const result: unknown = await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceFileUpload,
+        entityIdSchema.parse(conversationId),
+      );
+      return result === null ? null : attachmentSchema.parse(result);
+    },
+    openConversationFile: async (attachmentId: string) =>
+      openAttachmentResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceFileOpen,
+          entityIdSchema.parse(attachmentId),
         ),
       ),
     listConversationTasks: async (conversationId: string, input: Partial<TaskListQuery> = {}) =>

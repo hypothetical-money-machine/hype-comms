@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -29,6 +30,7 @@ const CLIENT_CAPABILITIES = [
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -264,6 +266,7 @@ describe("WorkspaceTransport threads", () => {
 
     await expect(transport.messageById(THREAD_REPLY.id)).resolves.toEqual({
       message: THREAD_REPLY,
+      attachments: [],
     });
     expect(requests).toEqual([
       {
@@ -332,7 +335,7 @@ describe("WorkspaceTransport threads", () => {
 
     await expect(
       transport.thread({ messageId: THREAD_ROOT.id, before: "cursor-2", limit: 25 }),
-    ).resolves.toEqual(response);
+    ).resolves.toEqual({ ...response, attachments: [] });
     expect(requests).toEqual([
       {
         url: `https://chat.example/v1/messages/${THREAD_ROOT.id}/thread?before=cursor-2&limit=25`,
@@ -583,6 +586,7 @@ describe("WorkspaceTransport send classification", () => {
           headers: {
             "content-type": "application/json",
             "idempotency-key": THREAD_REPLY_CLIENT_ID,
+            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
           },
           body: JSON.stringify(operation.message),
         }),

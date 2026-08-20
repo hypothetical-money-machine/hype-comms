@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENTS_PER_MESSAGE_MAX,
+  CONVERSATION_FILES_MAX_LIMIT,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   MESSAGE_HISTORY_MAX_LIMIT,
@@ -9,6 +12,11 @@ import {
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
+  attachmentSchema,
+  completeFileUploadResponseSchema,
+  conversationFilesResponseSchema,
+  createFileUploadResponseSchema,
+  listMessageAttachmentsResponseSchema,
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -43,6 +51,13 @@ import {
   workspaceSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type Attachment,
+  type CompleteFileUploadRequest,
+  type CompleteFileUploadResponse,
+  type ConversationFilesResponse,
+  type CreateFileUploadRequest,
+  type CreateFileUploadResponse,
+  type ListMessageAttachmentsResponse,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type Conversation,
@@ -85,6 +100,14 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
+import {
+  ATTACHMENT_UPLOAD_TTL_MS,
+  isRejectedAttachment,
+  sanitizeFileName,
+  sha256Buffer,
+  sha256Hex,
+  type AttachmentStore,
+} from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
@@ -176,6 +199,23 @@ interface MessageRow extends QueryResultRow {
   body_format: "hype_comms_markdown_v1";
   edited_at: Date | string | null;
   deleted_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface AttachmentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  message_id: string | null;
+  uploaded_by: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: string;
+  content_sha256: Buffer;
+  status: "pending" | "ready" | "failed";
+  upload_expires_at: Date | string | null;
+  content_received_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -312,6 +352,8 @@ export interface WorkspaceRepositoryHooks {
   readonly afterArchiveConversationLocked?: () => Promise<void>;
   /** Test seam for holding the conversation lock before a member removal commits. */
   readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
+  /** Local or remote object bytes for staged attachments. */
+  readonly attachmentStore?: AttachmentStore;
 }
 
 export interface AnnouncementAuditRecord {
@@ -457,6 +499,47 @@ function mapMessage(row: MessageRow): Message {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+function mapAttachment(row: AttachmentRow): Attachment {
+  return attachmentSchema.parse({
+    id: row.id,
+    messageId: row.message_id,
+    uploadedBy: row.uploaded_by,
+    fileName: row.file_name,
+    contentType: row.content_type,
+    sizeBytes: Number(row.size_bytes),
+    status: row.status,
+    downloadUrl: null,
+    createdAt: iso(row.created_at),
+  });
+}
+
+function encodeFilesCursor(createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
+}
+
+function decodeFilesCursor(cursor: string | undefined): { createdAt: string; id: string } | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("createdAt" in parsed) ||
+      !("id" in parsed) ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.id !== "string" ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      return null;
+    }
+    const createdAt = new Date(parsed.createdAt);
+    if (Number.isNaN(createdAt.getTime())) return null;
+    return { createdAt: createdAt.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
 }
 
 function mapReaction(row: ReactionRow): Reaction {
@@ -1265,6 +1348,10 @@ export class WorkspaceRepository {
       const messages = selected.reverse().map(mapMessage);
       return messageHistoryResponseSchema.parse({
         messages,
+        attachments: await this.#attachmentsForMessages(
+          client,
+          messages.map((message) => message.id),
+        ),
         threadSummaries: includeThreadReplies
           ? []
           : await this.#threadSummaries(
@@ -1318,9 +1405,15 @@ export class WorkspaceRepository {
       const hasMore = result.rows.length > limit;
       const selected = result.rows.slice(0, limit);
       const oldest = selected.at(-1);
+      const replies = selected.reverse().map(mapMessage);
+      const rootMessage = mapMessage(root);
       return messageThreadResponseSchema.parse({
-        root: mapMessage(root),
-        replies: selected.reverse().map(mapMessage),
+        root: rootMessage,
+        replies,
+        attachments: await this.#attachmentsForMessages(client, [
+          rootMessage.id,
+          ...replies.map((message) => message.id),
+        ]),
         nextCursor:
           hasMore && oldest !== undefined
             ? encodeHistoryCursor(oldest.conversation_sequence)
@@ -1350,7 +1443,333 @@ export class WorkspaceRepository {
       // Missing and unauthorized targets deliberately share one response.
       throw new ApiError(404, "NOT_FOUND", "Message not found");
     }
-    return messageByIdResponseSchema.parse({ message: mapMessage(message) });
+    const attachments = await this.pool.query<AttachmentRow>(
+      `SELECT *
+         FROM attachments
+        WHERE message_id = $1
+          AND status = 'ready'
+        ORDER BY created_at, id`,
+      [messageId],
+    );
+    return messageByIdResponseSchema.parse({
+      message: mapMessage(message),
+      attachments: attachments.rows.map(mapAttachment),
+    });
+  }
+
+  async createFileUpload(
+    identity: AuthenticatedIdentity,
+    input: CreateFileUploadRequest,
+    idempotencyKey: string,
+  ): Promise<CreateFileUploadResponse> {
+    const fileName = sanitizeFileName(input.fileName);
+    const contentType = input.contentType.trim();
+    if (isRejectedAttachment(fileName, contentType)) {
+      throw new ApiError(400, "BAD_REQUEST", "Executable files are not allowed");
+    }
+    if (input.sizeBytes > ATTACHMENT_MAX_BYTES) {
+      throw new ApiError(400, "BAD_REQUEST", "File exceeds the 25 MiB limit");
+    }
+    this.#attachmentStore();
+    return this.#transaction(async (client) => {
+      await this.#requireVisibleConversation(client, identity, input.conversationId, true);
+      await this.#requireActivePrincipal(client, identity);
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: "/v1/files/uploads",
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 201,
+          responseSchema: createFileUploadResponseSchema,
+        },
+        async () => {
+          const expiresAt = new Date(Date.now() + ATTACHMENT_UPLOAD_TTL_MS).toISOString();
+          const inserted = await client.query<AttachmentRow>(
+            `INSERT INTO attachments (
+               id, workspace_id, conversation_id, uploaded_by, file_name, content_type,
+               size_bytes, content_sha256, status, upload_expires_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+             RETURNING *`,
+            [
+              randomUUID(),
+              identity.currentUser.workspaceId,
+              input.conversationId,
+              identity.currentUser.user.id,
+              fileName,
+              contentType,
+              input.sizeBytes,
+              sha256Buffer(input.contentSha256),
+              expiresAt,
+            ],
+          );
+          const row = inserted.rows[0];
+          if (row === undefined) throw new Error("Attachment insert returned no row");
+          return createFileUploadResponseSchema.parse({
+            attachment: mapAttachment(row),
+            expiresAt,
+          });
+        },
+      );
+    });
+  }
+
+  async putFileContent(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+    contentType: string,
+    bytes: Uint8Array,
+  ): Promise<void> {
+    const store = this.#attachmentStore();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<AttachmentRow>(
+        `SELECT *
+           FROM attachments
+          WHERE id = $1
+            AND workspace_id = $2
+          FOR UPDATE`,
+        [attachmentId, identity.currentUser.workspaceId],
+      );
+      const row = locked.rows[0];
+      if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
+        throw new ApiError(404, "NOT_FOUND", "Upload not found");
+      }
+      if (row.status !== "pending") {
+        throw new ApiError(409, "CONFLICT", "This upload can no longer receive content");
+      }
+      if (
+        row.upload_expires_at !== null &&
+        new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
+      ) {
+        throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+      }
+      if (row.content_type !== contentType.trim()) {
+        throw new ApiError(400, "BAD_REQUEST", "Content type must match the staged upload");
+      }
+      if (Number(row.size_bytes) !== bytes.byteLength) {
+        throw new ApiError(400, "BAD_REQUEST", "File size must match the staged upload");
+      }
+      if (sha256Hex(bytes) !== row.content_sha256.toString("hex")) {
+        throw new ApiError(400, "BAD_REQUEST", "File hash must match the staged upload");
+      }
+      await store.write(identity.currentUser.workspaceId, attachmentId, bytes);
+      await client.query(
+        `UPDATE attachments
+            SET content_received_at = clock_timestamp(),
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [attachmentId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeFileUpload(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+    input: CompleteFileUploadRequest,
+    idempotencyKey: string,
+  ): Promise<CompleteFileUploadResponse> {
+    const store = this.#attachmentStore();
+    return this.#transaction(async (client) => {
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: `/v1/files/${attachmentId}/complete`,
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 200,
+          responseSchema: completeFileUploadResponseSchema,
+        },
+        async () => {
+          const locked = await client.query<AttachmentRow>(
+            `SELECT *
+               FROM attachments
+              WHERE id = $1
+                AND workspace_id = $2
+              FOR UPDATE`,
+            [attachmentId, identity.currentUser.workspaceId],
+          );
+          const row = locked.rows[0];
+          if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
+            throw new ApiError(404, "NOT_FOUND", "Upload not found");
+          }
+          if (row.status === "ready") {
+            return completeFileUploadResponseSchema.parse({ attachment: mapAttachment(row) });
+          }
+          if (row.status !== "pending") {
+            throw new ApiError(409, "CONFLICT", "This upload can no longer be completed");
+          }
+          if (
+            row.upload_expires_at !== null &&
+            new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
+          ) {
+            throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+          }
+          if (row.content_received_at === null) {
+            throw new ApiError(400, "BAD_REQUEST", "Upload the file before completing it");
+          }
+          if (
+            Number(row.size_bytes) !== input.sizeBytes ||
+            row.content_sha256.toString("hex") !== input.contentSha256
+          ) {
+            throw new ApiError(
+              400,
+              "BAD_REQUEST",
+              "Completed file does not match the staged upload",
+            );
+          }
+          const stored = await store.read(identity.currentUser.workspaceId, attachmentId);
+          if (stored.byteLength !== input.sizeBytes || sha256Hex(stored) !== input.contentSha256) {
+            throw new ApiError(
+              400,
+              "BAD_REQUEST",
+              "Completed file does not match the staged upload",
+            );
+          }
+          const updated = await client.query<AttachmentRow>(
+            `UPDATE attachments
+                SET status = 'ready',
+                    updated_at = clock_timestamp()
+              WHERE id = $1
+              RETURNING *`,
+            [attachmentId],
+          );
+          const ready = updated.rows[0];
+          if (ready === undefined) throw new Error("Attachment complete returned no row");
+          return completeFileUploadResponseSchema.parse({ attachment: mapAttachment(ready) });
+        },
+      );
+    });
+  }
+
+  async listConversationFiles(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<ConversationFilesResponse> {
+    const client = await this.pool.connect();
+    try {
+      await this.#requireVisibleConversation(client, identity, conversationId, false);
+      const cursor = decodeFilesCursor(before);
+      if (before !== undefined && cursor === null) {
+        throw new ApiError(400, "BAD_REQUEST", "Invalid files cursor");
+      }
+      const result = await client.query<AttachmentRow>(
+        `SELECT *
+           FROM attachments
+          WHERE conversation_id = $1
+            AND workspace_id = $2
+            AND status = 'ready'
+            AND message_id IS NOT NULL
+            AND (
+              $3::timestamptz IS NULL
+              OR created_at < $3::timestamptz
+              OR (created_at = $3::timestamptz AND id < $4::uuid)
+            )
+          ORDER BY created_at DESC, id DESC
+          LIMIT $5`,
+        [
+          conversationId,
+          identity.currentUser.workspaceId,
+          cursor?.createdAt ?? null,
+          cursor?.id ?? null,
+          Math.min(limit, CONVERSATION_FILES_MAX_LIMIT) + 1,
+        ],
+      );
+      const hasMore = result.rows.length > limit;
+      const selected = result.rows.slice(0, limit);
+      const oldest = selected.at(-1);
+      return conversationFilesResponseSchema.parse({
+        files: selected.map(mapAttachment),
+        nextCursor:
+          hasMore && oldest !== undefined
+            ? encodeFilesCursor(iso(oldest.created_at), oldest.id)
+            : null,
+        hasMore,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async listMessageAttachments(
+    identity: AuthenticatedIdentity,
+    messageIds: readonly string[],
+  ): Promise<ListMessageAttachmentsResponse> {
+    const ids = [...new Set(messageIds)];
+    if (
+      ids.length === 0 ||
+      ids.length !== messageIds.length ||
+      ids.length > MESSAGE_HISTORY_MAX_LIMIT
+    ) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid attachment message IDs");
+    }
+    const client = await this.pool.connect();
+    try {
+      const visible = await client.query<{ id: string } & QueryResultRow>(
+        `SELECT message.id
+           FROM messages AS message
+           JOIN conversations AS conversation ON conversation.id = message.conversation_id
+          WHERE message.id = ANY($1::uuid[])
+            AND message.workspace_id = $2
+            AND conversation.workspace_id = $2
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      if (visible.rows.length !== ids.length) {
+        throw new ApiError(404, "NOT_FOUND", "One or more messages were not found");
+      }
+      const attachments = await this.#attachmentsForMessages(client, ids);
+      return listMessageAttachmentsResponseSchema.parse({ attachments });
+    } finally {
+      client.release();
+    }
+  }
+
+  async readFileContent(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+  ): Promise<{ readonly attachment: Attachment; readonly bytes: Buffer }> {
+    const store = this.#attachmentStore();
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<AttachmentRow>(
+        `SELECT attachment.*
+           FROM attachments AS attachment
+           JOIN conversations AS conversation
+             ON conversation.id = attachment.conversation_id
+          WHERE attachment.id = $1
+            AND attachment.workspace_id = $2
+            AND conversation.workspace_id = $2
+            AND attachment.status = 'ready'
+            AND (
+              attachment.message_id IS NOT NULL
+              OR attachment.uploaded_by = $3
+            )
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [attachmentId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      return {
+        attachment: mapAttachment(row),
+        bytes: await store.read(identity.currentUser.workspaceId, attachmentId),
+      };
+    } finally {
+      client.release();
+    }
   }
 
   async listMessageReactions(
@@ -2093,8 +2512,11 @@ export class WorkspaceRepository {
     correlationId?: string,
     announcementCapability = false,
   ): Promise<SendMessageResponse> {
-    if (input.attachmentIds.length > 0) {
-      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
+    if (input.attachmentIds.length !== new Set(input.attachmentIds).size) {
+      throw new ApiError(400, "BAD_REQUEST", "Attachment IDs must be unique");
+    }
+    if (input.attachmentIds.length > ATTACHMENTS_PER_MESSAGE_MAX) {
+      throw new ApiError(400, "BAD_REQUEST", "A message may include at most 10 files");
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     let bulletinAccepted = false;
@@ -2189,6 +2611,7 @@ export class WorkspaceRepository {
         }
         return sendMessageResponseSchema.parse({
           message: mapMessage(replay),
+          attachments: await this.#attachmentsForMessages(client, [replay.id]),
           syncCursor: replay.committed_workspace_sequence,
         });
       }
@@ -2235,6 +2658,12 @@ export class WorkspaceRepository {
         }
       }
       await this.#validateMentions(client, identity, conversation, input);
+      const attachments = await this.#claimAttachments(
+        client,
+        identity,
+        conversationId,
+        input.attachmentIds,
+      );
 
       const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
         `UPDATE conversations
@@ -2282,6 +2711,26 @@ export class WorkspaceRepository {
         await client.query(
           `INSERT INTO message_mentions (message_id, mentioned_user_id) VALUES ($1, $2)`,
           [messageId, mentionedUserId],
+        );
+      }
+      if (attachments.length > 0) {
+        await client.query(
+          `UPDATE attachments
+              SET message_id = $1,
+                  updated_at = clock_timestamp()
+            WHERE id = ANY($2::uuid[])
+              AND workspace_id = $3
+              AND conversation_id = $4
+              AND uploaded_by = $5
+              AND status = 'ready'
+              AND message_id IS NULL`,
+          [
+            messageId,
+            attachments.map((attachment) => attachment.id),
+            identity.currentUser.workspaceId,
+            conversationId,
+            identity.currentUser.user.id,
+          ],
         );
       }
       const audienceUserIds = await this.#conversationAudience(client, conversation);
@@ -2333,6 +2782,10 @@ export class WorkspaceRepository {
       }
       const response = sendMessageResponseSchema.parse({
         message: mapMessage(row),
+        attachments: attachments.map((attachment) => ({
+          ...attachment,
+          messageId,
+        })),
         syncCursor: event.workspaceSequence,
       });
       await client.query(
@@ -3345,6 +3798,66 @@ export class WorkspaceRepository {
       [conversation.id],
     );
     return result.rows.map((row) => row.user_id);
+  }
+
+  #attachmentStore(): AttachmentStore {
+    const store = this.hooks.attachmentStore;
+    if (store === undefined) {
+      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
+    }
+    return store;
+  }
+
+  async #attachmentsForMessages(
+    client: PoolClient,
+    messageIds: readonly string[],
+  ): Promise<Attachment[]> {
+    if (messageIds.length === 0) return [];
+    const result = await client.query<AttachmentRow>(
+      `SELECT *
+         FROM attachments
+        WHERE message_id = ANY($1::uuid[])
+          AND status = 'ready'
+        ORDER BY created_at, id`,
+      [messageIds],
+    );
+    return result.rows.map(mapAttachment);
+  }
+
+  async #claimAttachments(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    attachmentIds: readonly string[],
+  ): Promise<Attachment[]> {
+    if (attachmentIds.length === 0) return [];
+    const locked = await client.query<AttachmentRow>(
+      `SELECT *
+         FROM attachments
+        WHERE id = ANY($1::uuid[])
+          AND workspace_id = $2
+        FOR UPDATE`,
+      [attachmentIds, identity.currentUser.workspaceId],
+    );
+    if (locked.rows.length !== attachmentIds.length) {
+      throw new ApiError(400, "BAD_REQUEST", "One or more attachments were not found");
+    }
+    const byId = new Map(locked.rows.map((row) => [row.id, row]));
+    const claimed: Attachment[] = [];
+    for (const attachmentId of attachmentIds) {
+      const row = byId.get(attachmentId);
+      if (
+        row === undefined ||
+        row.conversation_id !== conversationId ||
+        row.uploaded_by !== identity.currentUser.user.id ||
+        row.status !== "ready" ||
+        row.message_id !== null
+      ) {
+        throw new ApiError(400, "BAD_REQUEST", "One or more attachments cannot be attached");
+      }
+      claimed.push(mapAttachment(row));
+    }
+    return claimed;
   }
 
   async #membershipRole(

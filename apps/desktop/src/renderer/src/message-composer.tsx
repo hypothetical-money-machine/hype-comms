@@ -8,13 +8,17 @@ import {
   type Ref,
 } from "react";
 
+import type { Attachment } from "@hype-comms/contracts";
+
 const MIN_COMPOSER_HEIGHT = 44;
 const MAX_COMPOSER_HEIGHT = 132;
 
 export function MessageComposer({
   conversationName,
   draft,
+  pendingAttachments = [],
   disabled,
+  attachDisabled = false,
   error,
   inputId = "message",
   inputLabel = "Message",
@@ -23,11 +27,15 @@ export function MessageComposer({
   submitLabel = "Send",
   variantClassName,
   onDraftChange,
+  onAttach,
+  onRemoveAttachment,
   onSubmit,
 }: {
   readonly conversationName: string | null;
   readonly draft: string;
+  readonly pendingAttachments?: readonly Attachment[];
   readonly disabled: boolean;
+  readonly attachDisabled?: boolean;
   readonly error: string;
   readonly inputId?: string;
   readonly inputLabel?: string;
@@ -36,12 +44,17 @@ export function MessageComposer({
   readonly submitLabel?: string;
   readonly variantClassName?: string;
   readonly onDraftChange: (value: string) => void;
+  readonly onAttach?: () => Promise<void>;
+  readonly onRemoveAttachment?: (attachmentId: string) => void;
   readonly onSubmit: () => Promise<void>;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
   const submitting = useRef(false);
+  const attaching = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const sendDisabled = disabled || isSubmitting || draft.trim() === "";
+  const [isAttaching, setIsAttaching] = useState(false);
+  const sendDisabled =
+    disabled || isSubmitting || (draft.trim() === "" && pendingAttachments.length === 0);
 
   useEffect(() => {
     const element = input.current;
@@ -94,8 +107,27 @@ export function MessageComposer({
     <form
       className={variantClassName === undefined ? "composer" : `composer ${variantClassName}`}
       onSubmit={submit}
-      aria-busy={isSubmitting}
+      aria-busy={isSubmitting || isAttaching}
     >
+      {pendingAttachments.length > 0 && (
+        <ul className="composer-attachments" aria-label="Attached files">
+          {pendingAttachments.map((attachment) => (
+            <li key={attachment.id} className="composer-attachment">
+              <span>{attachment.fileName}</span>
+              {onRemoveAttachment !== undefined && (
+                <button
+                  type="button"
+                  className="composer-attachment-remove"
+                  aria-label={`Remove ${attachment.fileName}`}
+                  onClick={() => onRemoveAttachment(attachment.id)}
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="composer-input">
         <label className="sr-only" htmlFor={inputId}>
           {inputLabel}
@@ -117,6 +149,28 @@ export function MessageComposer({
           <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
         </p>
       </div>
+      {onAttach !== undefined && (
+        <button
+          type="button"
+          className="composer-attach"
+          disabled={disabled || attachDisabled || isAttaching}
+          onClick={() => {
+            if (attaching.current) return;
+            attaching.current = true;
+            setIsAttaching(true);
+            void (async () => {
+              try {
+                await onAttach();
+              } finally {
+                attaching.current = false;
+                setIsAttaching(false);
+              }
+            })();
+          }}
+        >
+          Attach
+        </button>
+      )}
       <button type="submit" disabled={sendDisabled}>
         {submitLabel}
       </button>

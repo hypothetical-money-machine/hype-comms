@@ -15,13 +15,17 @@ import type {
   ChatSessionState,
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
+  Attachment,
+  ConversationFilesResponse,
   ConversationMutationResponse,
   CreateTaskOperation,
   CreateChannelOperation,
   DirectConversationRequest,
+  ConversationFilesQuery,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
+  ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
@@ -30,6 +34,7 @@ import type {
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
+  OpenAttachmentResponse,
   NotificationAction,
   NotificationActionAcknowledgement,
   NotificationActionDrainRequest,
@@ -211,6 +216,15 @@ export interface DesktopApi
     emoji: ReactionEmoji,
   ) => Promise<RemoveReactionResponse>;
   readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
+  readonly listConversationFiles: (
+    conversationId: string,
+    input?: Partial<ConversationFilesQuery>,
+  ) => Promise<ConversationFilesResponse>;
+  readonly listMessageAttachments: (
+    messageIds: readonly string[],
+  ) => Promise<ListMessageAttachmentsResponse>;
+  readonly chooseAndUploadConversationFile: (conversationId: string) => Promise<Attachment | null>;
+  readonly openConversationFile: (attachmentId: string) => Promise<OpenAttachmentResponse>;
   readonly listConversationTasks: (
     conversationId: string,
     input?: Partial<TaskListQuery>,
