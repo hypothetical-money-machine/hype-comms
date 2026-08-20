@@ -2136,7 +2136,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#assertNoMembershipRepair();
     if (authorized !== true) return false;
     for (const message of parsedMessages) {
-      this.#messages.set(message.id, preferRetainedMessage(this.#messages.get(message.id), message));
+      this.#messages.set(
+        message.id,
+        preferRetainedMessage(this.#messages.get(message.id), message),
+      );
     }
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
