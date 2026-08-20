@@ -1,8 +1,8 @@
--- Scaffolding for a later delete-in-window retract. The original table forbade any
--- deleted_at/edited_at write (`messages_check`). Lift deleted_at only so a later
--- retract can tombstone the row in place. edited_at stays forbidden — this is not
--- editing. Do not relax the body CHECK: messageBodySchema still requires a
--- non-blank body, and emptying the body is not the retract.
+-- Delete-in-window retract. The original table forbade any deleted_at/edited_at
+-- write (`messages_check`). Lift deleted_at only so DELETE /v1/messages/:id can
+-- tombstone the row in place. edited_at stays forbidden — this is not editing.
+-- Do not relax the body CHECK: messageBodySchema still requires a non-blank body,
+-- and emptying the body is not the retract.
 
 ALTER TABLE messages
   DROP CONSTRAINT messages_check;

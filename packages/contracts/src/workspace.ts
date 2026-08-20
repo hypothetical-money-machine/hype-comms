@@ -468,8 +468,9 @@ export const sendMessageResponseSchema = z
  * `MESSAGE_RETRACT_WINDOW_MS` only to show the control. Other author → 403.
  * After five minutes → 409; the row stays immutable. Success keeps the row, sets
  * `deletedAt`, bumps version, and leaves `body` intact. Attachments disappear with
- * this tombstone. Retry returns the same tombstone. Live fanout is `message.retracted`
- * to clients that send {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
+ * this tombstone. Already retracted → idempotent 200 with the same tombstone (not 409).
+ * Live fanout is `message.retracted` to clients that send
+ * {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
  */
 export const retractMessageResponseSchema = z
   .object({

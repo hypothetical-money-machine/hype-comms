@@ -2673,6 +2673,50 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(downloaded.bytes.toString()).toBe("channel notes");
   });
 
+  it("hides attachment metadata and bytes after the parent message is retracted", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Sharing the brief"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    const before = await repository.messageById(member, sent.message.id);
+    expect(before.attachments.map((attachment) => attachment.id)).toEqual([attachmentId]);
+
+    const retracted = await repository.retractMessage(owner, sent.message.id);
+    expect(retracted.message).toMatchObject({
+      id: sent.message.id,
+      body: "Sharing the brief",
+      deletedAt: expect.any(String),
+    });
+    expect(retracted).not.toHaveProperty("attachments");
+
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.listMessageAttachments(member, [sent.message.id])).rejects.toMatchObject(
+      {
+        statusCode: 404,
+        code: "NOT_FOUND",
+      } satisfies Partial<ApiError>,
+    );
+    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.some((item) => item.id === sent.message.id)).toBe(false);
+    expect(history.attachments.some((attachment) => attachment.id === attachmentId)).toBe(false);
+
+    const files = await repository.listConversationFiles(member, generalId, undefined, 50);
+    expect(files.files.some((file) => file.id === attachmentId)).toBe(false);
+
+    const search = await repository.searchMessages(member, "Sharing the brief", undefined, 50);
+    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
+  });
+
   it("attaches a ready file to a DM and hides it from a third member", async () => {
     const dm = await repository.createDirectConversation(owner, { memberId });
     const conversationId = dm.conversation.conversation.id;

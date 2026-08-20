@@ -1450,11 +1450,13 @@ export class WorkspaceRepository {
       throw new ApiError(404, "NOT_FOUND", "Message not found");
     }
     const attachments = await this.pool.query<AttachmentRow>(
-      `SELECT *
-         FROM attachments
-        WHERE message_id = $1
-          AND status = 'ready'
-        ORDER BY created_at, id`,
+      `SELECT attachment.*
+         FROM attachments AS attachment
+         JOIN messages AS parent ON parent.id = attachment.message_id
+        WHERE attachment.message_id = $1
+          AND attachment.status = 'ready'
+          AND parent.deleted_at IS NULL
+        ORDER BY attachment.created_at, attachment.id`,
       [messageId],
     );
     return messageByIdResponseSchema.parse({
@@ -1733,6 +1735,7 @@ export class WorkspaceRepository {
           WHERE message.id = ANY($1::uuid[])
             AND message.workspace_id = $2
             AND conversation.workspace_id = $2
+            AND message.deleted_at IS NULL
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
