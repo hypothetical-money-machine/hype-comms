@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -27,6 +28,7 @@ import {
   listMembersResponseSchema,
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
+  retractMessageResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
   messageSearchResponseSchema,
@@ -58,6 +60,7 @@ import {
   type ListMessageReactionsResponse,
   type MessageHistoryResponse,
   type MessageByIdResponse,
+  type RetractMessageResponse,
   type MessageThreadRequest,
   type MessageThreadResponse,
   type MessageSearchQuery,
@@ -87,6 +90,7 @@ const CLIENT_CAPABILITIES = [
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -342,6 +346,14 @@ export class WorkspaceTransport {
       { method: "GET" },
     );
     return messageByIdResponseSchema.parse(await this.#payload(response));
+  }
+
+  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/messages/${encodeURIComponent(messageId)}`).href,
+      { method: "DELETE" },
+    );
+    return retractMessageResponseSchema.parse(await this.#payload(response));
   }
 
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {

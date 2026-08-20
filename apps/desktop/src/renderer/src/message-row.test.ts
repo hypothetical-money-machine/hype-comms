@@ -217,4 +217,14 @@ describe("visibleTimelineMessages", () => {
       message,
     ]);
   });
+
+  it("hides retracted messages so the stored body does not stay on the timeline", () => {
+    expect(
+      visibleTimelineMessages(
+        [{ ...message, deletedAt: NOW, version: 2 }],
+        message.conversationId,
+        true,
+      ),
+    ).toEqual([]);
+  });
 });

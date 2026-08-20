@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
 import {
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -111,6 +112,7 @@ describe("watch", () => {
             REACTION_EVENTS_CAPABILITY,
             READ_STATE_EVENTS_CAPABILITY,
             PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+            MESSAGE_RETRACT_EVENTS_CAPABILITY,
           ].join(","),
         );
         return jsonResponse({

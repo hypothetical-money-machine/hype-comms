@@ -582,6 +582,25 @@ async function decryptRows<T>(
   return values;
 }
 
+export function tombstoneMessage(
+  message: Message,
+  event: Extract<WorkspaceEvent, { type: "message.retracted" }>,
+): Message {
+  return messageSchema.parse({
+    ...message,
+    deletedAt: event.payload.deletedAt,
+    version: event.entityVersion,
+    updatedAt: event.payload.deletedAt,
+  });
+}
+
+export function preferRetainedMessage(current: Message | undefined, incoming: Message): Message {
+  if (current === undefined) return incoming;
+  if (current.deletedAt !== null && incoming.deletedAt === null) return current;
+  if (incoming.version < current.version) return current;
+  return incoming;
+}
+
 function messageRow(message: Message, encrypted: ReadonlyMap<string, CacheCiphertext>): MessageRow {
   return {
     id: message.id,
@@ -1107,14 +1126,49 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
     } else if (parsed.type === "message.retracted") {
-      // Scaffolding: accept the tombstone type and advance the cursor. Delete-in-window will
-      // apply the retraction. Do not empty the body — messageBodySchema forbids a blank body.
+      const currentMessage = await this.#message(parsed.payload.messageId);
+      const currentSummary = await this.#conversation(parsed.conversationId);
+      const source =
+        currentMessage ??
+        (currentSummary?.lastMessage?.id === parsed.payload.messageId
+          ? currentSummary.lastMessage
+          : null);
+      const tombstone = source === null ? null : tombstoneMessage(source, parsed);
+      const nextSummary =
+        currentSummary === null
+          ? null
+          : conversationSummarySchema.parse({
+              ...currentSummary,
+              lastMessage:
+                currentSummary.lastMessage?.id === parsed.payload.messageId
+                  ? (tombstone ?? currentSummary.lastMessage)
+                  : currentSummary.lastMessage,
+            });
+      const encrypted = await encryptRecords(this.#crypto, [
+        ...(tombstone === null ? [] : [protectedRecord("message", tombstone.id, tombstone)]),
+        ...(nextSummary === null
+          ? []
+          : [protectedRecord("conversation", nextSummary.conversation.id, nextSummary)]),
+      ]);
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
+        this.#database.messages,
+        this.#database.conversations,
         this.#database.events,
         async () => {
+          if (tombstone !== null) {
+            await this.#database.messages.put(messageRow(tombstone, encrypted));
+          }
           await this.#recordEvent(parsed, signal);
+          if (nextSummary !== null) {
+            await this.#database.conversations.put({
+              id: nextSummary.conversation.id,
+              kind: nextSummary.conversation.kind,
+              updatedAt: nextSummary.conversation.updatedAt,
+              value: encryptedValue(encrypted, "conversation", nextSummary.conversation.id),
+            });
+          }
         },
       );
     } else {
@@ -1286,8 +1340,24 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             throw new Error("Membership repair must complete before mutating the cache");
           }
           if (conversation === undefined) return false;
+          const existingRows = await this.#database.messages.bulkGet(
+            parsed.map((message) => message.id),
+          );
+          const existing = await decryptRows(
+            this.#crypto,
+            "message",
+            existingRows.filter((row): row is NonNullable<typeof row> => row !== undefined),
+            existingRows.flatMap((row) => (row === undefined ? [] : [row.id])),
+            (value) => messageSchema.parse(value),
+          );
+          const existingById = new Map(existing.map((message) => [message.id, message]));
           await this.#database.messages.bulkPut(
-            parsed.map((message) => messageRow(message, encrypted)),
+            parsed
+              .filter((message) => {
+                const current = existingById.get(message.id);
+                return current === undefined || preferRetainedMessage(current, message) === message;
+              })
+              .map((message) => messageRow(message, encrypted)),
           );
           if (parsedReactions !== undefined) {
             const messageIds = parsed.map((message) => message.id);
@@ -1633,6 +1703,18 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     }
   }
 
+  async #message(id: string): Promise<Message | null> {
+    const row = await this.#database.messages.get(id);
+    if (row === undefined) return null;
+    return (
+      (
+        await decryptRows(this.#crypto, "message", [row], [id], (value) =>
+          messageSchema.parse(value),
+        )
+      )[0] ?? null
+    );
+  }
+
   async #conversation(id: string | null): Promise<ConversationSummary | null> {
     if (id === null) return null;
     const row = await this.#database.conversations.get(id);
@@ -1898,7 +1980,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#syncCursor = parsed.workspaceSequence;
     this.#lastSyncedAt = new Date().toISOString();
     if (parsed.type === "message.created") {
-      this.#messages.set(parsed.payload.message.id, parsed.payload.message);
+      this.#messages.set(
+        parsed.payload.message.id,
+        preferRetainedMessage(
+          this.#messages.get(parsed.payload.message.id),
+          parsed.payload.message,
+        ),
+      );
       this.#outbox.delete(parsed.payload.message.clientMessageId);
       if (this.#snapshot !== null && parsed.conversationId !== null) {
         const conversations = new Map(
@@ -1940,7 +2028,29 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // WorkspaceRuntime replaces the server-derived member list because `payload.member` cannot
       // express a removal. Advancing the cursor above keeps this event idempotent until then.
     } else if (parsed.type === "message.retracted") {
-      // Cursor-only until delete-in-window applies the tombstone. Do not empty the body.
+      const current = this.#messages.get(parsed.payload.messageId);
+      const lastMessage = this.#snapshot?.conversations.find(
+        (summary) => summary.conversation.id === parsed.conversationId,
+      )?.lastMessage;
+      const source =
+        current ?? (lastMessage?.id === parsed.payload.messageId ? lastMessage : undefined);
+      if (source !== undefined) {
+        const tombstone = tombstoneMessage(source, parsed);
+        this.#messages.set(tombstone.id, tombstone);
+        if (this.#snapshot !== null && parsed.conversationId !== null) {
+          const conversations = new Map(
+            this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
+          );
+          const summary = conversations.get(parsed.conversationId);
+          if (summary !== undefined && summary.lastMessage?.id === tombstone.id) {
+            conversations.set(parsed.conversationId, { ...summary, lastMessage: tombstone });
+            this.#snapshot = {
+              ...this.#snapshot,
+              conversations: [...conversations.values()],
+            };
+          }
+        }
+      }
     } else if (this.#snapshot !== null && parsed.conversationId !== null) {
       const conversations = new Map(
         this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
@@ -2025,7 +2135,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     );
     this.#assertNoMembershipRepair();
     if (authorized !== true) return false;
-    for (const message of parsedMessages) this.#messages.set(message.id, message);
+    for (const message of parsedMessages) {
+      this.#messages.set(message.id, preferRetainedMessage(this.#messages.get(message.id), message));
+    }
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
       for (const [id, reaction] of this.#reactions) {

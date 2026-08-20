@@ -461,6 +461,32 @@ export const sendMessageResponseSchema = z
   })
   .strict();
 
+/**
+ * `DELETE /v1/messages/:id` — author-only delete-in-window retract.
+ *
+ * No request body. Scope `messages:write`. Server clock vs `createdAt`; UI may use
+ * `MESSAGE_RETRACT_WINDOW_MS` only to show the control. Other author → 403.
+ * After five minutes → 409; the row stays immutable. Success keeps the row, sets
+ * `deletedAt`, bumps version, and leaves `body` intact. Attachments disappear with
+ * this tombstone. Retry returns the same tombstone. Live fanout is `message.retracted`
+ * to clients that send {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
+ */
+export const retractMessageResponseSchema = z
+  .object({
+    message: messageSchema,
+    syncCursor: sequenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.message.deletedAt === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["message", "deletedAt"],
+        message: "A retracted message must include deletedAt",
+      });
+    }
+  });
+
 export const advanceReadCursorRequestSchema = z
   .object({
     lastReadMessageId: entityIdSchema,
@@ -597,10 +623,10 @@ export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.exte
 });
 
 /**
- * Tombstone for a later delete-in-window retract. Payload identifies the message and when it
+ * Tombstone for delete-in-window retract. Payload identifies the message and when it
  * disappeared. It does not carry a body: retract is not an edit, and the message body schema
- * forbids a blank body. Shipped APIs do not emit this event yet. Clients that omit
- * {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} never receive it; older desktops ignore unknown types.
+ * forbids a blank body. Clients that omit {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} never
+ * receive it; older desktops ignore unknown types.
  */
 export const messageRetractedEventSchema = workspaceEventBaseSchema.extend({
   type: z.literal("message.retracted"),
@@ -819,6 +845,7 @@ export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;
 export type SendConversationMessageRequest = z.infer<typeof sendConversationMessageRequestSchema>;
 export type SendMessageOperation = z.infer<typeof sendMessageOperationSchema>;
 export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
+export type RetractMessageResponse = z.infer<typeof retractMessageResponseSchema>;
 export type AdvanceReadCursorRequest = z.infer<typeof advanceReadCursorRequestSchema>;
 export type AdvanceReadCursorResponse = z.infer<typeof advanceReadCursorResponseSchema>;
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;

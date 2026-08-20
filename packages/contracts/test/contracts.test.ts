@@ -5,6 +5,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MESSAGE_RETRACT_WINDOW_MS,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -44,6 +45,7 @@ import {
   moveTaskOperationSchema,
   reactionEmojiSchema,
   reactionSchema,
+  retractMessageResponseSchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
@@ -329,6 +331,35 @@ describe("entity contracts", () => {
         updatedAt: NOW,
       }),
     ).toMatchObject({ body: "Hello" });
+    expect(MESSAGE_RETRACT_WINDOW_MS).toBe(5 * 60 * 1_000);
+    const retracted = {
+      id: MESSAGE_ID,
+      conversationId: CONVERSATION_ID,
+      conversationSequence: "42",
+      version: 2,
+      clientMessageId: MESSAGE_ID,
+      authorId: USER_ID,
+      threadRootId: null,
+      body: "still stored",
+      bodyFormat: "hype_comms_markdown_v1" as const,
+      editedAt: null,
+      deletedAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    expect(messageSchema.parse(retracted)).toMatchObject({
+      body: "still stored",
+      deletedAt: NOW,
+    });
+    expect(
+      retractMessageResponseSchema.parse({ message: retracted, syncCursor: "44" }),
+    ).toMatchObject({ message: { deletedAt: NOW, body: "still stored" }, syncCursor: "44" });
+    expect(() =>
+      retractMessageResponseSchema.parse({
+        message: { ...retracted, deletedAt: null },
+        syncCursor: "44",
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown fields so wire-shape changes are deliberate", () => {
