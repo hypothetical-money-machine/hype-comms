@@ -519,20 +519,39 @@ describeWithPostgres("WorkspaceRepository", () => {
         }),
         expect.objectContaining({
           type: "message.retracted",
-          conversationId: direct.conversation.conversation.id,
-          conversationSequence: dm.message.conversationSequence,
-          payload: {
-            messageId: dm.message.id,
-            deletedAt: dmRetract.message.deletedAt,
-          },
-        }),
-        expect.objectContaining({
-          type: "message.retracted",
           conversationId: generalId,
           conversationSequence: reply.message.conversationSequence,
           payload: {
             messageId: reply.message.id,
             deletedAt: replyRetract.message.deletedAt,
+          },
+        }),
+      ]),
+    );
+    expect(
+      retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
+    ).toBe(false);
+
+    const dmFanout = await repository.sync(
+      member,
+      dm.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(dmFanout.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "message.retracted",
+          conversationId: direct.conversation.conversation.id,
+          conversationSequence: dm.message.conversationSequence,
+          payload: {
+            messageId: dm.message.id,
+            deletedAt: dmRetract.message.deletedAt,
           },
         }),
       ]),

@@ -1,27 +1,10 @@
 -- Authors may retract their own message within five minutes. The original table
--- forbade any deleted_at/edited_at write; replace that immutability check with
--- a retract-only contract: edits stay forbidden, a retracted body must be empty,
--- and the row stays in place as a tombstone.
+-- forbade any deleted_at/edited_at write (`messages_check`); replace that
+-- immutability check with a retract-only contract: edits stay forbidden, a
+-- retracted body must be empty, and the row stays in place as a tombstone.
 
-DO $$
-DECLARE
-  constraint_name text;
-BEGIN
-  FOR constraint_name IN
-    SELECT con.conname
-      FROM pg_constraint AS con
-      JOIN pg_class AS rel ON rel.oid = con.conrelid
-     WHERE rel.relname = 'messages'
-       AND con.contype = 'c'
-       AND pg_get_constraintdef(con.oid) IN (
-         'CHECK ((edited_at IS NULL AND deleted_at IS NULL))',
-         'CHECK ((edited_at IS NULL))'
-       )
-  LOOP
-    EXECUTE format('ALTER TABLE messages DROP CONSTRAINT %I', constraint_name);
-  END LOOP;
-END
-$$;
+ALTER TABLE messages
+  DROP CONSTRAINT messages_check;
 
 ALTER TABLE messages
   DROP CONSTRAINT messages_body_check;
