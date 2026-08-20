@@ -143,20 +143,6 @@ export const messageBodySchema = z
   .refine((body) => body.trim().length > 0, "Message body cannot be blank")
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 
-const messageWireBodySchema = z
-  .string()
-  .max(4_000)
-  .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
-
-/**
- * Author-only retract window for `DELETE /v1/messages/:id`.
- *
- * The server compares `clock_timestamp()` to `created_at`, not the client's clock. After this
- * window the row is immutable. This constant is for UI enablement only; `403` / `409` are
- * authoritative. Disappearing-TTL purge of the tombstone is a later slice, not this contract.
- */
-export const MESSAGE_RETRACT_WINDOW_MS = 5 * 60 * 1_000;
-
 export const messageSchema = z
   .object({
     id: entityIdSchema,
@@ -166,29 +152,14 @@ export const messageSchema = z
     clientMessageId: clientMessageIdSchema,
     authorId: entityIdSchema.nullable(),
     threadRootId: entityIdSchema.nullable(),
-    body: messageWireBodySchema,
+    body: messageBodySchema,
     bodyFormat: messageBodyFormatSchema,
     editedAt: isoDateTimeSchema.nullable(),
+    // Reserved for a later delete-in-window retract. Shipped APIs never set this.
     deletedAt: isoDateTimeSchema.nullable(),
     ...timestampsShape,
   })
-  .strict()
-  .superRefine((message, context) => {
-    if (message.deletedAt === null && message.body.trim().length === 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["body"],
-        message: "Message body cannot be blank",
-      });
-    }
-    if (message.deletedAt !== null && message.body.length !== 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["body"],
-        message: "A retracted message cannot retain a body",
-      });
-    }
-  });
+  .strict();
 
 export const sendMessageRequestSchema = z
   .object({

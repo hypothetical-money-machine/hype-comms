@@ -1,32 +1,15 @@
--- Authors may retract their own message within five minutes. The original table
--- forbade any deleted_at/edited_at write (`messages_check`); replace that
--- immutability check with a retract-only contract: edits stay forbidden, a
--- retracted body must be empty, and the row stays in place as a tombstone.
+-- Scaffolding for a later delete-in-window retract. The original table forbade any
+-- deleted_at/edited_at write (`messages_check`). Lift deleted_at only so a later
+-- retract can tombstone the row in place. edited_at stays forbidden — this is not
+-- editing. Do not relax the body CHECK: messageBodySchema still requires a
+-- non-blank body, and emptying the body is not the retract.
 
 ALTER TABLE messages
   DROP CONSTRAINT messages_check;
 
 ALTER TABLE messages
-  DROP CONSTRAINT messages_body_check;
-
-ALTER TABLE messages
   ADD CONSTRAINT messages_edited_at_forbidden
   CHECK (edited_at IS NULL);
-
-ALTER TABLE messages
-  ADD CONSTRAINT messages_body_check
-  CHECK (
-    (
-      deleted_at IS NULL
-      AND char_length(body) BETWEEN 1 AND 4000
-      AND char_length(btrim(body)) > 0
-    )
-    OR
-    (
-      deleted_at IS NOT NULL
-      AND body = ''
-    )
-  );
 
 ALTER TABLE sync_events
   DROP CONSTRAINT sync_events_event_type_check;

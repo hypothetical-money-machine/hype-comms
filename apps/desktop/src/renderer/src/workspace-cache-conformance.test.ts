@@ -187,12 +187,12 @@ const messageCreatedEvent: WorkspaceEvent = {
 
 const messageRetractedEvent: WorkspaceEvent = {
   version: 1,
-  id: "10000000-0000-4000-8000-000000000068",
+  id: "10000000-0000-4000-8000-000000000066",
   type: "message.retracted",
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "13",
+  workspaceSequence: "9",
   conversationSequence: "2",
   entityVersion: 2,
   delivery: "at_least_once",
@@ -515,6 +515,21 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.syncCursor).toBe("7");
   });
 
+  it("records message.retracted without emptying the cached body", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
+
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("9");
+    expect(state.messages).toEqual([messageSequence2]);
+    expect(state.messages[0]?.body).toBe("Message 2");
+    expect(state.messages[0]?.deletedAt).toBeNull();
+  });
+
   it("counts an unread mention once and rejects the duplicate event", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
@@ -528,40 +543,6 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(alpha?.unreadCount).toBe(1);
     expect(alpha?.mentionCount).toBe(1);
     expect(state.messages).toHaveLength(1);
-  });
-
-  it("applies a message.retracted tombstone and refuses to resurrect the body", async () => {
-    const cache = create();
-    await cache.replaceSnapshot(snapshot, [messageSequence2]);
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
-
-    const retracted = await cache.load();
-    expect(retracted.messages).toEqual([
-      expect.objectContaining({
-        id: MESSAGE_SEQUENCE_2_ID,
-        body: "",
-        deletedAt: NOW,
-        version: 2,
-      }),
-    ]);
-    const alpha = retracted.bootstrap?.conversations.find(
-      (summary) => summary.conversation.id === ALPHA_ID,
-    );
-    expect(alpha?.lastMessage).toMatchObject({
-      id: MESSAGE_SEQUENCE_2_ID,
-      body: "",
-      deletedAt: NOW,
-    });
-
-    await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2])).resolves.toBe(true);
-    const afterHistory = await cache.load();
-    expect(afterHistory.messages[0]).toMatchObject({
-      id: MESSAGE_SEQUENCE_2_ID,
-      body: "",
-      deletedAt: NOW,
-    });
   });
 
   it("projects the canonical counts carried by read_cursor.updated", async () => {

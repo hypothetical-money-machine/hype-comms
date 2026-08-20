@@ -19,7 +19,7 @@ export type RealtimePrincipal =
       readonly announcementChannels?: boolean;
       /** False/absent for tickets predating recipient-specific thread notification reasons. */
       readonly participatedThreadNotifications?: boolean;
-      /** False/absent for tickets issued to clients predating message retract events. */
+      /** False/absent for tickets predating message.retracted sync events. */
       readonly messageRetractEvents?: boolean;
     }
   | {
@@ -38,7 +38,7 @@ export type RealtimePrincipal =
       readonly announcementChannels?: boolean;
       /** False/absent for tickets predating recipient-specific thread notification reasons. */
       readonly participatedThreadNotifications?: boolean;
-      /** False/absent for tickets issued to clients predating message retract events. */
+      /** False/absent for tickets predating message.retracted sync events. */
       readonly messageRetractEvents?: boolean;
     };
 

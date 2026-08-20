@@ -318,13 +318,6 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     );
   });
 
-  app.delete("/messages/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
-    const { id } = parameters(request.params);
-    return repository.retractMessage(identity, id);
-  });
-
   app.get("/search", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");

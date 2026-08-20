@@ -27,6 +27,7 @@ import {
   type WorkspaceRepositoryHooks,
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
+import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -426,183 +427,6 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.sendMessage(owner, generalId, message(clientMessageId, "changed @member")),
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
-  });
-
-  it("lets an author retract their own message within five minutes and fans the tombstone out", async () => {
-    const secret = `bot token ${randomUUID()}`;
-    const channel = await repository.sendMessage(owner, generalId, {
-      ...message(randomUUID(), secret),
-      mentionedUserIds: [],
-    });
-    const direct = await repository.createDirectConversation(owner, { memberId });
-    const dm = await repository.sendMessage(owner, direct.conversation.conversation.id, {
-      ...message(randomUUID(), secret),
-      mentionedUserIds: [],
-    });
-    const root = await repository.sendMessage(owner, generalId, {
-      ...message(randomUUID(), "thread root stays"),
-      mentionedUserIds: [],
-    });
-    const reply = await repository.sendMessage(owner, generalId, {
-      ...message(randomUUID(), secret),
-      threadRootId: root.message.id,
-      mentionedUserIds: [],
-    });
-
-    const [channelRetract, channelReplay] = await Promise.all([
-      repository.retractMessage(owner, channel.message.id),
-      repository.retractMessage(owner, channel.message.id),
-    ]);
-    expect(channelReplay).toEqual(channelRetract);
-    expect(channelRetract.message).toMatchObject({
-      id: channel.message.id,
-      conversationId: generalId,
-      conversationSequence: channel.message.conversationSequence,
-      body: "",
-      deletedAt: expect.any(String),
-    });
-    expect(channelRetract.message.deletedAt).not.toBeNull();
-
-    const dmRetract = await repository.retractMessage(owner, dm.message.id);
-    const replyRetract = await repository.retractMessage(owner, reply.message.id);
-
-    await expect(repository.retractMessage(member, channel.message.id)).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
-    } satisfies Partial<ApiError>);
-
-    const history = await repository.history(member, generalId, undefined, 50);
-    const tombstoned = history.messages.find((item) => item.id === channel.message.id);
-    expect(tombstoned).toMatchObject({ body: "", deletedAt: channelRetract.message.deletedAt });
-    expect(history.messages.some((item) => item.body.includes("bot token"))).toBe(false);
-
-    const thread = await repository.thread(member, root.message.id, undefined, 50);
-    expect(thread.root.body).toBe("thread root stays");
-    expect(thread.replies).toEqual([
-      expect.objectContaining({
-        id: reply.message.id,
-        body: "",
-        deletedAt: replyRetract.message.deletedAt,
-      }),
-    ]);
-
-    const search = await repository.searchMessages(member, "bot token", undefined, 50);
-    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
-
-    const afterCreate = channel.syncCursor;
-    const legacy = await repository.sync(observer, afterCreate, 100);
-    expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
-    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
-
-    const capable = await repository.sync(
-      observer,
-      afterCreate,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
-    const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
-    expect(retractEvents).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "message.retracted",
-          conversationId: generalId,
-          conversationSequence: channel.message.conversationSequence,
-          payload: {
-            messageId: channel.message.id,
-            deletedAt: channelRetract.message.deletedAt,
-          },
-        }),
-        expect.objectContaining({
-          type: "message.retracted",
-          conversationId: generalId,
-          conversationSequence: reply.message.conversationSequence,
-          payload: {
-            messageId: reply.message.id,
-            deletedAt: replyRetract.message.deletedAt,
-          },
-        }),
-      ]),
-    );
-    expect(
-      retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
-    ).toBe(false);
-
-    const dmFanout = await repository.sync(
-      member,
-      dm.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
-    expect(dmFanout.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "message.retracted",
-          conversationId: direct.conversation.conversation.id,
-          conversationSequence: dm.message.conversationSequence,
-          payload: {
-            messageId: dm.message.id,
-            deletedAt: dmRetract.message.deletedAt,
-          },
-        }),
-      ]),
-    );
-    expect(
-      retractEvents.some(
-        (event) => "message" in event.payload && typeof event.payload.message === "object",
-      ),
-    ).toBe(false);
-
-    const stored = await pool.query<{ body: string; deleted_at: Date | string | null }>(
-      `SELECT body, deleted_at FROM messages WHERE id = $1`,
-      [channel.message.id],
-    );
-    expect(stored.rows[0]).toMatchObject({ body: "", deleted_at: expect.anything() });
-    expect(stored.rows[0]?.deleted_at).not.toBeNull();
-  });
-
-  it("rejects retracting another member's message and an author retract after five minutes", async () => {
-    const own = await repository.sendMessage(owner, generalId, {
-      ...message(randomUUID(), "still secret after the window"),
-      mentionedUserIds: [],
-    });
-    const theirs = await repository.sendMessage(member, generalId, {
-      ...message(randomUUID(), "member wrote this"),
-      mentionedUserIds: [],
-    });
-
-    await expect(repository.retractMessage(owner, theirs.message.id)).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
-    } satisfies Partial<ApiError>);
-
-    await pool.query(
-      `UPDATE messages
-          SET created_at = clock_timestamp() - interval '5 minutes 1 second',
-              updated_at = created_at
-        WHERE id = $1`,
-      [own.message.id],
-    );
-    await expect(repository.retractMessage(owner, own.message.id)).rejects.toMatchObject({
-      statusCode: 409,
-      code: "CONFLICT",
-    } satisfies Partial<ApiError>);
-
-    const persisted = await repository.messageById(member, own.message.id);
-    expect(persisted.message).toMatchObject({
-      id: own.message.id,
-      body: "still secret after the window",
-      deletedAt: null,
-    });
   });
 
   it("projects roots in history and paginates replies inside one thread", async () => {
@@ -1467,6 +1291,52 @@ describeWithPostgres("WorkspaceRepository", () => {
         }),
       ]),
     );
+  });
+
+  it("hides message.retracted from clients that did not negotiate the capability", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "retract capability target"),
+      mentionedUserIds: [],
+    });
+    const deletedAt = "2026-08-20T17:00:00.000Z";
+    const client = await pool.connect();
+    try {
+      await insertSyncEvent(client, {
+        workspaceId,
+        actorUserId: ownerId,
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        entityVersion: 2,
+        payload: { messageId: sent.message.id, deletedAt },
+      });
+    } finally {
+      client.release();
+    }
+
+    const legacy = await repository.sync(observer, sent.syncCursor, 100);
+    expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
+    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+
+    const capable = await repository.sync(
+      observer,
+      sent.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(capable.events).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        payload: { messageId: sent.message.id, deletedAt },
+      }),
+    ]);
   });
 
   it("serializes the per-member reaction cap at its concurrent boundary", async () => {
