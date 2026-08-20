@@ -182,10 +182,11 @@ lane—never at workflow, job-wide, repository-variable, or environment level, w
 on the macOS, Windows, and Linux jobs at once and ship unproven platforms enabled in the same
 release.
 
-macOS signing/notarization is configured. Windows Authenticode is blocked on procuring a Windows
-code-signing certificate and publisher identity; no matching repository secrets or variables exist
-today. Once procured, add protected certificate credentials, configure electron-builder with the
-publisher subject, and make `Get-AuthenticodeSignature` validate both the installed executable and
-NSIS installer before upload. Linux detached signing, SBOM, and provenance are also still open.
+macOS signing/notarization is configured. Windows Authenticode is wired for Azure Trusted Signing
+and stays inert (unsigned publish) until every secret and variable in
+[windows-signing.md](windows-signing.md) exists. A partial set, or a configured job that fails to
+sign, publishes nothing. After that, `Get-AuthenticodeSignature` validates both the unpacked
+`hype-comms.exe` and each NSIS installer before upload. Linux detached signing, SBOM, and
+provenance are also still open.
 
 Do not describe the current cross-platform feed as fully signed until those independent gates pass.

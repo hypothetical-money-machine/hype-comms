@@ -661,10 +661,11 @@ feed. Its platform-signature status is:
 - macOS application bundles are Developer ID signed, notarized, stapled, and independently
   verified by the release workflow for arm64 and x64. The DMG container itself still needs
   fresh-download Gatekeeper evidence.
-- Windows x64 and ARM64 NSIS artifacts are currently unsigned. Authenticode requires an externally
-  procured code-signing certificate, its publisher subject, protected runner credentials, and an
-  independent `Get-AuthenticodeSignature` release gate. Until then Windows updates rely on HTTPS
-  plus the manifest checksum and do not meet the hosted target.
+- Windows x64 and ARM64 NSIS artifacts stay unsigned until Azure Trusted Signing secrets and the
+  exact publisher subject are present. The lane is inert without those values and fail-closed once
+  they exist: `Get-AuthenticodeSignature` must report Valid on each installer and unpacked
+  `hype-comms.exe` before upload. See [windows-signing.md](windows-signing.md). 0.1.29 clients have
+  no `publisherName` and will still accept the first signed update.
 - Linux x64 and ARM64 AppImage and Debian packages carry the updater manifest's SHA-512 digest but
   do not yet have a detached GPG signature or SBOM gate.
 

@@ -18,6 +18,8 @@ on:
       - .node-version
       - .npmrc
       - scripts/verify-desktop-package.mjs
+      - scripts/require-windows-signing-env.mjs
+      - scripts/verify-windows-release.mjs
       - scripts/build-macos-notification-authorization.mjs
       - scripts/capture-macos-native-notification.mjs
       - scripts/capture-macos-native-notification.test.mjs
@@ -36,6 +38,8 @@ on:
       - .node-version
       - .npmrc
       - scripts/verify-desktop-package.mjs
+      - scripts/require-windows-signing-env.mjs
+      - scripts/verify-windows-release.mjs
       - scripts/build-macos-notification-authorization.mjs
       - scripts/capture-macos-native-notification.mjs
       - scripts/capture-macos-native-notification.test.mjs

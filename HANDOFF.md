@@ -78,9 +78,10 @@ found the corresponding hole:
   (`accepted / Notarized Developer ID`, verified on both architectures), but `spctl` rejects the
   DMG. Impact on a fresh browser download is untested; downloading the first published DMG settles
   it. Fix, if needed, is notarizing the DMG via an `afterAllArtifactBuild` hook.
-- **Windows installers are unsigned.** Updates there rest on HTTPS plus the manifest checksum
-  rather than an independent signature, because electron-updater skips Authenticode verification
-  when no publisher name is recorded. macOS has both. Closing it needs a Windows certificate.
+- **Windows Authenticode is wired and inert until Azure Trusted Signing identity exists.** The
+  release lane keeps publishing unsigned NSIS artifacts. Ops must add the secrets and publisher
+  subject in `docs/windows-signing.md` before signing turns on. 0.1.29 clients can still take the
+  first signed update because electron-updater skips Authenticode when no publisher is recorded.
 - **`scripts/test-database.sh` exit code on interrupt** is correct in the main window but can still
   report 0 if the interrupt lands where npm absorbs the signal after the suite finished. Cleanup is
   reliable in every tested path; no container leaks.

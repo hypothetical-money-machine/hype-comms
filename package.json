@@ -53,7 +53,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
-    "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs"
+    "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
+    "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

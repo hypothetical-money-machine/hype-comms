@@ -362,11 +362,25 @@ which is deliberate: an unsigned macOS build cannot auto-update at all, because 
 not apply an update it cannot match to the running app's code signature. A red macOS job therefore
 means "no macOS build shipped", while Windows and Linux still publish normally.
 
-Windows installers are not signed. The update mechanism still works — `electron-updater` skips
-Authenticode verification when no publisher name is recorded — but that means a Windows update is
-protected by HTTPS and the manifest checksum rather than by a signature independent of the
-transport. macOS is protected by Developer ID and notarization in addition to those. Closing that
-gap needs a Windows code-signing certificate.
+Windows installers are not signed today. The update mechanism still works — `electron-updater`
+skips Authenticode verification when no publisher name is recorded on the running app — so a
+0.1.29 Windows client will still accept the first signed build. The release workflow is wired for
+Azure Trusted Signing and stays inert until every value below is present; a partial set, or a
+signing failure after that, publishes nothing. DEV smoke builds stay unsigned. See
+[docs/windows-signing.md](docs/windows-signing.md). Do not invent a publisher subject.
+
+Repository **secrets** (empty today; mapped to `AZURE_*` for electron-builder 26):
+
+- `HYPE_COMMS_WINDOWS_AZURE_TENANT_ID`
+- `HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID`
+- `HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET`
+
+Repository **variables** (empty today):
+
+- `HYPE_COMMS_WINDOWS_AZURE_ENDPOINT`
+- `HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME`
+- `HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME`
+- `HYPE_COMMS_WINDOWS_PUBLISHER_NAME` (exact issued certificate subject)
 
 ## Verification
 
@@ -453,6 +467,6 @@ workspace-visible and members-only channels, 1:1 DMs, paginated text history, au
 message search, mentions, reactions, unread state, ordered reconnect sync, date-separated
 timelines, one-level threads, scoped agent identities, and restart-safe sends. The repository also
 contains native-notification Milestones 0 through 3 behind default-off build and device settings;
-installed notification proof and any default flip remain open alongside attachments, complete
-release signing, and hosted operations. Product direction and delivery status are tracked in
+installed notification proof and any default flip remain open alongside attachments, Windows
+Authenticode identity provisioning, Linux release signatures, and hosted operations. Product direction and delivery status are tracked in
 [Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).

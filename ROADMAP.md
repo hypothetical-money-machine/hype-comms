@@ -81,9 +81,9 @@ Roughly in order:
   off. Let each platform ship after its applicable gate rather than blocking on the combined
   macOS, Windows, and Linux matrix; keep every platform's device preference default-off until its
   own gate passes.
-- Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
-  an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
-  and notarization plus the cross-platform update feed are already running.
+- Close the remaining release-signature gaps: finish Azure Trusted Signing onboarding so the
+  inert Windows Authenticode hooks can sign, then add Linux detached signatures/SBOM/provenance.
+  macOS signing and notarization plus the Windows pipeline wiring are already in tree.
 - A small hosted deployment (the AWS/Cloudflare target in `docs/architecture.md`) once
   daily use justifies it.
 

@@ -166,6 +166,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     2,
   );
   assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/require-windows-signing-env\.mjs$/gmu)?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/verify-windows-release\.mjs$/gmu)?.length,
+    2,
+  );
+  assert.equal(
     packageSmokeWorkflow.match(/^ {6}- scripts\/capture-macos-native-notification\.mjs$/gmu)
       ?.length,
     2,
@@ -218,6 +226,44 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
+  assert.match(releasePackageJob, /name: Configure Windows Authenticode signing/u);
+  assert.match(releasePackageJob, /node scripts\/require-windows-signing-env\.mjs/u);
+  assert.match(releasePackageJob, /name: Verify Windows release signing/u);
+  assert.match(
+    releasePackageJob,
+    /if: matrix\.platform == 'Windows' && env\.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'/u,
+  );
+  assert.match(releasePackageJob, /npm run verify:desktop-package:windows-release/u);
+  assert.ok(
+    releasePackageJob.indexOf("name: Configure Windows Authenticode signing") <
+      releasePackageJob.indexOf("name: Package desktop application on Windows"),
+    "Windows signing env must be required before the Windows package step",
+  );
+  assert.ok(
+    releasePackageJob.indexOf("name: Package desktop application on Windows") <
+      releasePackageJob.indexOf("name: Verify Windows release signing"),
+    "Windows Authenticode verification must run after packaging and before publication",
+  );
+  assert.ok(
+    releasePackageJob.indexOf("name: Verify Windows release signing") <
+      releasePackageJob.indexOf("name: Stage GitHub Release assets"),
+    "When signing is enabled, Authenticode verification must run before staging",
+  );
+  for (const secret of [
+    "HYPE_COMMS_WINDOWS_AZURE_TENANT_ID",
+    "HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID",
+    "HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET",
+  ]) {
+    assert.match(releasePackageJob, new RegExp(`secrets\\.${secret}`, "u"));
+  }
+  for (const variable of [
+    "HYPE_COMMS_WINDOWS_AZURE_ENDPOINT",
+    "HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME",
+    "HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME",
+    "HYPE_COMMS_WINDOWS_PUBLISHER_NAME",
+  ]) {
+    assert.match(releasePackageJob, new RegExp(`vars\\.${variable}`, "u"));
+  }
   assert.match(nativeEvidenceJob, /name: Build signed macOS capture helper/u);
   assert.match(
     nativeEvidenceJob,

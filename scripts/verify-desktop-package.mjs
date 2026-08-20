@@ -129,6 +129,16 @@ export async function verifyUpdateConfiguration(
       `${updateConfigurationPath} update feed must be ${flavor.updateUrl}; found ${updateUrl}`,
     );
   }
+
+  const expectedPublisherName = process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME?.trim();
+  if (expectedPublisherName) {
+    const publisherName = valueFor("publisherName");
+    if (publisherName !== expectedPublisherName) {
+      throw new Error(
+        `${updateConfigurationPath} publisherName must be ${expectedPublisherName}; found ${publisherName}`,
+      );
+    }
+  }
 }
 
 export function verifyPackageMetadata(asarPath, flavor, extractFileImplementation = extractFile) {

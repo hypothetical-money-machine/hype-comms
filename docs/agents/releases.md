@@ -76,9 +76,12 @@ HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop
 HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package
 ```
 
-Also run `npm run verify:desktop-package:macos-release` on a signed macOS host. The release workflow
-is the real packaging gate; do not block the prep PR on a full local installer if this host cannot
-build one.
+Also run `npm run verify:desktop-package:macos-release` on a signed macOS host, and
+`npm run verify:desktop-package:windows-release` on a signed Windows host after the Azure Trusted
+Signing secrets in [docs/windows-signing.md](../windows-signing.md) exist. Production Windows
+packaging stays unsigned until those values exist, then fail-closes. The release workflow is the
+real packaging gate; do not block the prep PR on a full local installer if this host cannot build
+one.
 
 The prep PR must be green before merge. The PostgreSQL CI job can occasionally time out on
 `bot-cli` / `migrate` when the self-hosted runner is busy. Rerun the failed job; do not change

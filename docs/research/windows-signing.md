@@ -3,6 +3,9 @@
 Resolves the research ticket for issue #47 ("Windows code-signing certificate path").
 Researched against Microsoft Learn, electron-builder docs, and CA product pages.
 
+Implementation and the ops checklist for issue #158 / the tracker `#158` live in
+[docs/windows-signing.md](../windows-signing.md). This file stays the procurement comparison.
+
 ## Current state (constraints from this repo)
 
 - `.github/workflows/desktop-release.yml` packages Windows x64 + ARM64 installers with
@@ -141,10 +144,10 @@ sign no drivers).
 2. Certificate profile type: Public Trust. Create an Entra app registration, grant it
    "Trusted Signing Certificate Profile Signer", store `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
    `AZURE_CLIENT_SECRET` as repo secrets (or use GitHub OIDC federation to avoid the secret).
-3. electron-builder config: `win.sign = { type: "azure", endpoint, codeSigningAccountName,
-certificateProfileName, publisherName: "<exact certificate subject>" }`; set
-   `forceCodeSigning: true` for the Windows release lane so a misconfiguration fails the build
-   instead of silently shipping unsigned (mirrors the macOS lane's fail-closed behavior).
+3. electron-builder config: this repo is on 26.15.3, so use `win.azureSignOptions` (v27 renamed
+   that to `win.sign.type: "azure"`). Set `forceCodeSigning: true` only once the Azure identity
+   is present so a misconfiguration fails the build instead of silently shipping unsigned. Until
+   then the Windows lane stays inert and keeps publishing unsigned artifacts.
 4. Set `publisherName` so electron-updater writes it into `app-update.yml` and starts
    verifying update signatures independent of transport. Note the README's rollout caveat:
    the first signed release must still be accepted by clients whose current install records

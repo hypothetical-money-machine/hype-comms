@@ -238,6 +238,19 @@ jobs:
         shell: cmd
         run: npm ci
 
+      - name: Configure Windows Authenticode signing
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        env:
+          HYPE_COMMS_WINDOWS_AZURE_TENANT_ID: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_TENANT_ID }}
+          HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID }}
+          HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET }}
+          HYPE_COMMS_WINDOWS_AZURE_ENDPOINT: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_ENDPOINT }}
+          HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
+          HYPE_COMMS_WINDOWS_PUBLISHER_NAME: ${{ vars.HYPE_COMMS_WINDOWS_PUBLISHER_NAME }}
+        run: node scripts/require-windows-signing-env.mjs
+
       - name: Configure macOS signing and notarization
         if: matrix.platform == 'macOS'
         shell: bash
@@ -357,6 +370,11 @@ jobs:
         if: matrix.platform == 'Windows'
         shell: cmd
         run: npm run verify:desktop-package
+
+      - name: Verify Windows release signing
+        if: matrix.platform == 'Windows' && env.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'
+        shell: cmd
+        run: npm run verify:desktop-package:windows-release
 
       - name: Verify macOS release signing and notarization
         if: matrix.platform == 'macOS'

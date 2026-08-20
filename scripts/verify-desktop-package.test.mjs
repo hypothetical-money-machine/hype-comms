@@ -55,6 +55,36 @@ test("requires production packages to use the stable update feed", async () => {
   );
 });
 
+test("requires publisherName in production update config when Windows signing is configured", async () => {
+  const previousPublisher = process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME;
+  process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME =
+    "CN=Hype Comms, O=Hypothetical Money Machine, C=US";
+  try {
+    await assert.doesNotReject(
+      verifyUpdateConfiguration(
+        "/tmp/hype-comms/resources/app.asar",
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+        async () =>
+          "provider: generic\nurl: https://updates.hypemm.com/desktop\npublisherName: CN=Hype Comms, O=Hypothetical Money Machine, C=US\n",
+      ),
+    );
+    await assert.rejects(
+      verifyUpdateConfiguration(
+        "/tmp/hype-comms/resources/app.asar",
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+        async () => "provider: generic\nurl: https://updates.hypemm.com/desktop\n",
+      ),
+      /must contain exactly one publisherName/u,
+    );
+  } finally {
+    if (previousPublisher === undefined) {
+      delete process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME;
+    } else {
+      process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME = previousPublisher;
+    }
+  }
+});
+
 test("requires packaged metadata to carry the selected native identity", () => {
   const extractDevelopmentPackage = () =>
     Buffer.from(
