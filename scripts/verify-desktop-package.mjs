@@ -11,6 +11,7 @@ const expectedUpdateProvider = "generic";
 const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
+  "/dist/main/codex-app-server-worker.js",
   "/dist/preload/index.js",
   "/dist/renderer/index.html",
   "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
@@ -141,6 +142,45 @@ export async function verifyUpdateConfiguration(
   }
 }
 
+export function verifyPackageEntries(asarPath, entries) {
+  for (const requiredEntry of requiredAsarEntries) {
+    if (!entries.has(requiredEntry)) {
+      throw new Error(`${asarPath} is missing ${requiredEntry}`);
+    }
+  }
+
+  if (![...entries].some((entry) => entry.startsWith("/dist/renderer/assets/"))) {
+    throw new Error(`${asarPath} has no bundled renderer assets`);
+  }
+
+  const packagedClaudeExecutables = [...entries].filter((entry) =>
+    entry.startsWith("/node_modules/@anthropic-ai/claude-agent-sdk-"),
+  );
+  if (packagedClaudeExecutables.length > 0) {
+    throw new Error(
+      `${asarPath} contains host-specific Claude executables; AI Channel must use the user-installed Claude Code binary`,
+    );
+  }
+
+  const packagedCodexPackages = [...entries].filter((entry) =>
+    entry.startsWith("/node_modules/@openai/codex"),
+  );
+  if (packagedCodexPackages.length > 0) {
+    throw new Error(
+      `${asarPath} contains bundled official Codex packages; AI Channel must use the user-installed Codex CLI`,
+    );
+  }
+
+  const packagedCodexExecutables = [...entries].filter((entry) =>
+    /\/codex(?:\.exe)?$/iu.test(entry),
+  );
+  if (packagedCodexExecutables.length > 0) {
+    throw new Error(
+      `${asarPath} contains a bundled Codex executable; AI Channel must use the user-installed Codex CLI`,
+    );
+  }
+}
+
 export function verifyPackageMetadata(asarPath, flavor, extractFileImplementation = extractFile) {
   const packageJsonPath = "package.json";
   let packageMetadata;
@@ -184,25 +224,7 @@ export async function verifyDesktopPackages(
 
   for (const asarPath of asarPaths) {
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
-    for (const requiredEntry of requiredAsarEntries) {
-      if (!entries.has(requiredEntry)) {
-        throw new Error(`${asarPath} is missing ${requiredEntry}`);
-      }
-    }
-
-    if (![...entries].some((entry) => entry.startsWith("/dist/renderer/assets/"))) {
-      throw new Error(`${asarPath} has no bundled renderer assets`);
-    }
-
-    const packagedClaudeExecutables = [...entries].filter((entry) =>
-      entry.startsWith("/node_modules/@anthropic-ai/claude-agent-sdk-"),
-    );
-    if (packagedClaudeExecutables.length > 0) {
-      throw new Error(
-        `${asarPath} contains host-specific Claude executables; AI Channel must use the user-installed Claude Code binary`,
-      );
-    }
-
+    verifyPackageEntries(asarPath, entries);
     verifyPackageMetadata(asarPath, flavor);
     await verifyUpdateConfiguration(asarPath, flavor);
 

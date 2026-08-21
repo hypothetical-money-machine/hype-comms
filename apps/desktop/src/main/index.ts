@@ -104,7 +104,7 @@ import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
 import { ChatSession, ChatSessionError } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
-import { createClaudeAcpHost } from "./claude-acp-host";
+import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
 import {
@@ -2235,7 +2235,8 @@ if (!hasSingleInstanceLock) {
       });
       aiChannelController = new AiChannelController({
         preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
-        hostFactory: createClaudeAcpHost,
+        hostFactory: createClaudeAiAgentHost,
+        hostPresentation: { displayName: "Claude Code", executableName: "claude" },
         reportListenerError: () => {
           reportMainProcessError("AI Channel state listener failed");
         },

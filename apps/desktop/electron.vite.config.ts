@@ -83,6 +83,10 @@ export default defineConfig(({ command }) => {
           input: {
             index: path.join(desktopRoot, "src/main/index.ts"),
             "claude-acp-worker": path.join(desktopRoot, "src/main/claude-acp-worker.ts"),
+            "codex-app-server-worker": path.join(
+              desktopRoot,
+              "src/main/codex-app-server-worker.ts",
+            ),
           },
           output: {
             entryFileNames: "[name].js",
