@@ -20,6 +20,7 @@ import {
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  COMMUNICATION_PATHS_MAX_PATHS,
   communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
@@ -920,29 +921,50 @@ export class WorkspaceRepository {
 
   /**
    * Owner-only administration: every undirected communication link between two distinct active
-   * members, aggregated from committed messages and memberships. Message bodies are never read;
-   * only counts and timestamps leave the database. Owner authorization happens at the route,
-   * where the authenticated principal's role is already resolved per request.
+   * human or agent members, aggregated from committed messages and memberships. Message bodies
+   * are never read; only counts and timestamps leave the database. Owner authorization happens
+   * at the route, where the authenticated principal's role is already resolved per request.
+   *
+   * Deliberate scope decisions:
+   * - Bots are excluded. They are integrations rather than members: their channel access comes
+   *   from `bot_channel_grants` rather than membership semantics, so treating them as pair
+   *   endpoints would fabricate links no human recognizes.
+   * - Deactivated members are excluded from both endpoints of every path, so revoked members'
+   *   DM history does not resurface in the owner's report.
+   * - Pairs that share channels but have exchanged no messages are still reported (as potential
+   *   paths), but sort strictly below pairs with actual message volume.
+   *
+   * Both reads run in one repeatable-read snapshot so `members` and `paths` can never disagree,
+   * and the result is bounded by the contract's path cap -- with endpoints restricted to active
+   * human/agent members the pair count is at most C(25,2), which equals the cap exactly.
    */
   async communicationPaths(identity: AuthenticatedIdentity): Promise<CommunicationPathsResponse> {
-    const client = await this.pool.connect();
-    try {
-      const members = await this.#members(client, identity.currentUser.workspaceId);
-      const result = await client.query<CommunicationPathRow>(
-        // A member "accesses" a channel when it is workspace-visible (every active member) or
-        // they hold an explicit, live membership. Shared channels intersect those sets; channel
-        // message volume credits each non-author accessor of the authoring conversation.
-        `WITH accessible AS (
-           SELECT membership.user_id AS user_id,
-                  conversation.id AS conversation_id
+    return this.#transaction(
+      async (client) => {
+        const members = await this.#members(client, identity.currentUser.workspaceId);
+        const result = await client.query<CommunicationPathRow>(
+          // `actor` is the active human/agent member set; every path endpoint comes from it.
+          // `accessible` mirrors the channel-visibility rule for those actors: workspace-access
+          // channels are visible to every actor, restricted channels through a live explicit
+          // membership. Bots are deliberately absent here -- their grant-based access never
+          // produces a member-to-member path under the scope decisions above.
+          `WITH actor AS (
+           SELECT membership.user_id AS user_id
              FROM workspace_memberships AS membership
+             JOIN users AS user_account ON user_account.id = membership.user_id
+            WHERE membership.workspace_id = $1
+              AND membership.status = 'active'
+              AND user_account.kind IN ('human', 'agent')
+         ),
+         accessible AS (
+           SELECT actor.user_id AS user_id,
+                  conversation.id AS conversation_id
+             FROM actor
              JOIN conversations AS conversation
-               ON conversation.workspace_id = membership.workspace_id
+               ON conversation.workspace_id = $1
               AND conversation.kind = 'channel'
               AND conversation.is_archived = false
               AND conversation.channel_access = 'workspace'
-            WHERE membership.workspace_id = $1
-              AND membership.status = 'active'
             UNION
            SELECT conversation_membership.user_id AS user_id,
                   conversation_membership.conversation_id AS conversation_id
@@ -951,6 +973,7 @@ export class WorkspaceRepository {
                ON conversation.id = conversation_membership.conversation_id
               AND conversation.kind = 'channel'
               AND conversation.is_archived = false
+             JOIN actor ON actor.user_id = conversation_membership.user_id
             WHERE conversation_membership.workspace_id = $1
               AND conversation_membership.left_at IS NULL
          ),
@@ -960,6 +983,8 @@ export class WorkspaceRepository {
                   COUNT(message.id) AS direct_message_count,
                   MAX(message.created_at) AS last_dm_at
              FROM conversations AS conversation
+             JOIN actor AS low ON low.user_id = conversation.dm_user_low_id
+             JOIN actor AS high ON high.user_id = conversation.dm_user_high_id
              JOIN messages AS message
                ON message.conversation_id = conversation.id
               AND message.deleted_at IS NULL
@@ -969,14 +994,14 @@ export class WorkspaceRepository {
             GROUP BY 1, 2
          ),
          shared AS (
-           SELECT sender.user_id AS member_a_id,
-                  peer.user_id AS member_b_id,
-                  COUNT(DISTINCT sender.conversation_id) AS shared_channel_count
-             FROM accessible AS sender
-             JOIN accessible AS peer
-               ON peer.conversation_id = sender.conversation_id
-              AND peer.user_id > sender.user_id
-            GROUP BY 1, 2
+            SELECT sender.user_id AS member_a_id,
+                   peer.user_id AS member_b_id,
+                   COUNT(DISTINCT sender.conversation_id) AS shared_channel_count
+              FROM accessible AS sender
+              JOIN accessible AS peer
+                ON peer.conversation_id = sender.conversation_id
+               AND peer.user_id > sender.user_id
+             GROUP BY 1, 2
          ),
          channel_activity AS (
            SELECT LEAST(message.author_id, recipient.user_id) AS member_a_id,
@@ -984,6 +1009,7 @@ export class WorkspaceRepository {
                   COUNT(*) AS channel_message_count,
                   MAX(message.created_at) AS last_channel_at
              FROM messages AS message
+             JOIN actor AS author ON author.user_id = message.author_id
              JOIN conversations AS conversation
                ON conversation.id = message.conversation_id
               AND conversation.kind = 'channel'
@@ -1008,27 +1034,28 @@ export class WorkspaceRepository {
              ON activity.member_a_id = COALESCE(dm.member_a_id, shared.member_a_id)
             AND activity.member_b_id = COALESCE(dm.member_b_id, shared.member_b_id)
           ORDER BY COALESCE(dm.direct_message_count, 0)
-                 + COALESCE(shared.shared_channel_count, 0)
                  + COALESCE(activity.channel_message_count, 0) DESC,
-                member_a_id,
-                member_b_id`,
-        [identity.currentUser.workspaceId],
-      );
-      return communicationPathsResponseSchema.parse({
-        generatedAt: new Date().toISOString(),
-        members,
-        paths: result.rows.map((row) => ({
-          memberAId: row.member_a_id,
-          memberBId: row.member_b_id,
-          directMessageCount: Number(row.direct_message_count),
-          sharedChannelCount: Number(row.shared_channel_count),
-          channelMessageCount: Number(row.channel_message_count),
-          lastActivityAt: nullableIso(row.last_activity_at),
-        })),
-      });
-    } finally {
-      client.release();
-    }
+                 COALESCE(shared.shared_channel_count, 0) DESC,
+                 member_a_id,
+                 member_b_id
+          LIMIT $2`,
+          [identity.currentUser.workspaceId, COMMUNICATION_PATHS_MAX_PATHS],
+        );
+        return communicationPathsResponseSchema.parse({
+          generatedAt: new Date().toISOString(),
+          members,
+          paths: result.rows.map((row) => ({
+            memberAId: row.member_a_id,
+            memberBId: row.member_b_id,
+            directMessageCount: Number(row.direct_message_count),
+            sharedChannelCount: Number(row.shared_channel_count),
+            channelMessageCount: Number(row.channel_message_count),
+            lastActivityAt: nullableIso(row.last_activity_at),
+          })),
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listConversations(

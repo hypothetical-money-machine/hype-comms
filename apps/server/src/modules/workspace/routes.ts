@@ -192,6 +192,16 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (identity.currentUser.role !== "owner") {
       throw new ApiError(403, "FORBIDDEN", "Only workspace owners can view communication paths");
     }
+    // This endpoint exposes per-pair activity for conversations the owner may not be party to,
+    // so every read is recorded even though it is a query.
+    request.log.info(
+      {
+        event: "admin.communication_paths_viewed",
+        actorUserId: identity.currentUser.user.id,
+        workspaceId: identity.currentUser.workspaceId,
+      },
+      "Workspace owner viewed member communication paths",
+    );
     return repository.communicationPaths(identity);
   });
 

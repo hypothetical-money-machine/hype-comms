@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { CommunicationPath, CommunicationPathsResponse, User } from "@hype-comms/contracts";
 
@@ -10,7 +10,8 @@ type LoadState =
   | { readonly status: "idle" }
   | { readonly status: "loading" }
   | { readonly status: "error"; readonly message: string }
-  | { readonly status: "ready"; readonly data: CommunicationPathsResponse };
+  | { readonly status: "ready"; readonly data: CommunicationPathsResponse }
+  | { readonly status: "refreshing"; readonly data: CommunicationPathsResponse };
 
 function memberName(members: readonly User[], memberId: string): string {
   return members.find((member) => member.id === memberId)?.displayName ?? "Former member";
@@ -26,8 +27,9 @@ function formatActivity(value: string | null): string {
   }).format(new Date(value));
 }
 
-export function totalPathActivity(path: CommunicationPath): number {
-  return path.directMessageCount + path.sharedChannelCount + path.channelMessageCount;
+/** Actual messages exchanged between the pair; co-membership alone does not count. */
+export function totalPathMessages(path: CommunicationPath): number {
+  return path.directMessageCount + path.channelMessageCount;
 }
 
 function PathRow({
@@ -44,7 +46,7 @@ function PathRow({
       <td className="communication-paths-number">{path.directMessageCount}</td>
       <td className="communication-paths-number">{path.sharedChannelCount}</td>
       <td className="communication-paths-number">{path.channelMessageCount}</td>
-      <td className="communication-paths-number">{totalPathActivity(path)}</td>
+      <td className="communication-paths-number">{totalPathMessages(path)}</td>
       <td>
         {path.lastActivityAt === null ? (
           "Never"
@@ -66,30 +68,41 @@ export function CommunicationPathsView({
   readonly active: boolean;
 }) {
   const [state, setState] = useState<LoadState>({ status: "idle" });
+  const inFlight = useRef(false);
 
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    setState({ status: "loading" });
+  const load = useCallback(() => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setState((previous) =>
+      previous.status === "ready"
+        ? { status: "refreshing", data: previous.data }
+        : { status: "loading" },
+    );
     client
       .getCommunicationPaths()
-      .then((data) => {
-        if (!cancelled) setState({ status: "ready", data });
-      })
+      .then((data) => setState({ status: "ready", data }))
       .catch((error: unknown) => {
-        if (!cancelled) {
-          setState({
-            status: "error",
-            message: error instanceof Error && error.message !== "" ? error.message : "",
-          });
-        }
+        setState({
+          status: "error",
+          message: error instanceof Error && error.message !== "" ? error.message : "",
+        });
+      })
+      .finally(() => {
+        inFlight.current = false;
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [active, client]);
+  }, [client]);
 
-  const paths = state.status === "ready" ? state.data.paths : [];
+  // The aggregate is expensive server-side, so returning to the tab reuses the cached table;
+  // only the first activation fetches automatically, and the Refresh button refetches on demand.
+  useEffect(() => {
+    if (active && state.status === "idle") load();
+  }, [active, load, state.status]);
+
+  const data = state.status === "ready" || state.status === "refreshing" ? state.data : null;
+  const paths = data?.paths ?? [];
+  // Names come from the same snapshot the counts came from, so a member renamed or removed since
+  // bootstrap still renders consistently with the numbers beside it.
+  const snapshotMembers = data?.members ?? members;
 
   return (
     <section
@@ -104,8 +117,17 @@ export function CommunicationPathsView({
           <p className="unreads-subtitle">
             How members talk to each other: direct messages, shared channels, and channel message
             volume per pair. Owner-only.
+            {data !== null && (
+              <>
+                {" "}
+                As of <time dateTime={data.generatedAt}>{formatActivity(data.generatedAt)}</time>.
+              </>
+            )}
           </p>
         </div>
+        <button type="button" className="communication-paths-refresh" onClick={load}>
+          Refresh
+        </button>
       </header>
       <div className="communication-paths-body">
         {state.status === "loading" && <p role="status">Loading communication paths…</p>}
@@ -116,14 +138,14 @@ export function CommunicationPathsView({
               : `Could not load communication paths: ${state.message}`}
           </p>
         )}
-        {state.status === "ready" && paths.length === 0 && (
+        {data !== null && paths.length === 0 && (
           <div className="empty-state">
             <h3>No communication yet</h3>
             <p>Once members exchange messages, their paths appear here.</p>
           </div>
         )}
-        {state.status === "ready" && paths.length > 0 && (
-          <table className="communication-paths-table">
+        {data !== null && paths.length > 0 && (
+          <table className="communication-paths-table" aria-busy={state.status === "refreshing"}>
             <thead>
               <tr>
                 <th scope="col">Member</th>
@@ -138,7 +160,7 @@ export function CommunicationPathsView({
                   Channel messages
                 </th>
                 <th scope="col" className="communication-paths-number">
-                  Total activity
+                  Messages
                 </th>
                 <th scope="col">Last activity</th>
               </tr>
@@ -148,7 +170,7 @@ export function CommunicationPathsView({
                 <PathRow
                   key={`${path.memberAId}:${path.memberBId}`}
                   path={path}
-                  members={members}
+                  members={snapshotMembers}
                 />
               ))}
             </tbody>

@@ -5506,3 +5506,18 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+.communication-paths-refresh {
+  flex: 0 0 auto;
+  margin-left: 16px;
+  padding: 6px 14px;
+  border: 1px solid var(--theme-border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--theme-text-muted);
+  cursor: pointer;
+}
+
+.communication-paths-refresh:hover {
+  background: var(--theme-surface-hover);
+}

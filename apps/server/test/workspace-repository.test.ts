@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import {
+  COMMUNICATION_PATHS_MAX_PATHS,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
@@ -2492,5 +2493,162 @@ describeWithPostgres("WorkspaceRepository", () => {
         attachmentIds: [attachmentId],
       }),
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  describe("communicationPaths", () => {
+    function pathFor(
+      response: Awaited<ReturnType<WorkspaceRepository["communicationPaths"]>>,
+      a: string,
+      b: string,
+    ) {
+      const [low, high] = [a, b].sort();
+      return response.paths.find((path) => path.memberAId === low && path.memberBId === high);
+    }
+
+    it("aggregates direct messages, shared channels, and channel volume per pair", async () => {
+      const dm = await repository.createDirectConversation(owner, { memberId });
+      await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "one"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "two"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(member, generalId, {
+        ...message(randomUUID(), "three"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(owner, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm one"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(member, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm two"),
+        mentionedUserIds: [],
+      });
+
+      const response = await repository.communicationPaths(owner);
+
+      // Every endpoint is a listed member.
+      const memberIds = new Set(response.members.map((entry) => entry.id));
+      for (const path of response.paths) {
+        expect(memberIds.has(path.memberAId)).toBe(true);
+        expect(memberIds.has(path.memberBId)).toBe(true);
+      }
+      const ownerMember = pathFor(response, ownerId, memberId);
+      expect(ownerMember).toMatchObject({
+        directMessageCount: 2,
+        sharedChannelCount: 1,
+        channelMessageCount: 3,
+      });
+      // The observer shares #general but exchanged no DMs.
+      const ownerObserver = pathFor(response, ownerId, observerId);
+      expect(ownerObserver).toMatchObject({
+        directMessageCount: 0,
+        sharedChannelCount: 1,
+        channelMessageCount: 2,
+      });
+      // Pairs with actual messages sort above co-membership-only pairs.
+      expect(response.paths[0]).toMatchObject({ directMessageCount: 2 });
+    });
+
+    it("counts restricted channels only for explicit live members", async () => {
+      const restricted = await repository.createChannel(owner, {
+        name: "Private",
+        slug: "private",
+        topic: null,
+        access: "members",
+      });
+      await repository.upsertChannelMember(
+        owner,
+        restricted.conversation.conversation.id,
+        memberId,
+        {
+          role: "member",
+        },
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(pathFor(response, ownerId, memberId)).toMatchObject({
+        sharedChannelCount: 2,
+        channelMessageCount: 0,
+      });
+      expect(pathFor(response, ownerId, observerId)).toMatchObject({
+        sharedChannelCount: 1,
+        channelMessageCount: 0,
+      });
+    });
+
+    it("drops deactivated members from every path, including their DM history", async () => {
+      const dm = await repository.createDirectConversation(owner, { memberId });
+      await repository.sendMessage(owner, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm"),
+        mentionedUserIds: [],
+      });
+      await pool.query(
+        `UPDATE workspace_memberships SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, memberId],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(pathFor(response, ownerId, memberId)).toBeUndefined();
+      for (const path of response.paths) {
+        expect(path.memberAId).not.toBe(memberId);
+        expect(path.memberBId).not.toBe(memberId);
+      }
+    });
+
+    it("never treats bots as pair endpoints even with an active membership", async () => {
+      const botId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, username, display_name, kind)
+         VALUES ($1, 'helper-bot', 'Helper Bot', 'bot')`,
+        [botId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+        [workspaceId, botId],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      for (const path of response.paths) {
+        expect(path.memberAId).not.toBe(botId);
+        expect(path.memberBId).not.toBe(botId);
+      }
+    });
+
+    it("parses exactly at the wire contract's path cap with 25 active members", async () => {
+      // The server caps active membership at 25, so C(25,2) = 300 pairs is the real worst case:
+      // one workspace-access channel puts every pair in `shared` and the response must still
+      // validate instead of overflowing its own schema.
+      const extraUsers = Array.from({ length: 22 }, () => randomUUID());
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         SELECT id,
+                'user-' || substring(id::text, 1, 8) || '@example.com',
+                'user-' || substring(id::text, 1, 8),
+                'User'
+           FROM unnest($1::uuid[]) AS id`,
+        [extraUsers],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         SELECT $1, id, 'member', 'active' FROM unnest($2::uuid[]) AS id`,
+        [workspaceId, extraUsers],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(response.paths).toHaveLength(COMMUNICATION_PATHS_MAX_PATHS);
+      expect(
+        new Set(response.paths.map((path) => `${path.memberAId}:${path.memberBId}`)).size,
+      ).toBe(COMMUNICATION_PATHS_MAX_PATHS);
+    });
   });
 });

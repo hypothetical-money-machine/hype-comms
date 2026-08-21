@@ -56,23 +56,41 @@ function clientWith(
 }
 
 describe("CommunicationPathsView", () => {
-  it("fetches paths when active and renders one row per member pair", async () => {
+  it("fetches paths when first active and renders one row per member pair", async () => {
     const getCommunicationPaths = vi.fn(async () => response);
-    render(
+    const { rerender } = render(
       createElement(CommunicationPathsView, {
         client: clientWith(getCommunicationPaths),
-        members,
+        members: [],
         active: true,
       }),
     );
 
     expect(getCommunicationPaths).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByRole("cell", { name: "Morgan" })).toBeTruthy());
+    // Names resolve from the response snapshot, not the bootstrap member list.
     expect(screen.getByRole("cell", { name: "Dan" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "4" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "2" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "7" })).toBeTruthy();
-    expect(screen.getByRole("cell", { name: "13" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "11" })).toBeTruthy();
+    expect(document.querySelector('time[dateTime="2026-08-20T12:00:00.000Z"]')).not.toBeNull();
+
+    rerender(
+      createElement(CommunicationPathsView, {
+        client: clientWith(getCommunicationPaths),
+        members: [],
+        active: false,
+      }),
+    );
+    rerender(
+      createElement(CommunicationPathsView, {
+        client: clientWith(getCommunicationPaths),
+        members: [],
+        active: true,
+      }),
+    );
+    expect(getCommunicationPaths).toHaveBeenCalledTimes(1);
   });
 
   it("does not fetch while inactive and stays out of the layout", () => {
@@ -87,6 +105,36 @@ describe("CommunicationPathsView", () => {
 
     expect(getCommunicationPaths).not.toHaveBeenCalled();
     expect(screen.getByTestId("communication-paths-view").hidden).toBe(true);
+  });
+
+  it("refetches only when Refresh is pressed", async () => {
+    const gates: Array<{ resolve: () => void }> = [];
+    const getCommunicationPaths = vi.fn(
+      () =>
+        new Promise<CommunicationPathsResponse>((resolve) => {
+          gates.push({ resolve: () => resolve(response) });
+        }),
+    );
+    render(
+      createElement(CommunicationPathsView, {
+        client: clientWith(getCommunicationPaths),
+        members,
+        active: true,
+      }),
+    );
+    await waitFor(() => {
+      if (gates[0] === undefined) throw new Error("not requested yet");
+      gates[0].resolve();
+    });
+    await waitFor(() => expect(screen.getByRole("table")).toBeTruthy());
+
+    screen.getByRole("button", { name: "Refresh" }).click();
+    await waitFor(() => expect(gates.length).toBe(2));
+    // The cached table stays on screen with a busy signal while the refresh is in flight.
+    expect(screen.getByRole("table").getAttribute("aria-busy")).toBe("true");
+    gates[1]?.resolve();
+    await waitFor(() => expect(screen.getByRole("table").getAttribute("aria-busy")).toBe("false"));
+    expect(getCommunicationPaths).toHaveBeenCalledTimes(2);
   });
 
   it("surfaces a rejection without leaving a stale table", async () => {
