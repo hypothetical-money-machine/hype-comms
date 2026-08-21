@@ -43,6 +43,7 @@ export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
+export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -503,6 +504,33 @@ export const sendMessageResponseSchema = z
   })
   .strict();
 
+/**
+ * `DELETE /v1/messages/:id` — author-only delete-in-window retract.
+ *
+ * No request body. Scope `messages:write`. Server clock vs `createdAt`; UI may use
+ * `MESSAGE_RETRACT_WINDOW_MS` only to show the control. Other author → 403.
+ * After five minutes → 409; the row stays immutable. Success keeps the row, sets
+ * `deletedAt`, bumps version, and leaves `body` intact. Attachments disappear with
+ * this tombstone. Already retracted → idempotent 200 with the same tombstone (not 409).
+ * Live fanout is `message.retracted` to clients that send
+ * {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
+ */
+export const retractMessageResponseSchema = z
+  .object({
+    message: messageSchema,
+    syncCursor: sequenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.message.deletedAt === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["message", "deletedAt"],
+        message: "A retracted message must include deletedAt",
+      });
+    }
+  });
+
 export const advanceReadCursorRequestSchema = z
   .object({
     lastReadMessageId: entityIdSchema,
@@ -638,6 +666,24 @@ export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.exte
     .strict(),
 });
 
+/**
+ * Tombstone for delete-in-window retract. Payload identifies the message and when it
+ * disappeared. It does not carry a body: retract is not an edit, and the message body schema
+ * forbids a blank body. Clients that omit {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} never
+ * receive it; older desktops ignore unknown types.
+ */
+export const messageRetractedEventSchema = workspaceEventBaseSchema.extend({
+  type: z.literal("message.retracted"),
+  conversationId: entityIdSchema,
+  conversationSequence: sequenceSchema,
+  payload: z
+    .object({
+      messageId: entityIdSchema,
+      deletedAt: isoDateTimeSchema,
+    })
+    .strict(),
+});
+
 export const messageCreatedEventSchema = workspaceEventBaseSchema
   .extend({
     type: z.literal("message.created"),
@@ -746,6 +792,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   conversationUpdatedEventSchema,
   channelMembershipChangedEventSchema,
   messageCreatedEventSchema,
+  messageRetractedEventSchema,
   reactionAddedEventSchema,
   reactionRemovedEventSchema,
   readCursorUpdatedEventSchema,
@@ -844,6 +891,7 @@ export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;
 export type SendConversationMessageRequest = z.infer<typeof sendConversationMessageRequestSchema>;
 export type SendMessageOperation = z.infer<typeof sendMessageOperationSchema>;
 export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
+export type RetractMessageResponse = z.infer<typeof retractMessageResponseSchema>;
 export type AdvanceReadCursorRequest = z.infer<typeof advanceReadCursorRequestSchema>;
 export type AdvanceReadCursorResponse = z.infer<typeof advanceReadCursorResponseSchema>;
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;

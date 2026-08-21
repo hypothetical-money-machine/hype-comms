@@ -120,6 +120,7 @@ export function visibleTimelineMessages(
 ): readonly Message[] {
   return messages.filter(
     (message) =>
+      message.deletedAt === null &&
       message.conversationId === conversationId &&
       (!threadsSupported || message.threadRootId === null),
   );

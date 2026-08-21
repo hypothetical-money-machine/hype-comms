@@ -38,6 +38,7 @@ import {
   readCursorSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
+  retractMessageResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
   taskListResponseSchema,
@@ -81,6 +82,7 @@ import {
   type Reaction,
   type ReactionEmoji,
   type RemoveReactionResponse,
+  type RetractMessageResponse,
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
@@ -320,6 +322,7 @@ interface TicketRow extends QueryResultRow {
   task_events: boolean;
   announcement_channels: boolean;
   participated_thread_notifications: boolean;
+  message_retract_events: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -388,6 +391,7 @@ export interface WorkspacePrincipal {
   readonly taskEvents?: boolean;
   readonly announcementChannels?: boolean;
   readonly participatedThreadNotifications?: boolean;
+  readonly messageRetractEvents?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -1488,6 +1492,7 @@ export class WorkspaceRepository {
            FROM messages
           WHERE conversation_id = $1
             ${threadScope}
+            AND deleted_at IS NULL
             AND ($2::bigint IS NULL OR conversation_sequence < $2::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $3`,
@@ -1548,6 +1553,7 @@ export class WorkspaceRepository {
            FROM messages
           WHERE thread_root_id = $1
             AND conversation_id = $2
+            AND deleted_at IS NULL
             AND ($3::bigint IS NULL OR conversation_sequence < $3::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $4`,
@@ -1590,16 +1596,18 @@ export class WorkspaceRepository {
       [messageId, identity.currentUser.workspaceId, identity.currentUser.user.id],
     );
     const message = result.rows[0];
-    if (message === undefined) {
-      // Missing and unauthorized targets deliberately share one response.
+    if (message === undefined || message.deleted_at !== null) {
+      // Missing, unauthorized, and retracted targets deliberately share one response.
       throw new ApiError(404, "NOT_FOUND", "Message not found");
     }
     const attachments = await this.pool.query<AttachmentRow>(
-      `SELECT *
-         FROM attachments
-        WHERE message_id = $1
-          AND status = 'ready'
-        ORDER BY created_at, id`,
+      `SELECT attachment.*
+         FROM attachments AS attachment
+         JOIN messages AS parent ON parent.id = attachment.message_id
+        WHERE attachment.message_id = $1
+          AND attachment.status = 'ready'
+          AND parent.deleted_at IS NULL
+        ORDER BY attachment.created_at, attachment.id`,
       [messageId],
     );
     return messageByIdResponseSchema.parse({
@@ -1818,18 +1826,20 @@ export class WorkspaceRepository {
         throw new ApiError(400, "BAD_REQUEST", "Invalid files cursor");
       }
       const result = await client.query<AttachmentRow>(
-        `SELECT *
-           FROM attachments
-          WHERE conversation_id = $1
-            AND workspace_id = $2
-            AND status = 'ready'
-            AND message_id IS NOT NULL
+        `SELECT attachment.*
+           FROM attachments AS attachment
+           JOIN messages AS message ON message.id = attachment.message_id
+          WHERE attachment.conversation_id = $1
+            AND attachment.workspace_id = $2
+            AND attachment.status = 'ready'
+            AND attachment.message_id IS NOT NULL
+            AND message.deleted_at IS NULL
             AND (
               $3::timestamptz IS NULL
-              OR created_at < $3::timestamptz
-              OR (created_at = $3::timestamptz AND id < $4::uuid)
+              OR attachment.created_at < $3::timestamptz
+              OR (attachment.created_at = $3::timestamptz AND attachment.id < $4::uuid)
             )
-          ORDER BY created_at DESC, id DESC
+          ORDER BY attachment.created_at DESC, attachment.id DESC
           LIMIT $5`,
         [
           conversationId,
@@ -1876,6 +1886,7 @@ export class WorkspaceRepository {
           WHERE message.id = ANY($1::uuid[])
             AND message.workspace_id = $2
             AND conversation.workspace_id = $2
+            AND message.deleted_at IS NULL
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
@@ -1908,6 +1919,15 @@ export class WorkspaceRepository {
             AND (
               attachment.message_id IS NOT NULL
               OR attachment.uploaded_by = $3
+            )
+            AND (
+              attachment.message_id IS NULL
+              OR EXISTS (
+                SELECT 1
+                  FROM messages AS message
+                 WHERE message.id = attachment.message_id
+                   AND message.deleted_at IS NULL
+              )
             )
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [attachmentId, identity.currentUser.workspaceId, identity.currentUser.user.id],
@@ -2100,6 +2120,7 @@ export class WorkspaceRepository {
           CROSS JOIN search_query
           WHERE message.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
+            AND message.deleted_at IS NULL
             AND message.search_vector @@ search_query.value
             AND (
               $4::real IS NULL
@@ -2969,6 +2990,100 @@ export class WorkspaceRepository {
     return response;
   }
 
+  async retractMessage(
+    identity: AuthenticatedIdentity,
+    messageId: string,
+  ): Promise<RetractMessageResponse> {
+    return this.#transaction(async (client) => {
+      const located = await client.query<{ conversation_id: string } & QueryResultRow>(
+        `SELECT conversation_id
+           FROM messages
+          WHERE id = $1
+            AND workspace_id = $2`,
+        [messageId, identity.currentUser.workspaceId],
+      );
+      const conversationId = located.rows[0]?.conversation_id;
+      if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+        true,
+      );
+      await this.#requireActivePrincipal(client, identity);
+
+      const locked = await client.query<MessageRow & { retract_window_elapsed: boolean }>(
+        `SELECT message.*,
+                clock_timestamp() > (message.created_at + interval '5 minutes')
+                  AS retract_window_elapsed
+           FROM messages AS message
+          WHERE message.id = $1
+            AND message.conversation_id = $2
+          FOR UPDATE OF message`,
+        [messageId, conversationId],
+      );
+      const message = locked.rows[0];
+      if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+      if (message.author_id !== identity.currentUser.user.id) {
+        throw new ApiError(403, "FORBIDDEN", "Only the author can retract this message");
+      }
+      if (message.deleted_at !== null) {
+        return retractMessageResponseSchema.parse({
+          message: mapMessage(message),
+          syncCursor: message.committed_workspace_sequence,
+        });
+      }
+      if (message.retract_window_elapsed) {
+        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+      }
+
+      const workspaceSequence = await this.#nextWorkspaceSequence(
+        client,
+        identity.currentUser.workspaceId,
+      );
+      const updated = await client.query<MessageRow>(
+        `UPDATE messages
+            SET deleted_at = clock_timestamp(),
+                updated_at = clock_timestamp(),
+                version = version + 1,
+                committed_workspace_sequence = $3
+          WHERE id = $1
+            AND conversation_id = $2
+            AND deleted_at IS NULL
+            AND edited_at IS NULL
+            AND author_id = $4
+            AND clock_timestamp() <= created_at + interval '5 minutes'
+          RETURNING *`,
+        [messageId, conversationId, workspaceSequence, identity.currentUser.user.id],
+      );
+      const retracted = updated.rows[0];
+      if (retracted === undefined || retracted.deleted_at === null) {
+        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+      }
+      const tombstone = mapMessage(retracted);
+      if (tombstone.deletedAt === null) {
+        throw new Error("Retract committed without a deletedAt tombstone");
+      }
+      const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
+        type: "message.retracted",
+        conversation,
+        conversationSequence: retracted.conversation_sequence,
+        entityVersion: tombstone.version,
+        payload: {
+          messageId: tombstone.id,
+          deletedAt: tombstone.deletedAt,
+        },
+        audienceUserIds: await this.#conversationAudience(client, conversation),
+      });
+      return retractMessageResponseSchema.parse({
+        message: tombstone,
+        syncCursor: event.workspaceSequence,
+      });
+    });
+  }
+
   async advanceReadCursor(
     identity: AuthenticatedIdentity,
     conversationId: string,
@@ -3060,6 +3175,7 @@ export class WorkspaceRepository {
     taskEvents = false,
     announcementChannels = false,
     participatedThreadNotifications = false,
+    messageRetractEvents = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -3070,6 +3186,7 @@ export class WorkspaceRepository {
         taskEvents,
         announcementChannels,
         participatedThreadNotifications,
+        messageRetractEvents,
       },
       after,
       limit,
@@ -3143,6 +3260,10 @@ export class WorkspaceRepository {
                     $6::boolean
                     OR event.event_type NOT IN ('task.created', 'task.updated')
                   )
+                  AND (
+                    $8::boolean
+                    OR event.event_type <> 'message.retracted'
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -3157,6 +3278,7 @@ export class WorkspaceRepository {
           principal.reactionEvents ?? false,
           principal.taskEvents ?? false,
           principal.participatedThreadNotifications ?? false,
+          principal.messageRetractEvents ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -3192,6 +3314,7 @@ export class WorkspaceRepository {
     taskEvents = false,
     announcementChannels = false,
     participatedThreadNotifications = false,
+    messageRetractEvents = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -3205,8 +3328,8 @@ export class WorkspaceRepository {
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          participated_thread_notifications, message_retract_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -3220,6 +3343,7 @@ export class WorkspaceRepository {
         taskEvents,
         announcementChannels,
         participatedThreadNotifications,
+        messageRetractEvents,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -3245,7 +3369,8 @@ export class WorkspaceRepository {
                    ticket.read_state_events,
                    ticket.task_events,
                    ticket.announcement_channels,
-                   ticket.participated_thread_notifications
+                   ticket.participated_thread_notifications,
+                   ticket.message_retract_events
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -3255,7 +3380,8 @@ export class WorkspaceRepository {
               ticket.read_state_events,
               ticket.task_events,
               ticket.announcement_channels,
-              ticket.participated_thread_notifications
+              ticket.participated_thread_notifications,
+              ticket.message_retract_events
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -3307,6 +3433,7 @@ export class WorkspaceRepository {
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
+        messageRetractEvents: row.message_retract_events,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -3320,6 +3447,7 @@ export class WorkspaceRepository {
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
+        messageRetractEvents: row.message_retract_events,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -3491,6 +3619,7 @@ export class WorkspaceRepository {
     const latestResult = await client.query<MessageRow>(
       `SELECT * FROM messages
         WHERE conversation_id = $1
+          AND deleted_at IS NULL
         ORDER BY conversation_sequence DESC
         LIMIT 1`,
       [conversation.id],
@@ -3523,11 +3652,13 @@ export class WorkspaceRepository {
           SELECT count(*)::text AS reply_count
             FROM messages AS reply
            WHERE reply.thread_root_id = root.id
+             AND reply.deleted_at IS NULL
         ) AS totals
         CROSS JOIN LATERAL (
           SELECT reply.*
             FROM messages AS reply
            WHERE reply.thread_root_id = root.id
+             AND reply.deleted_at IS NULL
            ORDER BY reply.conversation_sequence DESC, reply.id DESC
            LIMIT 1
         ) AS latest
@@ -3554,6 +3685,7 @@ export class WorkspaceRepository {
           AND cursor.user_id = $2
         WHERE message.conversation_id = $1
           AND message.author_id <> $2
+          AND message.deleted_at IS NULL
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
       [conversationId, userId],
@@ -3568,6 +3700,7 @@ export class WorkspaceRepository {
         WHERE message.conversation_id = $1
           AND mention.mentioned_user_id = $2
           AND message.author_id <> $2
+          AND message.deleted_at IS NULL
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
       [conversationId, userId],
@@ -3648,7 +3781,7 @@ export class WorkspaceRepository {
     }
     if (input.sourceMessageId !== undefined && input.sourceMessageId !== null) {
       const source = await client.query(
-        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2`,
+        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2 AND deleted_at IS NULL`,
         [input.sourceMessageId, conversation.id],
       );
       if (source.rowCount !== 1) {
@@ -3965,11 +4098,13 @@ export class WorkspaceRepository {
   ): Promise<Attachment[]> {
     if (messageIds.length === 0) return [];
     const result = await client.query<AttachmentRow>(
-      `SELECT *
-         FROM attachments
-        WHERE message_id = ANY($1::uuid[])
-          AND status = 'ready'
-        ORDER BY created_at, id`,
+      `SELECT attachment.*
+         FROM attachments AS attachment
+         JOIN messages AS message ON message.id = attachment.message_id
+        WHERE attachment.message_id = ANY($1::uuid[])
+          AND attachment.status = 'ready'
+          AND message.deleted_at IS NULL
+        ORDER BY attachment.created_at, attachment.id`,
       [messageIds],
     );
     return result.rows.map(mapAttachment);
@@ -4066,7 +4201,9 @@ export class WorkspaceRepository {
       [messageId, conversationId],
     );
     const message = messageResult.rows[0];
-    if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+    if (message === undefined || message.deleted_at !== null) {
+      throw new ApiError(404, "NOT_FOUND", "Message not found");
+    }
     return { conversation, message };
   }
 

@@ -648,6 +648,16 @@ class FakeWorkspaceCache implements WorkspaceCache {
     } else if (event.type === "message.created") {
       this.#messages.set(event.payload.message.id, event.payload.message);
       this.#outbox.delete(event.payload.message.clientMessageId);
+    } else if (event.type === "message.retracted") {
+      const current = this.#messages.get(event.payload.messageId);
+      if (current !== undefined) {
+        this.#messages.set(event.payload.messageId, {
+          ...current,
+          deletedAt: event.payload.deletedAt,
+          version: event.entityVersion,
+          updatedAt: event.payload.deletedAt,
+        });
+      }
     } else if (event.type === "reaction.added") {
       this.#reactions.set(event.payload.reaction.id, event.payload.reaction);
     } else if (event.type === "reaction.removed") {
@@ -2247,6 +2257,58 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.messages).toContainEqual(ownMessage);
     expect(runtime.state.outbox[0]?.operation.message.threadRootId).toBe(OWN_MESSAGE_ID);
     expect((await cache.load()).messages).toContainEqual(ownMessage);
+  });
+
+  it("projects a message.retracted tombstone and drops that message's attachments", async () => {
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000ad",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "secrets.txt",
+      contentType: "text/plain",
+      sizeBytes: 32,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const leaked = { ...ownMessage, body: "bot token leaked in comms" };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [leaked],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [attachment],
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    expect(runtime.state.messages).toContainEqual(leaked);
+    expect(runtime.state.attachments).toEqual([attachment]);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000ae",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: leaked.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "message-retracted acknowledgement");
+
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: "bot token leaked in comms",
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+    expect(runtime.state.attachments).toEqual([]);
   });
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {

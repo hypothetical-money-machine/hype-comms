@@ -143,6 +143,9 @@ export const messageBodySchema = z
   .refine((body) => body.trim().length > 0, "Message body cannot be blank")
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 
+/** Authors may retract their own message during this window; after it the row is immutable. */
+export const MESSAGE_RETRACT_WINDOW_MS = 5 * 60 * 1_000;
+
 export const messageSchema = z
   .object({
     id: entityIdSchema,

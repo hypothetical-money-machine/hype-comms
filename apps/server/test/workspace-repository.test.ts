@@ -28,6 +28,7 @@ import {
   type WorkspaceRepositoryHooks,
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
+import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -427,6 +428,186 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.sendMessage(owner, generalId, message(clientMessageId, "changed @member")),
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+  });
+
+  it("lets an author retract their own message within five minutes and fans the tombstone out", async () => {
+    const secret = `bot token ${randomUUID()}`;
+    const channel = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const direct = await repository.createDirectConversation(owner, { memberId });
+    const dm = await repository.sendMessage(owner, direct.conversation.conversation.id, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "thread root stays"),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+
+    const [channelRetract, channelReplay] = await Promise.all([
+      repository.retractMessage(owner, channel.message.id),
+      repository.retractMessage(owner, channel.message.id),
+    ]);
+    expect(channelReplay).toEqual(channelRetract);
+    expect(channelRetract.message).toMatchObject({
+      id: channel.message.id,
+      conversationId: generalId,
+      conversationSequence: channel.message.conversationSequence,
+      body: secret,
+      deletedAt: expect.any(String),
+    });
+    expect(channelRetract.message.deletedAt).not.toBeNull();
+
+    const dmRetract = await repository.retractMessage(owner, dm.message.id);
+    const replyRetract = await repository.retractMessage(owner, reply.message.id);
+
+    await expect(repository.retractMessage(member, channel.message.id)).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+    } satisfies Partial<ApiError>);
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.some((item) => item.id === channel.message.id)).toBe(false);
+    expect(history.messages.some((item) => item.body.includes("bot token"))).toBe(false);
+
+    const thread = await repository.thread(member, root.message.id, undefined, 50);
+    expect(thread.root.body).toBe("thread root stays");
+    expect(thread.replies).toEqual([]);
+    expect(replyRetract.message.body).toBe(secret);
+
+    const search = await repository.searchMessages(member, "bot token", undefined, 50);
+    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
+
+    await expect(repository.messageById(member, channel.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const afterCreate = channel.syncCursor;
+    const legacy = await repository.sync(observer, afterCreate, 100);
+    expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
+    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+
+    const capable = await repository.sync(
+      observer,
+      afterCreate,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
+    expect(retractEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "message.retracted",
+          conversationId: generalId,
+          conversationSequence: channel.message.conversationSequence,
+          payload: {
+            messageId: channel.message.id,
+            deletedAt: channelRetract.message.deletedAt,
+          },
+        }),
+        expect.objectContaining({
+          type: "message.retracted",
+          conversationId: generalId,
+          conversationSequence: reply.message.conversationSequence,
+          payload: {
+            messageId: reply.message.id,
+            deletedAt: replyRetract.message.deletedAt,
+          },
+        }),
+      ]),
+    );
+    expect(
+      retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
+    ).toBe(false);
+
+    const dmCapable = await repository.sync(
+      member,
+      dm.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(
+      dmCapable.events.filter(
+        (event) =>
+          event.type === "message.retracted" &&
+          event.conversationId === direct.conversation.conversation.id,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: direct.conversation.conversation.id,
+        conversationSequence: dm.message.conversationSequence,
+        payload: {
+          messageId: dm.message.id,
+          deletedAt: dmRetract.message.deletedAt,
+        },
+      }),
+    ]);
+    expect(
+      retractEvents.some(
+        (event) => "message" in event.payload && typeof event.payload.message === "object",
+      ),
+    ).toBe(false);
+
+    const stored = await pool.query<{ body: string; deleted_at: Date | string | null }>(
+      `SELECT body, deleted_at FROM messages WHERE id = $1`,
+      [channel.message.id],
+    );
+    expect(stored.rows[0]).toMatchObject({ body: secret, deleted_at: expect.anything() });
+    expect(stored.rows[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("rejects retracting another member's message and an author retract after five minutes", async () => {
+    const own = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "still secret after the window"),
+      mentionedUserIds: [],
+    });
+    const theirs = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "member wrote this"),
+      mentionedUserIds: [],
+    });
+
+    await expect(repository.retractMessage(owner, theirs.message.id)).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+    } satisfies Partial<ApiError>);
+
+    await pool.query(
+      `UPDATE messages
+          SET created_at = clock_timestamp() - interval '5 minutes 1 second',
+              updated_at = created_at
+        WHERE id = $1`,
+      [own.message.id],
+    );
+    await expect(repository.retractMessage(owner, own.message.id)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "CONFLICT",
+    } satisfies Partial<ApiError>);
+
+    const persisted = await repository.messageById(member, own.message.id);
+    expect(persisted.message).toMatchObject({
+      id: own.message.id,
+      body: "still secret after the window",
+      deletedAt: null,
+    });
   });
 
   it("projects roots in history and paginates replies inside one thread", async () => {
@@ -1293,6 +1474,52 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("hides message.retracted from clients that did not negotiate the capability", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "retract capability target"),
+      mentionedUserIds: [],
+    });
+    const deletedAt = "2026-08-20T17:00:00.000Z";
+    const client = await pool.connect();
+    try {
+      await insertSyncEvent(client, {
+        workspaceId,
+        actorUserId: ownerId,
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        entityVersion: 2,
+        payload: { messageId: sent.message.id, deletedAt },
+      });
+    } finally {
+      client.release();
+    }
+
+    const legacy = await repository.sync(observer, sent.syncCursor, 100);
+    expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
+    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+
+    const capable = await repository.sync(
+      observer,
+      sent.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(capable.events).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        payload: { messageId: sent.message.id, deletedAt },
+      }),
+    ]);
+  });
+
   it("serializes the per-member reaction cap at its concurrent boundary", async () => {
     const sent = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "member quota target"),
@@ -2152,10 +2379,11 @@ describeWithPostgres("WorkspaceRepository", () => {
       taskEvents: false,
       announcementChannels: false,
       participatedThreadNotifications: false,
+      messageRetractEvents: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true, true);
+    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true, true, true);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -2166,6 +2394,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       taskEvents: true,
       announcementChannels: true,
       participatedThreadNotifications: true,
+      messageRetractEvents: true,
     });
   });
 
@@ -2443,6 +2672,50 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     const downloaded = await repository.readFileContent(member, attachmentId);
     expect(downloaded.bytes.toString()).toBe("channel notes");
+  });
+
+  it("hides attachment metadata and bytes after the parent message is retracted", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Sharing the brief"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    const before = await repository.messageById(member, sent.message.id);
+    expect(before.attachments.map((attachment) => attachment.id)).toEqual([attachmentId]);
+
+    const retracted = await repository.retractMessage(owner, sent.message.id);
+    expect(retracted.message).toMatchObject({
+      id: sent.message.id,
+      body: "Sharing the brief",
+      deletedAt: expect.any(String),
+    });
+    expect(retracted).not.toHaveProperty("attachments");
+
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(
+      repository.listMessageAttachments(member, [sent.message.id]),
+    ).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.some((item) => item.id === sent.message.id)).toBe(false);
+    expect(history.attachments.some((attachment) => attachment.id === attachmentId)).toBe(false);
+
+    const files = await repository.listConversationFiles(member, generalId, undefined, 50);
+    expect(files.files.some((file) => file.id === attachmentId)).toBe(false);
+
+    const search = await repository.searchMessages(member, "Sharing the brief", undefined, 50);
+    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
   });
 
   it("attaches a ready file to a DM and hides it from a third member", async () => {

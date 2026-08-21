@@ -28,6 +28,7 @@ const KNOWN_PRODUCT_REALTIME_EVENT_TYPES = new Set([
   "direct_conversation.created",
   "channel.membership_changed",
   "message.created",
+  "message.retracted",
   "reaction.added",
   "reaction.removed",
   "read_cursor.updated",
