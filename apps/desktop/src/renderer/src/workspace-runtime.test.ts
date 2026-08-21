@@ -2412,7 +2412,10 @@ describe("WorkspaceRuntime", () => {
       delivery: "at_least_once",
       payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
     });
-    await settle(() => api.acknowledged.includes("11"), "source-less message-retracted acknowledgement");
+    await settle(
+      () => api.acknowledged.includes("11"),
+      "source-less message-retracted acknowledgement",
+    );
 
     expect(runtime.state.messages).toEqual([]);
     expect((await cache.load()).retractReservations).toEqual([

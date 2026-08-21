@@ -2025,10 +2025,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // Map insertion order is arrival order, not conversation order; sort so "load older
       // messages" cannot append history below newer messages and so `messages.at(-1)` is really
       // the newest message, exactly like PersistentWorkspaceCache.
-      messages: applyRetractReservationsToMessages(
-        [...this.#messages.values()],
-        reservations,
-      ).sort(compareMessages),
+      messages: applyRetractReservationsToMessages([...this.#messages.values()], reservations).sort(
+        compareMessages,
+      ),
       reactions: [...this.#reactions.values()].sort(compareReactions),
       tasks: [...this.#tasks.values()].sort(compareTasks),
       outbox: [...this.#outbox.values()].sort((left, right) =>
@@ -2192,8 +2191,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           conversations.set(parsed.conversationId, {
             ...current,
             lastMessage: created,
-            unreadCount:
-              current.unreadCount + (created.authorId === currentUserId ? 0 : 1),
+            unreadCount: current.unreadCount + (created.authorId === currentUserId ? 0 : 1),
             mentionCount:
               current.mentionCount +
               (created.authorId !== currentUserId &&
