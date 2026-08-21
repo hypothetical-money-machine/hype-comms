@@ -20,6 +20,7 @@ import {
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
   conversationSummarySchema,
@@ -60,6 +61,7 @@ import {
   type ListMessageAttachmentsResponse,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type CommunicationPathsResponse,
   type Conversation,
   type ConversationMutationResponse,
   type ConversationSummary,
@@ -183,6 +185,15 @@ interface ConversationMembershipRow extends QueryResultRow {
 interface ChannelMemberRow extends UserRow {
   role: "owner" | "member";
   joined_at: Date | string;
+}
+
+interface CommunicationPathRow extends QueryResultRow {
+  member_a_id: string;
+  member_b_id: string;
+  direct_message_count: string;
+  shared_channel_count: string;
+  channel_message_count: string;
+  last_activity_at: Date | string | null;
 }
 
 interface MessageRow extends QueryResultRow {
@@ -901,6 +912,119 @@ export class WorkspaceRepository {
     try {
       return listMembersResponseSchema.parse({
         members: await this.#members(client, identity.currentUser.workspaceId),
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Owner-only administration: every undirected communication link between two distinct active
+   * members, aggregated from committed messages and memberships. Message bodies are never read;
+   * only counts and timestamps leave the database. Owner authorization happens at the route,
+   * where the authenticated principal's role is already resolved per request.
+   */
+  async communicationPaths(identity: AuthenticatedIdentity): Promise<CommunicationPathsResponse> {
+    const client = await this.pool.connect();
+    try {
+      const members = await this.#members(client, identity.currentUser.workspaceId);
+      const result = await client.query<CommunicationPathRow>(
+        // A member "accesses" a channel when it is workspace-visible (every active member) or
+        // they hold an explicit, live membership. Shared channels intersect those sets; channel
+        // message volume credits each non-author accessor of the authoring conversation.
+        `WITH accessible AS (
+           SELECT membership.user_id AS user_id,
+                  conversation.id AS conversation_id
+             FROM workspace_memberships AS membership
+             JOIN conversations AS conversation
+               ON conversation.workspace_id = membership.workspace_id
+              AND conversation.kind = 'channel'
+              AND conversation.is_archived = false
+              AND conversation.channel_access = 'workspace'
+            WHERE membership.workspace_id = $1
+              AND membership.status = 'active'
+            UNION
+           SELECT conversation_membership.user_id AS user_id,
+                  conversation_membership.conversation_id AS conversation_id
+             FROM conversation_memberships AS conversation_membership
+             JOIN conversations AS conversation
+               ON conversation.id = conversation_membership.conversation_id
+              AND conversation.kind = 'channel'
+              AND conversation.is_archived = false
+            WHERE conversation_membership.workspace_id = $1
+              AND conversation_membership.left_at IS NULL
+         ),
+         dm AS (
+           SELECT conversation.dm_user_low_id AS member_a_id,
+                  conversation.dm_user_high_id AS member_b_id,
+                  COUNT(message.id) AS direct_message_count,
+                  MAX(message.created_at) AS last_dm_at
+             FROM conversations AS conversation
+             JOIN messages AS message
+               ON message.conversation_id = conversation.id
+              AND message.deleted_at IS NULL
+            WHERE conversation.workspace_id = $1
+              AND conversation.kind = 'direct_message'
+              AND conversation.dm_user_low_id <> conversation.dm_user_high_id
+            GROUP BY 1, 2
+         ),
+         shared AS (
+           SELECT sender.user_id AS member_a_id,
+                  peer.user_id AS member_b_id,
+                  COUNT(DISTINCT sender.conversation_id) AS shared_channel_count
+             FROM accessible AS sender
+             JOIN accessible AS peer
+               ON peer.conversation_id = sender.conversation_id
+              AND peer.user_id > sender.user_id
+            GROUP BY 1, 2
+         ),
+         channel_activity AS (
+           SELECT LEAST(message.author_id, recipient.user_id) AS member_a_id,
+                  GREATEST(message.author_id, recipient.user_id) AS member_b_id,
+                  COUNT(*) AS channel_message_count,
+                  MAX(message.created_at) AS last_channel_at
+             FROM messages AS message
+             JOIN conversations AS conversation
+               ON conversation.id = message.conversation_id
+              AND conversation.kind = 'channel'
+             JOIN accessible AS recipient
+               ON recipient.conversation_id = message.conversation_id
+              AND recipient.user_id <> message.author_id
+            WHERE message.workspace_id = $1
+              AND message.deleted_at IS NULL
+            GROUP BY 1, 2
+         )
+         SELECT COALESCE(dm.member_a_id, shared.member_a_id, activity.member_a_id) AS member_a_id,
+                COALESCE(dm.member_b_id, shared.member_b_id, activity.member_b_id) AS member_b_id,
+                COALESCE(dm.direct_message_count, 0) AS direct_message_count,
+                COALESCE(shared.shared_channel_count, 0) AS shared_channel_count,
+                COALESCE(activity.channel_message_count, 0) AS channel_message_count,
+                GREATEST(dm.last_dm_at, activity.last_channel_at) AS last_activity_at
+           FROM dm
+           FULL OUTER JOIN shared
+             ON shared.member_a_id = dm.member_a_id
+            AND shared.member_b_id = dm.member_b_id
+           FULL OUTER JOIN channel_activity AS activity
+             ON activity.member_a_id = COALESCE(dm.member_a_id, shared.member_a_id)
+            AND activity.member_b_id = COALESCE(dm.member_b_id, shared.member_b_id)
+          ORDER BY COALESCE(dm.direct_message_count, 0)
+                 + COALESCE(shared.shared_channel_count, 0)
+                 + COALESCE(activity.channel_message_count, 0) DESC,
+                member_a_id,
+                member_b_id`,
+        [identity.currentUser.workspaceId],
+      );
+      return communicationPathsResponseSchema.parse({
+        generatedAt: new Date().toISOString(),
+        members,
+        paths: result.rows.map((row) => ({
+          memberAId: row.member_a_id,
+          memberBId: row.member_b_id,
+          directMessageCount: Number(row.direct_message_count),
+          sharedChannelCount: Number(row.shared_channel_count),
+          channelMessageCount: Number(row.channel_message_count),
+          lastActivityAt: nullableIso(row.last_activity_at),
+        })),
       });
     } finally {
       client.release();

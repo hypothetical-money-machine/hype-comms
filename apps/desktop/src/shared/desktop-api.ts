@@ -15,6 +15,7 @@ import type {
   ChatSessionState,
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
+  CommunicationPathsResponse,
   Attachment,
   ConversationFilesResponse,
   ConversationMutationResponse,
@@ -186,6 +187,11 @@ export interface DesktopApi
    * `member.updated` announces that the directory changed but its payload cannot express removal.
    */
   readonly listWorkspaceMembers: () => Promise<ListMembersResponse>;
+  /**
+   * Owner-only workspace administration: member-to-member communication links with per-link
+   * message volume. The server rejects non-owners, so callers must gate the UI on the role.
+   */
+  readonly getCommunicationPaths: () => Promise<CommunicationPathsResponse>;
   /**
    * Fetches one page of conversation summaries. Bootstrap returns the first page; callers page
    * with `after` until `hasMore` is false so a large workspace cannot exceed the wire contract.

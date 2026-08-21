@@ -24,6 +24,7 @@ import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { CommunicationPathsView } from "./communication-paths-view";
 import { ConversationHealth } from "./conversation-health";
 import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
 import {
@@ -71,7 +72,7 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
-type WorkspaceDestination = "workspace" | "ai" | "unreads";
+type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin";
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -329,6 +330,24 @@ function AiChannelIcon() {
     <svg className="ai-channel-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
       <path d="M10 1.9c.5 4 2.1 5.6 6.1 6.1-4 .5-5.6 2.1-6.1 6.1-.5-4-2.1-5.6-6.1-6.1 4-.5 5.6-2.1 6.1-6.1Z" />
       <path d="M15.8 12.4c.2 1.8 1 2.6 2.8 2.8-1.8.2-2.6 1-2.8 2.8-.2-1.8-1-2.6-2.8-2.8 1.8-.2 2.6-1 2.8-2.8Z" />
+    </svg>
+  );
+}
+
+function CommunicationPathsIcon() {
+  return (
+    <svg className="communication-paths-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="5" cy="5" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="15" cy="5" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="5" cy="15" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="15" cy="15" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M7.4 5h5.2M5 7.4v5.2M15 7.4v5.2M7.4 15h5.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.6"
+      />
     </svg>
   );
 }
@@ -642,6 +661,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     runtime.closeThread();
     chrome.collapse();
   }, [chrome, runtime]);
+
+  const openCommunicationPaths = useCallback((): void => {
+    setDestination("admin");
+    setPaneView("chat");
+    setShowChannelMembers(false);
+    setShowPreferences(false);
+    runtime.closeThread();
+  }, [runtime]);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -1799,6 +1826,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               <span className="ai-channel-local-badge">Local</span>
             </button>
 
+            {bootstrap.currentUser.role === "owner" && (
+              <>
+                <div className="nav-heading">
+                  <span>Admin</span>
+                </div>
+                <button
+                  className={
+                    destination === "admin"
+                      ? "conversation communication-paths-destination active"
+                      : "conversation communication-paths-destination"
+                  }
+                  type="button"
+                  aria-current={destination === "admin" ? "page" : undefined}
+                  onClick={openCommunicationPaths}
+                >
+                  <span className="conversation-label">
+                    <CommunicationPathsIcon />
+                    <span className="conversation-label-text">Communication paths</span>
+                  </span>
+                </button>
+              </>
+            )}
+
             <div className="nav-heading">
               <span>Channels</span>
               <ChannelCreatePopover
@@ -1917,6 +1967,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         active={destination === "unreads"}
         onOpen={selectConversation}
       />
+      {bootstrap.currentUser.role === "owner" && (
+        <CommunicationPathsView
+          client={client}
+          members={bootstrap.members}
+          active={destination === "admin"}
+        />
+      )}
       <section className="conversation-pane" hidden={destination !== "workspace"}>
         <header className="conversation-header">
           <div>

@@ -1498,6 +1498,13 @@ function registerIpcHandlers(): void {
     return workspaceTransport.members();
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths, async (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted communication paths sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.communicationPaths();
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationsList, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace conversations sender");

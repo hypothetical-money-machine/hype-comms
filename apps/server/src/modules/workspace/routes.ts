@@ -186,6 +186,15 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return repository.listMembers(identity);
   });
 
+  app.get("/admin/communication-paths", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    if (identity.currentUser.role !== "owner") {
+      throw new ApiError(403, "FORBIDDEN", "Only workspace owners can view communication paths");
+    }
+    return repository.communicationPaths(identity);
+  });
+
   app.get("/conversations", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
