@@ -195,7 +195,7 @@ describe("loadConfig", () => {
         apiKey: "sk_test_example",
         clientId: "client_example",
         redirectUri: "http://127.0.0.1:3000/v1/auth/workos/callback",
-        jwtIssuer: "https://api.workos.com/",
+        jwtIssuer: "https://api.workos.com",
         encryptionKey: Buffer.alloc(32),
       },
     });
