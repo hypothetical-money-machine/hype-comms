@@ -166,7 +166,7 @@ describe("CommunicationPathsView", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "No communication yet" })).toBeTruthy(),
+      expect(screen.getByRole("heading", { name: "No member paths yet" })).toBeTruthy(),
     );
   });
 });

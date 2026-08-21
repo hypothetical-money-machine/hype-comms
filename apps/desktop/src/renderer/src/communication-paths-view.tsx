@@ -140,8 +140,11 @@ export function CommunicationPathsView({
         )}
         {data !== null && paths.length === 0 && (
           <div className="empty-state">
-            <h3>No communication yet</h3>
-            <p>Once members exchange messages, their paths appear here.</p>
+            <h3>No member paths yet</h3>
+            <p>
+              Once this workspace has two or more active members, every pair appears here — with
+              message volume once members start talking.
+            </p>
           </div>
         )}
         {data !== null && paths.length > 0 && (
