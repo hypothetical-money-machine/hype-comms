@@ -46,6 +46,10 @@ async function emulateFixture(
 }
 
 describe("WorkOS access-token verification", () => {
+  it("pins the default issuer to WorkOS's documented access-token issuer", () => {
+    expect(DEFAULT_WORKOS_JWT_ISSUER).toBe("https://api.workos.com");
+  });
+
   it("requires bounded identity, session, temporal, unique, and expected-client claims", () => {
     const claims = {
       iss: DEFAULT_WORKOS_JWT_ISSUER,

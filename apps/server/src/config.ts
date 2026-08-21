@@ -426,7 +426,7 @@ export function loadConfig(
       throw new ConfigError(["workosRedirectUri: Expected the configured public API origin"]);
     }
 
-    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com/";
+    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com";
     const jwtIssuerResult = configuredJwtIssuerSchema.safeParse(jwtIssuer);
     if (!jwtIssuerResult.success) {
       throw new ConfigError([
