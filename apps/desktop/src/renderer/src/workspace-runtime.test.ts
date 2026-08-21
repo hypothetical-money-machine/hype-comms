@@ -3607,6 +3607,7 @@ describe("WorkspaceRuntime", () => {
       messages: [hydratedMessage],
       threadSummaries: [],
       threadsSupported: true,
+      attachments: [],
       nextCursor: null,
     });
     await settle(
