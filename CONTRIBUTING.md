@@ -25,4 +25,3 @@ To keep the project's options open, by submitting a contribution you agree that 
 may include your contribution in a future version of Hype Comms published under a different
 license. Already-released versions stay available under the MIT license forever; only later
 versions can change terms.
-
