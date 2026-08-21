@@ -65,6 +65,12 @@ export interface MembershipRepairMarker {
   readonly selfRemoval: boolean;
 }
 
+export interface RetractReservation {
+  readonly messageId: string;
+  readonly deletedAt: string;
+  readonly entityVersion: number;
+}
+
 export interface CachedWorkspaceState {
   /**
    * The aggregate client snapshot, not a bootstrap response: the cache holds every conversation
@@ -78,6 +84,11 @@ export interface CachedWorkspaceState {
   readonly syncCursor: string | null;
   readonly lastSyncedAt: string | null;
   readonly repairMarker: MembershipRepairMarker | null;
+  /**
+   * Retract events that arrived before their message row existed. History and later created
+   * projections must apply these so a stale live body cannot resurrect the message.
+   */
+  readonly retractReservations: readonly RetractReservation[];
 }
 
 type MembershipChangedEvent = Extract<WorkspaceEvent, { type: "channel.membership_changed" }>;
@@ -189,6 +200,8 @@ interface MetadataRow {
   readonly lastSyncedAt: string | null;
   /** Non-indexed local recovery metadata; adding it does not require an IndexedDB schema bump. */
   readonly repairMarker?: MembershipRepairMarker | null;
+  /** Non-indexed local recovery metadata; adding it does not require an IndexedDB schema bump. */
+  readonly retractReservations?: RetractReservation[];
 }
 
 interface WorkspacePayload {
@@ -350,6 +363,36 @@ const MEMBERSHIP_REPAIR_MARKER_KEYS = [
   "selfRemoval",
   "workspaceSequence",
 ] as const;
+
+const RETRACT_RESERVATION_KEYS = ["deletedAt", "entityVersion", "messageId"] as const;
+
+function parseRetractReservations(value: unknown): RetractReservation[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("Invalid retract reservations");
+  }
+  return value.map((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("Invalid retract reservation");
+    }
+    const record = item as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    if (
+      keys.length !== RETRACT_RESERVATION_KEYS.length ||
+      keys.some((key, index) => key !== RETRACT_RESERVATION_KEYS[index]) ||
+      typeof record.deletedAt !== "string" ||
+      typeof record.entityVersion !== "number" ||
+      !Number.isInteger(record.entityVersion)
+    ) {
+      throw new Error("Invalid retract reservation");
+    }
+    return {
+      messageId: entityIdSchema.parse(record.messageId),
+      deletedAt: record.deletedAt,
+      entityVersion: record.entityVersion,
+    };
+  });
+}
 
 function parseMembershipRepairMarker(value: unknown): MembershipRepairMarker | null {
   if (value === null || value === undefined) return null;
@@ -601,6 +644,81 @@ export function preferRetainedMessage(current: Message | undefined, incoming: Me
   return incoming;
 }
 
+export function retractReservationMap(
+  reservations: readonly RetractReservation[],
+): Map<string, RetractReservation> {
+  return new Map(reservations.map((reservation) => [reservation.messageId, reservation]));
+}
+
+export function upsertRetractReservation(
+  reservations: readonly RetractReservation[],
+  reservation: RetractReservation,
+): RetractReservation[] {
+  const next = retractReservationMap(reservations);
+  const current = next.get(reservation.messageId);
+  if (current !== undefined && current.entityVersion > reservation.entityVersion) {
+    return [...next.values()];
+  }
+  next.set(reservation.messageId, reservation);
+  return [...next.values()];
+}
+
+export function applyRetractReservation(
+  message: Message,
+  reservations: ReadonlyMap<string, RetractReservation>,
+): Message {
+  const reservation = reservations.get(message.id);
+  if (reservation === undefined) return message;
+  const tombstone = messageSchema.parse({
+    ...message,
+    deletedAt: reservation.deletedAt,
+    version: reservation.entityVersion,
+    updatedAt: reservation.deletedAt,
+  });
+  if (message.deletedAt !== null) return preferRetainedMessage(message, tombstone);
+  return tombstone;
+}
+
+function applyRetractReservationsToMessages(
+  messages: readonly Message[],
+  reservations: ReadonlyMap<string, RetractReservation>,
+): Message[] {
+  if (reservations.size === 0) return [...messages];
+  return messages.map((message) => applyRetractReservation(message, reservations));
+}
+
+function applyRetractReservationsToConversations(
+  conversations: readonly ConversationSummary[],
+  reservations: ReadonlyMap<string, RetractReservation>,
+): ConversationSummary[] {
+  if (reservations.size === 0) return [...conversations];
+  return conversations.map((summary) => {
+    if (summary.lastMessage === null) return summary;
+    const lastMessage = applyRetractReservation(summary.lastMessage, reservations);
+    return lastMessage === summary.lastMessage ? summary : { ...summary, lastMessage };
+  });
+}
+
+function mergeMetadataRow(
+  current: MetadataRow | undefined,
+  scope: CacheScope,
+  patch: Partial<Omit<MetadataRow, "id">>,
+): MetadataRow {
+  return {
+    id: "state",
+    userId: patch.userId ?? current?.userId ?? scope.userId,
+    workspaceId: patch.workspaceId ?? current?.workspaceId ?? scope.workspaceId,
+    syncCursor: patch.syncCursor !== undefined ? patch.syncCursor : (current?.syncCursor ?? null),
+    lastSyncedAt:
+      patch.lastSyncedAt !== undefined ? patch.lastSyncedAt : (current?.lastSyncedAt ?? null),
+    repairMarker: patch.repairMarker !== undefined ? patch.repairMarker : current?.repairMarker,
+    retractReservations:
+      patch.retractReservations !== undefined
+        ? patch.retractReservations
+        : current?.retractReservations,
+  };
+}
+
 function messageRow(message: Message, encrypted: ReadonlyMap<string, CacheCiphertext>): MessageRow {
   return {
     id: message.id,
@@ -777,6 +895,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         ),
       ]);
     const workspace = workspacePayloads[0];
+    const reservations = retractReservationMap(
+      parseRetractReservations(metadata?.retractReservations),
+    );
+    const retainedMessages = applyRetractReservationsToMessages(messages, reservations);
+    const retainedConversations = applyRetractReservationsToConversations(
+      conversations,
+      reservations,
+    );
     // A client upgraded from the build that upserted `member.updated` can hold 26 member rows
     // after a disable followed by a create, and `workspaceSnapshotSchema.members` is `.max(25)`.
     // That hard `.parse` runs inside `WorkspaceRuntime.start()`'s try block, so an over-capacity
@@ -794,13 +920,13 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             parseSnapshotInput({
               ...workspace,
               members: cappedMembers,
-              conversations,
+              conversations: retainedConversations,
               syncCursor: metadata?.syncCursor ?? "0",
             }),
           );
     return {
       bootstrap,
-      messages: messages.sort(compareMessages),
+      messages: retainedMessages.sort(compareMessages),
       reactions: reactions.sort(compareReactions),
       tasks: tasks.sort(compareTasks),
       outbox: outboxRows.map((row, index) => ({
@@ -814,6 +940,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       syncCursor: metadata?.syncCursor ?? null,
       lastSyncedAt: metadata?.lastSyncedAt ?? null,
       repairMarker: parseMembershipRepairMarker(metadata?.repairMarker),
+      retractReservations: parseRetractReservations(metadata?.retractReservations),
     };
   }
 
@@ -825,10 +952,20 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?: AbortSignal,
   ): Promise<void> {
     const parsed = parseSnapshotInput(snapshot);
+    const existingReservations = retractReservationMap(
+      parseRetractReservations((await this.#database.metadata.get("state"))?.retractReservations),
+    );
     const authorizedConversationIds = new Set(
       parsed.conversations.map((summary) => summary.conversation.id),
     );
-    const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    const parsedMessages = applyRetractReservationsToMessages(
+      messages.map((message) => messageSchema.parse(message)),
+      existingReservations,
+    );
+    const parsedConversations = applyRetractReservationsToConversations(
+      parsed.conversations,
+      existingReservations,
+    );
     const parsedReactions = reactions.map((reaction) => reactionSchema.parse(reaction));
     const parsedTasks = tasks.map((task) => taskSchema.parse(task));
     const encrypted = await encryptRecords(this.#crypto, [
@@ -838,7 +975,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         featureFlags: parsed.featureFlags,
       } satisfies WorkspacePayload),
       ...parsed.members.map((member) => protectedRecord("member", member.id, member)),
-      ...parsed.conversations.map((conversation) =>
+      ...parsedConversations.map((conversation) =>
         protectedRecord("conversation", conversation.conversation.id, conversation),
       ),
       ...parsedMessages.map((message) => protectedRecord("message", message.id, message)),
@@ -887,7 +1024,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         });
         await this.#writeMembers(parsed.members, encrypted);
         await this.#database.conversations.bulkPut(
-          parsed.conversations.map((summary) => ({
+          parsedConversations.map((summary) => ({
             id: summary.conversation.id,
             kind: summary.conversation.kind,
             updatedAt: summary.conversation.updatedAt,
@@ -901,13 +1038,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           reactionRows(parsedReactions, parsedMessages, encrypted),
         );
         await this.#database.tasks.bulkPut(parsedTasks.map((task) => taskRow(task, encrypted)));
-        await this.#database.metadata.put({
-          id: "state",
-          ...this.#scope,
-          syncCursor: parsed.syncCursor,
-          lastSyncedAt: new Date().toISOString(),
-          repairMarker: null,
-        });
+        await this.#database.metadata.put(
+          mergeMetadataRow(metadata, this.#scope, {
+            ...this.#scope,
+            syncCursor: parsed.syncCursor,
+            lastSyncedAt: new Date().toISOString(),
+            repairMarker: null,
+          }),
+        );
         // Throwing inside the transaction rolls every store back when this cache generation was
         // retired while its encrypted replacement was in progress.
         signal?.throwIfAborted();
@@ -983,14 +1121,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ) {
         return false;
       }
-      await this.#database.metadata.put({
-        id: "state",
-        userId: metadata?.userId ?? this.#scope.userId,
-        workspaceId: metadata?.workspaceId ?? this.#scope.workspaceId,
-        syncCursor: metadata?.syncCursor ?? null,
-        lastSyncedAt: metadata?.lastSyncedAt ?? null,
-        repairMarker: marker,
-      });
+      await this.#database.metadata.put(
+        mergeMetadataRow(metadata, this.#scope, {
+          repairMarker: marker,
+        }),
+      );
       return true;
     });
   }
@@ -1023,16 +1158,20 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
 
     if (parsed.type === "message.created") {
       const currentSummary = await this.#conversation(parsed.conversationId);
+      const created = applyRetractReservation(
+        parsed.payload.message,
+        retractReservationMap(parseRetractReservations(metadata?.retractReservations)),
+      );
       // The workspace row can be missing while a resync is in flight. Store the message and skip
       // the unread bookkeeping instead of throwing, matching MemoryWorkspaceCache.
       const currentUserId = await this.#currentUserId();
-      const fromAnotherMember = parsed.payload.message.authorId !== currentUserId;
+      const fromAnotherMember = created.authorId !== currentUserId;
       const nextSummary =
         currentSummary === null || currentUserId === null
           ? null
           : conversationSummarySchema.parse({
               ...currentSummary,
-              lastMessage: parsed.payload.message,
+              lastMessage: created,
               unreadCount: currentSummary.unreadCount + (fromAnotherMember ? 1 : 0),
               mentionCount:
                 currentSummary.mentionCount +
@@ -1041,7 +1180,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
                   : 0),
             });
       const encrypted = await encryptRecords(this.#crypto, [
-        protectedRecord("message", parsed.payload.message.id, parsed.payload.message),
+        protectedRecord("message", created.id, created),
         ...(nextSummary === null
           ? []
           : [protectedRecord("conversation", nextSummary.conversation.id, nextSummary)]),
@@ -1054,7 +1193,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.outbox,
         this.#database.events,
         async () => {
-          await this.#database.messages.put(messageRow(parsed.payload.message, encrypted));
+          await this.#database.messages.put(messageRow(created, encrypted));
           if (nextSummary !== null) {
             await this.#database.conversations.put({
               id: nextSummary.conversation.id,
@@ -1134,6 +1273,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           ? currentSummary.lastMessage
           : null);
       const tombstone = source === null ? null : tombstoneMessage(source, parsed);
+      const retractReservations = upsertRetractReservation(
+        parseRetractReservations(metadata?.retractReservations),
+        {
+          messageId: parsed.payload.messageId,
+          deletedAt: parsed.payload.deletedAt,
+          entityVersion: parsed.entityVersion,
+        },
+      );
       const nextSummary =
         currentSummary === null
           ? null
@@ -1160,7 +1307,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           if (tombstone !== null) {
             await this.#database.messages.put(messageRow(tombstone, encrypted));
           }
-          await this.#recordEvent(parsed, signal);
+          await this.#recordEvent(parsed, signal, { retractReservations });
           if (nextSummary !== null) {
             await this.#database.conversations.put({
               id: nextSummary.conversation.id,
@@ -1243,13 +1390,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ) {
         return;
       }
-      await this.#database.metadata.put({
-        id: "state",
-        ...this.#scope,
-        syncCursor,
-        lastSyncedAt: new Date().toISOString(),
-        repairMarker: null,
-      });
+      await this.#database.metadata.put(
+        mergeMetadataRow(current, this.#scope, {
+          ...this.#scope,
+          syncCursor,
+          lastSyncedAt: new Date().toISOString(),
+          repairMarker: null,
+        }),
+      );
     });
   }
 
@@ -1260,7 +1408,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?: AbortSignal,
   ): Promise<boolean> {
     if (signal?.aborted) return false;
-    const parsed = messageSchema.parse(message);
+    const reservations = retractReservationMap(
+      parseRetractReservations((await this.#database.metadata.get("state"))?.retractReservations),
+    );
+    const parsed = applyRetractReservation(messageSchema.parse(message), reservations);
     const expectedId = entityIdSchema.parse(expectedClientMessageId);
     const encrypted = await encryptRecords(this.#crypto, [
       protectedRecord("message", parsed.id, parsed),
@@ -1310,7 +1461,13 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   ): Promise<boolean> {
     if (signal?.aborted) return false;
     const expectedConversationId = entityIdSchema.parse(conversationId);
-    const parsed = messages.map((message) => messageSchema.parse(message));
+    const reservations = retractReservationMap(
+      parseRetractReservations((await this.#database.metadata.get("state"))?.retractReservations),
+    );
+    const parsed = applyRetractReservationsToMessages(
+      messages.map((message) => messageSchema.parse(message)),
+      reservations,
+    );
     if (parsed.some((message) => message.conversationId !== expectedConversationId)) {
       throw new Error("The workspace history crossed conversation scope");
     }
@@ -1624,6 +1781,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       ],
       async () => {
         await this.#assertNoMembershipRepair();
+        const reservations = parseRetractReservations(
+          (await this.#database.metadata.get("state"))?.retractReservations,
+        );
         await Promise.all([
           this.#database.metadata.clear(),
           this.#database.workspaces.clear(),
@@ -1634,6 +1794,13 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           this.#database.tasks.clear(),
           this.#database.events.clear(),
         ]);
+        if (reservations.length > 0) {
+          await this.#database.metadata.put(
+            mergeMetadataRow(undefined, this.#scope, {
+              retractReservations: reservations,
+            }),
+          );
+        }
       },
     );
   }
@@ -1678,19 +1845,18 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           id: marker.eventId,
           workspaceSequence: marker.workspaceSequence,
         });
-        await this.#database.metadata.put({
-          id: "state",
-          userId: metadata?.userId ?? this.#scope.userId,
-          workspaceId: metadata?.workspaceId ?? this.#scope.workspaceId,
-          syncCursor:
-            metadata?.syncCursor === null ||
-            metadata?.syncCursor === undefined ||
-            compareSequence(marker.workspaceSequence, metadata.syncCursor) > 0
-              ? marker.workspaceSequence
-              : metadata.syncCursor,
-          lastSyncedAt: new Date().toISOString(),
-          repairMarker: marker,
-        });
+        await this.#database.metadata.put(
+          mergeMetadataRow(metadata, this.#scope, {
+            syncCursor:
+              metadata?.syncCursor === null ||
+              metadata?.syncCursor === undefined ||
+              compareSequence(marker.workspaceSequence, metadata.syncCursor) > 0
+                ? marker.workspaceSequence
+                : metadata.syncCursor,
+            lastSyncedAt: new Date().toISOString(),
+            repairMarker: marker,
+          }),
+        );
         return !alreadyRecorded;
       },
     );
@@ -1770,19 +1936,25 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
   }
 
-  async #recordEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<void> {
+  async #recordEvent(
+    event: WorkspaceEvent,
+    signal?: AbortSignal,
+    extras: Pick<MetadataRow, "retractReservations"> = {},
+  ): Promise<void> {
     signal?.throwIfAborted();
     await this.#assertNoMembershipRepair();
+    const current = await this.#database.metadata.get("state");
     await this.#database.events.put({
       id: event.id,
       workspaceSequence: event.workspaceSequence,
     });
-    await this.#database.metadata.put({
-      id: "state",
-      ...this.#scope,
-      syncCursor: event.workspaceSequence,
-      lastSyncedAt: new Date().toISOString(),
-    });
+    await this.#database.metadata.put(
+      mergeMetadataRow(current, this.#scope, {
+        syncCursor: event.workspaceSequence,
+        lastSyncedAt: new Date().toISOString(),
+        ...extras,
+      }),
+    );
     signal?.throwIfAborted();
   }
 
@@ -1825,11 +1997,22 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   #syncCursor: string | null = null;
   #lastSyncedAt: string | null = null;
   #repairMarker: MembershipRepairMarker | null = null;
+  #retractReservations: RetractReservation[] = [];
   #currentUserId: string | null = null;
 
   async load(): Promise<CachedWorkspaceState> {
     this.#finishStagedMembershipEvent();
-    const snapshot = this.#snapshot;
+    const reservations = retractReservationMap(this.#retractReservations);
+    const snapshot =
+      this.#snapshot === null
+        ? null
+        : {
+            ...this.#snapshot,
+            conversations: applyRetractReservationsToConversations(
+              this.#snapshot.conversations,
+              reservations,
+            ),
+          };
     // The reported snapshot cursor tracks applied events, matching how PersistentWorkspaceCache
     // rebuilds it from the metadata row.
     const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? "0";
@@ -1842,7 +2025,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // Map insertion order is arrival order, not conversation order; sort so "load older
       // messages" cannot append history below newer messages and so `messages.at(-1)` is really
       // the newest message, exactly like PersistentWorkspaceCache.
-      messages: [...this.#messages.values()].sort(compareMessages),
+      messages: applyRetractReservationsToMessages([...this.#messages.values()], reservations).sort(
+        compareMessages,
+      ),
       reactions: [...this.#reactions.values()].sort(compareReactions),
       tasks: [...this.#tasks.values()].sort(compareTasks),
       outbox: [...this.#outbox.values()].sort((left, right) =>
@@ -1851,6 +2036,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       syncCursor: this.#syncCursor,
       lastSyncedAt: this.#lastSyncedAt,
       repairMarker: this.#repairMarker,
+      retractReservations: this.#retractReservations,
     };
   }
 
@@ -1878,11 +2064,17 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     ) {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
-    this.#snapshot = parsed;
+    const reservations = retractReservationMap(this.#retractReservations);
+    const retainedMessages = applyRetractReservationsToMessages(parsedMessages, reservations);
+    const retainedConversations = applyRetractReservationsToConversations(
+      parsed.conversations,
+      reservations,
+    );
+    this.#snapshot = { ...parsed, conversations: retainedConversations };
     this.#currentUserId = parsed.currentUser.user.id;
     this.#members = parsed.members;
     this.#messages.clear();
-    for (const message of parsedMessages) this.#messages.set(message.id, message);
+    for (const message of retainedMessages) this.#messages.set(message.id, message);
     this.#reactions.clear();
     this.#reactionConversationIds.clear();
     for (const reaction of parsedReactions) {
@@ -1980,14 +2172,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#syncCursor = parsed.workspaceSequence;
     this.#lastSyncedAt = new Date().toISOString();
     if (parsed.type === "message.created") {
-      this.#messages.set(
-        parsed.payload.message.id,
-        preferRetainedMessage(
-          this.#messages.get(parsed.payload.message.id),
-          parsed.payload.message,
-        ),
+      const created = applyRetractReservation(
+        parsed.payload.message,
+        retractReservationMap(this.#retractReservations),
       );
-      this.#outbox.delete(parsed.payload.message.clientMessageId);
+      this.#messages.set(
+        created.id,
+        preferRetainedMessage(this.#messages.get(created.id), created),
+      );
+      this.#outbox.delete(created.clientMessageId);
       if (this.#snapshot !== null && parsed.conversationId !== null) {
         const conversations = new Map(
           this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
@@ -1997,12 +2190,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           const currentUserId = this.#snapshot.currentUser.user.id;
           conversations.set(parsed.conversationId, {
             ...current,
-            lastMessage: parsed.payload.message,
-            unreadCount:
-              current.unreadCount + (parsed.payload.message.authorId === currentUserId ? 0 : 1),
+            lastMessage: created,
+            unreadCount: current.unreadCount + (created.authorId === currentUserId ? 0 : 1),
             mentionCount:
               current.mentionCount +
-              (parsed.payload.message.authorId !== currentUserId &&
+              (created.authorId !== currentUserId &&
               parsed.payload.mentionedUserIds.includes(currentUserId)
                 ? 1
                 : 0),
@@ -2028,6 +2220,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // WorkspaceRuntime replaces the server-derived member list because `payload.member` cannot
       // express a removal. Advancing the cursor above keeps this event idempotent until then.
     } else if (parsed.type === "message.retracted") {
+      this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
+        messageId: parsed.payload.messageId,
+        deletedAt: parsed.payload.deletedAt,
+        entityVersion: parsed.entityVersion,
+      });
       const current = this.#messages.get(parsed.payload.messageId);
       const lastMessage = this.#snapshot?.conversations.find(
         (summary) => summary.conversation.id === parsed.conversationId,
@@ -2110,7 +2307,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     ) {
       return false;
     }
-    this.#messages.set(parsed.id, parsed);
+    this.#messages.set(
+      parsed.id,
+      applyRetractReservation(parsed, retractReservationMap(this.#retractReservations)),
+    );
     this.#outbox.delete(expectedId);
     this.#outbox.delete(parsed.clientMessageId);
     await this.advanceCursor(syncCursor);
@@ -2135,10 +2335,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     );
     this.#assertNoMembershipRepair();
     if (authorized !== true) return false;
+    const reservations = retractReservationMap(this.#retractReservations);
     for (const message of parsedMessages) {
+      const reserved = applyRetractReservation(message, reservations);
       this.#messages.set(
-        message.id,
-        preferRetainedMessage(this.#messages.get(message.id), message),
+        reserved.id,
+        preferRetainedMessage(this.#messages.get(reserved.id), reserved),
       );
     }
     if (reactions !== undefined) {
@@ -2307,6 +2509,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
 
   async clearAll(): Promise<void> {
     this.#repairMarker = null;
+    this.#retractReservations = [];
     this.#currentUserId = null;
     await this.clearServerStatePreservingOutbox();
     this.#outbox.clear();

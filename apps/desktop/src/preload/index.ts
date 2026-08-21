@@ -51,6 +51,7 @@ import {
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
+  retractMessageResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
   messageReactionTargetSchema,
@@ -535,6 +536,13 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       messageByIdResponseSchema.parse(
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.workspaceMessageGet,
+          entityIdSchema.parse(messageId),
+        ),
+      ),
+    retractMessage: async (messageId: string) =>
+      retractMessageResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceMessageRetract,
           entityIdSchema.parse(messageId),
         ),
       ),

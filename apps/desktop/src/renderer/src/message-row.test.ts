@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { Message, User } from "@hype-comms/contracts";
+import { MESSAGE_RETRACT_WINDOW_MS, type Message, type User } from "@hype-comms/contracts";
 import { createElement } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OutboxItem } from "./workspace-cache";
+
 import {
   MessageRow,
   participantColorIndex,
@@ -67,15 +68,18 @@ afterEach(cleanup);
 
 function renderMessage(overrides: {
   readonly onOpenThread?: () => void;
+  readonly onRetract?: () => Promise<void>;
+  readonly currentUserId?: string;
+  readonly message?: Message;
   readonly replyCount?: number;
   readonly domIdPrefix?: string;
 }) {
   return render(
     createElement(MessageRow, {
-      message,
+      message: overrides.message ?? message,
       members: [user],
       reactions: [],
-      currentUserId: USER_ID,
+      currentUserId: overrides.currentUserId ?? USER_ID,
       reactionsDisabled: false,
       onAddReaction: vi.fn().mockResolvedValue(undefined),
       onRemoveReaction: vi.fn().mockResolvedValue(undefined),
@@ -226,5 +230,50 @@ describe("visibleTimelineMessages", () => {
         true,
       ),
     ).toEqual([]);
+  });
+});
+
+describe("MessageRow retract action", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(NOW));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("folds retract into the hover action rail for own messages inside the window", () => {
+    const onRetract = vi.fn().mockResolvedValue(undefined);
+    const { container } = renderMessage({ onRetract });
+
+    const retract = screen.getByRole("button", { name: "Retract message" });
+    expect(retract.closest(".message-action-rail")).not.toBeNull();
+    expect(container.textContent).toContain("Root message");
+
+    fireEvent.click(retract);
+    expect(onRetract).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer retract on another author's message", () => {
+    renderMessage({
+      onRetract: vi.fn().mockResolvedValue(undefined),
+      currentUserId: "10000000-0000-4000-8000-000000000099",
+    });
+
+    expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
+  });
+
+  it("does not offer retract after the five-minute window", () => {
+    renderMessage({
+      onRetract: vi.fn().mockResolvedValue(undefined),
+      message: {
+        ...message,
+        createdAt: new Date(Date.parse(NOW) - MESSAGE_RETRACT_WINDOW_MS - 1).toISOString(),
+      },
+    });
+
+    expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
+    expect(screen.getByText("Root message")).not.toBeNull();
   });
 });

@@ -39,6 +39,7 @@ import type {
   ReactionEmoji,
   RealtimeAcknowledgement,
   RemoveReactionResponse,
+  RetractMessageResponse,
   RealtimeConnectionState,
   RealtimeSessionScope,
   SendAttemptResult,
@@ -67,7 +68,13 @@ import type {
   CachedWorkspaceState,
   MembershipRepairMarker,
   OutboxItem,
+  RetractReservation,
   WorkspaceCache,
+} from "./workspace-cache";
+import {
+  applyRetractReservation,
+  retractReservationMap,
+  upsertRetractReservation,
 } from "./workspace-cache";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
@@ -502,6 +509,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
   #repairMarker: MembershipRepairMarker | null = null;
+  #retractReservations: RetractReservation[] = [];
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
   readonly loadBarriers: Promise<void>[] = [];
@@ -530,6 +538,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
       syncCursor: this.#syncCursor,
       lastSyncedAt: null,
       repairMarker: this.#repairMarker,
+      retractReservations: this.#retractReservations,
     };
   }
 
@@ -546,9 +555,20 @@ class FakeWorkspaceCache implements WorkspaceCache {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
     this.operations.push("replaceSnapshot");
-    this.#snapshot = snapshot;
+    const reservations = retractReservationMap(this.#retractReservations);
+    this.#snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((summary) => {
+        if (summary.lastMessage === null) return summary;
+        const lastMessage = applyRetractReservation(summary.lastMessage, reservations);
+        return lastMessage === summary.lastMessage ? summary : { ...summary, lastMessage };
+      }),
+    };
     this.#messages.clear();
-    for (const item of messages) this.#messages.set(item.id, item);
+    for (const item of messages) {
+      const retained = applyRetractReservation(item, reservations);
+      this.#messages.set(retained.id, retained);
+    }
     this.#reactions.clear();
     for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     this.#tasks.clear();
@@ -646,9 +666,18 @@ class FakeWorkspaceCache implements WorkspaceCache {
         }
       }
     } else if (event.type === "message.created") {
-      this.#messages.set(event.payload.message.id, event.payload.message);
-      this.#outbox.delete(event.payload.message.clientMessageId);
+      const created = applyRetractReservation(
+        event.payload.message,
+        retractReservationMap(this.#retractReservations),
+      );
+      this.#messages.set(created.id, created);
+      this.#outbox.delete(created.clientMessageId);
     } else if (event.type === "message.retracted") {
+      this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
+        messageId: event.payload.messageId,
+        deletedAt: event.payload.deletedAt,
+        entityVersion: event.entityVersion,
+      });
       const current = this.#messages.get(event.payload.messageId);
       if (current !== undefined) {
         this.#messages.set(event.payload.messageId, {
@@ -696,7 +725,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     if (messages.some((message) => message.conversationId !== conversationId)) {
       throw new Error("The workspace history crossed conversation scope");
     }
-    for (const item of messages) this.#messages.set(item.id, item);
+    const reservations = retractReservationMap(this.#retractReservations);
+    for (const item of messages) {
+      const retained = applyRetractReservation(item, reservations);
+      this.#messages.set(retained.id, retained);
+    }
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
       for (const [id, reaction] of this.#reactions) {
@@ -762,7 +795,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     ) {
       return false;
     }
-    this.#messages.set(item.id, item);
+    const retained = applyRetractReservation(
+      item,
+      retractReservationMap(this.#retractReservations),
+    );
+    this.#messages.set(retained.id, retained);
     this.#outbox.delete(expectedClientMessageId);
     this.#outbox.delete(item.clientMessageId);
     await this.advanceCursor(syncCursor);
@@ -948,6 +985,8 @@ class FakeDesktopApi implements DesktopApi {
   readonly removeReactionResults: RemoveReactionResponse[] = [];
   readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
+  readonly retractResults: RetractMessageResponse[] = [];
+  readonly retractedMessageIds: string[] = [];
   readonly syncResults: (SyncAttemptResult | Promise<SyncAttemptResult>)[] = [];
   readonly sendResults: (
     | SendAttemptResult
@@ -1226,6 +1265,13 @@ class FakeDesktopApi implements DesktopApi {
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
     return { attachments: [], ...response };
+  }
+
+  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    this.retractedMessageIds.push(messageId);
+    const result = this.retractResults.shift();
+    if (result === undefined) throw new Error("The test queued no retract-message result");
+    return result;
   }
 
   async getMessageById(messageId: string): Promise<MessageByIdResponse> {
@@ -2309,6 +2355,95 @@ describe("WorkspaceRuntime", () => {
       }),
     );
     expect(runtime.state.attachments).toEqual([]);
+  });
+
+  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.retractResults.push({
+      message: { ...ownMessage, deletedAt: NOW, version: 2, updatedAt: NOW },
+      syncCursor: "11",
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    runtime.selectConversation(CONVERSATION_ID);
+
+    await runtime.retractMessage(OWN_MESSAGE_ID);
+
+    expect(api.retractedMessageIds).toEqual([OWN_MESSAGE_ID]);
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+  });
+
+  it("does not let stale history resurrect a source-less message.retracted event", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.messages).toEqual([]);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000af",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(
+      () => api.acknowledged.includes("11"),
+      "source-less message-retracted acknowledgement",
+    );
+
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).retractReservations).toEqual([
+      {
+        messageId: OWN_MESSAGE_ID,
+        deletedAt: NOW,
+        entityVersion: 2,
+      },
+    ]);
+
+    await runtime.openSearchResult({ message: ownMessage });
+
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+    expect((await cache.load()).messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
   });
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {

@@ -2928,7 +2928,8 @@ html[data-member-list-resizing] * {
 }
 
 .message-reply-action,
-.message-task-action {
+.message-task-action,
+.message-retract-action {
   height: 27px;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -2964,7 +2965,8 @@ html[data-member-list-resizing] * {
   line-height: 1;
 }
 
-.message-task-action {
+.message-task-action,
+.message-retract-action {
   padding: 0 7px;
 }
 
@@ -3031,6 +3033,7 @@ html[data-member-list-resizing] * {
 .reaction-add:hover:not(:disabled),
 .message-reply-action:hover:not(:disabled),
 .message-task-action:hover:not(:disabled),
+.message-retract-action:hover:not(:disabled),
 .reaction-picker button:hover:not(:disabled) {
   border-color: var(--theme-border-accent);
   background: var(--theme-surface-reaction-hover);
@@ -3038,7 +3041,8 @@ html[data-member-list-resizing] * {
 
 .reaction-chip:disabled,
 .reaction-add:disabled,
-.reaction-picker button:disabled {
+.reaction-picker button:disabled,
+.message-retract-action:disabled {
   cursor: default;
   opacity: 0.48;
 }
@@ -3064,7 +3068,8 @@ html[data-member-list-resizing] * {
   font-size: 17px;
 }
 
-.reaction-error {
+.reaction-error,
+.retract-error {
   margin: 5px 0 0 !important;
   color: var(--theme-text-danger) !important;
   font-size: 11px;

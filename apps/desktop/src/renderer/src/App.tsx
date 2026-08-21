@@ -45,6 +45,7 @@ import {
   isTimelineAtBottom,
   lastReadEligibleMessageId,
 } from "./message-read-tracking";
+import { canRetractOwnMessage, retractWindowRemainingMs } from "./message-retract";
 import { MessageReactions } from "./message-reactions";
 import { createNotificationActivityView } from "./notification-activity";
 import {
@@ -375,6 +376,7 @@ export function MessageRow({
   onRemoveReaction,
   onOpenAttachment,
   onCreateTask,
+  onRetract,
   highlighted,
   continuation,
   onOpenThread,
@@ -393,6 +395,7 @@ export function MessageRow({
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
   readonly onCreateTask?: () => Promise<void>;
+  readonly onRetract?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
   readonly onOpenThread?: () => void;
@@ -403,6 +406,18 @@ export function MessageRow({
 }) {
   const author = members.find((member) => member.id === message.authorId);
   const participantId = message.authorId ?? "former-member";
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [retracting, setRetracting] = useState(false);
+  const [retractError, setRetractError] = useState("");
+  const retractVisible =
+    onRetract !== undefined && canRetractOwnMessage(message, currentUserId, nowMs);
+  useEffect(() => {
+    if (!retractVisible) return;
+    const remaining = retractWindowRemainingMs(message.createdAt, nowMs);
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining);
+    return () => window.clearTimeout(timer);
+  }, [message.createdAt, nowMs, retractVisible]);
   const threadActionLabel =
     replyCount === 0
       ? "Reply in thread"
@@ -473,17 +488,51 @@ export function MessageRow({
             )
           }
           trailingActions={
-            onCreateTask === undefined ? undefined : (
-              <button
-                className="message-task-action"
-                type="button"
-                onClick={() => void onCreateTask()}
-              >
-                + Task
-              </button>
+            onCreateTask === undefined && !retractVisible ? undefined : (
+              <>
+                {onCreateTask === undefined ? undefined : (
+                  <button
+                    className="message-task-action"
+                    type="button"
+                    onClick={() => void onCreateTask()}
+                  >
+                    + Task
+                  </button>
+                )}
+                {retractVisible ? (
+                  <button
+                    className="message-retract-action"
+                    type="button"
+                    disabled={retracting}
+                    aria-label="Retract message"
+                    title="Retract this message. It disappears for everyone. Available for five minutes."
+                    onClick={() => {
+                      if (onRetract === undefined || retracting) return;
+                      setRetracting(true);
+                      setRetractError("");
+                      void onRetract()
+                        .catch((caught: unknown) => {
+                          setRetractError(
+                            caught instanceof Error && caught.message !== ""
+                              ? caught.message
+                              : "Could not retract the message",
+                          );
+                        })
+                        .finally(() => setRetracting(false));
+                    }}
+                  >
+                    Retract
+                  </button>
+                ) : null}
+              </>
             )
           }
         />
+        {retractError !== "" && (
+          <p className="retract-error" role="alert">
+            {retractError}
+          </p>
+        )}
       </div>
     </article>
   );
@@ -797,7 +846,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     selectedIsPersonal === true;
   const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
-    (message) => message.conversationId === runtimeState.selectedConversationId,
+    (message) =>
+      message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
   );
   const messages = visibleTimelineMessages(
     runtimeState.messages,
@@ -2193,6 +2243,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       onCreateTask={
                         tasksAvailable ? () => createTaskFromMessage(message) : undefined
                       }
+                      onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
                       channelReferences={channelReferences}
@@ -2354,6 +2405,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                   onAddReaction={(emoji) => runtime.addReaction(threadRoot.id, emoji)}
                   onRemoveReaction={(emoji) => runtime.removeReaction(threadRoot.id, emoji)}
+                  onRetract={() => runtime.retractMessage(threadRoot.id)}
                   highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
                   continuation={false}
                   domIdPrefix="thread-message"
@@ -2393,6 +2445,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
+                      onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedThreadMessageId}
                       continuation={isMessageContinuation(
                         message,

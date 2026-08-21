@@ -31,6 +31,7 @@ import type {
   MagicLinkDeliveryState,
   MessageHistoryResponse,
   MessageByIdResponse,
+  RetractMessageResponse,
   MessageThreadResponse,
   MessageSearchQuery,
   MessageSearchResponse,
@@ -205,6 +206,7 @@ export interface DesktopApi
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
   readonly getMessageById: (messageId: string) => Promise<MessageByIdResponse>;
+  readonly retractMessage: (messageId: string) => Promise<RetractMessageResponse>;
   readonly getMessageThread: (input: {
     readonly messageId: string;
     readonly before?: string;
