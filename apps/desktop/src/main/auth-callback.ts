@@ -47,7 +47,11 @@ export function parseAuthKitCallback(
 
   const parameters = [...url.searchParams.entries()];
   const parameterNames = parameters.map(([name]) => name);
-  if (parameters.length !== 2 || new Set(parameterNames).size !== 2) {
+  if (
+    parameters.length < 1 ||
+    parameters.length > 2 ||
+    new Set(parameterNames).size !== parameters.length
+  ) {
     return null;
   }
 

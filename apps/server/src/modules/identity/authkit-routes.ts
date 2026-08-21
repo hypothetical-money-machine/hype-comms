@@ -124,7 +124,9 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
     } else {
       callbackUrl.searchParams.set("error", parameters.error);
     }
-    callbackUrl.searchParams.set("state", parameters.state);
+    if (parameters.state !== undefined) {
+      callbackUrl.searchParams.set("state", parameters.state);
+    }
     return reply.redirect(callbackUrl.href);
   });
 

@@ -352,7 +352,26 @@ export class AuthKitFlow {
     }
     const parsed = desktopAuthCallbackParametersSchema.safeParse(callback);
     const pending = this.#pending;
-    if (!parsed.success || pending === null || !securelyEqual(parsed.data.state, pending.state)) {
+    if (!parsed.success || pending === null) {
+      return { status: "ignored" };
+    }
+
+    const callbackState = parsed.data.state;
+    if (callbackState === undefined) {
+      // A consume-miss lands as authentication_failed with no state. Fail only the in-flight
+      // pending transaction; do not invent state or start a new sign-in.
+      if (!("error" in parsed.data)) {
+        return { status: "ignored" };
+      }
+      if (this.#isExpired(pending)) {
+        await this.#retire(pending.state);
+        return { status: "expired" };
+      }
+      await this.#retire(pending.state);
+      return { status: "authentication_failed" };
+    }
+
+    if (!securelyEqual(callbackState, pending.state)) {
       return { status: "ignored" };
     }
 
