@@ -182,6 +182,20 @@ function isTaskConversation(summary: ConversationSummary, currentUserId: string)
   );
 }
 
+/** The unique 1:1 (or self) DM for `memberId` already present in the local catalog. */
+function isDirectConversationWith(
+  summary: ConversationSummary,
+  currentUserId: string,
+  memberId: string,
+): boolean {
+  if (summary.conversation.kind !== "direct_message") return false;
+  const participants = new Set(summary.participantIds);
+  if (memberId === currentUserId) {
+    return participants.size === 1 && participants.has(currentUserId);
+  }
+  return participants.size === 2 && participants.has(currentUserId) && participants.has(memberId);
+}
+
 /** Full jitter between one second and 30 seconds, per the delivery contract. */
 function retryDelay(attempt: number): number {
   const maximum = Math.min(1_000 * 2 ** Math.min(attempt, 5), 30_000);
@@ -503,6 +517,8 @@ export class WorkspaceRuntime {
   /** The immutable main-process scope currently authorized to mutate this renderer cache. */
   #realtimeScope: RealtimeSessionScope | null = null;
   readonly #historyCursors = new Map<string, string | null>();
+  /** In-flight first-page hydrations so opening the same conversation does not stack fetches. */
+  readonly #historyHydrations = new Map<string, Promise<void>>();
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
   #retractReservations: RetractReservation[] = [];
@@ -589,6 +605,7 @@ export class WorkspaceRuntime {
       this.#cache = null;
       this.#syncCursor = null;
       this.#historyCursors.clear();
+      this.#historyHydrations.clear();
       this.#threadCursors.clear();
       this.#retractReservations = [];
       this.#setState({ ...INITIAL_STATE, busy: true });
@@ -754,6 +771,8 @@ export class WorkspaceRuntime {
     this.#syncCursor = null;
     this.#retractReservations = [];
     this.#membersDirty = false;
+    this.#historyCursors.clear();
+    this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
@@ -785,6 +804,9 @@ export class WorkspaceRuntime {
       threadLoading: false,
       threadError: null,
     });
+    // First paint uses whatever the encrypted replica already has. History for a conversation
+    // that this session has not hydrated yet is fetched after the selection is published.
+    this.#ensureConversationHistory(conversationId);
   }
 
   openTaskSource(task: Task): void {
@@ -1795,9 +1817,75 @@ export class WorkspaceRuntime {
   }
 
   async createDirectConversation(memberId: string): Promise<void> {
+    const existingId = this.#directConversationId(memberId);
+    if (existingId !== null) {
+      this.selectConversation(existingId);
+      return;
+    }
+
+    const generation = this.#generation;
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
     const result = await this.#client.createDirectConversation({ memberId });
-    await this.#refreshSnapshot(this.#generation);
-    this.selectConversation(result.conversation.conversation.id);
+    const snapshotAfterCreate = this.#state.bootstrap;
+    if (generation !== this.#generation || cache !== this.#cache || snapshotAfterCreate === null) {
+      return;
+    }
+    const conversationId = result.conversation.conversation.id;
+    if (
+      snapshotAfterCreate.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      )
+    ) {
+      this.selectConversation(conversationId);
+      return;
+    }
+
+    // Same projection path as channel creation: publish the conversation and select it without
+    // re-downloading every conversation's history. First paint uses the mutation summary plus any
+    // already-cached messages; `#ensureConversationHistory` lazy-hydrates this thread only.
+    const projection = this.#eventQueue.then(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      const snapshot = this.#state.bootstrap;
+      if (snapshot === null) return;
+      const projected = replaceConversation(snapshot, conversationId, (current) => ({
+        ...result.conversation,
+        lastMessage: current?.lastMessage ?? result.conversation.lastMessage,
+        unreadCount: current?.unreadCount ?? result.conversation.unreadCount,
+        mentionCount: current?.mentionCount ?? result.conversation.mentionCount,
+        readCursor: current?.readCursor ?? result.conversation.readCursor,
+      }));
+      const summary = projected.conversations.find(
+        (candidate) => candidate.conversation.id === conversationId,
+      );
+      if (summary === undefined) return;
+
+      let repairError: string | null = null;
+      try {
+        await cache.upsertConversation(summary);
+      } catch {
+        repairError =
+          "The conversation was opened, but its local cache needs repair. Reconnect to refresh it.";
+      }
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#setState({
+        bootstrap: projected,
+        selectedConversationId: conversationId,
+        focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+        ...(repairError === null ? {} : { stale: true, error: repairError }),
+      });
+    });
+    this.#eventQueue = projection;
+    await projection;
+    if (generation === this.#generation && cache === this.#cache) {
+      this.#ensureConversationHistory(conversationId);
+    }
   }
 
   async archiveChannel(conversationId: string): Promise<void> {
@@ -1896,6 +1984,31 @@ export class WorkspaceRuntime {
     return this.#historyCursors.get(conversationId) !== null;
   }
 
+  #directConversationId(memberId: string): string | null {
+    const snapshot = this.#state.bootstrap;
+    const currentUserId = snapshot?.currentUser.user.id;
+    if (snapshot === null || currentUserId === undefined) return null;
+    return (
+      snapshot.conversations.find((summary) =>
+        isDirectConversationWith(summary, currentUserId, memberId),
+      )?.conversation.id ?? null
+    );
+  }
+
+  /**
+   * Fetches the first history page only when this session has not already hydrated the
+   * conversation. Selection must already be published so the pane can paint cached messages first.
+   */
+  #ensureConversationHistory(conversationId: string): void {
+    if (this.#historyCursors.has(conversationId) || this.#historyHydrations.has(conversationId)) {
+      return;
+    }
+    const hydration = this.loadOlder(conversationId).finally(() => {
+      this.#historyHydrations.delete(conversationId);
+    });
+    this.#historyHydrations.set(conversationId, hydration);
+  }
+
   async resetLocalCache(): Promise<void> {
     ++this.#generation;
     this.#retireMembersReplacementQueue();
@@ -1925,6 +2038,7 @@ export class WorkspaceRuntime {
     this.#syncCursor = null;
     this.#retractReservations = [];
     this.#historyCursors.clear();
+    this.#historyHydrations.clear();
     this.#threadCursors.clear();
     this.#setState({ ...INITIAL_STATE, error: "Local cache reset. Rebuilding the workspace…" });
   }
