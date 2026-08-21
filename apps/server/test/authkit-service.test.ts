@@ -7,8 +7,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import type { AuthKitIdentityProvider } from "../src/modules/identity/authkit-provider.js";
 import {
+  AuthKitIdentityRejectedError,
+  AuthKitProviderUnavailableError,
+  type AuthKitIdentityProvider,
+} from "../src/modules/identity/authkit-provider.js";
+import {
+  AuthKitAdmissionDeniedError,
   AuthKitCredentialRejectedError,
   type AuthKitRepository,
 } from "../src/modules/identity/authkit-repository.js";
@@ -249,6 +254,73 @@ describe("AuthKitService", () => {
       }),
     ).resolves.toEqual({
       kind: "error",
+      failureCategory: "internal",
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
+    });
+  });
+
+  it.each([
+    ["identity_rejected", new AuthKitIdentityRejectedError()],
+    ["provider_unavailable", new AuthKitProviderUnavailableError()],
+  ] as const)(
+    "classifies %s callback failures without exposing provider details",
+    async (category, error) => {
+      const service = new AuthKitService({
+        provider: {
+          createAuthorization: vi.fn(),
+          authenticateCode: vi.fn().mockRejectedValue(error),
+          createLogoutUrl: vi.fn(),
+          listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+        },
+        repository: repositoryWith({ consumeTransaction: vi.fn().mockResolvedValue(transaction) }),
+        now: () => NOW,
+      });
+
+      await expect(
+        service.completeCallback({
+          kind: "success",
+          code: PROVIDER_CODE,
+          providerState: PROVIDER_STATE,
+        }),
+      ).resolves.toEqual({
+        kind: "error",
+        failureCategory: category,
+        desktopState: DESKTOP_STATE,
+        desktopAuthVariant: "production",
+      });
+    },
+  );
+
+  it("classifies local admission failures without exposing identity details", async () => {
+    const service = new AuthKitService({
+      provider: {
+        createAuthorization: vi.fn(),
+        authenticateCode: vi.fn().mockResolvedValue({
+          provider: "workos",
+          subject: "user_01ABC",
+          verifiedEmail: "member@example.com",
+          providerSessionId: "session_01ABC",
+        }),
+        createLogoutUrl: vi.fn(),
+        listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+      },
+      repository: repositoryWith({
+        consumeTransaction: vi.fn().mockResolvedValue(transaction),
+        admitIdentity: vi.fn().mockRejectedValue(new AuthKitAdmissionDeniedError()),
+      }),
+      now: () => NOW,
+    });
+
+    await expect(
+      service.completeCallback({
+        kind: "success",
+        code: PROVIDER_CODE,
+        providerState: PROVIDER_STATE,
+      }),
+    ).resolves.toEqual({
+      kind: "error",
+      failureCategory: "admission_denied",
       desktopState: DESKTOP_STATE,
       desktopAuthVariant: "production",
     });
