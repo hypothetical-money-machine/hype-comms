@@ -2,6 +2,7 @@
   "name": "@hype-comms/cli",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Machine-readable command-line client for Hype Comms.",
   "type": "module",
   "bin": {

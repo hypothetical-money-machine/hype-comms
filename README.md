@@ -470,3 +470,9 @@ contains native-notification Milestones 0 through 3 behind default-off build and
 installed notification proof and any default flip remain open alongside attachments, Windows
 Authenticode identity provisioning, Linux release signatures, and hosted operations. Product direction and delivery status are tracked in
 [Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+
+## License
+
+Hype Comms is [MIT-licensed](LICENSE). By contributing you agree to the licensing terms in
+[CONTRIBUTING.md](CONTRIBUTING.md), including the maintainers' right to relicense future
+versions.

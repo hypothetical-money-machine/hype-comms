@@ -7,7 +7,7 @@
     "name": "Hype Comms",
     "email": "callmemorgan@users.noreply.github.com"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "homepage": "https://github.com/hype-comms/hype-comms",
   "desktopName": "com.hypemm.hypecomms.desktop",
   "main": "./dist/main/index.js",
