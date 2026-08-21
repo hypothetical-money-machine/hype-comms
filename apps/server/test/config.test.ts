@@ -282,6 +282,16 @@ describe("loadConfig", () => {
       workos: { clientId: "client_example" },
     });
 
+    expect(
+      loadConfig({
+        ...environment,
+        WORKOS_API_KEY: "sk_opaque_production_example",
+      }),
+    ).toMatchObject({
+      authKitAdmissionEnabled: false,
+      workos: { apiKey: "sk_opaque_production_example" },
+    });
+
     expect(() =>
       loadConfig({ ...environment, HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: "true" }),
     ).toThrow(/WORKOS_WEBHOOK_SECRET/);

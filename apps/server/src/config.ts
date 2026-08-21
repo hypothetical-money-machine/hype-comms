@@ -394,10 +394,14 @@ export function loadConfig(
     result.data.workosRedirectUri !== undefined &&
     result.data.workosEncryptionKey !== undefined
   ) {
-    const expectedKeyPrefix = result.data.nodeEnv === "production" ? "sk_live_" : "sk_test_";
-    if (!result.data.workosApiKey.startsWith(expectedKeyPrefix)) {
+    const expectedLegacyKeyPrefix = result.data.nodeEnv === "production" ? "sk_live_" : "sk_test_";
+    const oppositeLegacyKeyPrefix = result.data.nodeEnv === "production" ? "sk_test_" : "sk_live_";
+    if (
+      !result.data.workosApiKey.startsWith("sk_") ||
+      result.data.workosApiKey.startsWith(oppositeLegacyKeyPrefix)
+    ) {
       throw new ConfigError([
-        `workosApiKey: ${result.data.nodeEnv} requires a ${expectedKeyPrefix} API key`,
+        `workosApiKey: ${result.data.nodeEnv} requires a ${expectedLegacyKeyPrefix} or opaque sk_ API key`,
       ]);
     }
 
