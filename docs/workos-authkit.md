@@ -77,9 +77,11 @@ WORKOS_WEBHOOK_SECRET=replace-me
 HYPE_COMMS_TRUSTED_PROXIES=172.20.0.0/16
 ```
 
-JWT validation defaults to WorkOS's canonical `https://api.workos.com` issuer. If the Application
-uses a WorkOS custom authentication domain, configure the exact HTTPS URL exposed in the token's
-`iss` claim, preserving its exact trailing-slash form when present:
+JWT validation accepts the issuer forms WorkOS mints for this exact Application, derived from the
+issuer origin and the configured client ID: `<origin>/user_management/<client_id>` plus the bare
+origin with and without its trailing slash. The default origin is WorkOS's canonical
+`https://api.workos.com`. If the Application uses a WorkOS custom authentication domain, configure
+that HTTPS origin and the same forms are derived from it:
 
 ```dotenv
 WORKOS_JWT_ISSUER=https://auth.example.com

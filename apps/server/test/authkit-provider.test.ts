@@ -82,6 +82,21 @@ describe("WorkOS access-token verification", () => {
         "client_test",
       ),
     ).toThrow("Unexpected WorkOS access-token claims");
+    expect(
+      validateWorkOSAccessTokenClaims(
+        { ...claims, iss: "https://api.workos.com/user_management/client_test" },
+        "client_test",
+      ),
+    ).toEqual({ subject: "user_01ABC", sessionId: "session_01ABC" });
+    expect(
+      validateWorkOSAccessTokenClaims({ ...claims, iss: "https://api.workos.com" }, "client_test"),
+    ).toEqual({ subject: "user_01ABC", sessionId: "session_01ABC" });
+    expect(() =>
+      validateWorkOSAccessTokenClaims(
+        { ...claims, iss: "https://api.workos.com/user_management/client_other" },
+        "client_test",
+      ),
+    ).toThrow("Unexpected WorkOS access-token claims");
     expect(() =>
       validateWorkOSAccessTokenClaims({ ...claims, exp: claims.iat }, "client_test"),
     ).toThrow("Unexpected WorkOS access-token claims");
@@ -115,6 +130,19 @@ describe("WorkOS access-token verification", () => {
       subject: "user_01ABC",
       sessionId: "session_01ABC",
     });
+    await expect(
+      verifyAccessToken(
+        await sign("client_test", "https://api.workos.com/user_management/client_test"),
+      ),
+    ).resolves.toEqual({
+      subject: "user_01ABC",
+      sessionId: "session_01ABC",
+    });
+    await expect(
+      verifyAccessToken(
+        await sign("client_test", "https://api.workos.com/user_management/client_other"),
+      ),
+    ).rejects.toBeInstanceOf(joseErrors.JWTClaimValidationFailed);
     await expect(verifyAccessToken(await sign("client_other"))).rejects.toBeInstanceOf(
       joseErrors.JWTClaimValidationFailed,
     );
@@ -126,6 +154,14 @@ describe("WorkOS access-token verification", () => {
     );
     await expect(
       verifyCustomIssuer(await sign("client_test", "https://auth.example.com")),
+    ).resolves.toEqual({
+      subject: "user_01ABC",
+      sessionId: "session_01ABC",
+    });
+    await expect(
+      verifyCustomIssuer(
+        await sign("client_test", "https://auth.example.com/user_management/client_test"),
+      ),
     ).resolves.toEqual({
       subject: "user_01ABC",
       sessionId: "session_01ABC",
