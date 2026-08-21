@@ -129,6 +129,49 @@ export const listMembersResponseSchema = z
   })
   .strict();
 
+/**
+ * Owner-only workspace administration: one undirected communication link between two distinct
+ * active members. `memberAId` is always lexicographically before `memberBId` so each pair appears
+ * exactly once.
+ */
+export const COMMUNICATION_PATHS_MAX_MEMBERS = 25;
+export const COMMUNICATION_PATHS_MAX_PATHS = 300;
+
+export const communicationPathSchema = z
+  .object({
+    memberAId: entityIdSchema,
+    memberBId: entityIdSchema,
+    directMessageCount: z.number().int().nonnegative(),
+    sharedChannelCount: z.number().int().nonnegative(),
+    channelMessageCount: z.number().int().nonnegative(),
+    lastActivityAt: isoDateTimeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((path, context) => {
+    if (path.memberAId === path.memberBId) {
+      context.addIssue({
+        code: "custom",
+        path: ["memberBId"],
+        message: "A communication path must join two distinct members",
+      });
+    }
+    if (path.memberAId > path.memberBId) {
+      context.addIssue({
+        code: "custom",
+        path: ["memberAId"],
+        message: "memberAId must sort before memberBId",
+      });
+    }
+  });
+
+export const communicationPathsResponseSchema = z
+  .object({
+    generatedAt: isoDateTimeSchema,
+    members: z.array(userSchema).max(COMMUNICATION_PATHS_MAX_MEMBERS),
+    paths: z.array(communicationPathSchema).max(COMMUNICATION_PATHS_MAX_PATHS),
+  })
+  .strict();
+
 export const listConversationsQuerySchema = z
   .object({
     after: paginationCursorSchema.optional(),
@@ -767,6 +810,8 @@ export type WorkspaceBootstrapResponse = z.infer<typeof workspaceBootstrapRespon
 export type HumanWorkspaceBootstrapResponse = z.infer<typeof humanWorkspaceBootstrapResponseSchema>;
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
 export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
+export type CommunicationPath = z.infer<typeof communicationPathSchema>;
+export type CommunicationPathsResponse = z.infer<typeof communicationPathsResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;

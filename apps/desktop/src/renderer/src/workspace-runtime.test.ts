@@ -12,6 +12,7 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ChatSessionState,
+  CommunicationPathsResponse,
   ConversationFilesResponse,
   ConversationMutationResponse,
   ConversationSummary,
@@ -1171,6 +1172,10 @@ class FakeDesktopApi implements DesktopApi {
     const queued = this.memberResults.shift();
     if (queued !== undefined) return await queued;
     return { members: [...this.members] };
+  }
+
+  async getCommunicationPaths(): Promise<CommunicationPathsResponse> {
+    return { generatedAt: "2026-01-01T00:00:00.000Z", members: [...this.members], paths: [] };
   }
 
   async listConversations(

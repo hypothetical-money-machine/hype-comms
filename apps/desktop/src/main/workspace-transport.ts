@@ -20,6 +20,7 @@ import {
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
@@ -48,6 +49,7 @@ import {
   type ArchiveChannelRequest,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type CommunicationPathsResponse,
   type ConversationMutationResponse,
   type CreateTaskOperation,
   type CreateChannelOperation,
@@ -210,6 +212,13 @@ export class WorkspaceTransport {
   async members(): Promise<ListMembersResponse> {
     const response = await this.session.fetch(this.#url("/v1/members").href, { method: "GET" });
     return listMembersResponseSchema.parse(await this.#payload(response));
+  }
+
+  async communicationPaths(): Promise<CommunicationPathsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/admin/communication-paths").href, {
+      method: "GET",
+    });
+    return communicationPathsResponseSchema.parse(await this.#payload(response));
   }
 
   async conversations(

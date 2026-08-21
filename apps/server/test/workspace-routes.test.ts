@@ -41,11 +41,15 @@ const currentUser: CurrentUser = {
 };
 
 class FakeIdentityService {
-  readonly authenticateContext = vi.fn(async () => ({
-    currentUser,
-    sessionId,
-    principalKind: "human" as const,
-  }));
+  readonly authenticateContext: ReturnType<typeof vi.fn>;
+
+  constructor(role: "owner" | "member" = "owner") {
+    this.authenticateContext = vi.fn(async () => ({
+      currentUser: { ...currentUser, role },
+      sessionId,
+      principalKind: "human" as const,
+    }));
+  }
 
   asService(): IdentityService {
     return this as unknown as IdentityService;
@@ -273,6 +277,11 @@ class FakeWorkspaceRepository {
   readonly createChannelTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
   readonly updateTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "10" }));
   readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "11" }));
+  readonly communicationPaths = vi.fn(async () => ({
+    generatedAt: now,
+    members: [currentUser.user],
+    paths: [],
+  }));
 
   asRepository(): WorkspaceRepository {
     return this as unknown as WorkspaceRepository;
@@ -303,6 +312,21 @@ async function reactionApp(repository: FakeWorkspaceRepository, botService?: Bot
       service: new FakeIdentityService().asService(),
       ...(botService === undefined ? {} : { botService }),
     },
+    workspace: {
+      repository: repository.asRepository(),
+      realtimeHub: new FakeRealtimeEventHub().asHub(),
+    },
+  });
+  apps.push(app);
+  return app;
+}
+
+async function appWithRole(
+  repository: FakeWorkspaceRepository,
+  role: "owner" | "member",
+): Promise<Awaited<ReturnType<typeof buildApp>>> {
+  const app = await buildApp({
+    identity: { service: new FakeIdentityService(role).asService() },
     workspace: {
       repository: repository.asRepository(),
       realtimeHub: new FakeRealtimeEventHub().asHub(),
@@ -1012,5 +1036,52 @@ describe("channel mutation routes", () => {
       "req-2",
     );
     expect(repository.createChannel).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("admin communication paths route", () => {
+  it("returns aggregated member-to-member paths for workspace owners", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/communication-paths",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.communicationPaths).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+    );
+    expect(response.json()).toEqual({
+      generatedAt: now,
+      members: [currentUser.user],
+      paths: [],
+    });
+  });
+
+  it("rejects non-owner members with 403 without querying the repository", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await appWithRole(repository, "member");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/communication-paths",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(repository.communicationPaths).not.toHaveBeenCalled();
+  });
+
+  it("requires an authenticated session", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({ method: "GET", url: "/v1/admin/communication-paths" });
+
+    expect(response.statusCode).toBe(401);
+    expect(repository.communicationPaths).not.toHaveBeenCalled();
   });
 });

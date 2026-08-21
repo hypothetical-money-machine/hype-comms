@@ -29,6 +29,7 @@ import {
   channelMemberTargetSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  communicationPathsResponseSchema,
   compactModePreferenceSchema,
   conversationMutationResponseSchema,
   createChannelOperationSchema,
@@ -510,6 +511,10 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
     listWorkspaceMembers: async () =>
       listMembersResponseSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMembersList),
+      ),
+    getCommunicationPaths: async () =>
+      communicationPathsResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths),
       ),
     listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
       listConversationsResponseSchema.parse(
