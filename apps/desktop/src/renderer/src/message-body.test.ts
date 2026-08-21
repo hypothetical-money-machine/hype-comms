@@ -4,13 +4,27 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { User } from "@hype-comms/contracts";
+
 import { FencedBlockquoteProvider } from "./fenced-blockquote-context";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MessageBody } from "./message-body";
 
 const GENERAL_ID = "10000000-0000-4000-8000-000000000001";
 
+const ALEX_ID = "10000000-0000-4000-8000-000000000011";
+
 const channels = [{ conversationId: GENERAL_ID, slug: "general" }];
+
+const alex: User = {
+  id: ALEX_ID,
+  kind: "human",
+  username: "alex",
+  displayName: "Alex Rivera",
+  avatarUrl: null,
+  createdAt: "2026-08-04T12:00:00.000Z",
+  updatedAt: "2026-08-04T12:00:00.000Z",
+};
 
 afterEach(cleanup);
 
@@ -322,6 +336,49 @@ describe("MessageBody", () => {
     );
     expect(reference).not.toBeNull();
     expect(backReference).not.toBeNull();
+  });
+
+  it("renders known mentions as chips and leaves unknown @tokens as text", () => {
+    const { container, rerender } = render(
+      createElement(MessageBody, { body: "see @alex later", members: [alex] }),
+    );
+
+    const chip = container.querySelector(".mention-chip");
+    expect(chip?.textContent).toBe("@alex");
+    expect(chip?.getAttribute("data-mention-user-id")).toBe(ALEX_ID);
+
+    rerender(createElement(MessageBody, { body: "ping @nobody", members: [alex] }));
+    expect(container.querySelector(".mention-chip")).toBeNull();
+    expect(container.textContent).toBe("ping @nobody");
+  });
+
+  it("renders mentions beside channel references", () => {
+    const onOpenChannel = vi.fn();
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "ask @alex in #general",
+        channels,
+        members: [alex],
+        onOpenChannel,
+      }),
+    );
+
+    expect(container.querySelector(".mention-chip")?.textContent).toBe("@alex");
+    fireEvent.click(screen.getByRole("button", { name: "#general" }));
+    expect(onOpenChannel).toHaveBeenCalledWith(GENERAL_ID);
+  });
+
+  it("keeps mentions literal inside code and links", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "keep `@alex` literal or see [@alex](https://example.com)",
+        members: [alex],
+      }),
+    );
+
+    expect(container.querySelector(".mention-chip")).toBeNull();
+    expect(screen.getByText("@alex", { selector: "code" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "@alex (https://example.com/)" })).toBeTruthy();
   });
 
   it("only inlines a pending suffix after a final paragraph", () => {

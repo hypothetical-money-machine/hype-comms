@@ -1,3 +1,4 @@
+import type { User } from "@hype-comms/contracts";
 import {
   Children,
   createContext,
@@ -14,6 +15,7 @@ import { segmentMessageBody, type ChannelReferenceTarget } from "./channel-refer
 import { useFencedBlockquoteMode } from "./fenced-blockquote-context";
 import type { FencedBlockquoteMode } from "./fenced-blockquote-runtime";
 import { expandFencedBlockquotes } from "./fenced-blockquotes";
+import { segmentMentions } from "./mentions";
 
 interface MarkdownSyntaxNode {
   children?: MarkdownSyntaxNode[];
@@ -61,29 +63,51 @@ function externalLinkDestination(children: ReactNode, safeUrl: string): ReactNod
   return <span className="markdown-link-destination"> ({safeUrl})</span>;
 }
 
-function channelAwareText(
+function mentionChip(text: string, userId: string, key: string): ReactNode {
+  return (
+    <span key={key} className="mention-chip" data-mention-user-id={userId}>
+      {text}
+    </span>
+  );
+}
+
+function annotateMessageText(
   children: ReactNode,
   channels: readonly ChannelReferenceTarget[],
+  members: readonly User[],
   onOpenChannel: ((conversationId: string) => void) | undefined,
 ): ReactNode {
-  if (onOpenChannel === undefined) return children;
+  if (onOpenChannel === undefined && members.length === 0) return children;
 
   return Children.map(children, (child, childIndex) => {
     if (typeof child !== "string") return child;
-    return segmentMessageBody(child, channels).map((segment, segmentIndex) =>
-      segment.kind === "channel" ? (
-        <button
-          key={`${String(childIndex)}-${String(segmentIndex)}`}
-          type="button"
-          className="channel-reference"
-          onClick={() => onOpenChannel(segment.conversationId)}
-        >
-          {segment.text}
-        </button>
-      ) : (
-        <Fragment key={`${String(childIndex)}-${String(segmentIndex)}`}>{segment.text}</Fragment>
-      ),
-    );
+    const channelSegments =
+      onOpenChannel === undefined
+        ? [{ kind: "text" as const, text: child }]
+        : segmentMessageBody(child, channels);
+    return channelSegments.flatMap((segment, segmentIndex) => {
+      const keyPrefix = `${String(childIndex)}-${String(segmentIndex)}`;
+      if (segment.kind === "channel") {
+        return [
+          <button
+            key={keyPrefix}
+            type="button"
+            className="channel-reference"
+            onClick={() => onOpenChannel?.(segment.conversationId)}
+          >
+            {segment.text}
+          </button>,
+        ];
+      }
+      return segmentMentions(segment.text, members).map((mentionSegment, mentionIndex) => {
+        const key = `${keyPrefix}-${String(mentionIndex)}`;
+        return mentionSegment.kind === "mention" ? (
+          mentionChip(mentionSegment.text, mentionSegment.userId, key)
+        ) : (
+          <Fragment key={key}>{mentionSegment.text}</Fragment>
+        );
+      });
+    });
   });
 }
 
@@ -92,14 +116,21 @@ const ChannelReferencesEnabledContext = createContext(true);
 function ChannelAwareText({
   children,
   channels,
+  members,
   onOpenChannel,
 }: {
   readonly children: ReactNode;
   readonly channels: readonly ChannelReferenceTarget[];
+  readonly members: readonly User[];
   readonly onOpenChannel: ((conversationId: string) => void) | undefined;
 }) {
-  const channelReferencesEnabled = useContext(ChannelReferencesEnabledContext);
-  return channelAwareText(children, channels, channelReferencesEnabled ? onOpenChannel : undefined);
+  const referencesEnabled = useContext(ChannelReferencesEnabledContext);
+  return annotateMessageText(
+    children,
+    channels,
+    referencesEnabled ? members : [],
+    referencesEnabled ? onOpenChannel : undefined,
+  );
 }
 
 interface MarkdownBodyProps {
@@ -108,6 +139,7 @@ interface MarkdownBodyProps {
   readonly fencedBlockquoteMode?: FencedBlockquoteMode;
   readonly suffix?: ReactNode;
   readonly channels?: readonly ChannelReferenceTarget[];
+  readonly members?: readonly User[];
   readonly onOpenChannel?: (conversationId: string) => void;
 }
 
@@ -117,6 +149,7 @@ export const MarkdownBody = memo(function MarkdownBody({
   fencedBlockquoteMode,
   suffix,
   channels = [],
+  members = [],
   onOpenChannel,
 }: MarkdownBodyProps) {
   const contextualFencedBlockquoteMode = useFencedBlockquoteMode();
@@ -125,7 +158,7 @@ export const MarkdownBody = memo(function MarkdownBody({
     fencedBlockquoteMode ?? contextualFencedBlockquoteMode,
   );
   const renderText = (children: ReactNode): ReactNode => (
-    <ChannelAwareText channels={channels} onOpenChannel={onOpenChannel}>
+    <ChannelAwareText channels={channels} members={members} onOpenChannel={onOpenChannel}>
       {children}
     </ChannelAwareText>
   );
@@ -250,12 +283,14 @@ export const MessageBody = memo(function MessageBody({
   fencedBlockquoteMode,
   suffix,
   channels = [],
+  members = [],
   onOpenChannel,
 }: {
   readonly body: string;
   readonly fencedBlockquoteMode?: FencedBlockquoteMode;
   readonly suffix?: ReactNode;
   readonly channels?: readonly ChannelReferenceTarget[];
+  readonly members?: readonly User[];
   readonly onOpenChannel?: (conversationId: string) => void;
 }) {
   return (
@@ -265,6 +300,7 @@ export const MessageBody = memo(function MessageBody({
       fencedBlockquoteMode={fencedBlockquoteMode}
       suffix={suffix}
       channels={channels}
+      members={members}
       onOpenChannel={onOpenChannel}
     />
   );

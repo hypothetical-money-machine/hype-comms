@@ -39,6 +39,7 @@ import { MemberListResizeHandle } from "./member-list-resize-handle";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
+import { mentionedMemberIds } from "./mentions";
 import { isMessageContinuation } from "./message-grouping";
 import {
   isReadTrackingEligible,
@@ -97,21 +98,6 @@ function messageTime(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
-}
-
-function mentionedMemberIds(
-  body: string,
-  members: readonly User[],
-  participantIds: readonly string[],
-): readonly string[] {
-  const visibleMemberIds = new Set(participantIds);
-  return members
-    .filter((member) => {
-      if (!visibleMemberIds.has(member.id)) return false;
-      const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
-    })
-    .map((member) => member.id);
 }
 
 export function visibleTimelineMessages(
@@ -446,6 +432,7 @@ export function MessageRow({
         <MessageBody
           body={message.body}
           channels={channelReferences}
+          members={members}
           onOpenChannel={onOpenChannel}
         />
         {attachments.length > 0 && (
@@ -541,6 +528,7 @@ export function MessageRow({
 export function PendingMessageRow({
   item,
   currentUser,
+  members = [],
   continuation,
   editing,
   onEdit,
@@ -552,6 +540,7 @@ export function PendingMessageRow({
 }: {
   readonly item: OutboxItem;
   readonly currentUser: User;
+  readonly members?: readonly User[];
   readonly continuation: boolean;
   readonly editing: boolean;
   readonly onEdit: () => void;
@@ -581,6 +570,7 @@ export function PendingMessageRow({
         <MessageBody
           body={item.operation.message.body}
           channels={channelReferences}
+          members={members}
           onOpenChannel={onOpenChannel}
           suffix={
             continuation ? <span className="pending-status"> · {pendingStatus}</span> : undefined
@@ -2129,6 +2119,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               <AnnouncementPostingNotice />
             ) : (
               <MessageComposer
+                contextKey={selectedSummary.conversation.id}
                 conversationName={runtime.conversationName(selectedSummary)}
                 draft={draft}
                 pendingAttachments={composerAttachments}
@@ -2291,6 +2282,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <PendingMessageRow
                       item={item}
                       currentUser={bootstrap.currentUser.user}
+                      members={bootstrap.members}
                       continuation={continuation}
                       editing={editingClientMessageId === item.operation.message.clientMessageId}
                       mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
@@ -2318,6 +2310,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               <AnnouncementPostingNotice />
             ) : (
               <MessageComposer
+                contextKey={runtimeState.selectedConversationId ?? undefined}
                 conversationName={
                   selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
                 }
@@ -2328,6 +2321,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
+                members={bootstrap.members}
+                currentUserId={currentUserId}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 onDraftChange={setDraft}
@@ -2487,6 +2482,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       <PendingMessageRow
                         item={item}
                         currentUser={bootstrap.currentUser.user}
+                        members={bootstrap.members}
                         continuation={continuation}
                         editing={
                           threadEditingClientMessageId === item.operation.message.clientMessageId
@@ -2521,6 +2517,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             <ArchivedConversationNotice thread />
           ) : (
             <MessageComposer
+              contextKey={`${String(runtimeState.selectedConversationId)}:${selectedThreadRootId}`}
               conversationName={null}
               draft={threadDraft}
               pendingAttachments={threadComposerAttachments}
@@ -2530,6 +2527,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               inputId="thread-message-composer"
               inputLabel="Reply"
               inputRef={attachThreadComposerInput}
+              members={bootstrap.members}
+              currentUserId={currentUserId}
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
