@@ -1969,6 +1969,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       />
       {bootstrap.currentUser.role === "owner" && (
         <CommunicationPathsView
+          // Keyed by the authenticated identity so the cached aggregate can never survive a
+          // session change into another workspace, even across a direct signed-in transition.
+          key={`${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
           client={client}
           members={bootstrap.members}
           active={destination === "admin"}

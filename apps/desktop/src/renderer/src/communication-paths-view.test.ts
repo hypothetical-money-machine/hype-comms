@@ -137,6 +137,25 @@ describe("CommunicationPathsView", () => {
     expect(getCommunicationPaths).toHaveBeenCalledTimes(2);
   });
 
+  it("resets its cache and refetches when the session identity changes", async () => {
+    const getCommunicationPaths = vi.fn(async () => response);
+    const props = {
+      client: clientWith(getCommunicationPaths),
+      members,
+      active: true,
+    };
+    const { rerender } = render(createElement(CommunicationPathsView, { ...props, key: "a" }));
+    await waitFor(() => expect(getCommunicationPaths).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("table")).toBeTruthy());
+
+    // The parent keys the view by user/workspace; a direct signed-in transition remounts it,
+    // so the previous workspace's cached table can never survive into the next one.
+    rerender(createElement(CommunicationPathsView, { ...props, key: "b" }));
+    expect(screen.getByRole("status").textContent).toContain("Loading");
+    expect(screen.queryByRole("table")).toBeNull();
+    await waitFor(() => expect(getCommunicationPaths).toHaveBeenCalledTimes(2));
+  });
+
   it("surfaces a rejection without leaving a stale table", async () => {
     const getCommunicationPaths = vi.fn(async () => {
       throw new Error("Only workspace owners can view communication paths");
