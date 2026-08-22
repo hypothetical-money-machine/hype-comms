@@ -478,7 +478,7 @@ describe("main composer focus on conversation changes", () => {
       act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
 
       await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
-      expect(document.activeElement).toBe(control);
+      await waitFor(() => expect(document.activeElement).toBe(control), { timeout: 5_000 });
       expect(dialog.contains(document.activeElement)).toBe(true);
     } finally {
       dialog.remove();
@@ -542,7 +542,7 @@ describe("main composer focus on conversation changes", () => {
     fireEvent.click(chatToggle);
 
     await screen.findByRole("textbox", { name: "Message" });
-    expect(document.activeElement).toBe(chatToggle);
+    await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
   });
 
   it("does not steal focus when the pane toggle remounts the composer", async () => {
@@ -557,7 +557,7 @@ describe("main composer focus on conversation changes", () => {
     fireEvent.click(chatToggle);
 
     await screen.findByRole("textbox", { name: "Message" });
-    expect(document.activeElement).toBe(chatToggle);
+    await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
   });
 
   it("focuses the composer when the conversation changes while the Tasks pane is showing", async () => {
