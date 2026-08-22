@@ -80,9 +80,7 @@ steps:
       TARGET_CLUSTER: *target_cluster
     commands:
       - apk add --no-cache curl tar
-      - |
-        curl -sSL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz \
-          | tar -xz -C /usr/local/bin kustomize
+      - sh scripts/verify-kustomize.sh
       - git clone --branch $${DEPLOY_BRANCH} https://woodpecker-ci:$${GITHUB_TOKEN}@github.com/$${DEPLOY_REPO}.git deploy-kit
       - cd deploy-kit/clusters/$${TARGET_CLUSTER}/workloads/$${APP}
       - kustomize edit set image $${APP}=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA}
