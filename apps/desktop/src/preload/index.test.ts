@@ -49,6 +49,7 @@ const MEMBER = {
   username: "morgan",
   displayName: "Morgan",
   avatarUrl: null,
+  title: null,
   createdAt: NOW,
   updatedAt: NOW,
 } as const;

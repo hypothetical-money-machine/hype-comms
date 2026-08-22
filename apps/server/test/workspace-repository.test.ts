@@ -2380,10 +2380,20 @@ describeWithPostgres("WorkspaceRepository", () => {
       announcementChannels: false,
       participatedThreadNotifications: false,
       messageRetractEvents: false,
+      memberProfiles: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true, true, true);
+    const capable = await repository.issueRealtimeTicket(
+      owner,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    );
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -2395,6 +2405,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       announcementChannels: true,
       participatedThreadNotifications: true,
       messageRetractEvents: true,
+      memberProfiles: true,
     });
   });
 

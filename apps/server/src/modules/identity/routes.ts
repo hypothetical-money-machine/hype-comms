@@ -6,6 +6,7 @@ import {
   createAgentTokenRequestSchema,
   createAgentTokenResponseSchema,
   createInvitationSchema,
+  clientCapabilitiesHeaderSchema,
   currentPrincipalSchema,
   currentUserSchema,
   deviceSessionSchema,
@@ -16,8 +17,11 @@ import {
   listInvitationsResponseSchema,
   magicLinkLandingQuerySchema,
   magicLinkRequestedSchema,
+  MEMBER_PROFILES_CAPABILITY,
   requestMagicLinkSchema,
   sessionTokenSchema,
+  updateProfileRequestSchema,
+  updateProfileResponseSchema,
   verifyMagicLinkSchema,
   type CurrentUser,
   type SessionToken,
@@ -25,6 +29,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import { FixedWindowAttemptThrottle } from "../../throttle.js";
 import {
   rejectAmbiguousCredentials,
   requireAuthenticatedIdentity,
@@ -45,6 +50,8 @@ const DESKTOP_CALLBACK_SCHEMES = {
   production: "hype-comms",
   development: "hype-comms-dev",
 } as const;
+const PROFILE_UPDATE_LIMIT = 10;
+const PROFILE_UPDATE_WINDOW_MS = 15 * 60 * 1_000;
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
@@ -115,11 +122,30 @@ async function requireCurrentUser(
  * contracts default the missing value back to `"human"`, so both generations accept this wire
  * shape while internal identity objects remain discriminated.
  */
-export function desktopCurrentUserResponse(currentUser: CurrentUser) {
+export function supportsMemberProfiles(value: string | string[] | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "string")
+    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  return parsed.data.includes(MEMBER_PROFILES_CAPABILITY);
+}
+
+function withoutTitle<T extends { readonly title?: unknown }>(user: T): Omit<T, "title"> {
+  const { title, ...legacy } = user;
+  void title;
+  return legacy;
+}
+
+function withoutAgentTitle<T extends { readonly user: { readonly title?: unknown } }>(agent: T) {
+  return { ...agent, user: withoutTitle(agent.user) };
+}
+
+export function desktopCurrentUserResponse(currentUser: CurrentUser, memberProfiles = false) {
   const parsed = currentUserSchema.parse(currentUser);
   const { kind, ...user } = parsed.user;
   void kind;
-  return { ...parsed, user };
+  return { ...parsed, user: memberProfiles ? user : withoutTitle(user) };
 }
 
 export function setSessionCookie(
@@ -217,6 +243,11 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     agentProvisioningEnabled = true,
   },
 ) => {
+  const profileUpdateThrottle = new FixedWindowAttemptThrottle({
+    maxAttempts: PROFILE_UPDATE_LIMIT,
+    windowMs: PROFILE_UPDATE_WINDOW_MS,
+  });
+
   app.post("/auth/magic-link", async (request, reply) => {
     if (!selfServiceMagicLink) {
       throw new ApiError(
@@ -242,14 +273,42 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
       throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
     }
     setSessionCookie(reply, session, cookieSecure);
-    return reply.code(200).send(desktopCurrentUserResponse(currentUser));
+    return reply
+      .code(200)
+      .send(
+        desktopCurrentUserResponse(
+          currentUser,
+          supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
+        ),
+      );
   });
 
   app.get("/auth/me", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, service);
+    const memberProfiles = supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]);
     return identity.credentialType === "session"
-      ? desktopCurrentUserResponse(identity.currentUser)
-      : currentPrincipalSchema.parse(identity.currentUser);
+      ? desktopCurrentUserResponse(identity.currentUser, memberProfiles)
+      : (() => {
+          const principal = currentPrincipalSchema.parse(identity.currentUser);
+          return memberProfiles ? principal : { ...principal, user: withoutTitle(principal.user) };
+        })();
+  });
+
+  app.patch("/profile", async (request, reply) => {
+    const { currentUser } = await requireCurrentUser(request, service);
+    const retryAfterMs = profileUpdateThrottle.recordAttempt(currentUser.user.id);
+    if (retryAfterMs > 0) {
+      void reply.header("retry-after", Math.ceil(retryAfterMs / 1_000).toString());
+      throw new ApiError(429, "RATE_LIMITED", "Too many requests");
+    }
+    const body = updateProfileRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid profile update");
+    const response = updateProfileResponseSchema.parse({
+      user: await service.updateProfileTitle(currentUser.user.id, body.data.title),
+    });
+    return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+      ? response
+      : { ...response, user: withoutTitle(response.user) };
   });
 
   app.post("/auth/session/refresh", async (request, reply) => {
@@ -338,9 +397,12 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
 
   app.get("/agents", async (request) => {
     const identity = await requireHumanIdentity(request, service);
-    return listAgentsResponseSchema.parse({
+    const response = listAgentsResponseSchema.parse({
       agents: await service.listAgents(identity.currentUser.user.id),
     });
+    return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+      ? response
+      : { ...response, agents: response.agents.map(withoutAgentTitle) };
   });
 
   app.post("/agents", async (request, reply) => {
@@ -355,7 +417,14 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     const input = createAgentRequestSchema.safeParse(request.body);
     if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent");
     const agent = await service.createAgent(identity.currentUser.user.id, input.data);
-    return reply.code(201).send(createAgentResponseSchema.parse({ agent }));
+    const response = createAgentResponseSchema.parse({ agent });
+    return reply
+      .code(201)
+      .send(
+        supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+          ? response
+          : { ...response, agent: withoutAgentTitle(response.agent) },
+      );
   });
 
   app.delete("/agents/:id", async (request, reply) => {

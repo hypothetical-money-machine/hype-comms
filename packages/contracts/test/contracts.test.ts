@@ -250,7 +250,7 @@ describe("entity contracts", () => {
         createdAt: NOW,
         updatedAt: NOW,
       }),
-    ).toMatchObject({ id: USER_ID, kind: "human" });
+    ).toMatchObject({ id: USER_ID, kind: "human", title: null });
 
     expect(
       userSchema.parse({
@@ -263,6 +263,29 @@ describe("entity contracts", () => {
         updatedAt: NOW,
       }),
     ).toMatchObject({ kind: "bot" });
+
+    expect(
+      userSchema.parse({
+        id: USER_ID,
+        username: "morgan",
+        displayName: "Morgan",
+        avatarUrl: null,
+        title: "  Chief Mischief Officer  ",
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toMatchObject({ title: "Chief Mischief Officer" });
+    expect(() =>
+      userSchema.parse({
+        id: USER_ID,
+        username: "morgan",
+        displayName: "Morgan",
+        avatarUrl: null,
+        title: "line\u0000break",
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toThrow();
 
     expect(
       conversationSchema.parse({
@@ -475,7 +498,7 @@ describe("agent contracts", () => {
   it("keeps human principals unchanged and gives agents a distinct scoped arm", () => {
     expect(currentPrincipalSchema.parse(BOOTSTRAP.currentUser)).toEqual({
       ...BOOTSTRAP.currentUser,
-      user: { ...BOOTSTRAP.currentUser.user, kind: "human" },
+      user: { ...BOOTSTRAP.currentUser.user, kind: "human", title: null },
     });
     expect(
       currentAgentPrincipalSchema.parse({
@@ -1083,6 +1106,7 @@ describe("transport contracts", () => {
       username: "hermes",
       displayName: "Hermes",
       avatarUrl: null,
+      title: null,
       createdAt: NOW,
       updatedAt: NOW,
     };

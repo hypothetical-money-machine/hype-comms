@@ -17,6 +17,14 @@ const timestampsShape = {
 
 export const userKindSchema = z.enum(["human", "bot", "agent"]);
 
+/** A short, display-only member title. Control characters cannot forge UI lines. */
+export const memberTitleSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(160)
+  .refine((title) => !/[\p{Cc}\p{Cf}]/u.test(title), "Title cannot contain control characters");
+
 export const userSchema = z
   .object({
     id: entityIdSchema,
@@ -25,6 +33,8 @@ export const userSchema = z
     username: z.string().trim().min(1).max(80),
     displayName: z.string().trim().min(1).max(120),
     avatarUrl: credentialFreeHttpsUrlSchema.nullable(),
+    // Defaults preserve encrypted cache records written before member titles existed.
+    title: memberTitleSchema.nullable().default(null).optional(),
     ...timestampsShape,
   })
   .strict();
@@ -230,6 +240,7 @@ export const attachmentSchema = z
 
 export type User = z.infer<typeof userSchema>;
 export type UserKind = z.infer<typeof userKindSchema>;
+export type MemberTitle = z.infer<typeof memberTitleSchema>;
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 export type MembershipStatus = z.infer<typeof membershipStatusSchema>;

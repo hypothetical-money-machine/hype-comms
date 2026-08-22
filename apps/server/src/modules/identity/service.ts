@@ -18,7 +18,9 @@ import {
   type EntityId,
   type Invitation,
   type MagicLinkRequested,
+  type MemberTitle,
   type SessionToken,
+  type User,
 } from "@hype-comms/contracts";
 
 import { ApiError } from "../../errors.js";
@@ -337,6 +339,14 @@ export class IdentityService {
     const owner = await this.#requireOwner(actorUserId, this.#repository);
     await this.#repository.expireInvitations(iso(this.#clock()));
     return this.#repository.listInvitations(owner.workspaceId);
+  }
+
+  async updateProfileTitle(actorUserId: EntityId, title: MemberTitle | null): Promise<User> {
+    return this.#repository.transaction(async (repository) => {
+      const membership = await repository.findActiveMembershipByUserId(actorUserId);
+      if (membership === null) throw unauthenticated();
+      return repository.updateMemberTitle(membership.workspaceId, actorUserId, title);
+    });
   }
 
   async revokeInvitation(actorUserId: EntityId, invitationId: EntityId): Promise<boolean> {
