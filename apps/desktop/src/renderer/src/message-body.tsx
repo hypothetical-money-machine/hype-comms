@@ -15,6 +15,7 @@ import { segmentMessageBody, type ChannelReferenceTarget } from "./channel-refer
 import { useFencedBlockquoteMode } from "./fenced-blockquote-context";
 import type { FencedBlockquoteMode } from "./fenced-blockquote-runtime";
 import { expandFencedBlockquotes } from "./fenced-blockquotes";
+import { normalizeExternalMailtoUrl } from "../../shared/external-mailto";
 import { segmentMentions } from "./mentions";
 
 interface MarkdownSyntaxNode {
@@ -60,6 +61,12 @@ function readableText(node: ReactNode): string {
 function externalLinkDestination(children: ReactNode, safeUrl: string): ReactNode {
   const label = readableText(children).trim();
   if (normalizeHttpsUrl(label) === safeUrl) return null;
+  return <span className="markdown-link-destination"> ({safeUrl})</span>;
+}
+
+function externalMailtoDestination(children: ReactNode, safeUrl: string): ReactNode {
+  const label = readableText(children).trim();
+  if (label === safeUrl || label === safeUrl.slice("mailto:".length)) return null;
   return <span className="markdown-link-destination"> ({safeUrl})</span>;
 }
 
@@ -231,14 +238,24 @@ export const MarkdownBody = memo(function MarkdownBody({
         );
       }
       const safeUrl = normalizeHttpsUrl(href);
-      return safeUrl === null ? (
-        <span>{linkChildren}</span>
-      ) : (
-        <a {...props} href={safeUrl} target="_blank" rel="noreferrer noopener">
-          {linkChildren}
-          {externalLinkDestination(children, safeUrl)}
-        </a>
-      );
+      if (safeUrl !== null) {
+        return (
+          <a {...props} href={safeUrl} target="_blank" rel="noreferrer noopener">
+            {linkChildren}
+            {externalLinkDestination(children, safeUrl)}
+          </a>
+        );
+      }
+      const safeMailto = normalizeExternalMailtoUrl(href);
+      if (safeMailto !== null) {
+        return (
+          <a {...props} href={safeMailto} target="_blank" rel="noreferrer noopener">
+            {linkChildren}
+            {externalMailtoDestination(children, safeMailto)}
+          </a>
+        );
+      }
+      return <span>{linkChildren}</span>;
     },
     img: ({ alt, src, title }) => {
       const label = alt?.trim() === "" || alt === undefined ? "Image" : alt;
