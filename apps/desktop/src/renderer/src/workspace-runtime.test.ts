@@ -1096,6 +1096,10 @@ class FakeDesktopApi implements DesktopApi {
     return session;
   }
 
+  async retrySession(): Promise<ChatSessionState> {
+    return session;
+  }
+
   async requestMagicLink(): Promise<MagicLinkDeliveryState> {
     return { status: "email-sent" };
   }
@@ -1563,6 +1567,72 @@ class FakeDesktopApi implements DesktopApi {
   }
 }
 
+class DeterministicMessageServer {
+  readonly messages = new Map<string, Message>();
+  attempts = 0;
+
+  send(input: SendMessageOperation): SendAttemptResult {
+    this.attempts += 1;
+    if (this.attempts === 1) {
+      // The connection disappears before the server commits anything.
+      return { status: "retryable", reason: "network", retryAfterMs: 1_000 };
+    }
+
+    let canonical = this.messages.get(input.message.clientMessageId);
+    if (canonical === undefined) {
+      canonical = {
+        ...ownMessage,
+        id: "20000000-0000-4000-8000-000000000073",
+        clientMessageId: input.message.clientMessageId,
+        body: input.message.body,
+        conversationSequence: "3",
+      };
+      this.messages.set(input.message.clientMessageId, canonical);
+    }
+    if (this.attempts === 2) {
+      // The commit is durable, but the response disappears. The next request must reuse the same
+      // UUID and receive this canonical row rather than creating a second message.
+      return { status: "retryable", reason: "network", retryAfterMs: 1_000 };
+    }
+    return {
+      status: "accepted",
+      response: { message: canonical, attachments: [], syncCursor: "11" },
+    };
+  }
+
+  event(): WorkspaceEvent {
+    const canonical = [...this.messages.values()][0];
+    if (canonical === undefined) throw new Error("Expected the deterministic message commit");
+    return {
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000074",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: canonical.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: canonical, mentionedUserIds: [] },
+    };
+  }
+}
+
+class DeterministicDeliveryApi extends FakeDesktopApi {
+  constructor(
+    bootstrap: HumanWorkspaceBootstrapResponse,
+    private readonly server: DeterministicMessageServer,
+  ) {
+    super(bootstrap);
+  }
+
+  override async sendConversationMessage(input: SendMessageOperation): Promise<SendAttemptResult> {
+    this.sent.push(input);
+    return this.server.send(input);
+  }
+}
+
 /** Drains the runtime's promise chains without depending on real or fake timers. */
 async function settle(predicate: () => boolean, label: string): Promise<void> {
   for (let tick = 0; tick < 500; tick += 1) {
@@ -1685,6 +1755,152 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
+    const api = new FakeDesktopApi(bootstrapAt("99"));
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session, { offline: true });
+
+    expect(runtime.state).toMatchObject({
+      bootstrap: expect.objectContaining({ syncCursor: "10" }),
+      messages: [ownMessage],
+      reactions: [ownReaction],
+      tasks: [task],
+      connection: "offline",
+      stale: true,
+      busy: false,
+      error: null,
+    });
+    expect(api.bootstrapRequests).toBe(0);
+    expect(api.syncedFrom).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect(api.historyRequests).toEqual([]);
+    expect(api.reactionRequests).toEqual([]);
+    expect(api.conversationTaskRequests).toEqual([]);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Written during a cold offline restart", []);
+    expect(api.sent).toEqual([]);
+    expect(runtime.state.outbox).toHaveLength(1);
+    expect((await cache.load()).outbox).toHaveLength(1);
+  });
+
+  it("converges two clients after disconnects before and after the canonical commit", async () => {
+    vi.useFakeTimers();
+    try {
+      const initial = bootstrapAt("10");
+      const senderCache = new FakeWorkspaceCache();
+      await senderCache.replaceSnapshot(initial, []);
+      const offlineSender = runtimeWith(new FakeDesktopApi(bootstrapAt("99")), senderCache);
+      await offlineSender.start(session, { offline: true });
+      await offlineSender.sendMessage(CONVERSATION_ID, "One durable offline message", []);
+      const clientMessageId = offlineSender.state.outbox[0]?.operation.message.clientMessageId;
+      if (clientMessageId === undefined) throw new Error("Expected the offline outbox item");
+      await offlineSender.stop();
+
+      const server = new DeterministicMessageServer();
+      const senderApi = new DeterministicDeliveryApi(initial, server);
+      const restartedSender = runtimeWith(senderApi, senderCache);
+      await restartedSender.start(session);
+      await settle(
+        () => restartedSender.state.outbox[0]?.status === "retry_wait",
+        "disconnect before commit",
+      );
+      expect(server.attempts).toBe(1);
+      expect(server.messages.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(
+        () => server.attempts === 2 && restartedSender.state.outbox[0]?.status === "retry_wait",
+        "disconnect after commit before response",
+      );
+      expect(server.messages.size).toBe(1);
+      expect(restartedSender.state.outbox).toHaveLength(1);
+
+      const canonical = [...server.messages.values()][0];
+      if (canonical === undefined) throw new Error("Expected one canonical server message");
+      const initialConversation = initial.conversations[0];
+      if (initialConversation === undefined) throw new Error("Expected the initial conversation");
+      const observerCache = new FakeWorkspaceCache();
+      await observerCache.replaceSnapshot(initial, []);
+      const observerBootstrap = bootstrapAt("11", {
+        conversations: [
+          {
+            ...initialConversation,
+            lastMessage: canonical,
+          },
+        ],
+      });
+      const observerApi = new FakeDesktopApi(observerBootstrap);
+      observerApi.syncResults.push({
+        status: "accepted",
+        response: {
+          events: [server.event()],
+          nextCursor: "11",
+          highWaterCursor: "11",
+          hasMore: false,
+        },
+      });
+      const observer = runtimeWith(observerApi, observerCache);
+      await observer.start(session);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => restartedSender.state.outbox.length === 0, "idempotent retry response");
+
+      expect(server.attempts).toBe(3);
+      expect(server.messages.size).toBe(1);
+      expect(senderApi.sent.map((input) => input.message.clientMessageId)).toEqual([
+        clientMessageId,
+        clientMessageId,
+        clientMessageId,
+      ]);
+      expect(
+        restartedSender.state.messages.filter(
+          (message) => message.clientMessageId === clientMessageId,
+        ),
+      ).toEqual([canonical]);
+      expect(
+        observer.state.messages.filter((message) => message.clientMessageId === clientMessageId),
+      ).toEqual([canonical]);
+
+      await restartedSender.stop();
+      await observer.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("repairs a cached restart from its cursor and hydrates history only when selected", async () => {
+    const secondSummary = channel(SECOND_CONVERSATION_ID, "random");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000071",
+      clientMessageId: "20000000-0000-4000-8000-000000000072",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const snapshot = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(snapshot, [peerMessage, secondMessage], [ownReaction], [task]);
+    const api = new FakeDesktopApi(snapshot);
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+    await settle(() => api.historyRequests.length === 1, "selected history hydration");
+
+    expect(api.syncedFrom).toEqual(["10", "10"]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([]);
+    expect(runtime.state.messages).toEqual([peerMessage, secondMessage]);
+
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 2, "second history hydration");
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+  });
+
   it("replaces a legacy channel mode before syncing or restarting realtime", async () => {
     const cached = bootstrapAt("8");
     const announcement = channel(CONVERSATION_ID, "company-news");
@@ -1705,6 +1921,15 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(cached, []);
     const api = new FakeDesktopApi(capable);
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: "10",
+        highWaterCursor: "10",
+        hasMore: false,
+      },
+    });
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
@@ -2318,9 +2543,19 @@ describe("WorkspaceRuntime", () => {
       threadsSupported: true,
       nextCursor: null,
     });
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: "10",
+        highWaterCursor: "10",
+        hasMore: false,
+      },
+    });
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await settle(() => runtime.state.threadsSupported, "selected conversation hydration");
 
     expect(runtime.state.threadsSupported).toBe(true);
     expect(runtime.state.messages).toContainEqual(ownMessage);
@@ -2580,7 +2815,7 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
-  it("replaces stale cached tasks from the authoritative startup snapshot", async () => {
+  it("keeps cached tasks until that conversation is opened on demand", async () => {
     const staleTask = { ...task, title: "Stale cached title" };
     const currentTask: Task = {
       ...task,
@@ -2600,7 +2835,9 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
 
-    expect(cache.cursor).toBe("12");
+    expect(api.conversationTaskRequests).toEqual([]);
+    expect(runtime.state.tasks).toEqual([staleTask]);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(runtime.state.tasks).toEqual([currentTask]);
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
@@ -5569,7 +5806,7 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
     api.members = [user];
-    api.emitWorkspaceEvent(memberUpdated(SECOND_MEMBER_EVENT_ID, "11", agent));
+    api.emitWorkspaceEvent(memberUpdated(SECOND_MEMBER_EVENT_ID, "12", agent));
     await settle(() => api.memberRequests === 2, "current session member directory read");
     await settle(
       () => runtime.state.bootstrap?.members.length === 1,

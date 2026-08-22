@@ -25,7 +25,6 @@ import {
   cacheDecryptBatchResponseSchema,
   cacheEncryptBatchRequestSchema,
   cacheEncryptBatchResponseSchema,
-  cacheScopeSchema,
   channelMemberTargetSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -95,7 +94,6 @@ import {
   type AiChannelState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
-  type CacheScope,
   type ConversationFilesQuery,
   type CreateChannelOperation,
   type CreateTaskOperation,
@@ -357,6 +355,8 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
     getSessionState: async () =>
       chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
+    retrySession: async () =>
+      chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionRetry)),
     getAuthCapabilities: async () =>
       authCapabilitiesSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionAuthCapabilities),
@@ -481,12 +481,9 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       );
       return response.activated;
     },
-    initializeCacheCrypto: async (scope: CacheScope) =>
+    initializeCacheCrypto: async () =>
       cacheCryptoStatusSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.cacheCryptoInitialize,
-          cacheScopeSchema.parse(scope),
-        ),
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoInitialize),
       ),
     encryptCacheRecords: async (input: CacheEncryptBatchRequest) =>
       cacheEncryptBatchResponseSchema.parse(

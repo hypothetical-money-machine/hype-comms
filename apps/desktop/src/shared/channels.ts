@@ -23,6 +23,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   aiChannelPermissionRespond: "ai-channel:permission-respond",
   aiChannelChanged: "ai-channel:changed",
   sessionState: "chat:session-state",
+  sessionRetry: "chat:session-retry",
   sessionAuthCapabilities: "chat:session-auth-capabilities",
   sessionStartAuthKit: "chat:session-start-authkit",
   sessionRequestMagicLink: "chat:session-request-magic-link",

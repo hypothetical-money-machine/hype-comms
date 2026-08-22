@@ -14,6 +14,7 @@ import {
   type CacheEncryptBatchResponse,
   type CacheRecordContext,
   type CacheScope,
+  type ChatSessionState,
 } from "@hype-comms/contracts";
 
 const CACHE_KEY_BYTES = 32;
@@ -75,8 +76,22 @@ export class CacheCryptoUnavailableError extends Error {
   }
 }
 
-function scopesEqual(left: CacheScope, right: CacheScope): boolean {
+export function scopesEqual(left: CacheScope, right: CacheScope): boolean {
   return left.userId === right.userId && left.workspaceId === right.workspaceId;
+}
+
+/** The only cache scope main may authorize for the current renderer session. */
+export function cacheScopeForSession(state: ChatSessionState | null): CacheScope | null {
+  if (state?.status === "signed-in") {
+    return { userId: state.userId, workspaceId: state.workspaceId };
+  }
+  if (state?.status === "session-unavailable" && state.lastAuthenticatedSession !== undefined) {
+    return {
+      userId: state.lastAuthenticatedSession.userId,
+      workspaceId: state.lastAuthenticatedSession.workspaceId,
+    };
+  }
+  return null;
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -183,6 +198,11 @@ export class CacheCrypto {
     this.#cacheDirectory = path.join(options.userDataPath, "cache");
     this.#platform = options.platform;
     this.#safeStorage = options.safeStorage;
+  }
+
+  /** Main uses this only to enforce that every cache operation still owns the authorized scope. */
+  get activeScope(): CacheScope | null {
+    return this.#scope === null ? null : { ...this.#scope };
   }
 
   async initialize(scope: CacheScope): Promise<CacheCryptoStatus> {

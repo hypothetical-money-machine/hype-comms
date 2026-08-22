@@ -3,6 +3,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormE
 import {
   ATTACHMENTS_PER_MESSAGE_MAX,
   type Attachment,
+  type AuthenticatedSessionContext,
   type AuthCapabilities,
   type ChannelAccess,
   type ChannelMode,
@@ -91,6 +92,18 @@ type UpdateClient = Pick<
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
+}
+
+export function recoverableAuthenticatedSession(
+  session: ChatSessionState,
+): AuthenticatedSessionContext | null {
+  if (session.status === "signed-in") {
+    const { method, name, email, userId, workspaceId } = session;
+    return { method, name, email, userId, workspaceId };
+  }
+  return session.status === "session-unavailable"
+    ? (session.lastAuthenticatedSession ?? null)
+    : null;
 }
 
 function messageTime(value: string): string {
@@ -746,8 +759,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const startWorkspaceSession = useCallback(
     async (
-      next: SignedInSession,
+      next: AuthenticatedSessionContext,
       options: {
+        readonly offline?: boolean;
         readonly resetLocalCache?: boolean;
       } = {},
     ): Promise<void> => {
@@ -763,8 +777,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           await runtime.resetLocalCache();
           if (bindingGeneration !== notificationBindingGeneration.current) return;
         }
-        await runtime.start(next);
+        await runtime.start(next, options.offline === true ? { offline: true } : {});
         if (bindingGeneration !== notificationBindingGeneration.current) return;
+
+        if (options.offline === true) return;
 
         // WorkspaceRuntime reports bootstrap failures in its state instead of rejecting start(),
         // so an inactive result is expected on the first attempt and Retry binds again here.
@@ -788,6 +804,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         void startWorkspaceSession(next);
         return;
       }
+      if (next.status === "session-unavailable" && next.lastAuthenticatedSession !== undefined) {
+        void startWorkspaceSession(next.lastAuthenticatedSession, { offline: true });
+        return;
+      }
 
       notificationBindingGeneration.current += 1;
       notificationSession?.invalidate();
@@ -802,6 +822,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setComposerError("");
         setThreadComposerError("");
         void runtime.stop();
+      } else {
+        void runtime.stop();
       }
     },
     [notificationSession, resetDrafts, runtime, startWorkspaceSession],
@@ -809,11 +831,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const retrySession = useCallback(async (): Promise<void> => {
     try {
-      applySession(await client.getSessionState());
+      // Main publishes the result through the existing session-changed subscription. Ignoring the
+      // matching return value prevents a retry from starting the workspace runtime twice.
+      await client.retrySession();
     } catch {
       // Main reports an unreachable server as a preserved session, so there is nothing to add.
     }
-  }, [applySession, client]);
+  }, [client]);
 
   useEffect(() => {
     let active = true;
@@ -836,7 +860,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
   // and sync failures for the entire life of a session.
   const workspaceNotice =
-    runtimeState.error ?? cacheFallbackNotice(runtimeState.cacheFallbackReason);
+    session?.status === "session-unavailable"
+      ? session.message
+      : (runtimeState.error ?? cacheFallbackNotice(runtimeState.cacheFallbackReason));
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
@@ -1689,7 +1715,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   if (session.status === "signed-out") {
     return <SignIn client={client} theme={theme} sessionMessage={session.message} />;
   }
-  if (session.status === "session-unavailable") {
+  const authenticatedSession = recoverableAuthenticatedSession(session);
+  if (session.status === "session-unavailable" && authenticatedSession === null) {
     return (
       <main className="signin-shell">
         <section className="signin-card">
@@ -1704,7 +1731,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       </main>
     );
   }
-  if (session.method !== "email") {
+  if (authenticatedSession === null) {
     return (
       <main className="signin-shell">
         <section className="signin-card">
@@ -1731,12 +1758,21 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           </p>
           {runtimeState.error !== null && (
             <div className="message-actions">
-              <button type="button" onClick={() => void startWorkspaceSession(session)}>
+              <button
+                type="button"
+                onClick={() =>
+                  void (session.status === "session-unavailable"
+                    ? retrySession()
+                    : startWorkspaceSession(authenticatedSession))
+                }
+              >
                 Retry
               </button>
-              <button type="button" onClick={() => void rebuildLocalCache(session)}>
-                Reset local cache
-              </button>
+              {session.status === "signed-in" && (
+                <button type="button" onClick={() => void rebuildLocalCache(session)}>
+                  Reset local cache
+                </button>
+              )}
             </div>
           )}
           <ThemeSelector theme={theme} />
@@ -2056,8 +2092,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               stale={runtimeState.stale}
               cacheMode={runtimeState.cacheMode}
               notice={workspaceNotice}
-              onRetry={() => void startWorkspaceSession(session)}
-              onResetCache={() => void rebuildLocalCache(session)}
+              onRetry={() =>
+                void (session.status === "session-unavailable"
+                  ? retrySession()
+                  : startWorkspaceSession(authenticatedSession))
+              }
+              {...(session.status === "signed-in"
+                ? { onResetCache: () => void rebuildLocalCache(session) }
+                : {})}
               onCheckForUpdates={client.checkForUpdates}
             />
           </div>

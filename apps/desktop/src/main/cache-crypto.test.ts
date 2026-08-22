@@ -9,6 +9,7 @@ import {
   CacheCiphertextCorruptError,
   CacheCrypto,
   CacheCryptoUnavailableError,
+  cacheScopeForSession,
   type SafeStorageAdapter,
 } from "./cache-crypto";
 
@@ -123,6 +124,30 @@ afterEach(async () => {
 });
 
 describe("CacheCrypto", () => {
+  it("derives an offline scope only from main's credential-bound session context", () => {
+    expect(
+      cacheScopeForSession({
+        status: "session-unavailable",
+        reason: "server_unreachable",
+        message: "Offline",
+      }),
+    ).toBeNull();
+    expect(
+      cacheScopeForSession({
+        status: "session-unavailable",
+        reason: "server_unreachable",
+        message: "Offline",
+        lastAuthenticatedSession: {
+          method: "email",
+          name: "Morgan",
+          email: "morgan@example.com",
+          ...scope,
+        },
+      }),
+    ).toEqual(scope);
+    expect(cacheScopeForSession({ status: "signed-out" })).toBeNull();
+  });
+
   it("persists a wrapped key and authenticates record context", async () => {
     const storage = new FakeSafeStorage();
     const first = await crypto(storage);

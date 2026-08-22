@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DesktopAuthVariant, MagicLinkToken } from "@hype-comms/contracts";
+import type {
+  AuthenticatedSessionContext,
+  DesktopAuthVariant,
+  MagicLinkToken,
+} from "@hype-comms/contracts";
 
 import {
   AUTHKIT_FAILED_MESSAGE,
@@ -11,6 +15,7 @@ import {
   SESSION_UNREACHABLE_MESSAGE,
   type SessionCookieStore,
   type SessionFetch,
+  type AuthenticatedSessionContextPersistence,
 } from "./chat-session";
 
 const API_ORIGIN = "https://chat.example";
@@ -76,6 +81,33 @@ class MemoryCookies implements SessionCookieStore {
   }
 }
 
+class MemoryAuthenticatedContexts implements AuthenticatedSessionContextPersistence {
+  credential: string | null = null;
+  session: AuthenticatedSessionContext | null = null;
+
+  async load(credential: string): Promise<AuthenticatedSessionContext | null> {
+    if (credential !== this.credential) {
+      this.credential = null;
+      this.session = null;
+      return null;
+    }
+    return this.session;
+  }
+
+  async replace(input: {
+    readonly credential: string;
+    readonly session: AuthenticatedSessionContext;
+  }): Promise<void> {
+    this.credential = input.credential;
+    this.session = input.session;
+  }
+
+  async clear(): Promise<void> {
+    this.credential = null;
+    this.session = null;
+  }
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -91,8 +123,15 @@ function createSession(
   request: SessionFetch,
   cookies = new MemoryCookies(),
   authVariant: DesktopAuthVariant = "production",
+  contexts?: AuthenticatedSessionContextPersistence,
 ): ChatSession {
-  return new ChatSession({ apiOrigin: API_ORIGIN, authVariant, cookies, request });
+  return new ChatSession({
+    apiOrigin: API_ORIGIN,
+    authVariant,
+    cookies,
+    request,
+    ...(contexts === undefined ? {} : { contexts }),
+  });
 }
 
 /** A jar holding a credential that is still valid for the full 30-day window. */
@@ -217,6 +256,99 @@ describe("ChatSession restore", () => {
     });
     expect(cookies.removals).toEqual([]);
     expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+  });
+
+  it("cold-restores only the identity bound to the exact preserved credential", async () => {
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const online = createSession(
+      async () => jsonResponse(CURRENT_USER),
+      cookies,
+      "production",
+      contexts,
+    );
+    await online.restore();
+    online.stop();
+
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+      lastAuthenticatedSession: {
+        method: "email",
+        name: "Morgan",
+        email: "morgan@example.com",
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+      },
+    });
+  });
+
+  it("does not restore a cache identity without a protected credential", async () => {
+    const contexts = new MemoryAuthenticatedContexts();
+    await contexts.replace({
+      credential: "identity-cookie",
+      session: {
+        method: "email",
+        name: "Morgan",
+        email: "morgan@example.com",
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+      },
+    });
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      new MemoryCookies(),
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    });
+  });
+
+  it("does not restore a cache identity after the protected credential is replaced", async () => {
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const online = createSession(
+      async () => jsonResponse(CURRENT_USER),
+      cookies,
+      "production",
+      contexts,
+    );
+    await online.restore();
+    online.stop();
+    cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    });
+    expect(contexts.session).toBeNull();
   });
 
   it("keeps the stored credential when the identity check times out", async () => {
