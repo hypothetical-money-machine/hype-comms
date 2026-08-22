@@ -637,6 +637,23 @@ describe("task routes", () => {
       },
       payload: { expectedVersion: 2, status: "in_progress", beforeTaskId: null },
     });
+    const oversizedVersion = await app.inject({
+      method: "PATCH",
+      url: `/v1/tasks/${taskId}`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": "oversized-version",
+      },
+      payload: {
+        expectedVersion: Number.MAX_SAFE_INTEGER + 1,
+        title: "Should be rejected",
+        description: null,
+        priority: "none",
+        assigneeId: null,
+        dueOn: null,
+      },
+    });
 
     expect(listed.statusCode).toBe(200);
     expect(mine.statusCode).toBe(200);
@@ -644,6 +661,7 @@ describe("task routes", () => {
     expect(created.statusCode).toBe(201);
     expect(updated.statusCode).toBe(200);
     expect(moved.statusCode).toBe(200);
+    expect(oversizedVersion.statusCode).toBe(400);
     expect(repository.listConversationTasks).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       messageId,
@@ -823,6 +841,11 @@ describe("task routes", () => {
       url: "/v1/channels/general/tasks/0",
       headers,
     });
+    const oversizedNumber = await app.inject({
+      method: "GET",
+      url: "/v1/channels/general/tasks/9223372036854775808",
+      headers,
+    });
 
     expect(filtered.statusCode).toBe(200);
     expect(byNumber.statusCode).toBe(200);
@@ -830,6 +853,7 @@ describe("task routes", () => {
     expect(created.statusCode).toBe(201);
     expect(invalidRange.statusCode).toBe(400);
     expect(invalidNumber.statusCode).toBe(400);
+    expect(oversizedNumber.statusCode).toBe(400);
     expect(repository.listChannelTasks).toHaveBeenCalledWith(
       expect.objectContaining({ principalKind: "bot" }),
       "general",

@@ -681,6 +681,30 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("rejects oversized history cursors before bigint casts for history and threads", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "history cursor root"),
+      mentionedUserIds: [],
+    });
+    const oversizedCursor = Buffer.from(
+      JSON.stringify({ sequence: "9223372036854775808" }),
+      "utf8",
+    ).toString("base64url");
+
+    await expect(repository.history(member, generalId, oversizedCursor, 50)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message: "Invalid history cursor",
+    } satisfies Partial<ApiError>);
+    await expect(
+      repository.thread(member, root.message.id, oversizedCursor, 50),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message: "Invalid history cursor",
+    } satisfies Partial<ApiError>);
+  });
+
   it("enforces announcement publishing while preserving threads, reactions, and replay", async () => {
     const audits: AnnouncementAuditRecord[] = [];
     repository = new WorkspaceRepository(

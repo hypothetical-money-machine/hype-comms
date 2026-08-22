@@ -2,10 +2,20 @@ import { z } from "zod";
 
 export const entityIdSchema = z.uuid();
 export const isoDateTimeSchema = z.iso.datetime();
+export const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
+
+export function isPostgresBigintString(value: string): boolean {
+  return /^(?:0|[1-9]\d*)$/.test(value) && BigInt(value) <= POSTGRES_BIGINT_MAX;
+}
+
 export const sequenceSchema = z
   .string()
-  .regex(/^(?:0|[1-9]\d*)$/, "Expected an unsigned base-10 integer string");
-export const entityVersionSchema = z.number().int().positive();
+  .refine(isPostgresBigintString, "Expected an unsigned PostgreSQL bigint string");
+export const entityVersionSchema = z
+  .number()
+  .int()
+  .positive()
+  .refine(Number.isSafeInteger, "Expected a safe PostgreSQL bigint number");
 export const credentialFreeHttpsUrlSchema = z
   .url({ protocol: /^https$/ })
   .refine((value) => !/^https:\/\/[^/?#]*@/i.test(value), "Expected a credential-free HTTPS URL");
