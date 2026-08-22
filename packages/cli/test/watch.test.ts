@@ -13,6 +13,9 @@ import {
 } from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
+import { RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
+import { MAX_RETRY_AFTER_MS } from "../src/errors.js";
+import { watchRetryDelayMs } from "../src/watch.js";
 import {
   bootstrap,
   CLIENT_MESSAGE_ID,
@@ -38,6 +41,38 @@ afterEach(async () => {
 });
 
 describe("watch", () => {
+  it("caps a server Retry-After at the configured maximum without dropping backoff jitter", () => {
+    expect(watchRetryDelayMs(1, 0, () => 1)).toBe(625);
+    expect(watchRetryDelayMs(6, MAX_RETRY_AFTER_MS, () => 1)).toBe(MAX_RETRY_AFTER_MS);
+  });
+
+  it("does not refetch a ticket after an oversized response contract error", async () => {
+    let ticketRequests = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
+      if (url.pathname === "/v1/realtime/tickets") {
+        ticketRequests += 1;
+        return jsonResponse({ padding: "a".repeat(RESPONSE_BODY_MAX_BYTES) }, { status: 503 });
+      }
+      throw new Error("Unexpected route");
+    });
+    const runtime = testRuntime({
+      homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-watch-")),
+      env: {
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+      },
+      fetch,
+    });
+
+    expect(await executeCli(["watch", "--json"], runtime)).toBe(6);
+    expect(ticketRequests).toBe(1);
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: { code: "INVALID_SERVER_CONTRACT", retryable: false },
+    });
+  });
+
   it("emits pure NDJSON, reconnects from the last cursor, and exits with resync", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
