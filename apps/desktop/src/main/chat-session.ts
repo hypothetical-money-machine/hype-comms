@@ -436,8 +436,11 @@ export class ChatSession {
     return this.#state;
   }
 
-  /** The service refused the link: the only exchange outcome that discards the credential. */
+  /** The service refused the link. An active identity is never evidence that it has expired. */
   async #rejectMagicLink(): Promise<never> {
+    if (this.#state.status === "signed-in") {
+      throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
+    }
     this.#stopRenewal();
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     this.#setState({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
@@ -450,7 +453,10 @@ export class ChatSession {
    */
   #failMagicLink(status: "unreachable" | "failed"): never {
     const state = unavailableState(status);
-    this.#setState(state);
+    // A deep-link exchange is allowed to change this session only after it returns a new signed-in
+    // identity or an explicit 401 refusal. Keeping an active state here also keeps its realtime,
+    // cache, and notification scopes alive when the server did not reach a verdict on the link.
+    if (this.#state.status !== "signed-in") this.#setState(state);
     throw new ChatSessionError(state.message);
   }
 

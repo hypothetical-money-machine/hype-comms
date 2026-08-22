@@ -7,7 +7,7 @@ import {
 
 import { normalizeAuthCallbackUrl, type AuthProtocolScheme } from "./security";
 
-export type AuthCallbackOutcome = "ignored" | "succeeded" | "failed";
+export type AuthCallbackOutcome = "ignored" | "cancelled" | "succeeded" | "failed";
 
 export type ParsedAuthCallback =
   | { readonly kind: "magic_link"; readonly token: MagicLinkToken }
@@ -71,11 +71,16 @@ export function parseAuthCallback(
 export async function processAuthCallback(
   value: string,
   scheme: AuthProtocolScheme,
+  confirm: () => Promise<boolean>,
   exchange: (token: MagicLinkToken) => Promise<void>,
 ): Promise<AuthCallbackOutcome> {
   const token = parseAuthCallbackToken(value, scheme);
   if (token === null) {
     return "ignored";
+  }
+
+  if (!(await confirm())) {
+    return "cancelled";
   }
 
   try {
