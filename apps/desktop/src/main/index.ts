@@ -89,7 +89,11 @@ import { autoUpdater } from "electron-updater";
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
-import type { RealtimeConnectionState, ServerStatus } from "../shared/desktop-api";
+import {
+  AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE,
+  type RealtimeConnectionState,
+  type ServerStatus,
+} from "../shared/desktop-api";
 import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
 import { parseAuthCallback } from "./auth-callback";
 import { AuthKitFlow } from "./authkit-flow";
@@ -127,7 +131,11 @@ import {
   openHeadlessNotificationCaptureArtifact,
   type HeadlessNotificationCaptureArtifact,
 } from "./headless-notification-capture";
-import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
+import {
+  protectMainProcessLogStreams,
+  reportMainProcessError,
+  reportMainProcessEvent,
+} from "./main-process-log";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
   createMacosNotificationAuthorization,
@@ -161,10 +169,15 @@ import {
   PendingNotificationAuthorizationBarrier,
   settlePendingNotificationAuthorization,
 } from "./pending-notification-authorization-barrier";
+import { authCapabilitiesForSession } from "./session-auth-lifecycle";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
-import { BeforeQuitCoordinator, handleLastWindowClosed } from "./window-lifecycle";
+import {
+  BeforeQuitCoordinator,
+  FinalQuitCoordinator,
+  handleLastWindowClosed,
+} from "./window-lifecycle";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -1174,12 +1187,22 @@ function registerIpcHandlers(): void {
       throw new Error("Chat is not configured");
     }
 
-    const capabilities = await chatSession.getAuthCapabilities();
-    if (!capabilities.authKit || authKitPendingStore === null) return capabilities;
-    if (authKitCancellationFenced) return { ...capabilities, authKit: false };
+    const capabilities = authCapabilitiesForSession(
+      await chatSession.getAuthCapabilities(),
+      { chatSession, authKitFlow, authKitPendingStore },
+      authKitCancellationFenced,
+    );
+    const pendingStore = authKitPendingStore;
+    if (!capabilities.authKit || pendingStore === null) return capabilities;
     try {
-      await authKitPendingStore.assertAvailable();
-      return capabilities;
+      await pendingStore.assertAvailable();
+      // A final quit teardown can run while protected storage is being checked. If a later
+      // will-quit listener cancels that quit, never publish a capability captured before teardown.
+      return authCapabilitiesForSession(
+        capabilities,
+        { chatSession, authKitFlow, authKitPendingStore },
+        authKitCancellationFenced,
+      );
     } catch {
       return { ...capabilities, authKit: false };
     }
@@ -1191,7 +1214,7 @@ function registerIpcHandlers(): void {
       throw new Error("Untrusted AuthKit IPC sender");
     }
     if (chatSession === null || authKitFlow === null || authKitPendingStore === null) {
-      throw new Error("AuthKit sign-in is unavailable");
+      throw new Error(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE);
     }
     if (chatSession.state.status !== "signed-out") {
       throw new Error("Sign out before starting a different authentication attempt");
@@ -2559,6 +2582,26 @@ if (!hasSingleInstanceLock) {
     cleanup: () => {
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
+    },
+    teardown: async () => {
+      const localAiChannel = quittingAiChannel;
+      quittingAiChannel = null;
+      await localAiChannel?.dispose();
+    },
+    reportCleanupFailure: () => {
+      reportMainProcessError("Failed to prepare application cleanup before quitting");
+    },
+    reportTeardownFailure: () => {
+      reportMainProcessError("Failed to stop the local AI Channel");
+    },
+    quit: () => app.quit(),
+  });
+  app.on("before-quit", (event) => {
+    beforeQuitCoordinator.handle(event);
+  });
+
+  const finalQuitCoordinator = new FinalQuitCoordinator({
+    teardownSession: () => {
       macosNativeNotificationEvidenceSession?.handle.close();
       macosNativeNotificationEvidenceSession = null;
       if (authCallbackRetryTimer !== null) {
@@ -2573,6 +2616,8 @@ if (!hasSingleInstanceLock) {
       authKitFlow = null;
       authKitPendingStore = null;
       authKitStartPromise = null;
+    },
+    cleanup: () => {
       macWindowlessRealtimeActive = false;
       workspaceRealtime?.resetSession();
       notificationScope = null;
@@ -2599,20 +2644,22 @@ if (!hasSingleInstanceLock) {
       stopAiChannelSubscription?.();
       stopAiChannelSubscription = null;
     },
-    teardown: async () => {
-      const localAiChannel = quittingAiChannel;
-      quittingAiChannel = null;
-      await localAiChannel?.dispose();
+    reportSessionTeardown: () => {
+      reportMainProcessEvent("session_teardown", { trigger: "will-quit" });
     },
     reportCleanupFailure: () => {
-      reportMainProcessError("Failed to complete application cleanup before quitting");
+      reportMainProcessError("Failed to complete final application cleanup");
     },
-    reportTeardownFailure: () => {
-      reportMainProcessError("Failed to stop the local AI Channel");
+    reportQuitCancelledAfterTeardown: () => {
+      reportMainProcessEvent("quit_cancelled_after_session_teardown", {
+        trigger: "will-quit",
+      });
     },
-    quit: () => app.quit(),
+    scheduleQuitCancellationCheck: (check) => {
+      setImmediate(check).unref();
+    },
   });
-  app.on("before-quit", (event) => {
-    beforeQuitCoordinator.handle(event);
+  app.on("will-quit", (event) => {
+    finalQuitCoordinator.handle(event);
   });
 }

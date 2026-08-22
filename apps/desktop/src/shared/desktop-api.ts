@@ -70,6 +70,7 @@ import type {
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
 export type ServerStatus = "reachable" | "unreachable";
+export const AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE = "AuthKit sign-in is unavailable";
 /** Re-exported from the contracts package so main, preload, and the renderer cannot drift. */
 export type {
   NotificationAction,

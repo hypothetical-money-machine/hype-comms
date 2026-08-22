@@ -29,3 +29,15 @@ export function reportMainProcessError(
     // A closed console stream is not an application failure.
   }
 }
+
+export function reportMainProcessEvent(
+  event: string,
+  fields: Readonly<Record<string, string>> = {},
+  writer: MainProcessLogWriter = (...values) => console.info(...values),
+): void {
+  try {
+    writer(JSON.stringify({ event, ...fields }));
+  } catch {
+    // A closed console stream is not an application failure.
+  }
+}
