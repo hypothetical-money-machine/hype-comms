@@ -1,6 +1,6 @@
 {
   "name": "@hype-comms/desktop",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "private": true,
   "description": "Secure Electron desktop client for Hype Comms",
   "author": {
