@@ -80,6 +80,16 @@ server log. An owner can also issue a manual invitation:
 npm run invite --workspace @hype-comms/server -- --email member@example.com
 ```
 
+The same server-side operator interface manages workspace owners. Promote an active human member
+by username or email; to transfer ownership, promote the replacement first and then demote the
+former owner. The last active owner cannot be demoted:
+
+```bash
+npm run owner --workspace @hype-comms/server -- promote member@example.com
+npm run owner --workspace @hype-comms/server -- demote former-owner
+npm run owner --workspace @hype-comms/server -- list
+```
+
 The landing page offers both `Hype Comms` and `Hype Comms DEV`. The recipient chooses the
 application because a magic-link request is unauthenticated and cannot safely choose where the
 credential is sent.

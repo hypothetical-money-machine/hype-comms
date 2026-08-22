@@ -12,6 +12,8 @@
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
     "invite:dist": "node dist/modules/identity/invite-cli.js",
+    "owner": "tsx src/modules/identity/owner-cli.ts",
+    "owner:dist": "node dist/modules/identity/owner-cli.js",
     "authkit:revoke-all": "tsx src/modules/identity/authkit-revoke-all-cli.ts",
     "authkit:revoke-all:dist": "node dist/modules/identity/authkit-revoke-all-cli.js",
     "bot": "tsx src/modules/bots/cli.ts",
