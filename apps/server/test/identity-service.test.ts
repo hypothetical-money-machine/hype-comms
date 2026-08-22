@@ -75,7 +75,12 @@ describeWithPostgres("IdentityService and identity routes", () => {
     service = new IdentityService(
       repository,
       sender,
-      new SignInThrottle({ maxFailures: 10, windowMs: 15 * 60_000, now: () => nowMs }),
+      new SignInThrottle({
+        maxRequestsPerClient: 10,
+        maxRequestsPerEmailPerClient: 10,
+        windowMs: 15 * 60_000,
+        now: () => nowMs,
+      }),
       () => new Date(nowMs),
       "http://127.0.0.1:3000",
       { tokenReuseDetected: () => (reuseDetections += 1) },
@@ -745,7 +750,12 @@ describeWithPostgres("IdentityService and identity routes", () => {
     service = new IdentityService(
       repository,
       sender,
-      new SignInThrottle({ maxFailures: 1, windowMs: 60_000, now: () => nowMs }),
+      new SignInThrottle({
+        maxRequestsPerClient: 1,
+        maxRequestsPerEmailPerClient: 1,
+        windowMs: 60_000,
+        now: () => nowMs,
+      }),
       () => new Date(nowMs),
       "http://127.0.0.1:3000",
     );

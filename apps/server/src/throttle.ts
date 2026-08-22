@@ -1,10 +1,6 @@
-const DEFAULT_MAX_FAILURES = 10;
+const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_WINDOW_MS = 15 * 60 * 1_000;
-
-interface FailureWindow {
-  failures: number;
-  resetAt: number;
-}
+const DEFAULT_MAX_EMAIL_DELIVERIES = 50;
 
 interface AttemptWindow {
   attempts: number;
@@ -12,7 +8,9 @@ interface AttemptWindow {
 }
 
 export interface SignInThrottleOptions {
-  readonly maxFailures?: number;
+  readonly maxRequestsPerClient?: number;
+  readonly maxRequestsPerEmailPerClient?: number;
+  readonly maxDeliveriesPerEmail?: number;
   readonly windowMs?: number;
   readonly now?: () => number;
 }
@@ -31,7 +29,7 @@ export class FixedWindowAttemptThrottle {
   readonly #now: () => number;
 
   constructor(options: FixedWindowAttemptThrottleOptions = {}) {
-    this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_FAILURES;
+    this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.#windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
     this.#now = options.now ?? (() => Date.now());
     if (!Number.isSafeInteger(this.#maxAttempts) || this.#maxAttempts < 1) {
@@ -63,57 +61,40 @@ export class FixedWindowAttemptThrottle {
   }
 }
 
-/**
- * Fixed-window throttle for authentication attempts.
- *
- * Only failures are counted, so a correct code never consumes budget. State is per-process and
- * in-memory: it is deliberately scoped to the single-replica deployment and resets on
- * restart. Behind a reverse proxy every request shares the proxy's address unless Fastify is
- * configured to trust forwarded headers, which collapses this into a global budget.
- */
+/** Fixed-window limits for unauthenticated magic-link requests and delivery attempts. */
 export class SignInThrottle {
-  readonly #windows = new Map<string, FailureWindow>();
-  readonly #maxFailures: number;
-  readonly #windowMs: number;
-  readonly #now: () => number;
+  readonly #requestsPerClient: FixedWindowAttemptThrottle;
+  readonly #requestsPerEmailPerClient: FixedWindowAttemptThrottle;
+  readonly #deliveriesPerEmail: FixedWindowAttemptThrottle;
 
   constructor(options: SignInThrottleOptions = {}) {
-    this.#maxFailures = options.maxFailures ?? DEFAULT_MAX_FAILURES;
-    this.#windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
-    this.#now = options.now ?? (() => Date.now());
+    const shared = {
+      ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    };
+    this.#requestsPerClient = new FixedWindowAttemptThrottle({
+      ...shared,
+      maxAttempts: options.maxRequestsPerClient ?? DEFAULT_MAX_ATTEMPTS,
+    });
+    this.#requestsPerEmailPerClient = new FixedWindowAttemptThrottle({
+      ...shared,
+      maxAttempts: options.maxRequestsPerEmailPerClient ?? DEFAULT_MAX_ATTEMPTS,
+    });
+    this.#deliveriesPerEmail = new FixedWindowAttemptThrottle({
+      ...shared,
+      maxAttempts: options.maxDeliveriesPerEmail ?? DEFAULT_MAX_EMAIL_DELIVERIES,
+    });
   }
 
-  /** Milliseconds the caller must wait, or 0 when an attempt is allowed. */
-  retryAfterMs(key: string): number {
-    const window = this.#windows.get(key);
-    if (window === undefined) return 0;
-    const now = this.#now();
-    if (now >= window.resetAt) {
-      this.#windows.delete(key);
-      return 0;
-    }
-    if (window.failures < this.#maxFailures) return 0;
-    return window.resetAt - now;
+  /** Counts every request in both client scopes, even when one of those scopes is exhausted. */
+  recordMagicLinkRequest(email: string, clientIp: string): boolean {
+    const clientWait = this.#requestsPerClient.recordAttempt(clientIp);
+    const emailClientWait = this.#requestsPerEmailPerClient.recordAttempt(`${clientIp}\0${email}`);
+    return clientWait === 0 && emailClientWait === 0;
   }
 
-  recordFailure(key: string): void {
-    const now = this.#now();
-    this.#prune(now);
-    const window = this.#windows.get(key);
-    if (window === undefined || now >= window.resetAt) {
-      this.#windows.set(key, { failures: 1, resetAt: now + this.#windowMs });
-      return;
-    }
-    window.failures += 1;
-  }
-
-  recordSuccess(key: string): void {
-    this.#windows.delete(key);
-  }
-
-  #prune(now: number): void {
-    for (const [key, window] of this.#windows) {
-      if (now >= window.resetAt) this.#windows.delete(key);
-    }
+  /** Atomically reserves one slot in the higher, recipient-wide delivery ceiling. */
+  reserveMagicLinkDelivery(email: string): boolean {
+    return this.#deliveriesPerEmail.recordAttempt(email) === 0;
   }
 }
