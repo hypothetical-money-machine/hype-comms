@@ -514,7 +514,9 @@ review.
 
 Every `BrowserWindow` disables Node integration, enables context isolation, sandboxing, and
 web security, and uses a fixed local preload. Navigation and new windows are denied;
-allowlisted `https:` links open in the system browser after URL validation. The production
+allowlisted `https:` links open in the system browser after URL validation, and validated
+RFC 6068 `mailto:` links open the operating system's mail composer through the same
+single main-process handoff; every other scheme is dropped. The production
 CSP defaults to `default-src 'self'`, forbids object/embed content and inline/eval scripts,
 and sets `connect-src 'self'` because only main performs product networking. Remote renderer
 code, Electron `remote`, arbitrary IPC, shell execution, and generic filesystem/network

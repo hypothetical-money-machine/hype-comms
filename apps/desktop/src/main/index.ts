@@ -175,6 +175,7 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
+import { normalizeExternalMailtoUrl } from "../shared/external-mailto";
 import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
@@ -799,7 +800,7 @@ function flushPendingRendererEvents(): void {
 }
 
 function safelyOpenExternal(url: string): void {
-  const safeUrl = normalizeExternalHttpsUrl(url);
+  const safeUrl = normalizeExternalHttpsUrl(url) ?? normalizeExternalMailtoUrl(url);
   if (safeUrl !== null) {
     void shell.openExternal(safeUrl).catch((error: unknown) => {
       reportMainProcessError("Failed to open an external link", error);

@@ -131,6 +131,39 @@ describe("MessageBody", () => {
     expect(container.textContent).toContain("https://user:secret@example.com");
   });
 
+  it("renders well-formed mailto links and bare email addresses as clickable mail links", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "Ask [Dan](mailto:dan@example.com) or ping morgan@example.org today.",
+      }),
+    );
+
+    const labeled = screen.getByRole<HTMLAnchorElement>("link", { name: /Dan/ });
+    expect(labeled.href).toBe("mailto:dan@example.com");
+    expect(labeled.target).toBe("_blank");
+    expect(labeled.closest("p")?.textContent).toContain("mailto:dan@example.com");
+
+    const autolinked = screen.getByRole<HTMLAnchorElement>("link", {
+      name: "morgan@example.org",
+    });
+    expect(autolinked.href).toBe("mailto:morgan@example.org");
+    expect(screen.getByText(/Ask/).textContent).toBe(
+      "Ask Dan (mailto:dan@example.com) or ping morgan@example.org today.",
+    );
+    expect(container.querySelectorAll(".markdown-link-destination")).toHaveLength(1);
+  });
+
+  it("keeps malformed or header-injecting mailto values inert", () => {
+    const { container } = render(
+      createElement(MessageBody, {
+        body: "[one](mailto:) [two](mailto:a@example.com%0ABcc:x@y.example) [three](mailto:a@b.example?x-header=1)",
+      }),
+    );
+
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(container.querySelector("p")?.textContent).toBe("one two three");
+  });
+
   it("preserves multiline message text", () => {
     render(createElement(MessageBody, { body: "First line\nSecond line" }));
 
