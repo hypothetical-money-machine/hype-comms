@@ -251,6 +251,12 @@ The API and database ports bind to loopback. PostgreSQL is authoritative for ide
 conversations, messages, idempotency records, read cursors, and sync events. There is no SQLite
 runtime volume or shared access-code mode.
 
+The server accepts forwarded client addresses only from `HYPE_COMMS_TRUSTED_PROXIES`. Host-run
+production defaults to the exact IPv4 and IPv6 loopback addresses; Compose supplies its private
+bridge range because host proxy traffic reaches the container through that bridge. Configure the
+narrowest stable proxy IP/CIDR available, and make the proxy replace `X-Forwarded-For` rather than
+append to a value supplied by the client. Direct development leaves proxy trust disabled.
+
 `HYPE_COMMS_EMAIL_DELIVERY=manual` permits an administrator to issue links without an SMTP provider.
 Self-service requests return a uniform refusal in that mode. Configure `HYPE_COMMS_SMTP_URL` and
 `HYPE_COMMS_EMAIL_FROM`, then select `smtp`, for delivered mail.
