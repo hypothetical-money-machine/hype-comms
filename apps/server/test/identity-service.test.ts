@@ -463,27 +463,58 @@ describeWithPostgres("IdentityService and identity routes", () => {
     await seedOwner();
     const original = await signIn("owner@example.com");
 
-    const attempts = await Promise.allSettled([
-      service.refreshSession(original.token),
-      service.refreshSession(original.token),
-    ]);
-    const winners = attempts.filter(
-      (attempt): attempt is PromiseFulfilledResult<Awaited<typeof original>> =>
-        attempt.status === "fulfilled",
-    );
+    // Promise.all does not guarantee that both database statements capture their snapshots before
+    // the first rotation commits. Hold the row lock until both rotation statements are waiting so
+    // this test exercises the service's true-overlap path instead of a historical-token replay.
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM device_sessions WHERE token_hash = $1 FOR UPDATE", [
+        hashToken(original.token),
+      ]);
 
-    expect(winners).toHaveLength(1);
-    expect(attempts.filter(({ status }) => status === "rejected")).toEqual([
-      expect.objectContaining({
-        reason: expect.objectContaining({ statusCode: 401, code: "UNAUTHORIZED" }),
-      }),
-    ]);
-    await expect(service.refreshSession(winners[0]?.value.token ?? "")).resolves.toBeDefined();
-    const history = await pool.query<{ count: number }>(
-      "SELECT count(*)::integer AS count FROM device_session_token_history",
-    );
-    expect(history.rows[0]?.count).toBe(2);
-    expect(reuseDetections).toBe(0);
+      const attemptsPromise = Promise.allSettled([
+        service.refreshSession(original.token),
+        service.refreshSession(original.token),
+      ]);
+      let waitingRotations = 0;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const activity = await pool.query<{ waiting: number }>(
+          `SELECT count(*)::integer AS waiting
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock'
+              AND query LIKE '%rotation_attempt AS MATERIALIZED%'`,
+        );
+        waitingRotations = activity.rows[0]?.waiting ?? 0;
+        if (waitingRotations === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingRotations).toBe(2);
+      await blocker.query("COMMIT");
+
+      const attempts = await attemptsPromise;
+      const winners = attempts.filter(
+        (attempt): attempt is PromiseFulfilledResult<Awaited<typeof original>> =>
+          attempt.status === "fulfilled",
+      );
+
+      expect(winners).toHaveLength(1);
+      expect(attempts.filter(({ status }) => status === "rejected")).toEqual([
+        expect.objectContaining({
+          reason: expect.objectContaining({ statusCode: 401, code: "UNAUTHORIZED" }),
+        }),
+      ]);
+      await expect(service.refreshSession(winners[0]?.value.token ?? "")).resolves.toBeDefined();
+      const history = await pool.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM device_session_token_history",
+      );
+      expect(history.rows[0]?.count).toBe(2);
+      expect(reuseDetections).toBe(0);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
   });
 
   it("does not revoke a lineage for reuse after the historical credential expires", async () => {
