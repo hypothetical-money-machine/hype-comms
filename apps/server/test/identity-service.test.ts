@@ -743,7 +743,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(await repository.countActiveMembers(membership.workspaceId)).toBe(25);
   });
 
-  it("returns the same accepted response without emailing unknown or throttled callers", async () => {
+  it("returns the same accepted response while enforcing client and delivery limits", async () => {
     const owner = await seedOwner();
     await service.createInvitation(owner.id, emailSchema.parse("invited-a@example.com"), "member");
     await service.createInvitation(owner.id, emailSchema.parse("invited-b@example.com"), "member");
@@ -753,6 +753,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
       new SignInThrottle({
         maxRequestsPerClient: 1,
         maxRequestsPerEmailPerClient: 1,
+        maxDeliveriesPerEmail: 2,
         windowMs: 60_000,
         now: () => nowMs,
       }),
@@ -764,6 +765,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const invitedResponse = await app.inject({
       method: "POST",
       url: "/v1/auth/magic-link",
+      remoteAddress: "127.0.0.1",
       payload: { email: "invited-a@example.com" },
     });
     await app.close();
@@ -772,23 +774,38 @@ describeWithPostgres("IdentityService and identity routes", () => {
       emailSchema.parse("unknown@example.com"),
       "127.0.0.2",
     );
-    const emailLimited = await service.requestMagicLink(
+    const sameClientLimited = await service.requestMagicLink(
       emailSchema.parse("invited-a@example.com"),
-      "127.0.0.3",
+      "127.0.0.1",
     );
     const ipLimited = await service.requestMagicLink(
       emailSchema.parse("invited-b@example.com"),
       "127.0.0.1",
     );
+    const differentClientAllowed = await service.requestMagicLink(
+      emailSchema.parse("invited-a@example.com"),
+      "127.0.0.3",
+    );
+    const globalDeliveryLimited = await service.requestMagicLink(
+      emailSchema.parse("invited-a@example.com"),
+      "127.0.0.4",
+    );
 
-    expect([invited, unknown, emailLimited, ipLimited]).toEqual([
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-    ]);
+    expect([
+      invited,
+      unknown,
+      sameClientLimited,
+      ipLimited,
+      differentClientAllowed,
+      globalDeliveryLimited,
+    ]).toEqual(
+      Array.from({ length: 6 }, () => magicLinkRequestedSchema.parse({ status: "accepted" })),
+    );
     expect(invitedResponse.statusCode).toBe(202);
-    expect(sender.sent.map(({ to }) => to)).toEqual(["invited-a@example.com"]);
+    expect(sender.sent.map(({ to }) => to)).toEqual([
+      "invited-a@example.com",
+      "invited-a@example.com",
+    ]);
   });
 
   it("rejects revoked and expired invitations and accepts an invitation only once", async () => {
