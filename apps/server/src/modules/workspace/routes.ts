@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
@@ -9,6 +10,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   advanceReadCursorRequestSchema,
+  agentContextHistoryQuerySchema,
   archiveChannelRequestSchema,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
@@ -335,19 +337,32 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "conversations:write");
+    const canCreate =
+      identity.credentialType === "session" ||
+      identity.currentUser.scopes.includes("conversations:write");
+    if (
+      identity.credentialType === "agent" &&
+      !canCreate &&
+      !identity.currentUser.scopes.includes("workspace:read")
+    ) {
+      requireAgentScope(identity, "conversations:write");
+    }
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
     }
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const opened = canCreate
+      ? await repository.createDirectConversation(identity, result.data)
+      : await repository.findDirectConversation(identity, result.data);
+    if (opened === null) {
+      requireAgentScope(identity, "conversations:write");
+      throw new Error("An agent without conversations:write unexpectedly passed scope validation");
+    }
     return reply
       .code(201)
       .send(
-        projectConversationMutation(
-          await repository.createDirectConversation(identity, result.data),
-          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        ),
+        projectConversationMutation(opened, supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY)),
       );
   });
 
@@ -355,6 +370,25 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
+    if (
+      typeof request.query === "object" &&
+      request.query !== null &&
+      Object.hasOwn(request.query, "contextPack")
+    ) {
+      const query = agentContextHistoryQuerySchema.safeParse(request.query);
+      if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid context history query");
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
+        throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
+      }
+      return repository.contextHistory(
+        identity,
+        id,
+        query.data.before,
+        query.data.throughMessageId,
+        query.data.limit,
+      );
+    }
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);

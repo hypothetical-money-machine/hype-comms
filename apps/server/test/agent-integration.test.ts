@@ -2,6 +2,8 @@ import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  agentContextHistoryResponseSchema,
   agentCurrentPrincipalSchema,
   agentTokenSecretSchema,
   apiErrorEnvelopeSchema,
@@ -607,6 +609,184 @@ describeWithPostgres("agent identity and owner administration", () => {
     }
   });
 
+  it("lets read-scoped agents reopen an existing DM without granting creation authority", async () => {
+    const app = await appWithWorkspace();
+    const agent = await createAgent(app);
+    const read = await createToken(app, agent.user.id, "Read", ["workspace:read"]);
+    const messages = await createToken(app, agent.user.id, "Messages", ["messages:write"]);
+    const conversations = await createToken(app, agent.user.id, "Conversations", [
+      "conversations:write",
+    ]);
+
+    const [humanOpen, agentOpen] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/direct-conversations",
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+        payload: { memberId: agent.user.id },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/direct-conversations",
+        headers: { authorization: `Bearer ${conversations.token}` },
+        payload: { memberId: ownerId },
+      }),
+    ]);
+    expect(humanOpen.statusCode).toBe(201);
+    expect(agentOpen.statusCode).toBe(201);
+    const direct = conversationMutationResponseSchema.parse(humanOpen.json());
+    expect(conversationMutationResponseSchema.parse(agentOpen.json())).toEqual(direct);
+
+    const reopened = await app.inject({
+      method: "POST",
+      url: "/v1/direct-conversations",
+      headers: { authorization: `Bearer ${read.token}` },
+      payload: { memberId: ownerId },
+    });
+    expect(reopened.statusCode).toBe(201);
+    expect(conversationMutationResponseSchema.parse(reopened.json())).toEqual(direct);
+
+    const [missing, noReadScope] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/direct-conversations",
+        headers: { authorization: `Bearer ${read.token}` },
+        payload: { memberId },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/direct-conversations",
+        headers: { authorization: `Bearer ${messages.token}` },
+        payload: { memberId: ownerId },
+      }),
+    ]);
+    for (const response of [missing, noReadScope]) {
+      expect(response.statusCode).toBe(403);
+      expect(apiErrorEnvelopeSchema.parse(response.json()).error).toMatchObject({
+        code: "FORBIDDEN",
+        message: "Agent token requires the conversations:write scope",
+      });
+    }
+
+    const directRows = await pool.query<{ id: string } & QueryResultRow>(
+      `SELECT id
+         FROM conversations
+        WHERE workspace_id = $1
+          AND kind = 'direct_message'`,
+      [workspaceId],
+    );
+    expect(directRows.rows).toEqual([{ id: direct.conversation.conversation.id }]);
+    const directEvents = await pool.query<{ count: string } & QueryResultRow>(
+      `SELECT count(*)::text AS count
+         FROM sync_events
+        WHERE workspace_id = $1
+          AND event_type = 'direct_conversation.created'`,
+      [workspaceId],
+    );
+    expect(directEvents.rows[0]?.count).toBe("1");
+  });
+
+  it("lets a read-scoped agent reach an anchored context pack through its reopened DM", async () => {
+    const app = await appWithWorkspace();
+    const agent = await createAgent(app);
+    const read = await createToken(app, agent.user.id, "Read", ["workspace:read"]);
+    const noRead = await createToken(app, agent.user.id, "Messages", ["messages:write"]);
+
+    const opened = await app.inject({
+      method: "POST",
+      url: "/v1/direct-conversations",
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+      payload: { memberId: agent.user.id },
+    });
+    expect(opened.statusCode).toBe(201);
+    const direct = conversationMutationResponseSchema.parse(opened.json());
+    const conversationId = direct.conversation.conversation.id;
+
+    const clientMessageId = randomUUID();
+    const sent = await app.inject({
+      method: "POST",
+      url: `/v1/conversations/${conversationId}/messages`,
+      headers: {
+        cookie: `hype_comms_session=${ownerSessionToken}`,
+        "idempotency-key": clientMessageId,
+      },
+      payload: {
+        threadRootId: null,
+        body: "@hermes please read this DM",
+        bodyFormat: "hype_comms_markdown_v1",
+        clientMessageId,
+        mentionedUserIds: [agent.user.id],
+        attachmentIds: [],
+      },
+    });
+    expect(sent.statusCode).toBe(201);
+    const anchor = sendMessageResponseSchema.parse(sent.json()).message;
+
+    const reopened = await app.inject({
+      method: "POST",
+      url: "/v1/direct-conversations",
+      headers: { authorization: `Bearer ${read.token}` },
+      payload: { memberId: ownerId },
+    });
+    expect(reopened.statusCode).toBe(201);
+    expect(
+      conversationMutationResponseSchema.parse(reopened.json()).conversation.conversation.id,
+    ).toBe(conversationId);
+
+    const contextUrl =
+      `/v1/conversations/${conversationId}/messages?contextPack=true` +
+      `&throughMessageId=${anchor.id}`;
+    const [context, forbidden] = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: contextUrl,
+        headers: {
+          authorization: `Bearer ${read.token}`,
+          "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+        },
+      }),
+      app.inject({
+        method: "GET",
+        url: contextUrl,
+        headers: {
+          authorization: `Bearer ${noRead.token}`,
+          "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+        },
+      }),
+    ]);
+
+    expect(context.statusCode).toBe(200);
+    const pack = agentContextHistoryResponseSchema.parse(context.json()).contextPack;
+    expect(pack).toMatchObject({
+      conversation: {
+        id: conversationId,
+        kind: "direct_message",
+        selector: "@owner",
+        peer: { id: ownerId, kind: "human", username: "owner", displayName: "Owner" },
+        self: false,
+      },
+      anchorMessageId: anchor.id,
+      messages: [
+        {
+          id: anchor.id,
+          author: { id: ownerId, kind: "human", username: "owner", displayName: "Owner" },
+          mentionedYou: true,
+          threadRootId: null,
+        },
+      ],
+      threadRoot: null,
+      replyTarget: { kind: "flat", conversationId },
+      readThroughMessageId: anchor.id,
+      truncatedBefore: false,
+      nextCursor: null,
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect(apiErrorEnvelopeSchema.parse(forbidden.json()).error).toMatchObject({
+      code: "FORBIDDEN",
+      message: "Agent token requires the workspace:read scope",
+    });
+  });
+
   it("enforces route scopes while allowing the corresponding capability", async () => {
     const app = await appWithWorkspace();
     const agent = await createAgent(app);
@@ -714,7 +894,7 @@ describeWithPostgres("agent identity and owner administration", () => {
         method: "POST",
         url: "/v1/direct-conversations",
         headers: { authorization: `Bearer ${read.token}` },
-        payload: { memberId: ownerId },
+        payload: { memberId },
       }),
       app.inject({
         method: "PATCH",

@@ -51,6 +51,8 @@ Commands:
   channels archive CHANNEL
   dms create MEMBER
   messages history CONVERSATION [--before CURSOR] [--limit N]
+  messages history CONVERSATION --context-pack [--through-message-id UUID]
+                [--before CURSOR] [--limit N]
   messages send CONVERSATION [BODY] [--file PATH] [--mention MEMBER]...
                 [--client-message-id UUID] [--thread-root-id UUID]
   read-cursors advance CONVERSATION MESSAGE_ID
