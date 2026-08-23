@@ -1,10 +1,10 @@
 name: hype-comms-platform
 label: Hype Comms
 kind: platform
-version: 1.0.0
+version: 1.1.0
 description: >
   Hermes gateway adapter for Hype Comms. Uses hype-comms-cli as the only network
-  transport and wakes Hermes for direct messages and explicit channel mentions.
+  transport and supplies bounded canonical conversation context on every wake.
 author: Hype Comms
 requires_env:
   - name: HYPE_COMMS_API_ORIGIN
@@ -12,7 +12,9 @@ requires_env:
     prompt: "Hype Comms API origin"
     password: false
   - name: HYPE_COMMS_TOKEN
-    description: "Revocable Hype Comms agent token"
+    description: >-
+      Agent token with workspace:read and messages:write; add
+      read-cursors:write for post-handoff read advancement
     prompt: "Hype Comms agent token"
     password: true
 optional_env:
@@ -33,6 +35,18 @@ optional_env:
     prompt: "Hype Comms CLI path"
     password: false
   - name: HYPE_COMMS_HERMES_STATE_DIR
-    description: "Private directory for per-agent realtime cursor checkpoints"
+    description: "Private directory for realtime and pending read-cursor state"
     prompt: "Hype Comms Hermes state directory"
+    password: false
+  - name: HYPE_COMMS_CONTEXT_LIMIT
+    description: "Canonical messages supplied per wake (1-20, default 8)"
+    prompt: "Messages in each context pack"
+    password: false
+  - name: HYPE_COMMS_THREAD_REPLIES
+    description: "Thread channel replies under their canonical root (true/false)"
+    prompt: "Thread channel replies?"
+    password: false
+  - name: HYPE_COMMS_THREAD_FOLLOWUPS
+    description: "Wake for unmentioned replies in participated threads (true/false)"
+    prompt: "Wake for participated-thread follow-ups?"
     password: false
