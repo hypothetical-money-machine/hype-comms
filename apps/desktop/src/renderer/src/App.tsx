@@ -435,6 +435,8 @@ export function MessageRow({
     replyCount === 0
       ? "Reply in thread"
       : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
+  const threadSummaryLabel = `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
+  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${author?.displayName ?? "Former member"}`;
   return (
     <article
       className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
@@ -542,6 +544,16 @@ export function MessageRow({
             )
           }
         />
+        {replyCount > 0 && onOpenThread !== undefined && (
+          <button
+            className="thread-summary"
+            type="button"
+            aria-label={threadSummaryAccessibilityLabel}
+            onClick={onOpenThread}
+          >
+            {threadSummaryLabel}
+          </button>
+        )}
         {retractError !== "" && (
           <p className="retract-error" role="alert">
             {retractError}

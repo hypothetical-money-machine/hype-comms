@@ -91,20 +91,24 @@ function renderMessage(overrides: {
 }
 
 describe("MessageRow thread action", () => {
-  it("folds the reply count into the hover action rail", () => {
+  it("shows a reply count below the message while retaining the hover action rail", () => {
     const onOpenThread = vi.fn();
-    const { container } = renderMessage({ onOpenThread, replyCount: 3 });
+    renderMessage({ onOpenThread, replyCount: 3 });
 
     const threadAction = screen.getByRole("button", { name: "Open thread with 3 replies" });
     expect(threadAction.closest(".message-action-rail")).not.toBeNull();
     expect(threadAction.textContent).toBe("3");
-    expect(container.querySelector(".thread-summary")).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: "Open thread with 3 replies for message from Morgan",
+      }).textContent,
+    ).toBe("3 replies");
 
     fireEvent.click(threadAction);
     expect(onOpenThread).toHaveBeenCalledOnce();
   });
 
-  it("keeps an empty thread in the hover action rail instead of showing a summary", () => {
+  it("does not show a reply count for a message without replies", () => {
     const onOpenThread = vi.fn();
     const { container } = renderMessage({ onOpenThread, replyCount: 0 });
 
@@ -115,6 +119,35 @@ describe("MessageRow thread action", () => {
 
     fireEvent.click(reply);
     expect(onOpenThread).toHaveBeenCalledOnce();
+  });
+
+  it("uses singular reply text and opens the thread from the summary", () => {
+    const onOpenThread = vi.fn();
+    renderMessage({ onOpenThread, replyCount: 1 });
+
+    const summary = screen.getByRole("button", {
+      name: "Open thread with 1 reply for message from Morgan",
+    });
+    expect(summary.textContent).toBe("1 reply");
+
+    fireEvent.click(summary);
+    expect(onOpenThread).toHaveBeenCalledOnce();
+  });
+
+  it("exposes the reply count as a focusable native button", () => {
+    const onOpenThread = vi.fn();
+    renderMessage({ onOpenThread, replyCount: 2 });
+
+    const summary = screen.getByRole("button", {
+      name: "Open thread with 2 replies for message from Morgan",
+    });
+    summary.focus();
+    expect(document.activeElement).toBe(summary);
+    // Keyboard activation is the platform's job: a native button already activates on Enter and
+    // Space. Asserting the element type is what guarantees that, whereas asserting a keydown
+    // handler would only prove we reimplemented it -- and would fail once someone removed it.
+    expect(summary.tagName).toBe("BUTTON");
+    expect(summary.getAttribute("type")).toBe("button");
   });
 
   it("shows in-thread attachment chips that open the file", () => {
