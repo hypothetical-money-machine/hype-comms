@@ -8,6 +8,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   MESSAGE_HISTORY_MAX_LIMIT,
   MESSAGE_SEARCH_MAX_LIMIT,
+  POSTGRES_BIGINT_MAX,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
@@ -52,6 +53,7 @@ import {
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
+  isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
   type Attachment,
@@ -130,7 +132,6 @@ import {
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
-const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -624,7 +625,8 @@ function decodeHistoryCursor(cursor: string | undefined): string | null {
       parsed === null ||
       !("sequence" in parsed) ||
       typeof parsed.sequence !== "string" ||
-      !/^[1-9]\d*$/.test(parsed.sequence)
+      !/^[1-9]\d*$/.test(parsed.sequence) ||
+      !isPostgresBigintString(parsed.sequence)
     ) {
       throw new Error("Invalid cursor");
     }
@@ -675,7 +677,7 @@ function decodeSearchCursor(cursor: string | undefined, queryHash: string): Sear
       !("workspaceSequence" in parsed) ||
       typeof parsed.workspaceSequence !== "string" ||
       !/^[1-9]\d*$/.test(parsed.workspaceSequence) ||
-      BigInt(parsed.workspaceSequence) > POSTGRES_BIGINT_MAX ||
+      !isPostgresBigintString(parsed.workspaceSequence) ||
       !("id" in parsed) ||
       typeof parsed.id !== "string" ||
       !UUID_PATTERN.test(parsed.id)

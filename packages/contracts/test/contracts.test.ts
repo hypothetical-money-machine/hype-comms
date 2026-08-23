@@ -30,6 +30,7 @@ import {
   createTaskOperationSchema,
   currentUserSchema,
   displayNameSchema,
+  entityVersionSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
@@ -52,6 +53,7 @@ import {
   syncQuerySchema,
   systemConnectedEventSchema,
   taskListQuerySchema,
+  taskNumberSchema,
   taskRecordSchema,
   taskSchema,
   themeAccentColorSchema,
@@ -1244,6 +1246,14 @@ describe("transport contracts", () => {
         updatedAt: NOW,
       }),
     ).toThrow();
+  });
+
+  it("bounds decimal bigint values while accepting the PostgreSQL maximum", () => {
+    const maximum = "9223372036854775807";
+    expect(taskNumberSchema.parse(maximum)).toBe(maximum);
+    expect(() => taskNumberSchema.parse("9223372036854775808")).toThrow();
+    expect(entityVersionSchema.parse(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(() => entityVersionSchema.parse(Number.MAX_SAFE_INTEGER + 1)).toThrow();
   });
 
   it("requires a UUID clientMessageId for idempotent sends", () => {
