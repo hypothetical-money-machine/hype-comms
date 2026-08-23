@@ -89,6 +89,18 @@ describe("AuthKit callback parsing", () => {
     });
   });
 
+  it("parses a credential-free terminal error without desktop state", () => {
+    const value = "hype-comms://auth/callback?error=authentication_failed";
+
+    expect(parseAuthKitCallback(value, PRODUCTION_SCHEME)).toEqual({
+      error: "authentication_failed",
+    });
+    expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toEqual({
+      kind: "authkit",
+      callback: { error: "authentication_failed" },
+    });
+  });
+
   it.each([
     `hype-comms://auth/callback?code=${code}`,
     `hype-comms://auth/callback?state=${state}`,

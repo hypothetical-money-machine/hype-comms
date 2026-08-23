@@ -120,7 +120,8 @@ export const desktopAuthCallbackSuccessParametersSchema = z
 export const desktopAuthCallbackErrorParametersSchema = z
   .object({
     error: z.literal("authentication_failed"),
-    state: authDesktopStateSchema,
+    // Consume-miss has no stored desktop transaction, so the server omits state.
+    state: authDesktopStateSchema.optional(),
   })
   .strict();
 
