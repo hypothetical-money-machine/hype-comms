@@ -60,23 +60,23 @@ permissions:
 jobs:
   package:
     name: Package on ${{ matrix.platform }}
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macOS
-            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            # Pull requests, including forks, stay on disposable hosted runners. Trusted main and
+            # manual builds retain native coverage without exposing persistent hosts to PR code.
+            runner: ${{ github.event_name == 'pull_request' && '["macos-15"]' || '["self-hosted", "macOS", "ARM64", "notarize"]' }}
+            self_hosted: ${{ github.event_name != 'pull_request' }}
             native_notifications_enabled: "1"
           - platform: Windows
-            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+            runner: ${{ github.event_name == 'pull_request' && '["windows-11-arm"]' || '["self-hosted", "Windows", "ARM64", "windows-release"]' }}
+            self_hosted: ${{ github.event_name != 'pull_request' }}
             native_notifications_enabled: "0"
           - platform: Linux
-            # Smoke packages do not need release credentials. Run the Linux lane on the native
-            # ARM64 runner so package tooling is exercised on the architecture it targets.
-            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
+            runner: ${{ github.event_name == 'pull_request' && '["ubuntu-24.04-arm"]' || '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' }}
+            self_hosted: ${{ github.event_name != 'pull_request' }}
             native_notifications_enabled: "0"
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
@@ -94,7 +94,7 @@ jobs:
           package-manager-cache: false
 
       - name: Verify native Linux ARM64 runner
-        if: matrix.platform == 'Linux'
+        if: matrix.platform == 'Linux' && matrix.self_hosted
         shell: sh
         run: |
           test "$(uname -m)" = "aarch64"
@@ -103,7 +103,7 @@ jobs:
       # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
       # Its PowerShell execution policy also rejects the generated scripts used by Actions.
       - name: Expose MinGit sh on Windows
-        if: matrix.platform == 'Windows'
+        if: matrix.platform == 'Windows' && matrix.self_hosted
         shell: cmd
         run: |
           if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
@@ -127,8 +127,9 @@ jobs:
         if: matrix.platform != 'Windows'
         env:
           # electron-builder skips all macOS signing in PR jobs before reading identity: "-"
-          # unless this is enabled. Fork PRs never reach this job, and identity discovery is off.
-          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && 'true' || 'false' }}
+          # unless this is enabled. Hosted PR jobs receive no signing secrets, and identity
+          # discovery remains disabled for every DEV smoke build.
+          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && github.event_name == 'pull_request' && 'true' || 'false' }}
         shell: sh
         run: npm run package:desktop
 
@@ -168,6 +169,7 @@ jobs:
     name: Capture signed macOS native notification evidence
     if: github.event_name == 'workflow_dispatch' && inputs.native_notification_evidence
     runs-on: [self-hosted, macOS, ARM64, notarize]
+    environment: release
     timeout-minutes: 60
     env:
       HYPE_COMMS_BUILD_FLAVOR: production
