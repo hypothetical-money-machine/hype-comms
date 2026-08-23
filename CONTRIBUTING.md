@@ -3,6 +3,28 @@
 Hype Comms currently accepts changes from members of the Hypothetical Money Machine GitHub
 organization.
 
+## Fork pull requests
+
+Pull requests from forks do not run CI. The only CI job uses self-hosted infrastructure, and
+untrusted fork code must not execute on that infrastructure.
+
+Before pushing a fork pull request, use Node.js 24.18.x from `.node-version` and npm 11.16.x, then
+run:
+
+```bash
+npm ci
+npm run check
+```
+
+Paste the result in the pull request description. A maintainer re-runs these checks on a trusted
+branch before merge.
+
+## Reading the history
+
+Issue and pull request numbers in commit messages from before the public repository migration,
+such as `Closes #227`, do not correspond to current issue numbers. The tracker was renumbered
+during the migration; the commits themselves were not rewritten.
+
 ## Workflow
 
 1. Create a short-lived branch from `main`.
@@ -11,6 +33,9 @@ organization.
 4. Open a pull request describing user-visible behavior, security impact, and test evidence. For
    renderer or other user-visible desktop UI changes, include final-state screenshot(s) in the
    PR's Screenshots section; use `N/A — no renderer/UI changes` when the change is not visual.
+
+Read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating. Do not report suspected
+vulnerabilities in public issues; follow [the security policy](SECURITY.md) instead.
 
 Do not commit credentials, signing material, message contents from real users, generated
 installers, or local databases. Database migrations and realtime event contracts require
