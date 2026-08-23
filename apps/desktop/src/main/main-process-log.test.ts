@@ -2,7 +2,11 @@ import { EventEmitter } from "node:events";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
+import {
+  protectMainProcessLogStreams,
+  reportMainProcessError,
+  reportMainProcessEvent,
+} from "./main-process-log";
 
 describe("main-process logging", () => {
   it("does not throw when a closed console stream rejects a write", () => {
@@ -27,6 +31,24 @@ describe("main-process logging", () => {
     ).not.toThrow();
     expect(() =>
       stderr.emit("error", Object.assign(new Error("write EIO"), { code: "EIO" })),
+    ).not.toThrow();
+  });
+
+  it("writes structured lifecycle events as a single line", () => {
+    const writer = vi.fn();
+
+    reportMainProcessEvent("session_teardown", { trigger: "will-quit" }, writer);
+
+    expect(writer).toHaveBeenCalledWith(
+      JSON.stringify({ event: "session_teardown", trigger: "will-quit" }),
+    );
+  });
+
+  it("does not let a broken event log destination interrupt lifecycle work", () => {
+    expect(() =>
+      reportMainProcessEvent("session_teardown", {}, () => {
+        throw new Error("stream closed");
+      }),
     ).not.toThrow();
   });
 });

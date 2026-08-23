@@ -16,7 +16,7 @@ import {
   type User,
 } from "@hype-comms/contracts";
 
-import type { DesktopApi } from "../../shared/desktop-api";
+import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
@@ -179,7 +179,7 @@ export function UpdateControl({ client }: { readonly client: UpdateClient }) {
   );
 }
 
-function SignIn({
+export function SignIn({
   client,
   theme,
   sessionMessage,
@@ -225,6 +225,20 @@ function SignIn({
       await client.startAuthKitSignIn();
       setStatus("Finish signing in in the browser. You can return here when it completes.");
     } catch (error) {
+      if (error instanceof Error && error.message.includes(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE)) {
+        let nextCapabilities = { ...capabilities, authKit: false };
+        try {
+          if (client.getAuthCapabilities !== undefined) {
+            nextCapabilities = {
+              ...(await client.getAuthCapabilities()),
+              authKit: false,
+            };
+          }
+        } catch {
+          // Keep AuthKit hidden if its availability cannot be confirmed after a rejected start.
+        }
+        setCapabilities(nextCapabilities);
+      }
       setStatus(errorMessage(error, "Could not start WorkOS sign-in"));
     } finally {
       setAuthKitStarting(false);

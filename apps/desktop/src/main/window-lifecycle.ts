@@ -59,6 +59,67 @@ export class BeforeQuitCoordinator {
   }
 }
 
+export interface FinalQuitCoordinatorActions {
+  readonly teardownSession: () => void;
+  readonly cleanup: () => void;
+  readonly reportSessionTeardown: () => void;
+  readonly reportCleanupFailure: (error: unknown) => void;
+  readonly reportQuitCancelledAfterTeardown: () => void;
+  readonly scheduleQuitCancellationCheck: (check: () => void) => void;
+}
+
+export interface FinalQuitEvent {
+  readonly defaultPrevented: boolean;
+}
+
+/**
+ * Runs irreversible synchronous cleanup only once Electron has reached `will-quit`. If another
+ * listener cancels that final event, the surviving event loop emits a scheduled diagnostic.
+ */
+export class FinalQuitCoordinator {
+  readonly #actions: FinalQuitCoordinatorActions;
+  #handled = false;
+
+  constructor(actions: FinalQuitCoordinatorActions) {
+    this.#actions = actions;
+  }
+
+  handle(event: FinalQuitEvent): void {
+    if (this.#handled) return;
+    this.#handled = true;
+
+    try {
+      this.#actions.teardownSession();
+    } catch (error) {
+      this.#reportSafely(this.#actions.reportCleanupFailure, error);
+    } finally {
+      this.#reportSafely(this.#actions.reportSessionTeardown);
+    }
+
+    try {
+      this.#actions.cleanup();
+    } catch (error) {
+      this.#reportSafely(this.#actions.reportCleanupFailure, error);
+    } finally {
+      this.#actions.scheduleQuitCancellationCheck(() => {
+        if (event.defaultPrevented) {
+          this.#reportSafely(this.#actions.reportQuitCancelledAfterTeardown);
+        }
+      });
+    }
+  }
+
+  #reportSafely(report: () => void): void;
+  #reportSafely(report: (error: unknown) => void, error: unknown): void;
+  #reportSafely(report: (error?: unknown) => void, error?: unknown): void {
+    try {
+      report(error);
+    } catch {
+      // Reporting is diagnostic and must not interrupt final process cleanup.
+    }
+  }
+}
+
 export interface LastWindowClosedActions {
   readonly platform: NodeJS.Platform;
   readonly windowlessRealtimeEnabled: boolean;
