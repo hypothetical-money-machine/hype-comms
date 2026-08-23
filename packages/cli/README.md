@@ -80,7 +80,7 @@ workspace bootstrap|members
 conversations list
 channels create|archive
 dms create
-messages history|send
+messages history [--context-pack]|send
 read-cursors advance
 sync
 watch
@@ -90,7 +90,13 @@ agent-tokens list|create|revoke
 ```
 
 Channel slugs, member usernames, and UUIDs are accepted where applicable. Results always contain
-the canonical server IDs. `messages send` accepts one inline body, `--file`, or stdin, plus repeated
+the canonical server IDs. `messages history CONVERSATION --context-pack` returns the bounded agent
+context projection (up to 20 messages). Use `--through-message-id UUID` to anchor the projection
+inclusively at a message, or `--before CURSOR` to page older context; these options are mutually
+exclusive. Context-pack history negotiates `agent-context-pack-v1`; ordinary history keeps its
+existing request and response contract.
+
+`messages send` accepts one inline body, `--file`, or stdin, plus repeated
 `--mention` selectors. It generates a UUID unless `--client-message-id UUID` is supplied, and sends
 that same value as both `clientMessageId` and `Idempotency-Key`. If delivery is uncertain, the JSON
 error repeats this UUID so the caller can safely retry.
