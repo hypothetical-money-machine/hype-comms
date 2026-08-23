@@ -112,6 +112,11 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
         "AuthKit callback failed",
       );
     }
+    if (completion.kind === "error" && !("desktopState" in completion)) {
+      const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
+      callbackUrl.searchParams.set("error", "authentication_failed");
+      return reply.redirect(callbackUrl.href);
+    }
     const parameters = desktopAuthCallbackParametersSchema.parse(
       completion.kind === "success"
         ? { code: completion.handoffCode, state: completion.desktopState }

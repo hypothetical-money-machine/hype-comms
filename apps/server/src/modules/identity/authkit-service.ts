@@ -41,6 +41,10 @@ export type AuthKitCallbackCompletion =
       readonly failureCategory?: AuthKitCallbackFailureCategory;
       readonly desktopState: AuthDesktopState;
       readonly desktopAuthVariant: DesktopAuthVariant;
+    }
+  | {
+      readonly kind: "error";
+      readonly failureCategory?: AuthKitCallbackFailureCategory;
     };
 
 export type AuthKitCallbackFailureCategory =
@@ -120,7 +124,7 @@ export class AuthKitService {
       throw new ApiError(503, "SERVICE_UNAVAILABLE", "Authentication is temporarily unavailable");
     }
     if (transaction === null) {
-      throw new ApiError(403, "FORBIDDEN", "Authentication could not be completed");
+      return { kind: "error", failureCategory: "internal" };
     }
     if (input.kind === "error") {
       return {
