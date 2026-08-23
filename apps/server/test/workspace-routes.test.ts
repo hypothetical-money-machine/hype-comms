@@ -1,6 +1,7 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   THREADS_CAPABILITY,
   type BotScope,
@@ -33,6 +34,7 @@ const currentUser: CurrentUser = {
     username: "owner",
     displayName: "Owner",
     avatarUrl: null,
+    title: "Chief Mischief Officer",
     createdAt: now,
     updatedAt: now,
   },
@@ -70,6 +72,7 @@ class FakeBotService {
           username: "task-bot",
           displayName: "Task Bot",
           avatarUrl: null,
+          title: null,
           createdAt: now,
           updatedAt: now,
         },
@@ -138,6 +141,13 @@ class FakeWorkspaceRepository {
     const bootstrap = await this.bootstrap();
     return { conversations: bootstrap.conversations, nextCursor: null, hasMore: false };
   });
+  readonly listMembers = vi.fn(async () => ({ members: [currentUser.user] }));
+  readonly listChannelMembers = vi.fn(async () => ({
+    conversationId,
+    access: "workspace" as const,
+    members: [{ user: currentUser.user, role: "owner" as const, joinedAt: now }],
+    canManage: true,
+  }));
   readonly createChannel = vi.fn(async () => ({
     conversation: (await this.bootstrap()).conversations[0],
     syncCursor: "1",
@@ -265,7 +275,21 @@ class FakeWorkspaceRepository {
     syncCursor: "2",
   }));
   readonly sync = vi.fn(async () => ({
-    events: [],
+    events: [
+      {
+        version: 1,
+        id: replyId,
+        type: "member.updated" as const,
+        occurredAt: now,
+        workspaceId,
+        conversationId: null,
+        workspaceSequence: "1",
+        conversationSequence: null,
+        entityVersion: 1,
+        delivery: "at_least_once" as const,
+        payload: { member: currentUser.user },
+      },
+    ],
     nextCursor: "0",
     highWaterCursor: "0",
     hasMore: false,
@@ -381,6 +405,56 @@ describe("event capability routes", () => {
     expect(capable.json().conversations[0].conversation.channelMode).toBe("announcement");
   });
 
+  it("projects titles only to member-profile-capable clients on every user response surface", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
+    const capableHeaders = {
+      ...legacyHeaders,
+      "x-hype-comms-capabilities": MEMBER_PROFILES_CAPABILITY,
+    };
+    const requests = [
+      { url: "/v1/bootstrap", user: (body: Record<string, unknown>) => body.members?.[0] },
+      { url: "/v1/members", user: (body: Record<string, unknown>) => body.members?.[0] },
+      {
+        url: "/v1/channels/10000000-0000-4000-8000-000000000007/members",
+        user: (body: Record<string, unknown>) => (body.members as { user: unknown }[])?.[0]?.user,
+      },
+      {
+        url: "/v1/admin/communication-paths",
+        user: (body: Record<string, unknown>) => body.members?.[0],
+      },
+    ] as const;
+
+    for (const request of requests) {
+      const legacy = await app.inject({ method: "GET", url: request.url, headers: legacyHeaders });
+      const capable = await app.inject({
+        method: "GET",
+        url: request.url,
+        headers: capableHeaders,
+      });
+      expect(legacy.statusCode).toBe(200);
+      expect(capable.statusCode).toBe(200);
+      expect(request.user(legacy.json())).not.toHaveProperty("title");
+      expect(request.user(capable.json())).toMatchObject({ title: "Chief Mischief Officer" });
+    }
+
+    const legacySync = await app.inject({
+      method: "GET",
+      url: "/v1/sync?after=0&limit=100",
+      headers: legacyHeaders,
+    });
+    const capableSync = await app.inject({
+      method: "GET",
+      url: "/v1/sync?after=0&limit=100",
+      headers: capableHeaders,
+    });
+    expect(legacySync.json().events[0].payload.member).not.toHaveProperty("title");
+    expect(capableSync.json().events[0].payload.member).toMatchObject({
+      title: "Chief Mischief Officer",
+    });
+  });
+
   it("strips channel mode from every legacy conversation response surface", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
@@ -457,6 +531,7 @@ describe("event capability routes", () => {
       false,
       true,
       true,
+      false,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
@@ -466,6 +541,7 @@ describe("event capability routes", () => {
       false,
       true,
       true,
+      false,
     );
   });
 
@@ -490,6 +566,7 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
       false,
       false,
       false,
@@ -1131,7 +1208,17 @@ describe("admin communication paths route", () => {
     );
     expect(response.json()).toEqual({
       generatedAt: now,
-      members: [currentUser.user],
+      members: [
+        {
+          id: userId,
+          kind: "human",
+          username: "owner",
+          displayName: "Owner",
+          avatarUrl: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
       paths: [],
     });
   });

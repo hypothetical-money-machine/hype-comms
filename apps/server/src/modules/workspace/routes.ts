@@ -1,6 +1,7 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
@@ -37,6 +38,7 @@ import type {
   ConversationMutationResponse,
   ConversationSummary,
   ListConversationsResponse,
+  User,
   WorkspaceBootstrapResponse,
 } from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
@@ -135,14 +137,61 @@ function withoutChannelMode(summary: ConversationSummary) {
   return { ...summary, conversation };
 }
 
-function projectBootstrap(response: WorkspaceBootstrapResponse, capable: boolean) {
+function withoutTitle(user: User): Omit<User, "title"> {
+  const { title, ...legacy } = user;
+  void title;
+  return legacy;
+}
+
+function projectMembers<T extends { readonly members: readonly User[] }>(
+  response: T,
+  capable: boolean,
+) {
   if (capable) return response;
+  return { ...response, members: response.members.map(withoutTitle) };
+}
+
+function projectChannelMembers<T extends { readonly members: readonly { readonly user: User }[] }>(
+  response: T,
+  capable: boolean,
+) {
+  if (capable) return response;
+  return {
+    ...response,
+    members: response.members.map((member) => ({ ...member, user: withoutTitle(member.user) })),
+  };
+}
+
+function withoutMemberEventTitle(event: unknown): unknown {
+  if (typeof event !== "object" || event === null || !("type" in event)) return event;
+  if (event.type !== "member.updated" || !("payload" in event)) return event;
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || !("member" in payload)) return event;
+  return { ...event, payload: { ...payload, member: withoutTitle(payload.member as User) } };
+}
+
+function projectSyncMemberTitles<T extends { readonly events: readonly unknown[] }>(
+  response: T,
+  capable: boolean,
+) {
+  if (capable) return response;
+  return { ...response, events: response.events.map(withoutMemberEventTitle) };
+}
+
+function projectBootstrap(
+  response: WorkspaceBootstrapResponse,
+  supportsAnnouncements: boolean,
+  supportsMemberProfiles: boolean,
+) {
+  const members = supportsMemberProfiles ? response.members : response.members.map(withoutTitle);
+  if (supportsAnnouncements) return { ...response, members };
   const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
     ...response.featureFlags,
   };
   delete featureFlags.announcementChannels;
   return {
     ...response,
+    members,
     conversations: response.conversations.map(withoutChannelMode),
     featureFlags,
   };
@@ -178,13 +227,18 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return projectBootstrap(
       await repository.bootstrap(identity),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 
   app.get("/members", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    return repository.listMembers(identity);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectMembers(
+      await repository.listMembers(identity),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
   });
 
   app.get("/admin/communication-paths", async (request) => {
@@ -203,7 +257,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       },
       "Workspace owner viewed member communication paths",
     );
-    return repository.communicationPaths(identity);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectMembers(
+      await repository.communicationPaths(identity),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
   });
 
   app.get("/conversations", async (request) => {
@@ -252,7 +310,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
-    return repository.listChannelMembers(identity, id);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectChannelMembers(
+      await repository.listChannelMembers(identity, id),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
   });
 
   app.put("/channels/:id/members/:userId", async (request) => {
@@ -605,16 +667,20 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return repository.sync(
-      identity,
-      query.data.after,
-      query.data.limit,
-      supported.includes(REACTION_EVENTS_CAPABILITY),
-      supported.includes(READ_STATE_EVENTS_CAPABILITY),
-      supported.includes(TASK_EVENTS_CAPABILITY),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
-      supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+    return projectSyncMemberTitles(
+      await repository.sync(
+        identity,
+        query.data.after,
+        query.data.limit,
+        supported.includes(REACTION_EVENTS_CAPABILITY),
+        supported.includes(READ_STATE_EVENTS_CAPABILITY),
+        supported.includes(TASK_EVENTS_CAPABILITY),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+        supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+      ),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 
@@ -630,6 +696,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
       supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 };

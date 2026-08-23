@@ -43,6 +43,7 @@ const currentUser: CurrentUser = {
     username: "owner",
     displayName: "Owner",
     avatarUrl: null,
+    title: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
   },

@@ -42,6 +42,7 @@ const CURRENT_USER = {
     username: "morgan",
     displayName: "Morgan",
     avatarUrl: null,
+    title: null,
     createdAt: NOW,
     updatedAt: NOW,
   },

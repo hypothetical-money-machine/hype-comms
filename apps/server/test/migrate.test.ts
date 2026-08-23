@@ -106,6 +106,7 @@ describeWithPostgres("runMigrations", () => {
           "0019_desktop_auth_variants.sql",
           "0020_message_attachments.sql",
           "0021_message_retract.sql",
+          "0022_member_title.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -136,6 +137,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0019_desktop_auth_variants.sql" },
         { filename: "0020_message_attachments.sql" },
         { filename: "0021_message_retract.sql" },
+        { filename: "0022_member_title.sql" },
       ]);
 
       const userId = randomUUID();
@@ -341,6 +343,24 @@ describeWithPostgres("runMigrations", () => {
               AND column_name = 'message_retract_events'`,
         ),
       ).resolves.toMatchObject({ rows: [{ column_name: "message_retract_events" }] });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'users'
+              AND column_name = 'title'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "title" }] });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'realtime_tickets'
+              AND column_name = 'member_profiles'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "member_profiles" }] });
     });
   });
 

@@ -3,7 +3,6 @@ import {
   authKitCallbackQuerySchema,
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
-  currentUserSchema,
   desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
   exchangeAuthHandoffRequestSchema,
@@ -13,7 +12,7 @@ import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
-import { desktopCurrentUserResponse, setSessionCookie } from "./routes.js";
+import { desktopCurrentUserResponse, setSessionCookie, supportsMemberProfiles } from "./routes.js";
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService } from "./service.js";
 
@@ -156,6 +155,13 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
       throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
     }
     setSessionCookie(reply, session, cookieSecure);
-    return reply.code(200).send(currentUserSchema.parse(desktopCurrentUserResponse(currentUser)));
+    return reply
+      .code(200)
+      .send(
+        desktopCurrentUserResponse(
+          currentUser,
+          supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
+        ),
+      );
   });
 };

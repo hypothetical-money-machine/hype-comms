@@ -695,6 +695,98 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(await service.authenticate(refreshedCookie?.value ?? "")).toBeNull();
   });
 
+  it("updates only the authenticated profile title, validates it, and publishes an invalidation", async () => {
+    const owner = await seedOwner();
+    const session = await signIn("owner@example.com");
+    await service.createInvitation(owner.id, emailSchema.parse("member@example.com"), "member");
+    await signIn("member@example.com");
+    const member = await repository.findUserByEmail(emailSchema.parse("member@example.com"));
+    if (member === null) throw new Error("Member was not created");
+    const app = await buildApp({ cookieSecure: false, identity: { service } });
+    const headers = {
+      cookie: `hype_comms_session=${session.token}`,
+      "x-hype-comms-capabilities": "member-profiles-v1",
+    };
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: "  Chief Mischief Officer  " },
+    });
+    const legacy = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers: { cookie: `hype_comms_session=${session.token}` },
+      payload: { title: "Director of Shenanigans" },
+    });
+    const rejectedControlCharacter = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: "No\u0000pe" },
+    });
+    const rejectedOtherUser = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { userId: member.id, title: "Nope" },
+    });
+    const cleared = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: null },
+    });
+    await app.close();
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      user: { id: owner.id, title: "Chief Mischief Officer" },
+    });
+    expect(legacy.statusCode).toBe(200);
+    expect(legacy.json().user).not.toHaveProperty("title");
+    expect(rejectedControlCharacter.statusCode).toBe(400);
+    expect(rejectedOtherUser.statusCode).toBe(400);
+    expect(cleared.json()).toMatchObject({ user: { id: owner.id, title: null } });
+    expect(
+      (await repository.findUserByEmail(emailSchema.parse("member@example.com")))?.title,
+    ).toBeNull();
+    const events = await pool.query<{ payload: { member: { id: string; title: string | null } } }>(
+      `SELECT payload FROM sync_events WHERE event_type = 'member.updated' ORDER BY workspace_sequence`,
+    );
+    expect(
+      events.rows.some(
+        (event) =>
+          event.payload.member.id === owner.id &&
+          event.payload.member.title === "Chief Mischief Officer",
+      ),
+    ).toBe(true);
+  });
+
+  it("rate limits profile updates per user", async () => {
+    await seedOwner();
+    const session = await signIn("owner@example.com");
+    const app = await buildApp({ identity: { service } });
+    const headers = { cookie: `hype_comms_session=${session.token}` };
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(
+        await app.inject({
+          method: "PATCH",
+          url: "/v1/profile",
+          headers,
+          payload: { title: null },
+        }),
+      );
+    }
+    await app.close();
+
+    expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
+    expect(responses[10]?.statusCode).toBe(429);
+    expect(responses[10]?.headers["retry-after"]).toBeDefined();
+  });
+
   it("revokes exactly one owned device and never another user's device", async () => {
     const owner = await seedOwner();
     const first = await signIn("owner@example.com", "127.0.0.1");

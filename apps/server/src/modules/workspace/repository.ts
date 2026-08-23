@@ -154,6 +154,7 @@ interface UserRow extends QueryResultRow {
   username: string;
   display_name: string;
   avatar_url: string | null;
+  title: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -324,6 +325,7 @@ interface TicketRow extends QueryResultRow {
   announcement_channels: boolean;
   participated_thread_notifications: boolean;
   message_retract_events: boolean;
+  member_profiles: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -393,6 +395,7 @@ export interface WorkspacePrincipal {
   readonly announcementChannels?: boolean;
   readonly participatedThreadNotifications?: boolean;
   readonly messageRetractEvents?: boolean;
+  readonly memberProfiles?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -425,6 +428,7 @@ function mapUser(row: UserRow) {
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
+    title: row.title,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
@@ -3178,6 +3182,7 @@ export class WorkspaceRepository {
     announcementChannels = false,
     participatedThreadNotifications = false,
     messageRetractEvents = false,
+    memberProfiles = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -3189,6 +3194,7 @@ export class WorkspaceRepository {
         announcementChannels,
         participatedThreadNotifications,
         messageRetractEvents,
+        memberProfiles,
       },
       after,
       limit,
@@ -3293,6 +3299,7 @@ export class WorkspaceRepository {
               row,
               principal.readStateEvents ?? false,
               principal.participatedThreadNotifications ?? false,
+              principal.memberProfiles ?? false,
             ),
           ),
         nextCursor,
@@ -3317,6 +3324,7 @@ export class WorkspaceRepository {
     announcementChannels = false,
     participatedThreadNotifications = false,
     messageRetractEvents = false,
+    memberProfiles = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -3330,8 +3338,8 @@ export class WorkspaceRepository {
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications, message_retract_events)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          participated_thread_notifications, message_retract_events, member_profiles)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -3346,6 +3354,7 @@ export class WorkspaceRepository {
         announcementChannels,
         participatedThreadNotifications,
         messageRetractEvents,
+        memberProfiles,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -3372,7 +3381,8 @@ export class WorkspaceRepository {
                    ticket.task_events,
                    ticket.announcement_channels,
                    ticket.participated_thread_notifications,
-                   ticket.message_retract_events
+                   ticket.message_retract_events,
+                   ticket.member_profiles
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -3383,7 +3393,8 @@ export class WorkspaceRepository {
               ticket.task_events,
               ticket.announcement_channels,
               ticket.participated_thread_notifications,
-              ticket.message_retract_events
+              ticket.message_retract_events,
+              ticket.member_profiles
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -3436,6 +3447,7 @@ export class WorkspaceRepository {
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
+        memberProfiles: row.member_profiles,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -3450,6 +3462,7 @@ export class WorkspaceRepository {
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
+        memberProfiles: row.member_profiles,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -3527,7 +3540,8 @@ export class WorkspaceRepository {
   async #members(client: PoolClient, workspaceId: string) {
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
-              user_account.avatar_url, user_account.created_at, user_account.updated_at
+              user_account.avatar_url, user_account.title, user_account.created_at,
+              user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
            ON membership.user_id = user_account.id
@@ -3964,7 +3978,8 @@ export class WorkspaceRepository {
         ? await client.query<ChannelMemberRow>(
             `SELECT user_account.id, user_account.kind, user_account.username,
                     user_account.display_name,
-                    user_account.avatar_url, user_account.created_at, user_account.updated_at,
+                    user_account.avatar_url, user_account.title, user_account.created_at,
+                    user_account.updated_at,
                     CASE WHEN user_account.id = $2 THEN 'owner' ELSE 'member' END AS role,
                     workspace_membership.created_at AS joined_at
                FROM users AS user_account
@@ -3988,7 +4003,7 @@ export class WorkspaceRepository {
             `SELECT audience.*
                FROM (
                  SELECT user_account.id, user_account.kind, user_account.username,
-                        user_account.display_name, user_account.avatar_url,
+                        user_account.display_name, user_account.avatar_url, user_account.title,
                         user_account.created_at, user_account.updated_at,
                         membership.role, membership.joined_at
                    FROM conversation_memberships AS membership
@@ -4002,7 +4017,7 @@ export class WorkspaceRepository {
                     AND user_account.kind IN ('human', 'agent')
                  UNION ALL
                  SELECT user_account.id, user_account.kind, user_account.username,
-                        user_account.display_name, user_account.avatar_url,
+                        user_account.display_name, user_account.avatar_url, user_account.title,
                         user_account.created_at, user_account.updated_at,
                         'member'::text AS role, grant_record.created_at AS joined_at
                    FROM bot_channel_grants AS grant_record
@@ -4226,7 +4241,8 @@ export class WorkspaceRepository {
     }
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
-              user_account.avatar_url, user_account.created_at, user_account.updated_at
+              user_account.avatar_url, user_account.title, user_account.created_at,
+              user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
            ON membership.user_id = user_account.id
@@ -4354,6 +4370,7 @@ export class WorkspaceRepository {
     row: EventRow,
     readStateEvents: boolean,
     participatedThreadNotifications: boolean,
+    memberProfiles: boolean,
   ): WorkspaceEvent {
     const event = workspaceEventSchema.parse({
       version: 1,
@@ -4383,6 +4400,9 @@ export class WorkspaceRepository {
         },
       });
     }
+    if (event.type === "member.updated" && !memberProfiles) {
+      return this.#legacyMemberProfileEvent(event);
+    }
     if (event.type !== "read_cursor.updated" || readStateEvents) return event;
     // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
     // projecting its legacy shape for devices that did not negotiate read-state events.
@@ -4406,6 +4426,13 @@ export class WorkspaceRepository {
       ...event,
       payload: { ...event.payload, conversation },
     } as unknown as WorkspaceEvent;
+  }
+
+  #legacyMemberProfileEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (event.type !== "member.updated") return event;
+    const member: Partial<typeof event.payload.member> = { ...event.payload.member };
+    delete member.title;
+    return { ...event, payload: { member } } as unknown as WorkspaceEvent;
   }
 
   async #transaction<T>(
