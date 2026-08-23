@@ -13,6 +13,8 @@ import {
   normalizeProductionApiOrigin,
 } from "./src/shared/api-origin";
 import {
+  resolveAgentWakePackageEvidence,
+  resolveAgentWakeRollout,
   resolveMacosNativeNotificationEvidence,
   resolveNativeNotificationRollout,
 } from "./src/shared/native-notification-rollout";
@@ -44,6 +46,11 @@ export default defineConfig(({ command }) => {
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
     process.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED,
   );
+  const agentWakeEnabled = resolveAgentWakeRollout(process.env.HYPE_COMMS_AGENT_WAKE_ENABLED);
+  const agentWakePackageEvidenceEnabled = resolveAgentWakePackageEvidence(
+    process.env.HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED,
+    agentWakeEnabled,
+  );
   const macosNativeNotificationEvidenceEnabled = resolveMacosNativeNotificationEvidence(
     process.env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED,
     nativeNotificationsEnabled,
@@ -66,6 +73,10 @@ export default defineConfig(({ command }) => {
     main: {
       define: {
         __HYPE_COMMS_APPLICATION_ID__: JSON.stringify(buildFlavor.appId),
+        __HYPE_COMMS_AGENT_WAKE_ENABLED__: JSON.stringify(agentWakeEnabled),
+        __HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED__: JSON.stringify(
+          agentWakePackageEvidenceEnabled,
+        ),
         __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
         __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__: JSON.stringify(buildFlavor.protocolScheme),
         __HYPE_COMMS_BUILD_FLAVOR__: JSON.stringify(buildFlavor.name),
