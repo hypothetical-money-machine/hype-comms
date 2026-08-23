@@ -120,6 +120,54 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         socket.send(JSON.stringify(event));
       };
 
+      const revalidatePrincipal = async (): Promise<boolean> => {
+        if (closed || socket.readyState !== 1) return false;
+        if (revalidate === undefined) {
+          if (principal.agentTokenId === null) return true;
+          request.log.error(
+            { userId: principal.userId },
+            "Closing an agent realtime socket because revalidation is unavailable",
+          );
+          socket.close(1011, "Authorization unavailable");
+          return false;
+        }
+        try {
+          const result = await revalidate(principal);
+          if (result.status === "valid") return true;
+          if (closed || socket.readyState !== 1) return false;
+          request.log.warn(
+            { reason: result.reason, userId: principal.userId },
+            "Closing a realtime socket whose session is no longer authorized",
+          );
+          socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
+          return false;
+        } catch (error) {
+          request.log.error({ err: error }, "Realtime session revalidation failed");
+          if (principal.agentTokenId === null) {
+            // Preserve the existing human-session availability tradeoff. Wake-bearing agent
+            // sockets instead fail closed because a stale credential must never receive work.
+            return true;
+          }
+          if (!closed && socket.readyState === 1) {
+            socket.close(1011, "Authorization unavailable");
+          }
+          return false;
+        }
+      };
+
+      // Heartbeats and deliveries share one queue, so their credential checks never overlap. A
+      // notified flush waits behind an active heartbeat check, and a coalesced follow-up flush
+      // performs its own later check.
+      let revalidationTail: Promise<void> = Promise.resolve();
+      const serializedRevalidatePrincipal = (): Promise<boolean> => {
+        const current = revalidationTail.then(revalidatePrincipal);
+        revalidationTail = current.then(
+          () => undefined,
+          () => undefined,
+        );
+        return current;
+      };
+
       const flush = async (): Promise<void> => {
         if (closed || !initialRevalidationComplete) return;
         if (flushing) {
@@ -131,11 +179,17 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           do {
             flushAgain = false;
             if (loadEvents === undefined) {
-              sendConnected();
               return;
             }
             let response: SyncResponse;
             do {
+              // Re-authorize an agent before every replay page. This covers the initial backlog,
+              // every hub-notified flush, each pagination step, and the follow-up cycle for a
+              // notification coalesced while a page was loading. Humans retain heartbeat-based
+              // revalidation.
+              if (principal.agentTokenId !== null && !(await serializedRevalidatePrincipal())) {
+                return;
+              }
               response = await loadEvents(principal, cursor);
               for (const event of response.events) {
                 if (socket.readyState !== 1) return;
@@ -143,7 +197,6 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
               }
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);
-            sendConnected();
           } while (flushAgain && !closed);
         } catch (error) {
           if (error instanceof ApiError && error.code === "CURSOR_EXPIRED") {
@@ -177,31 +230,13 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       const unsubscribe = subscribe?.(principal.workspaceId, () => {
         void flush();
       });
-      const revalidatePrincipal = async (): Promise<boolean> => {
-        if (revalidate === undefined) return true;
-        try {
-          const result = await revalidate(principal);
-          if (result.status === "valid") return true;
-          if (closed || socket.readyState !== 1) return false;
-          request.log.warn(
-            { reason: result.reason, userId: principal.userId },
-            "Closing a realtime socket whose session is no longer authorized",
-          );
-          socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
-          return false;
-        } catch (error) {
-          // A transient database failure must not sign a healthy device out.
-          request.log.error({ err: error }, "Realtime session revalidation failed");
-          return true;
-        }
-      };
 
       const heartbeat = setInterval(() => {
         if (!pongReceived) {
           socket.terminate();
           return;
         }
-        void revalidatePrincipal();
+        void serializedRevalidatePrincipal();
         pongReceived = false;
         socket.ping();
       }, HEARTBEAT_INTERVAL_MS);
@@ -222,9 +257,12 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       });
       socket.once("close", teardown);
       socket.once("error", teardown);
-      void revalidatePrincipal().then((mayReplay) => {
+      void serializedRevalidatePrincipal().then((mayReplay) => {
         if (!mayReplay || closed || socket.readyState !== 1) return;
         initialRevalidationComplete = true;
+        // This authenticated boundary must be the first wire record. Clients use it to bind the
+        // connection and its starting cursor before applying any replayed product event.
+        sendConnected();
         void flush();
       });
     },

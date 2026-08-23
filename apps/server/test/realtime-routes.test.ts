@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
+import { ApiError } from "../src/errors.js";
 import type {
   RealtimePrincipal,
   RealtimePrincipalRevalidation,
@@ -16,7 +17,39 @@ import type { WorkspaceRepository } from "../src/modules/workspace/repository.js
 const userId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const deviceSessionId = "10000000-0000-4000-8000-000000000003";
+const replayEventId = "10000000-0000-4000-8000-000000000004";
 const ticket = "a".repeat(32);
+const now = "2026-08-23T12:00:00.000Z";
+
+const replayEvent: SyncResponse["events"][number] = {
+  version: 1,
+  id: replayEventId,
+  type: "member.updated",
+  occurredAt: now,
+  workspaceId,
+  conversationId: null,
+  workspaceSequence: "10",
+  conversationSequence: null,
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: {
+    member: {
+      id: userId,
+      kind: "agent",
+      username: "delivery-agent",
+      displayName: "Delivery Agent",
+      avatarUrl: null,
+      title: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  },
+};
+const secondReplayEvent: SyncResponse["events"][number] = {
+  ...replayEvent,
+  id: "10000000-0000-4000-8000-000000000006",
+  workspaceSequence: "11",
+};
 
 class FakeWorkspaceRepository {
   readonly consumedTickets: string[] = [];
@@ -31,6 +64,10 @@ class FakeWorkspaceRepository {
   };
   revalidation: RealtimePrincipalRevalidation = { status: "valid" };
   revalidationError: Error | null = null;
+  syncResponse: SyncResponse | null = null;
+  syncResponses: SyncResponse[] = [];
+  syncError: Error | null = null;
+  afterSync: ((call: number) => void | Promise<void>) | null = null;
 
   async consumeRealtimeTicket(token: string): Promise<RealtimePrincipal | null> {
     this.consumedTickets.push(token);
@@ -39,7 +76,13 @@ class FakeWorkspaceRepository {
 
   async syncPrincipal(principal: RealtimePrincipal, after: string): Promise<SyncResponse> {
     this.syncedCursors.push(after);
-    return { events: [], nextCursor: after, highWaterCursor: after, hasMore: false };
+    if (this.syncError !== null) throw this.syncError;
+    const response =
+      this.syncResponses.shift() ??
+      this.syncResponse ??
+      ({ events: [], nextCursor: after, highWaterCursor: after, hasMore: false } as const);
+    await this.afterSync?.(this.syncedCursors.length);
+    return response;
   }
 
   async revalidateRealtimePrincipal(
@@ -58,12 +101,19 @@ class FakeWorkspaceRepository {
 class FakeRealtimeEventHub {
   readonly subscribed: string[] = [];
   unsubscribeCalls = 0;
+  listener: (() => void) | null = null;
 
-  subscribe(workspaceIdentifier: string): () => void {
+  subscribe(workspaceIdentifier: string, listener: () => void): () => void {
     this.subscribed.push(workspaceIdentifier);
+    this.listener = listener;
     return () => {
       this.unsubscribeCalls += 1;
+      this.listener = null;
     };
+  }
+
+  notify(): void {
+    this.listener?.();
   }
 
   async close(): Promise<void> {}
@@ -105,6 +155,88 @@ async function connectedApp(
 }
 
 describe("realtime session revalidation", () => {
+  it("sends system.connected before an authorized initial replay", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000010",
+    };
+    repository.syncResponse = {
+      events: [replayEvent],
+      nextCursor: "10",
+      highWaterCursor: "10",
+      hasMore: false,
+    };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+
+    const frames = await new Promise<unknown[]>((resolve) => {
+      const received: unknown[] = [];
+      socket.on("message", (data) => {
+        received.push(JSON.parse(data.toString()));
+        if (received.length === 2) resolve(received);
+      });
+    });
+
+    expect(frames).toMatchObject([
+      { type: "system.connected", workspaceSequence: "9" },
+      { type: "member.updated", workspaceSequence: "10" },
+    ]);
+  });
+
+  it("sends system.connected before a replay cursor failure", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000011",
+    };
+    repository.syncError = new ApiError(409, "CURSOR_EXPIRED", "Cursor expired");
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    const frames: unknown[] = [];
+    socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+
+    const [code] = await once(socket, "close");
+
+    expect(code).toBe(4009);
+    expect(frames).toMatchObject([
+      { type: "system.connected", workspaceSequence: "9" },
+      {
+        type: "system.resync_required",
+        workspaceSequence: "9",
+        payload: { reason: "cursor_expired" },
+      },
+    ]);
+  });
+
   it("closes an initially invalid principal before replaying any events", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.revalidation = { status: "invalid", reason: "membership_inactive" };
@@ -199,6 +331,189 @@ describe("realtime session revalidation", () => {
     expect(repository.revalidations).toEqual([
       { workspaceId, userId, deviceSessionId: null, agentTokenId },
       { workspaceId, userId, deviceSessionId: null, agentTokenId },
+      { workspaceId, userId, deviceSessionId: null, agentTokenId },
+    ]);
+  });
+
+  it("rejects a revoked agent before a publish-triggered flush can deliver", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const hub = new FakeRealtimeEventHub();
+    const agentTokenId = "10000000-0000-4000-8000-000000000005";
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId,
+    };
+    const { socket } = await connectedApp(repository, hub);
+    repository.syncResponse = {
+      events: [replayEvent],
+      nextCursor: "10",
+      highWaterCursor: "10",
+      hasMore: false,
+    };
+    repository.revalidation = { status: "invalid", reason: "agent_token_revoked" };
+
+    const outcome = new Promise<
+      | { readonly type: "close"; readonly code: number; readonly reason: string }
+      | { readonly type: "message"; readonly frame: unknown }
+    >((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ type: "close", code, reason: reason.toString() });
+      });
+      socket.once("message", (data) => {
+        resolve({ type: "message", frame: JSON.parse(data.toString()) });
+      });
+    });
+    hub.notify();
+
+    await expect(outcome).resolves.toEqual({
+      type: "close",
+      code: REALTIME_SESSION_REVOKED_CLOSE_CODE,
+      reason: "Session revoked",
+    });
+  });
+
+  it("revalidates a coalesced publish after an earlier checked page finishes", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const hub = new FakeRealtimeEventHub();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000009",
+    };
+    const { socket } = await connectedApp(repository, hub);
+    await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9"]));
+    repository.syncResponses.push(
+      { events: [], nextCursor: "9", highWaterCursor: "9", hasMore: false },
+      {
+        events: [replayEvent],
+        nextCursor: "10",
+        highWaterCursor: "10",
+        hasMore: false,
+      },
+    );
+    const pageStarted = Promise.withResolvers<void>();
+    const releasePage = Promise.withResolvers<void>();
+    repository.afterSync = async (call) => {
+      if (call !== 2) return;
+      pageStarted.resolve();
+      await releasePage.promise;
+    };
+    const outcome = new Promise<
+      | { readonly type: "close"; readonly code: number; readonly reason: string }
+      | { readonly type: "message"; readonly frame: unknown }
+    >((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ type: "close", code, reason: reason.toString() });
+      });
+      socket.once("message", (data) => {
+        resolve({ type: "message", frame: JSON.parse(data.toString()) });
+      });
+    });
+
+    hub.notify();
+    await pageStarted.promise;
+    repository.revalidation = { status: "invalid", reason: "agent_token_revoked" };
+    hub.notify();
+    releasePage.resolve();
+
+    await expect(outcome).resolves.toEqual({
+      type: "close",
+      code: REALTIME_SESSION_REVOKED_CLOSE_CODE,
+      reason: "Session revoked",
+    });
+  });
+
+  it("fails closed when agent authorization cannot be checked before a notified flush", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const hub = new FakeRealtimeEventHub();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000007",
+    };
+    const { socket } = await connectedApp(repository, hub);
+    repository.syncResponse = {
+      events: [replayEvent],
+      nextCursor: "10",
+      highWaterCursor: "10",
+      hasMore: false,
+    };
+    repository.revalidationError = new Error("database unavailable");
+
+    const outcome = new Promise<
+      | { readonly type: "close"; readonly code: number; readonly reason: string }
+      | { readonly type: "message"; readonly frame: unknown }
+    >((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ type: "close", code, reason: reason.toString() });
+      });
+      socket.once("message", (data) => {
+        resolve({ type: "message", frame: JSON.parse(data.toString()) });
+      });
+    });
+    hub.notify();
+
+    await expect(outcome).resolves.toEqual({
+      type: "close",
+      code: 1011,
+      reason: "Authorization unavailable",
+    });
+  });
+
+  it("revalidates an agent again before delivering the next replay page", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000008",
+    };
+    repository.syncResponses.push(
+      {
+        events: [replayEvent],
+        nextCursor: "10",
+        highWaterCursor: "11",
+        hasMore: true,
+      },
+      {
+        events: [secondReplayEvent],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    );
+    repository.afterSync = (call) => {
+      if (call === 1) {
+        repository.revalidation = { status: "invalid", reason: "agent_token_revoked" };
+      }
+    };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    const frames: unknown[] = [];
+    socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+
+    const [code] = await once(socket, "close");
+
+    expect(code).toBe(REALTIME_SESSION_REVOKED_CLOSE_CODE);
+    expect(frames).toMatchObject([
+      { type: "system.connected", workspaceSequence: "9" },
+      { type: "member.updated", workspaceSequence: "10" },
     ]);
   });
 

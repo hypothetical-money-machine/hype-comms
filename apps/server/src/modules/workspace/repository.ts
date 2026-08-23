@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENTS_PER_MESSAGE_MAX,
   CONVERSATION_FILES_MAX_LIMIT,
@@ -13,6 +14,7 @@ import {
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
+  agentWakeBootstrapResponseSchema,
   attachmentSchema,
   completeFileUploadResponseSchema,
   conversationFilesResponseSchema,
@@ -56,6 +58,7 @@ import {
   isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type AgentWakeBootstrapResponse,
   type Attachment,
   type CompleteFileUploadRequest,
   type CompleteFileUploadResponse,
@@ -116,7 +119,7 @@ import {
   type AttachmentStore,
 } from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
-import type { AuthenticatedIdentity } from "../identity/service.js";
+import type { AuthenticatedAgentIdentity, AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import {
   fingerprintApiRequest,
@@ -185,6 +188,11 @@ interface ConversationMembershipRow extends QueryResultRow {
   joined_at: Date | string;
   left_at: Date | string | null;
   updated_at: Date | string;
+}
+
+interface AgentWakeConversationRow extends QueryResultRow {
+  id: string;
+  kind: "channel" | "direct_message";
 }
 
 interface ChannelMemberRow extends UserRow {
@@ -358,6 +366,8 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
+  /** Test seam after the wake bootstrap establishes its high-water snapshot. */
+  readonly afterAgentWakeBootstrapCursorRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
   /** Structured operational record; message bodies are deliberately never included. */
@@ -912,6 +922,52 @@ export class WorkspaceRepository {
             mentions: true,
             announcementChannels: workspace.announcement_channels_available,
           },
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
+  }
+
+  /**
+   * Establishes the future-only agent wake cursor and its visible conversation-kind projection in
+   * one repeatable-read snapshot. The query deliberately selects no summaries, messages, or bodies.
+   * The extra row distinguishes an exactly-full response from unsafe truncation.
+   */
+  async agentWakeBootstrap(
+    identity: AuthenticatedAgentIdentity,
+  ): Promise<AgentWakeBootstrapResponse> {
+    return this.#transaction(
+      async (client) => {
+        const highWaterCursor = await this.#highWater(client, identity.currentUser.workspaceId);
+        await this.hooks.afterAgentWakeBootstrapCursorRead?.();
+        const result = await client.query<AgentWakeConversationRow>(
+          `SELECT conversation.id, conversation.kind
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND ${conversationVisibilitySql("conversation", "$2")}
+            ORDER BY conversation.id
+            LIMIT $3`,
+          [
+            identity.currentUser.workspaceId,
+            identity.currentUser.user.id,
+            AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS + 1,
+          ],
+        );
+        if (result.rows.length > AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS) {
+          throw new ApiError(
+            409,
+            "CONFLICT",
+            `Agent wake bootstrap exceeds ${AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS} visible conversations`,
+          );
+        }
+        return agentWakeBootstrapResponseSchema.parse({
+          agentUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
+          highWaterCursor,
+          conversations: result.rows.map((conversation) => ({
+            conversationId: conversation.id,
+            kind: conversation.kind,
+          })),
         });
       },
       { isolationLevel: "repeatable_read", readOnly: true },

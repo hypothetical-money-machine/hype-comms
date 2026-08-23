@@ -12,6 +12,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
+  type AgentCurrentPrincipal,
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
@@ -20,7 +21,10 @@ import {
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
-import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
+import type {
+  AuthenticatedAgentIdentity,
+  AuthenticatedIdentity,
+} from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
 import {
@@ -360,6 +364,85 @@ describeWithPostgres("WorkspaceRepository", () => {
         payload: expect.objectContaining({
           message: expect.objectContaining({ id: sent.message.id }),
         }),
+      }),
+    );
+  });
+
+  it("bootstraps wake cursor and body-free conversation kinds from one snapshot", async () => {
+    const wakeAgentId = randomUUID();
+    const wakeAgentTokenId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, kind, email, username, display_name)
+       VALUES ($1, 'agent', NULL, 'wake-agent', 'Wake Agent')`,
+      [wakeAgentId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, wakeAgentId],
+    );
+    await pool.query(
+      `INSERT INTO agents (user_id, workspace_id, created_by)
+       VALUES ($1, $2, $3)`,
+      [wakeAgentId, workspaceId, ownerId],
+    );
+    const currentAgent: AgentCurrentPrincipal = {
+      type: "agent",
+      user: {
+        id: wakeAgentId,
+        kind: "agent",
+        username: "wake-agent",
+        displayName: "Wake Agent",
+        avatarUrl: null,
+        title: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      workspaceId,
+      role: "member",
+      scopes: ["workspace:read"],
+    };
+    const wakeAgent: AuthenticatedAgentIdentity = {
+      currentUser: currentAgent,
+      principalKind: "agent",
+      agentTokenId: wakeAgentTokenId,
+    };
+    const cursorRead = Promise.withResolvers<void>();
+    const continueBootstrap = Promise.withResolvers<void>();
+    const racingRepository = new WorkspaceRepository(pool, {
+      afterAgentWakeBootstrapCursorRead: async () => {
+        cursorRead.resolve();
+        await continueBootstrap.promise;
+      },
+    });
+
+    const bootstrapping = racingRepository.agentWakeBootstrap(wakeAgent);
+    await cursorRead.promise;
+    let created: Awaited<ReturnType<WorkspaceRepository["createChannel"]>>;
+    try {
+      created = await repository.createChannel(owner, {
+        name: "After Wake Snapshot",
+        slug: "after-wake-snapshot",
+        topic: null,
+        access: "workspace",
+      });
+    } finally {
+      continueBootstrap.resolve();
+    }
+    const bootstrap = await bootstrapping;
+    expect(bootstrap).toEqual({
+      agentUserId: wakeAgentId,
+      workspaceId,
+      highWaterCursor: "0",
+      conversations: [{ conversationId: generalId, kind: "channel" }],
+    });
+
+    const replay = await repository.sync(wakeAgent, bootstrap.highWaterCursor, 100);
+    expect(replay.events).toContainEqual(
+      expect.objectContaining({
+        type: "channel.created",
+        workspaceSequence: created.syncCursor,
+        conversationId: created.conversation.conversation.id,
       }),
     );
   });
