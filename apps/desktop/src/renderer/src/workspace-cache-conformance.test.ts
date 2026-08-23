@@ -518,6 +518,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("applies a message.retracted tombstone and refuses to resurrect the body", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    await cache.upsertReaction(reactionAddedEvent.payload.reaction, ALPHA_ID);
     await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
     await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
     await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
@@ -531,6 +532,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
         version: 2,
       }),
     ]);
+    expect(retracted.reactions).toEqual([]);
     const alpha = retracted.bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );

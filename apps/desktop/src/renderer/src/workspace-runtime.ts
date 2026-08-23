@@ -51,6 +51,7 @@ import {
   type RetractReservation,
   type WorkspaceCache,
 } from "./workspace-cache";
+import { mentionedMemberIds } from "./mentions";
 
 /** Why the encrypted cache fell back to memory. Derived so a new crypto reason cannot drift. */
 export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_only" }>["reason"];
@@ -380,6 +381,85 @@ function countMessage(
   });
 }
 
+/** Whether this retained message still contributes to the server's unread totals. */
+function isUnreadMessage(
+  summary: ConversationSummary,
+  currentUserId: string,
+  message: Message,
+): boolean {
+  return (
+    message.authorId !== currentUserId &&
+    (summary.readCursor === null ||
+      compareSequence(
+        message.conversationSequence,
+        summary.readCursor.lastReadConversationSequence,
+      ) > 0)
+  );
+}
+
+function newestLiveMessage(messages: readonly Message[], conversationId: string): Message | null {
+  let newest: Message | null = null;
+  for (const message of messages) {
+    if (message.conversationId !== conversationId || message.deletedAt !== null) continue;
+    if (
+      newest === null ||
+      compareSequence(message.conversationSequence, newest.conversationSequence) > 0
+    ) {
+      newest = message;
+    }
+  }
+  return newest;
+}
+
+function newestLiveReply(messages: readonly Message[], threadRootId: string): Message | null {
+  let newest: Message | null = null;
+  for (const message of messages) {
+    if (message.threadRootId !== threadRootId || message.deletedAt !== null) continue;
+    if (
+      newest === null ||
+      compareSequence(message.conversationSequence, newest.conversationSequence) > 0
+    ) {
+      newest = message;
+    }
+  }
+  return newest;
+}
+
+function retractReplySummary(
+  summaries: readonly MessageThreadSummary[],
+  messages: readonly Message[],
+  tombstone: Message,
+): readonly MessageThreadSummary[] {
+  // Deleted roots are omitted from fresh history, so their summaries must disappear with them.
+  if (tombstone.threadRootId === null) {
+    return summaries.filter((summary) => summary.threadRootId !== tombstone.id);
+  }
+  const summary = summaries.find((candidate) => candidate.threadRootId === tombstone.threadRootId);
+  if (summary === undefined) return summaries;
+  if (summary.latestReply.id !== tombstone.id) {
+    return summaries.map((candidate) =>
+      candidate.threadRootId === tombstone.threadRootId
+        ? { ...candidate, replyCount: Math.max(1, candidate.replyCount - 1) }
+        : candidate,
+    );
+  }
+  const latestReply = newestLiveReply(messages, tombstone.threadRootId);
+  // A page can know the aggregate count while not retaining another reply locally. Removing this
+  // incomplete summary is more honest than advertising the tombstone or guessing its replacement.
+  if (latestReply === null) {
+    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+  }
+  return summaries.map((candidate) =>
+    candidate.threadRootId === tombstone.threadRootId
+      ? {
+          ...candidate,
+          replyCount: Math.max(1, candidate.replyCount - 1),
+          latestReply,
+        }
+      : candidate,
+  );
+}
+
 function syncFailureMessage(
   reason: Extract<SyncAttemptResult, { status: "permanent" }>["reason"],
 ): string {
@@ -528,6 +608,8 @@ export class WorkspaceRuntime {
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
   #retractReservations: RetractReservation[] = [];
+  /** Exact mention IDs from live creates, retained only until a matching retract arrives. */
+  readonly #createdMessageMentions = new Map<string, readonly string[]>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -615,6 +697,7 @@ export class WorkspaceRuntime {
       this.#historyHydrations.clear();
       this.#threadCursors.clear();
       this.#retractReservations = [];
+      this.#createdMessageMentions.clear();
       this.#setState({ ...INITIAL_STATE, busy: true });
     } else {
       this.#setState({ busy: true, error: null });
@@ -806,6 +889,7 @@ export class WorkspaceRuntime {
     this.#cache = null;
     this.#syncCursor = null;
     this.#retractReservations = [];
+    this.#createdMessageMentions.clear();
     this.#membersDirty = false;
     this.#historyCursors.clear();
     this.#historyHydrations.clear();
@@ -3328,11 +3412,20 @@ export class WorkspaceRuntime {
 
   #applyRetractedMessage(tombstone: Message): void {
     const snapshot = this.#state.bootstrap;
+    const messages = mergeMessages(this.#state.messages, [tombstone]);
+    const summary = snapshot?.conversations.find(
+      (candidate) => candidate.conversation.id === tombstone.conversationId,
+    );
+    const mentionedUserIds =
+      this.#createdMessageMentions.get(tombstone.id) ??
+      (snapshot === null || summary === undefined
+        ? []
+        : mentionedMemberIds(tombstone.body, snapshot.members, summary.participantIds));
+    this.#createdMessageMentions.delete(tombstone.id);
     this.#setState({
-      messages: mergeMessages(this.#state.messages, [tombstone]),
-      threadSummaries: this.#state.threadSummaries.map((summary) =>
-        summary.latestReply.id === tombstone.id ? { ...summary, latestReply: tombstone } : summary,
-      ),
+      messages,
+      threadSummaries: retractReplySummary(this.#state.threadSummaries, messages, tombstone),
+      reactions: this.#state.reactions.filter((reaction) => reaction.messageId !== tombstone.id),
       attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
       conversationFiles: this.#state.conversationFiles.filter(
         (attachment) => attachment.messageId !== tombstone.id,
@@ -3342,8 +3435,16 @@ export class WorkspaceRuntime {
           ? null
           : replaceConversation(snapshot, tombstone.conversationId, (summary) => {
               if (summary === undefined) return null;
-              if (summary.lastMessage?.id !== tombstone.id) return summary;
-              return { ...summary, lastMessage: tombstone };
+              const unread = isUnreadMessage(summary, snapshot.currentUser.user.id, tombstone);
+              const mentioned = unread && mentionedUserIds.includes(snapshot.currentUser.user.id);
+              return {
+                ...summary,
+                unreadCount: Math.max(0, summary.unreadCount - (unread ? 1 : 0)),
+                mentionCount: Math.max(0, summary.mentionCount - (mentioned ? 1 : 0)),
+                ...(summary.lastMessage?.id === tombstone.id
+                  ? { lastMessage: newestLiveMessage(messages, tombstone.conversationId) }
+                  : {}),
+              };
             }),
     });
   }
@@ -3352,6 +3453,7 @@ export class WorkspaceRuntime {
     const snapshot = this.#state.bootstrap;
     if (event.type === "message.created") {
       const message = this.#retainMessages([event.payload.message])[0] ?? event.payload.message;
+      this.#createdMessageMentions.set(message.id, event.payload.mentionedUserIds);
       const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
       this.#setState({
         messages: mergeMessages(this.#state.messages, [message]),

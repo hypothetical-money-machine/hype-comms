@@ -692,6 +692,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
         deletedAt: event.payload.deletedAt,
         entityVersion: event.entityVersion,
       });
+      for (const [id, reaction] of this.#reactions) {
+        if (reaction.messageId === event.payload.messageId) this.#reactions.delete(id);
+      }
       const current = this.#messages.get(event.payload.messageId);
       if (current !== undefined) {
         this.#messages.set(event.payload.messageId, {
@@ -2615,8 +2618,156 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.attachments).toEqual([]);
   });
 
+  it("matches a fresh bootstrap after a live retract", async () => {
+    const earlierReply: Message = {
+      ...threadReply,
+      id: PEER_MESSAGE_ID,
+      clientMessageId: PEER_CLIENT_MESSAGE_ID,
+      conversationSequence: "3",
+      body: "Earlier thread reply",
+    };
+    const latestReply: Message = {
+      ...threadReply,
+      conversationSequence: "4",
+      body: "@morgan Latest thread reply",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: latestReply,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const liveApi = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    liveApi.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    liveApi.threadResults.push({
+      root: ownMessage,
+      replies: [earlierReply, latestReply],
+      nextCursor: null,
+    });
+    const live = runtimeWith(liveApi, new FakeWorkspaceCache());
+    await live.start(session);
+    await live.openThread(OWN_MESSAGE_ID);
+
+    const reaction: Reaction = { ...ownReaction, messageId: latestReply.id };
+    liveApi.emitWorkspaceEvent({
+      ...reactionAddedEvent,
+      workspaceSequence: "11",
+      conversationSequence: latestReply.conversationSequence,
+      payload: { reaction },
+    });
+    await settle(() => live.state.reactions.length === 1, "retract reaction setup");
+    liveApi.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b0",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: latestReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: latestReply.id, deletedAt: NOW },
+    });
+    await settle(() => liveApi.acknowledged.includes("12"), "live retract projection");
+
+    const afterRetract = {
+      ...beforeRetract,
+      lastMessage: earlierReply,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const freshApi = new FakeDesktopApi(
+      bootstrapAt("12", { members: [user, peer], conversations: [afterRetract] }),
+    );
+    freshApi.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: earlierReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    freshApi.threadResults.push({ root: ownMessage, replies: [earlierReply], nextCursor: null });
+    const fresh = runtimeWith(freshApi, new FakeWorkspaceCache());
+    await fresh.start(session);
+    await fresh.openThread(OWN_MESSAGE_ID);
+
+    const projection = (runtime: WorkspaceRuntime) => ({
+      conversations: runtime.state.bootstrap?.conversations,
+      messages: runtime.state.messages.filter((message) => message.deletedAt === null),
+      threadSummaries: runtime.state.threadSummaries,
+      reactions: runtime.state.reactions,
+      attachments: runtime.state.attachments,
+      conversationFiles: runtime.state.conversationFiles,
+    });
+    expect(projection(live)).toEqual(projection(fresh));
+  });
+
+  it("removes a deleted thread root's summary while retaining its live replies", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: threadReply,
+            unreadCount: 1,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b1",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "thread-root retract projection");
+
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: THREAD_REPLY_ID },
+      unreadCount: 1,
+    });
+  });
+
   it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: ownMessage,
+            unreadCount: 4,
+            mentionCount: 3,
+          },
+        ],
+      }),
+    );
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2642,6 +2793,10 @@ describe("WorkspaceRuntime", () => {
         version: 2,
       }),
     );
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 4,
+      mentionCount: 3,
+    });
   });
 
   it("does not let stale history resurrect a source-less message.retracted event", async () => {

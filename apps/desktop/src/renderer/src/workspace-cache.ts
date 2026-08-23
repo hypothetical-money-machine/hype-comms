@@ -1302,11 +1302,16 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.metadata,
         this.#database.messages,
         this.#database.conversations,
+        this.#database.reactions,
         this.#database.events,
         async () => {
           if (tombstone !== null) {
             await this.#database.messages.put(messageRow(tombstone, encrypted));
           }
+          await this.#database.reactions
+            .where("messageId")
+            .equals(parsed.payload.messageId)
+            .delete();
           await this.#recordEvent(parsed, signal, { retractReservations });
           if (nextSummary !== null) {
             await this.#database.conversations.put({
@@ -2226,6 +2231,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         entityVersion: parsed.entityVersion,
       });
       const current = this.#messages.get(parsed.payload.messageId);
+      for (const [id, reaction] of this.#reactions) {
+        if (reaction.messageId === parsed.payload.messageId) {
+          this.#reactions.delete(id);
+          this.#reactionConversationIds.delete(id);
+        }
+      }
       const lastMessage = this.#snapshot?.conversations.find(
         (summary) => summary.conversation.id === parsed.conversationId,
       )?.lastMessage;
