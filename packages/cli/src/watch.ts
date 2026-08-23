@@ -23,6 +23,7 @@ import {
   EXIT_AUTH,
   EXIT_CONTRACT,
   EXIT_TRANSIENT,
+  MAX_RETRY_AFTER_MS,
   UsageError,
   networkError,
 } from "./errors.js";
@@ -94,6 +95,16 @@ function unexpectedStatusError(status: number): CliError {
     httpStatus: status,
     retryable: false,
   });
+}
+
+export function watchRetryDelayMs(
+  failures: number,
+  requestedRetryDelay: number,
+  random: () => number,
+): number {
+  const base = Math.min(10_000, 250 * 2 ** Math.min(failures, 6));
+  const jitter = Math.floor(base * 0.25 * random());
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(base + jitter, requestedRetryDelay));
 }
 
 async function streamOneConnection(input: {
@@ -289,9 +300,7 @@ export async function watchCommand(
         failures += 1;
       }
       if (!stopped) {
-        const base = Math.min(10_000, 250 * 2 ** Math.min(failures, 6));
-        const jitter = Math.floor(base * 0.25 * context.runtime.random());
-        await delay(Math.max(base + jitter, requestedRetryDelay));
+        await delay(watchRetryDelayMs(failures, requestedRetryDelay, context.runtime.random));
       }
     }
   } finally {

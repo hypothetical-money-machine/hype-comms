@@ -7,6 +7,13 @@ export const EXIT_API = 4;
 export const EXIT_TRANSIENT = 5;
 export const EXIT_CONTRACT = 6;
 
+/**
+ * Retry-After is capped at the watch command's existing maximum backoff (including jitter).
+ * This keeps server-provided delays useful without allowing a server to park the CLI or exceed
+ * Node's reliable timer range.
+ */
+export const MAX_RETRY_AFTER_MS = 12_500;
+
 export type CliExitCode =
   | typeof EXIT_SUCCESS
   | typeof EXIT_USAGE
@@ -117,10 +124,14 @@ function retryAfterMs(headers: Headers): number | undefined {
   const value = headers.get("retry-after");
   if (value === null) return undefined;
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  if (Number.isFinite(seconds)) {
+    if (seconds < 0) return undefined;
+    if (seconds >= MAX_RETRY_AFTER_MS / 1_000) return MAX_RETRY_AFTER_MS;
+    return Math.round(seconds * 1_000);
+  }
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return undefined;
-  return Math.max(0, timestamp - Date.now());
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, timestamp - Date.now()));
 }
 
 export function apiResponseError(
