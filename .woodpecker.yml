@@ -3,16 +3,10 @@ when:
     branch: main
   - event: manual
 
-concurrency:
-  limit: 1
-
 variables:
   app: &app hype-comms
-  registry: &registry registry.example.invalid
-  project: &project example-project
-  deploy_repo: &deploy_repo hype-comms/deployment-repository
-  deploy_branch: &deploy_branch main
-  target_cluster: &target_cluster production-cluster
+  registry: &registry registry.fastnfree.dev
+  project: &project homelab
 
 services:
   - name: postgres
@@ -32,7 +26,7 @@ steps:
       - HYPE_COMMS_TEST_DATABASE_URL=postgres://hype_comms:hype-comms-test-password@postgres:5432/hype_comms_test npm run test:postgres
 
   - name: build-push
-    image: gcr.io/kaniko-project/executor:v1.23.2-debug
+    image: gcr.io/kaniko-project/executor:v1.23.2-debug@sha256:c3109d5926a997b100c4343944e06c6b30a6804b2f9abe0994d3de6ef92b028e
     environment:
       DOCKER_CONFIG: /kaniko/.docker
       HARBOR_USER:
@@ -43,7 +37,9 @@ steps:
       REGISTRY: *registry
       PROJECT: *project
     commands:
-      - echo "192.0.2.60 registry.example.invalid" >> /etc/hosts
+      # Public DNS routes through Cloudflare, which does not expose Harbor's /v2/ API. The
+      # Woodpecker agent reaches the same registry through the ops-cluster MetalLB address.
+      - echo "192.168.1.60 registry.fastnfree.dev" >> /etc/hosts
       - mkdir -p /kaniko/.docker
       - |
         set +x
@@ -56,47 +52,16 @@ steps:
           --context=dir://$${CI_WORKSPACE} \
           --dockerfile=Dockerfile \
           --destination=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA} \
-          --destination=$${REGISTRY}/$${PROJECT}/$${APP}:latest \
+          --custom-platform=linux/amd64 \
+          --label=org.opencontainers.image.revision=$${CI_COMMIT_SHA} \
+          --label=org.opencontainers.image.source=https://github.com/hypothetical-money-machine/hype-comms \
+          --image-name-tag-with-digest-file=/tmp/image-reference \
+          --reproducible \
           --cache=true \
           --cache-repo=$${REGISTRY}/$${PROJECT}/cache
+      - cat /tmp/image-reference
     depends_on:
       - check
-    when:
-      - event: push
-        branch: main
-      - event: manual
-        branch: main
-
-  - name: promote-gitops
-    image: alpine/git:2.45.2
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-      APP: *app
-      REGISTRY: *registry
-      PROJECT: *project
-      DEPLOY_REPO: *deploy_repo
-      DEPLOY_BRANCH: *deploy_branch
-      TARGET_CLUSTER: *target_cluster
-    commands:
-      - apk add --no-cache curl tar
-      - sh scripts/verify-kustomize.sh
-      - git clone --branch $${DEPLOY_BRANCH} https://woodpecker-ci:$${GITHUB_TOKEN}@github.com/$${DEPLOY_REPO}.git deploy-kit
-      - cd deploy-kit/clusters/$${TARGET_CLUSTER}/workloads/$${APP}
-      - kustomize edit set image $${APP}=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA}
-      - cd $${CI_WORKSPACE}/deploy-kit
-      - git config user.name "woodpecker-ci"
-      - git config user.email "woodpecker@$${REGISTRY}"
-      - git add clusters/$${TARGET_CLUSTER}/workloads/$${APP}/kustomization.yaml
-      - |
-        if git diff --cached --quiet; then
-          echo "No image change to promote"
-          exit 0
-        fi
-      - 'git commit -m "promote($${APP}): $${TARGET_CLUSTER} $${CI_COMMIT_SHA}"'
-      - git push origin HEAD:$${DEPLOY_BRANCH}
-    depends_on:
-      - build-push
     when:
       - event: push
         branch: main
