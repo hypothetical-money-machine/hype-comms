@@ -219,6 +219,9 @@ Epic 3 is complete only when evidence demonstrates all of the following:
 - attachment tests prove `attachments-v1` negotiation is independent of `workspace:read`, inaccessible
   files remain hidden, and downloads enforce bounds, digest, mode `0600`, no symlink parent, and no
   overwrite;
+- production evidence proves the configured attachment root is writable and PVC-backed, every ready
+  database attachment has matching durable bytes, and an encrypted off-node database-plus-file
+  backup restores successfully before any rollout restarts the current pod;
 - the primary workspace is recorded as `required`, the junkyard is explicitly recorded as
   `automatic`, and no name-based policy branch exists;
 - the Atlas cutover evidence names the replacement identity/profile, verifies the four day-one

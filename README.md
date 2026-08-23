@@ -461,9 +461,10 @@ committed.
 Two systems run against this repository, split by what each can physically build.
 
 **Woodpecker** (`.woodpecker.yml`) owns the server. On a push to `main` it runs `npm run check`,
-builds the service image with kaniko, pushes it to the Harbor registry, and updates the
-`deployment-repository` GitOps repository so Argo CD rolls it out to the `production-cluster` cluster. It runs
-on the example-project, which is where the registry, the cluster, and the database already live.
+builds the service image with kaniko, and pushes only a commit-addressed tag to the Harbor registry.
+The job prints the registry digest; deployment is a separate reviewed digest pin in
+`homelab-deploy-kit`. No GitOps secret is injected into the build pipeline, so a source merge cannot
+roll directly into the gatorlunch cluster.
 
 **GitHub Actions** (`.github/workflows/`) owns repository checks and the desktop client:
 
@@ -476,8 +477,8 @@ on the example-project, which is where the registry, the cluster, and the databa
   identity because that evidence applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
-The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,
-and Windows installers on Windows. GitHub provides those runners; the example-project does not.
+The desktop half cannot move to the homelab: macOS artifacts must be built and signed on macOS,
+and Windows installers on Windows. GitHub provides those runners; the homelab does not.
 
 Note that `npm run check` currently runs in both systems on a push to `main`. That duplication is
 harmless but not free, and is worth collapsing if CI minutes or feedback latency start to matter.

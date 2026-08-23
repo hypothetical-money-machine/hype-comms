@@ -10,9 +10,11 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   stable package metadata and updater feed before a tag. The `CI` workflow also runs the complete
   source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
 - A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
-  PostgreSQL 16 service, an immutable-SHA server image build into
-  `registry.example.invalid/example-project/hype-comms`, then a GitOps image promotion in
-  `hype-comms/deployment-repository` for the `production-cluster` cluster.
+  PostgreSQL 16 service, a commit-addressed server image build into
+  `registry.fastnfree.dev/homelab/hype-comms`. The build records its commit as an OCI label and
+  prints the pushed tag-plus-digest reference. It does not publish `latest`, receive a GitOps token,
+  or deploy the image. The tag is traceability metadata, not an immutability control; deployment
+  pins the printed digest.
 - A `v*` tag on `main` must exactly match `apps/desktop/package.json` and have nonempty, reviewed
   notes at `docs/releases/v<version>.md`. Prepare those files with
   `npm run release -- <version>`; aside from an ephemeral local Git lock that serializes concurrent
@@ -24,13 +26,17 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   Release for that tag. The workflow refuses to publish a body that does not contain the reviewed
   notes.
 - Kubernetes manifests, ingress/TLS, database lifecycle, secret injection, Argo CD health, backup
-  scheduling, and production rollback are owned by `deployment-repository`. A release review must link
-  evidence from that repository rather than assuming these controls from application code.
+  scheduling, reviewed image-digest promotion, and production rollback are owned by
+  `hypothetical-money-machine/homelab-deploy-kit`. A release review must link evidence from that
+  repository rather than assuming these controls from application code.
 
-The Woodpecker build depends on the database-backed check, promotion depends on that exact image
-build, and workflow concurrency is one. Overlapping `main` runs therefore cannot promote an older
-SHA after a newer one. Local `npm run test:db` and GitHub CI invoke the same guarded entrypoint; it
-refuses missing URLs and databases whose names are not explicitly test-only.
+The Woodpecker build depends on the database-backed check and publishes only the exact main commit.
+Distinct commits cannot overwrite one another because each destination tag is the full commit SHA;
+deployment never trusts that tag as immutable. A reviewer copies the printed content-addressed
+reference into a dedicated digest-pinned GitOps change, so merging application source alone cannot
+alter live desired state.
+Local `npm run test:db` and GitHub CI invoke the same guarded entrypoint; it refuses missing URLs and
+databases whose names are not explicitly test-only.
 
 ## Service checks and metrics
 
@@ -54,15 +60,23 @@ broader SLO/alert set in `docs/architecture.md` remains future work until those 
 Before promoting a server change:
 
 1. Require `npm run check`, `npm run test:db`, and relevant native package lanes.
-2. Confirm the new image is addressed by commit SHA and the GitOps commit changes only Hype Comms.
-3. Confirm migrations are backward-compatible with the currently deployed server and immediately
+2. Confirm the new image carries the main commit SHA label, record its registry digest, and pin that
+   digest in a GitOps commit that changes only Hype Comms. A commit-shaped tag alone is overwriteable.
+3. Before any restart, confirm `HYPE_COMMS_ATTACHMENT_DIR` resolves inside the mounted durable
+   volume and reconcile every ready database attachment with its stored byte count and SHA-256. If
+   the current pod uses the production fallback path, inventory and checksum-copy any files into
+   the durable root first; changing the variable does not migrate container-layer files. Stop until
+   a matched, encrypted, off-node database-plus-file backup has passed the paired restore and
+   reconciliation gate under [Backup and restore gate](#backup-and-restore-gate).
+4. Confirm migrations are backward-compatible with the currently deployed server and immediately
    previous desktop version.
-4. Watch Argo CD health, `/readyz`, 5xx rate, PostgreSQL pool waiters, and realtime reconnects.
-5. Roll back the image through GitOps if application health regresses. Never reverse an applied SQL
+5. Watch Argo CD health, `/readyz`, 5xx rate, PostgreSQL pool waiters, and realtime reconnects.
+6. Roll back the image through GitOps if application health regresses. Never reverse an applied SQL
    migration; forward-fix it unless the migration was explicitly proven reversible.
 
 Attach the successful Woodpecker pipeline URL to the release record so the installed Woodpecker
-version's service, dependency, and concurrency behavior is proven rather than inferred from YAML.
+version's event, service, dependency, and image-build behavior is proven rather than inferred from
+YAML.
 
 Agent identity rollout requires an expand/enable sequence because the previous server cannot parse
 the new persisted user kind. Deploy this migration with `HYPE_COMMS_AGENT_PROVISIONING_ENABLED=false`
@@ -89,9 +103,11 @@ revocation, security invariants, audit evidence, and definition of done. The own
 The application repository cannot verify cluster backup configuration. Before calling the pilot
 durable, record externally verifiable evidence for all of the following:
 
-- automated PostgreSQL backups and their retention;
+- automated off-node PostgreSQL and attachment-volume backups with a matched recovery point and
+  retention;
 - encryption and access control for backup material;
-- a restore into an isolated database using the same migration history;
+- a paired restore into an isolated database and attachment volume using the same migration history;
+- reconciliation of every restored ready attachment against its database byte count and SHA-256;
 - checks of owner sign-in, channel/DM authorization, message/search counts, and `/readyz` after
   restore;
 - measured recovery point and recovery time; and

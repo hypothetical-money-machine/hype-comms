@@ -66,17 +66,17 @@ did.
 ### Current pilot delivery
 
 ```text
-main -> Woodpecker check -> Kaniko -> registry.example.invalid
-                                      |
-                                      v
-deployment-repository promotion -> Argo CD -> production-cluster cluster
+main -> Woodpecker check -> Kaniko -> registry.fastnfree.dev/homelab/hype-comms:<commit SHA>
+                                                |
+reviewed homelab-deploy-kit digest pin -----------+-> Argo CD -> gatorlunch cluster
 
 v* tag -> GitHub Actions native runners -> updates.hypemm.com (S3-compatible storage)
 ```
 
-The server image and GitOps promotion are implemented by `.woodpecker.yml`. Runtime manifests,
-ingress, PostgreSQL, secret injection, backup policy, and rollback controls live in the separate
-`hype-comms/deployment-repository` repository; they must be verified there and cannot
+The server image build is implemented by `.woodpecker.yml`; it receives no GitOps secret and does
+not promote deployments. Runtime manifests, ingress, PostgreSQL, secret injection, backup policy,
+and rollback controls live in the separate `hypothetical-money-machine/homelab-deploy-kit`
+repository; they must be verified there and cannot
 be inferred from this checkout. Desktop releases use native self-hosted runners and a public
 S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
 and the controls that still need external evidence.
@@ -151,7 +151,7 @@ at the current 25-member scale.
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
 | Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
 | Task                   | Belongs to one channel or self-DM and has a conversation-local number, optimistic version, title, optional description/assignee/due date/source message, priority, fixed `todo`/`in_progress`/`done` status, canonical integer rank within a status column, and latest-mutation actor. Completing sets `completedAt`; reopening clears it. Assignees and linked messages must be able to access the same conversation. |
-| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. `attachments-v1` negotiates wire projections only; `workspace:read` plus conversation visibility authorizes agent reads. |
+| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable object key, size/hash, and `pending`, `ready`, or `failed` scan status. The pilot keeps object bytes on its attachment PVC; private S3 plus a scan worker belongs to the hosted target. An attachment is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. `attachments-v1` negotiates wire projections only; `workspace:read` plus conversation visibility authorizes agent reads. |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
 
 Domain mutations, their idempotency result, and corresponding sync events commit in one
