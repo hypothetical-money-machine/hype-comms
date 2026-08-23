@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -2707,6 +2707,19 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     const downloaded = await repository.readFileContent(member, attachmentId);
     expect(downloaded.bytes.toString()).toBe("channel notes");
+  });
+
+  it("refuses to serve stored attachment bytes that no longer match authoritative metadata", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    await writeFile(path.join(attachmentRoot, workspaceId, attachmentId), "tampered data", {
+      mode: 0o600,
+    });
+
+    await expect(repository.readFileContent(owner, attachmentId)).rejects.toMatchObject({
+      statusCode: 500,
+      code: "INTERNAL_ERROR",
+      message: "Stored file failed its integrity check",
+    } satisfies Partial<ApiError>);
   });
 
   it("hides attachment metadata and bytes after the parent message is retracted", async () => {

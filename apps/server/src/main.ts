@@ -23,6 +23,7 @@ import { AuthKitService } from "./modules/identity/authkit-service.js";
 import { createWorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { IdentityRepository } from "./modules/identity/repository.js";
 import { IdentityService } from "./modules/identity/service.js";
+import { AgentEnrollmentModule } from "./modules/identity/agent-enrollment.js";
 import { installGracefulShutdown } from "./shutdown.js";
 import { SignInThrottle } from "./throttle.js";
 import { RealtimeEventHub } from "./modules/realtime/hub.js";
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   let identity:
     | {
         readonly service: IdentityService;
+        readonly agentEnrollment: AgentEnrollmentModule;
         readonly botService: BotService;
         readonly selfServiceMagicLink: boolean;
         readonly agentProvisioningEnabled: boolean;
@@ -101,6 +103,7 @@ async function main(): Promise<void> {
             });
       identity = {
         service,
+        agentEnrollment: new AgentEnrollmentModule(databasePool),
         botService: new BotService(databasePool),
         selfServiceMagicLink: config.emailDelivery !== "manual",
         agentProvisioningEnabled: config.agentProvisioningEnabled,

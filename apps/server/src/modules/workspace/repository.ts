@@ -1909,7 +1909,11 @@ export class WorkspaceRepository {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
-  ): Promise<{ readonly attachment: Attachment; readonly bytes: Buffer }> {
+  ): Promise<{
+    readonly attachment: Attachment;
+    readonly bytes: Buffer;
+    readonly contentSha256: string;
+  }> {
     const store = this.#attachmentStore();
     const client = await this.pool.connect();
     try {
@@ -1940,9 +1944,15 @@ export class WorkspaceRepository {
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
+      const contentSha256 = row.content_sha256.toString("hex");
+      if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {
+        throw new ApiError(500, "INTERNAL_ERROR", "Stored file failed its integrity check");
+      }
       return {
         attachment: mapAttachment(row),
-        bytes: await store.read(identity.currentUser.workspaceId, attachmentId),
+        bytes,
+        contentSha256,
       };
     } finally {
       client.release();

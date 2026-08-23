@@ -53,7 +53,7 @@ broader SLO/alert set in `docs/architecture.md` remains future work until those 
 
 Before promoting a server change:
 
-1. Require `npm run check`, `npm run test:postgres`, and relevant native package lanes.
+1. Require `npm run check`, `npm run test:db`, and relevant native package lanes.
 2. Confirm the new image is addressed by commit SHA and the GitOps commit changes only Hype Comms.
 3. Confirm migrations are backward-compatible with the currently deployed server and immediately
    previous desktop version.
@@ -69,6 +69,20 @@ the new persisted user kind. Deploy this migration with `HYPE_COMMS_AGENT_PROVIS
 (the production default). After the new server is healthy and the previous image has left the
 supported rollback window, set the variable to `true` and redeploy before provisioning the first
 agent. Do not re-enable rollback to the previous image after an agent has been created.
+
+Default agency adds two more persisted scope values, so it uses the same expand/enable boundary:
+apply the additive migration, deploy compatible server and CLI code, and keep enrollment policy
+`required` until the previous image is no longer a rollback target. Record the primary setting with
+`hype-comms-cli --profile OWNER agent-enrollment-policy set required --json`. If the junkyard should
+auto-approve, set it only through that workspace's owner profile with
+`hype-comms-cli --profile JUNKYARD_OWNER agent-enrollment-policy set automatic --json`; no workspace
+name selects policy. Stop rollout by restoring `required`, cancelling open enrollments, and
+revoking or disabling activated credentials. Do not reverse the migration.
+
+Use the [default agent agency runbook](default-agent-agency.md) for the zero-copy
+offer/request/review/redeem sequence, file commands, one-time Atlas replacement profile and old-token
+revocation, security invariants, audit evidence, and definition of done. The owner `agents` and
+`agent-tokens` commands are break-glass routes, not routine child provisioning.
 
 ## Backup and restore gate
 

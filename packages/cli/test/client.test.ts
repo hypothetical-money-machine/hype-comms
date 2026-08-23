@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { constants, createGzip, gzipSync } from "node:zlib";
 
@@ -75,6 +76,20 @@ function streamedResponse(
   };
 }
 
+function attachmentResponse(
+  bytes: Uint8Array,
+  headers: Readonly<Record<string, string>> = {},
+): Response {
+  const responseHeaders = new Headers(headers);
+  if (!responseHeaders.has("content-length")) {
+    responseHeaders.set("content-length", String(bytes.byteLength));
+  }
+  if (!responseHeaders.has("x-content-sha256")) {
+    responseHeaders.set("x-content-sha256", createHash("sha256").update(bytes).digest("hex"));
+  }
+  return new Response(bytes, { headers: responseHeaders });
+}
+
 async function listen(server: Server): Promise<string> {
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -103,6 +118,123 @@ describe("ApiClient", () => {
     expect(response).toEqual({ ok: true });
   });
 
+  it("downloads authenticated raw bytes and verifies server length and digest metadata", async () => {
+    const bytes = new TextEncoder().encode("attachment bytes");
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      expect(String(url)).toBe("https://chat.example.test/v1/files/file-id/content");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe(`Bearer hype_comms_agent_${"a".repeat(43)}`);
+      expect(headers.get("accept")).toBe("application/octet-stream");
+      expect(headers.get("accept-encoding")).toBe("identity");
+      expect(init?.redirect).toBe("manual");
+      return attachmentResponse(bytes);
+    });
+
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).resolves.toMatchObject({
+      bytes,
+      sizeBytes: bytes.byteLength,
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  });
+
+  it("rejects raw download redirects without following them", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.redirect("https://elsewhere.example.test/file", 307),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "REDIRECT_REJECTED" });
+  });
+
+  it("preserves API error classification for a raw download", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      jsonResponse(
+        { error: { code: "NOT_FOUND", message: "Missing", requestId: "request-file" } },
+        { status: 404 },
+      ),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({ exitCode: EXIT_API, code: "NOT_FOUND", retryable: false });
+  });
+
+  it("cancels a raw response whose declared length exceeds the hard limit", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = new Response(body, {
+      headers: {
+        "content-length": "1025",
+        "x-content-sha256": "a".repeat(64),
+      },
+    });
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => response);
+
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({
+      exitCode: EXIT_CONTRACT,
+      code: "INVALID_SERVER_CONTRACT",
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "missing length",
+      headers: { "x-content-sha256": createHash("sha256").update("x").digest("hex") },
+    },
+    {
+      label: "invalid length",
+      headers: { "content-length": "-1", "x-content-sha256": "a".repeat(64) },
+    },
+    { label: "missing digest", headers: { "content-length": "1" } },
+    { label: "invalid digest", headers: { "content-length": "1", "x-content-sha256": "nope" } },
+  ])("rejects raw download metadata with $label", async ({ headers }) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () => new Response(new Uint8Array([120]), { headers }),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({
+      exitCode: EXIT_CONTRACT,
+      code: "INVALID_SERVER_CONTRACT",
+    });
+  });
+
+  it("rejects a raw download shorter than its advertised length", async () => {
+    const bytes = new Uint8Array([1, 2]);
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      attachmentResponse(bytes, { "content-length": "3" }),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
+  });
+
+  it("rejects encoded raw downloads so transparent decompression cannot corrupt verification", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      attachmentResponse(new Uint8Array([1, 2, 3]), { "content-encoding": "gzip" }),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
+  });
+
+  it("rejects a raw download whose body digest differs from metadata", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      attachmentResponse(new Uint8Array([1, 2, 3]), { "x-content-sha256": "a".repeat(64) }),
+    );
+    await expect(
+      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+    ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
+  });
+
   it("rejects a credential bound to another origin before making a request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const value = new ApiClient({
@@ -126,6 +258,12 @@ describe("ApiClient", () => {
     });
     await expect(
       value.requestEmpty({ method: "DELETE", path: "/v1/auth/session" }),
+    ).rejects.toMatchObject({
+      exitCode: 2,
+      code: "CREDENTIAL_ORIGIN_MISMATCH",
+    });
+    await expect(
+      value.download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({
       exitCode: 2,
       code: "CREDENTIAL_ORIGIN_MISMATCH",
