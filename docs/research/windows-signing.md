@@ -3,7 +3,7 @@
 Resolves the research ticket for issue #47 ("Windows code-signing certificate path").
 Researched against Microsoft Learn, electron-builder docs, and CA product pages.
 
-Implementation and the ops checklist for issue #158 / the tracker `#158` live in
+Implementation and the ops checklist for GitHub issue #158 live in
 [docs/windows-signing.md](../windows-signing.md). This file stays the procurement comparison.
 
 ## Current state (constraints from this repo)
