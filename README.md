@@ -7,7 +7,7 @@ first-class scoped agent identities, a PostgreSQL-backed conversation core, reco
 delivery, and a restart-safe encrypted desktop outbox.
 
 Product strategy and delivery work are tracked in
-[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+[GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
 See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
 contracts, [integrations/hermes-hype-comms/README.md](integrations/hermes-hype-comms/README.md) for
 the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
@@ -469,7 +469,7 @@ timelines, one-level threads, scoped agent identities, and restart-safe sends. T
 contains native-notification Milestones 0 through 3 behind default-off build and device settings;
 installed notification proof and any default flip remain open alongside attachments, Windows
 Authenticode identity provisioning, Linux release signatures, and hosted operations. Product direction and delivery status are tracked in
-[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+[GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
 
 ## License
 

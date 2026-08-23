@@ -5,7 +5,7 @@ The Windows release lane stays **inert** until Azure Trusted Signing is fully co
 installers, the same as v0.1.29. A partial secret/variable set, or a configured job that fails to
 sign, publishes nothing. DEV package-smoke stays unsigned.
 
-This is the ops checklist for GitHub issue #158 / the tracker `#158`. Procurement research and the
+This is the ops checklist for GitHub issue #158. Procurement research and the
 SSL.com fallback live in [docs/research/windows-signing.md](research/windows-signing.md). Do not
 put certificate material, client secrets, or a real publisher subject in the repository.
 

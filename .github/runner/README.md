@@ -1,7 +1,7 @@
 # Local Linux release runner
 
 The ARM64 runner replaces the GitHub-hosted Linux release lane and runs the required PostgreSQL
-CI job in an isolated Ubuntu container, natively on the Apple-silicon Mac Mini. PostgreSQL 16 is
+CI job in an isolated Ubuntu container, natively on an Apple-silicon host. PostgreSQL 16 is
 baked into the image so CI can create an unprivileged, job-scoped database cluster without a
 Docker socket or passwordless sudo. Linux release packaging and pull-request smoke packaging both
 run on this native ARM64 service. The legacy x64 service remains available for ad hoc
@@ -67,7 +67,7 @@ The examples in this section use Bash; start `bash` first when the host's login 
 export HYPE_COMMS_X64_RUNNER_URL=https://github.com/hype-comms
 export HYPE_COMMS_X64_RUNNER_GROUP=hmm-linux-x64-ci
 export HYPE_COMMS_X64_RUNNER_LABELS=hmm-ci
-export HYPE_COMMS_X64_RUNNER_NAME=self-hosted-ci-runner # use lenovo-t550-ci-01 on the T550
+export HYPE_COMMS_X64_RUNNER_NAME=self-hosted-ci-runner # use a unique name per physical host
 ```
 
 Build and register the service using a short-lived organization registration token:
