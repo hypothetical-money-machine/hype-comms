@@ -11,6 +11,10 @@ import {
 import {
   collectPackageFiles,
   excludedPackageDirectories,
+  resolveExpectedAgentWakeBuild,
+  resolveExpectedAgentWakePackageEvidence,
+  verifyAgentWakeBuild,
+  verifyAgentWakeUpdateIsolation,
   verifyPackageEntries,
   verifyPackageMetadata,
   verifyUpdateConfiguration,
@@ -33,6 +37,27 @@ const baselinePackageEntries = () =>
     "/node_modules/electron-updater/package.json",
     "/node_modules/electron-updater/out/main.js",
   ]);
+
+const agentWakeMain = (configurationEnabled, operatorEnabled = configurationEnabled) =>
+  Buffer.from(`
+var agentWakeConfigurationPath = resolveAgentWakeConfigurationPath({
+  compiledIn: ${String(configurationEnabled)},
+  env: process.env
+});
+var agentWakeOperatorRequestPath = resolveAgentWakeOperatorRequestPath({
+  compiledIn: ${String(operatorEnabled)},
+  env: process.env
+});
+`);
+
+const agentWakeUpdaterMain = (evidenceBuild) =>
+  Buffer.from(`
+updateController = new UpdateController({
+  updater: createUpdateSource(),
+  updatesAllowed: ${String(!evidenceBuild)},
+  isProductionBuild: true
+});
+`);
 
 test("requires the Codex worker without allowing bundled Codex packages or executables", () => {
   const asarPath = "/tmp/hype-comms/resources/app.asar";
@@ -60,6 +85,62 @@ test("requires the Codex worker without allowing bundled Codex packages or execu
       /contains a bundled Codex executable/u,
     );
   }
+});
+
+test("binds packaged Agent Wake code to the explicit build switch", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  assert.equal(resolveExpectedAgentWakeBuild(undefined), false);
+  assert.equal(resolveExpectedAgentWakeBuild(" 0 "), false);
+  assert.equal(resolveExpectedAgentWakeBuild(" 1 "), true);
+  assert.throws(
+    () => resolveExpectedAgentWakeBuild("true"),
+    /HYPE_COMMS_AGENT_WAKE_ENABLED must be 0 or 1/u,
+  );
+
+  assert.doesNotThrow(() => verifyAgentWakeBuild(asarPath, true, () => agentWakeMain(true)));
+  assert.doesNotThrow(() => verifyAgentWakeBuild(asarPath, false, () => agentWakeMain(false)));
+  assert.throws(
+    () => verifyAgentWakeBuild(asarPath, true, () => agentWakeMain(false)),
+    /Agent Wake build state does not match HYPE_COMMS_AGENT_WAKE_ENABLED=1/u,
+  );
+  assert.throws(
+    () => verifyAgentWakeBuild(asarPath, true, () => agentWakeMain(true, false)),
+    /Agent Wake build state does not match HYPE_COMMS_AGENT_WAKE_ENABLED=1/u,
+  );
+  assert.throws(
+    () => verifyAgentWakeBuild(asarPath, false, () => Buffer.from("no wake marker")),
+    /ambiguous or missing Agent Wake build marker/u,
+  );
+});
+
+test("binds packaged updater isolation to an explicit Agent Wake evidence build", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  assert.equal(resolveExpectedAgentWakePackageEvidence(undefined, true), false);
+  assert.equal(resolveExpectedAgentWakePackageEvidence(" 0 ", true), false);
+  assert.equal(resolveExpectedAgentWakePackageEvidence(" 1 ", true), true);
+  assert.throws(
+    () => resolveExpectedAgentWakePackageEvidence("true", true),
+    /HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED must be 0 or 1/u,
+  );
+  assert.throws(
+    () => resolveExpectedAgentWakePackageEvidence("1", false),
+    /requires HYPE_COMMS_AGENT_WAKE_ENABLED=1/u,
+  );
+
+  assert.doesNotThrow(() =>
+    verifyAgentWakeUpdateIsolation(asarPath, true, () => agentWakeUpdaterMain(true)),
+  );
+  assert.doesNotThrow(() =>
+    verifyAgentWakeUpdateIsolation(asarPath, false, () => agentWakeUpdaterMain(false)),
+  );
+  assert.throws(
+    () => verifyAgentWakeUpdateIsolation(asarPath, true, () => agentWakeUpdaterMain(false)),
+    /updater isolation does not match/u,
+  );
+  assert.throws(
+    () => verifyAgentWakeUpdateIsolation(asarPath, false, () => Buffer.from("no marker")),
+    /ambiguous or missing Agent Wake updater-isolation marker/u,
+  );
 });
 
 test("requires development packages to omit updater configuration", async () => {

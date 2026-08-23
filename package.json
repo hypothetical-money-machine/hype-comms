@@ -40,6 +40,7 @@
     "package:desktop:appimage": "npm run package:linux:appimage --workspace @hype-comms/desktop",
     "package:desktop:appimage:arm64": "npm run package:linux:appimage:arm64 --workspace @hype-comms/desktop",
     "package:desktop:mac": "npm run package:mac --workspace @hype-comms/desktop",
+    "package:desktop:mac:arm64": "npm run package:mac:arm64 --workspace @hype-comms/desktop",
     "package:desktop:win": "npm run package:win --workspace @hype-comms/desktop",
     "package:desktop:win:arm64": "npm run package:win:arm64 --workspace @hype-comms/desktop",
     "release": "node scripts/prepare-desktop-release.mjs",
@@ -51,10 +52,12 @@
     "test:db": "scripts/test-database.sh",
     "test:postgres": "node scripts/test-postgres.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "collect:agent-wake-evidence": "node scripts/collect-agent-wake-evidence.mjs",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
-    "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs"
+    "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
+    "validate:agent-wake-evidence-manifest": "node scripts/validate-agent-wake-evidence-manifest.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

@@ -96,6 +96,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     desktopPackage.scripts["package:mac"],
     /build-macos-notification-authorization\.mjs/u,
   );
+  assert.match(
+    desktopPackage.scripts["package:mac:arm64"],
+    /--mac dmg:arm64 zip:arm64 --publish never$/u,
+  );
   assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
   assert.deepEqual(productionBuild.mac.extraResources, [
     {
@@ -241,16 +245,43 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
   );
   assert.match(
-    nativeEvidenceJob,
-    /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.native_notification_evidence$/mu,
+    packageSmokeWorkflow,
+    /^ {6}agent_wake_package_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
   );
   assert.match(nativeEvidenceJob, /^ {4}environment: release$/mu);
   assert.match(
     nativeEvidenceJob,
-    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
+    /^ {4}if: >-\n {6}github\.event_name == 'workflow_dispatch' &&\n {6}\(inputs\.native_notification_evidence \|\| inputs\.agent_wake_package_evidence\)$/mu,
   );
-  assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
+  assert.match(
+    nativeEvidenceJob,
+    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}$/mu,
+  );
+  assert.match(
+    smokePackageJob,
+    /^ {6}HYPE_COMMS_AGENT_WAKE_ENABLED: "0"\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"$/mu,
+  );
+  assert.match(
+    releasePackageJob,
+    /^ {6}HYPE_COMMS_AGENT_WAKE_ENABLED: "0"\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"$/mu,
+  );
+  assert.match(nativeEvidenceJob, /npm run package:desktop:mac:arm64/u);
+  assert.match(
+    nativeEvidenceJob,
+    /name: Verify packaged application contents, updater, and fuses[\s\S]*npm run verify:desktop-package/u,
+  );
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
+  assert.match(
+    nativeEvidenceJob,
+    /name: Build signed macOS capture helper\n {8}if: inputs\.native_notification_evidence/u,
+  );
+  assert.match(
+    nativeEvidenceJob,
+    /name: Capture installed notification and click callback\n {8}if: inputs\.native_notification_evidence/u,
+  );
+  assert.match(nativeEvidenceJob, /name: Upload signed Agent Wake pilot package/u);
+  assert.match(nativeEvidenceJob, /if: inputs\.agent_wake_package_evidence/u);
+  assert.match(nativeEvidenceJob, /name: macos-arm64-agent-wake-package/u);
   assert.match(releasePackageJob, /name: Configure Windows Authenticode signing/u);
   assert.match(releasePackageJob, /node scripts\/require-windows-signing-env\.mjs/u);
   assert.match(releasePackageJob, /name: Verify Windows release signing/u);

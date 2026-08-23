@@ -8,6 +8,12 @@ import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 import { resolveDesktopBuildFlavor } from "../apps/desktop/build-flavor.mjs";
 
 const expectedUpdateProvider = "generic";
+const agentWakeConfigurationCall =
+  /agentWakeConfigurationPath\s*=\s*resolveAgentWakeConfigurationPath\(\{\s*compiledIn:\s*(true|false),/gu;
+const agentWakeOperatorCall =
+  /agentWakeOperatorRequestPath\s*=\s*resolveAgentWakeOperatorRequestPath\(\{\s*compiledIn:\s*(true|false),/gu;
+// Rolldown folds `!__HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED__` to this direct literal.
+const agentWakeUpdaterPolicy = /updatesAllowed:\s*(true|false),/gu;
 const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
@@ -212,10 +218,89 @@ export function verifyPackageMetadata(asarPath, flavor, extractFileImplementatio
   }
 }
 
+export function resolveExpectedAgentWakeBuild(value) {
+  const normalized = value?.trim() ?? "";
+  if (normalized === "" || normalized === "0") return false;
+  if (normalized === "1") return true;
+  throw new Error("HYPE_COMMS_AGENT_WAKE_ENABLED must be 0 or 1");
+}
+
+export function resolveExpectedAgentWakePackageEvidence(value, agentWakeEnabled) {
+  const normalized = value?.trim() ?? "";
+  if (normalized === "" || normalized === "0") return false;
+  if (normalized !== "1") {
+    throw new Error("HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED must be 0 or 1");
+  }
+  if (!agentWakeEnabled) {
+    throw new Error(
+      "HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED requires HYPE_COMMS_AGENT_WAKE_ENABLED=1",
+    );
+  }
+  return true;
+}
+
+export function verifyAgentWakeBuild(
+  asarPath,
+  expectedEnabled,
+  extractFileImplementation = extractFile,
+) {
+  const mainPath = "dist/main/index.js";
+  let source;
+  try {
+    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
+  } catch (error) {
+    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
+  }
+
+  const configurationMatches = [...source.matchAll(agentWakeConfigurationCall)];
+  const operatorMatches = [...source.matchAll(agentWakeOperatorCall)];
+  if (configurationMatches.length !== 1 || operatorMatches.length !== 1) {
+    throw new Error(`${asarPath} has an ambiguous or missing Agent Wake build marker`);
+  }
+
+  const expected = String(expectedEnabled);
+  if (configurationMatches[0][1] !== expected || operatorMatches[0][1] !== expected) {
+    throw new Error(
+      `${asarPath} Agent Wake build state does not match HYPE_COMMS_AGENT_WAKE_ENABLED=${expectedEnabled ? "1" : "0"}`,
+    );
+  }
+}
+
+export function verifyAgentWakeUpdateIsolation(
+  asarPath,
+  expectedEvidenceBuild,
+  extractFileImplementation = extractFile,
+) {
+  const mainPath = "dist/main/index.js";
+  let source;
+  try {
+    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
+  } catch (error) {
+    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
+  }
+
+  const matches = [...source.matchAll(agentWakeUpdaterPolicy)];
+  if (matches.length !== 1) {
+    throw new Error(`${asarPath} has an ambiguous or missing Agent Wake updater-isolation marker`);
+  }
+  if ((matches[0][1] === "true") === expectedEvidenceBuild) {
+    throw new Error(
+      `${asarPath} Agent Wake updater isolation does not match HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=${expectedEvidenceBuild ? "1" : "0"}`,
+    );
+  }
+}
+
 export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
 ) {
+  const expectedAgentWakeBuild = resolveExpectedAgentWakeBuild(
+    process.env.HYPE_COMMS_AGENT_WAKE_ENABLED,
+  );
+  const expectedAgentWakePackageEvidence = resolveExpectedAgentWakePackageEvidence(
+    process.env.HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED,
+    expectedAgentWakeBuild,
+  );
   const excludedDirectories = excludedPackageDirectories(flavor, releaseRoot);
   const asarPaths = await collectPackageFiles(releaseRoot, "app.asar", excludedDirectories);
   if (asarPaths.length === 0) {
@@ -226,6 +311,8 @@ export async function verifyDesktopPackages(
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
     verifyPackageMetadata(asarPath, flavor);
+    verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
+    verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
 
     const executablePath = await executableForAsar(asarPath, flavor);
@@ -240,7 +327,7 @@ export async function verifyDesktopPackages(
   }
 
   console.log(
-    `Verified updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
+    `Verified Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
   );
 }
 
