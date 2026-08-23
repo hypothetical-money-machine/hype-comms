@@ -54,6 +54,11 @@ async function main(): Promise<void> {
 
   try {
     if (config.database !== undefined) {
+      const attachmentStore = new LocalAttachmentStore(config.attachmentDir);
+      // Storage is part of the database-backed message contract. Check that the configured root
+      // supports the real write/read/rename pattern before applying a migration. GitOps separately
+      // proves that this path is backed by the intended durable volume.
+      await attachmentStore.prepare();
       const databasePool = createPool(config.database);
       pool = databasePool;
       metricsRegistry =
@@ -113,7 +118,7 @@ async function main(): Promise<void> {
       };
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
-        attachmentStore: new LocalAttachmentStore(config.attachmentDir),
+        attachmentStore,
         onAnnouncementAudit: (record) => {
           process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
         },
