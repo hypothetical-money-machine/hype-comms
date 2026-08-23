@@ -99,10 +99,15 @@ import {
   SafeStorageAuthKitPendingStore,
 } from "./authkit-pending-store";
 import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
+import {
+  DeepLinkSignInQueue,
+  routeOpenUrlMagicLink,
+  routeSecondInstanceMagicLink,
+} from "./deep-link-sign-in";
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
-import { ChatSession, ChatSessionError } from "./chat-session";
+import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
 import { CacheCrypto } from "./cache-crypto";
 import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
@@ -234,6 +239,33 @@ let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
 let authCallbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authIntentGeneration = 0;
+const deepLinkSignInQueue = new DeepLinkSignInQueue({
+  confirm: confirmDeepLinkSignIn,
+  exchange: async (token) => {
+    const callbackIntent = advanceAuthIntent();
+    try {
+      await cancelPendingAuthKit();
+    } catch {
+      // This callback remains authoritative in the current process because its generation
+      // invalidates AuthKit. Protected deletion continues in the background and is retried on
+      // every restore before another provider callback can be accepted.
+    }
+    if (callbackIntent !== authIntentGeneration) return "failed";
+    const currentSession = chatSession;
+    if (currentSession === null) return "failed";
+    try {
+      await currentSession.exchangeMagicLink(token);
+      focusMainWindow();
+      return "succeeded";
+    } catch (error) {
+      if (error instanceof ChatSessionError && error.message === INVALID_MAGIC_LINK_MESSAGE) {
+        return "invalid";
+      }
+      throw error;
+    }
+  },
+  onInvalidLink: showInvalidDeepLinkSignIn,
+});
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
 const macosNativeNotificationEvidenceConfiguration =
   resolveMacosNativeNotificationEvidenceConfiguration({
@@ -2045,6 +2077,39 @@ async function showUpdateCheckDialog(
   }
 }
 
+/** Native prompt seam injected into DeepLinkSignInQueue; it intentionally receives no token. */
+async function confirmDeepLinkSignIn(): Promise<boolean> {
+  const options = {
+    type: "question" as const,
+    buttons: ["Cancel", "Sign in"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    message: "Sign in from a link?",
+    detail: "Continue to sign in to Hype Comms? This will replace any active session.",
+  };
+  const window = mainWindow;
+  const result =
+    window === null || window.isDestroyed()
+      ? await dialog.showMessageBox(options)
+      : await dialog.showMessageBox(window, options);
+  return result.response === 1;
+}
+
+async function showInvalidDeepLinkSignIn(): Promise<void> {
+  const options = {
+    type: "error" as const,
+    message: "Sign-in link invalid",
+    detail: "Request a new sign-in link and try again.",
+  };
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) {
+    await dialog.showMessageBox(options);
+  } else {
+    await dialog.showMessageBox(window, options);
+  }
+}
+
 function scheduleAuthCallbackRetry(callback: PendingAuthCallback): boolean {
   const delay = AUTH_CALLBACK_RETRY_DELAYS_MS[callback.transientAttempts];
   if (delay === undefined) return false;
@@ -2087,22 +2152,7 @@ async function drainPendingAuthCallbacks(): Promise<void> {
       }
       const currentSession = chatSession;
       if (parsed.kind === "magic_link") {
-        const callbackIntent = advanceAuthIntent();
-        try {
-          await cancelPendingAuthKit();
-        } catch {
-          // This callback remains authoritative in the current process because its generation
-          // invalidates AuthKit. Protected deletion continues in the background and is retried on
-          // every restore before another provider callback can be accepted.
-        }
-        if (callbackIntent !== authIntentGeneration) continue;
-        try {
-          beginSessionReplacement();
-          await currentSession.exchangeMagicLink(parsed.token);
-          focusMainWindow();
-        } catch {
-          // ChatSession publishes the credential-preserving or terminal failure state.
-        }
+        deepLinkSignInQueue.enqueue(parsed.token);
         continue;
       }
 
@@ -2137,10 +2187,11 @@ async function drainPendingAuthCallbacks(): Promise<void> {
           continue;
         }
 
+        if (!(await confirmDeepLinkSignIn())) continue;
+
         // Once enqueued, ChatSession serializes this exchange against sign-out. The generation
         // check covers a sign-out that completed while protected state was being read; a later
         // sign-out queues behind the exchange and therefore wins.
-        beginSessionReplacement();
         await currentSession.exchangeAuthKitHandoff({
           code: outcome.handoff.callback.code,
           codeVerifier: outcome.handoff.codeVerifier,
@@ -2168,6 +2219,9 @@ async function drainPendingAuthCallbacks(): Promise<void> {
 }
 
 function handleAuthCallback(value: string): boolean {
+  if (routeOpenUrlMagicLink(value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__, deepLinkSignInQueue)) {
+    return true;
+  }
   const parsed = parseAuthCallback(value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
   if (parsed === null) return false;
   if (parsed.kind === "authkit" && authKitCancellationFenced) {
@@ -2205,6 +2259,15 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, commandLine) => {
+    if (
+      routeSecondInstanceMagicLink(
+        commandLine,
+        __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+        deepLinkSignInQueue,
+      )
+    ) {
+      return;
+    }
     const callbackUrl = findAuthCallbackUrl(commandLine, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
     if (callbackUrl === null || !handleAuthCallback(callbackUrl)) {
       focusMainWindow();
@@ -2516,6 +2579,7 @@ if (!hasSingleInstanceLock) {
         );
       }
       authCallbacksReady = true;
+      await deepLinkSignInQueue.markReady();
       await drainPendingAuthCallbacks();
 
       app.on("activate", () => {

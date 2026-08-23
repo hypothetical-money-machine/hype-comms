@@ -41,6 +41,17 @@ const CURRENT_USER = {
   role: "member",
 } as const;
 
+const OTHER_USER = {
+  ...CURRENT_USER,
+  user: {
+    ...CURRENT_USER.user,
+    id: "10000000-0000-4000-8000-000000000004",
+    displayName: "Avery",
+  },
+  email: "avery@example.com",
+  workspaceId: "10000000-0000-4000-8000-000000000005",
+} as const;
+
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
   /** Seconds since the epoch, matching how Electron reports cookie expiry. */
@@ -311,6 +322,80 @@ describe("ChatSession lifecycle", () => {
 });
 
 describe("ChatSession magic links", () => {
+  it("keeps an active identity and its scope transition untouched when an exchange has no verdict", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return jsonResponse({ error: "boom" }, 500);
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(SESSION_SERVER_ERROR_MESSAGE);
+
+    expect(session.state).toMatchObject({
+      status: "signed-in",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+    });
+    expect(transitions).toEqual([]);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
+  it("publishes one complete state transition when a confirmed link replaces an active identity", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return jsonResponse(OTHER_USER);
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).resolves.toMatchObject({
+      status: "signed-in",
+      userId: OTHER_USER.user.id,
+      workspaceId: OTHER_USER.workspaceId,
+    });
+
+    expect(transitions).toEqual([
+      {
+        status: "signed-in",
+        method: "email",
+        name: "Avery",
+        email: "avery@example.com",
+        userId: OTHER_USER.user.id,
+        workspaceId: OTHER_USER.workspaceId,
+      },
+    ]);
+    expect(cookies.removals).toEqual([]);
+    session.stop();
+  });
+
+  it("keeps an active identity and its scope transition intact when a link is rejected", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return jsonResponse({ error: "unauthorized" }, 401);
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
+
+    expect(session.state).toMatchObject({
+      status: "signed-in",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+    });
+    expect(transitions).toEqual([]);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
   it("publishes only a generic, token-free state and error after a failed exchange", async () => {
     const session = createSession(async () =>
       jsonResponse(
@@ -342,14 +427,14 @@ describe("ChatSession magic links", () => {
     expect(caught instanceof Error ? caught.message : "").not.toContain(TOKEN);
   });
 
-  it("discards the stored credential when the service refuses the link with 401", async () => {
+  it("signs out when the service refuses a link while no identity is active", async () => {
     const cookies = storedIdentityCookies();
     const session = createSession(
       async () => jsonResponse({ error: "unauthorized" }, 401),
       cookies,
     );
 
-    // The one exchange outcome that is a verdict on the link, and so on the jar.
+    // A link can establish no session while signed out, so an explicit refusal remains terminal.
     await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
     expect(session.state).toEqual({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     expect(cookies.removals).toEqual(["hype_comms_session"]);
