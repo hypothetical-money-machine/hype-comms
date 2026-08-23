@@ -465,9 +465,10 @@ on the example-project, which is where the registry, the cluster, and the databa
 - `ci.yml` runs `npm run check` on every pull request and push to `main`.
 - `desktop-package-smoke.yml` packages the default DEV artifacts on macOS, Windows, and Ubuntu,
   then packages production on Linux to check the stable identity and updater feed before a tag.
-  macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu artifacts remain unsigned. Its
-  signed macOS notification-evidence job selects the production identity because that evidence
-  applies to a release candidate.
+  Pull requests use disposable GitHub-hosted ARM64 runners; trusted `main` and manual runs retain
+  native self-hosted coverage. macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu
+  artifacts remain unsigned. Its signed macOS notification-evidence job selects the production
+  identity because that evidence applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
 The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,
