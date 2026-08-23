@@ -1,27 +1,28 @@
-# Domain Docs
+# Domain docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+Use this guide when an engineering skill needs domain documentation while exploring the repository.
 
-## Before exploring, read these
+## Read first
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
+Read `CONTEXT.md` at the repository root. If `CONTEXT-MAP.md` is present, read it first and then
+read each context file that applies to the work.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+If neither file exists, continue without comment. Do not propose a new file before it is needed.
+The `/domain-modeling` skill creates domain documents when a term needs a documented definition.
 
-## File structure
+## Layout
 
-Single-context repo (most repos):
+A single-context repository uses:
 
-```
+```text
 /
 ├── CONTEXT.md
 └── src/
 ```
 
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
+A multi-context repository uses:
 
-```
+```text
 /
 ├── CONTEXT-MAP.md
 └── src/
@@ -31,8 +32,10 @@ Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
         ├── CONTEXT.md
 ```
 
-## Use the glossary's vocabulary
+## Vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+Use the terms defined in the relevant `CONTEXT.md` in issue titles, proposals, hypotheses, and
+test names. Avoid interchangeable synonyms when the glossary defines one term.
 
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the glossary has no term for a concept, check whether the project already uses another name.
+Otherwise, record the gap for `/domain-modeling`.

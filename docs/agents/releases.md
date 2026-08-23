@@ -5,7 +5,7 @@ prepare a release. Do not rediscover the sequence from git history or a previous
 
 The notes scaffold, review marker, and file-format rules live in
 [docs/releases/README.md](../releases/README.md). The public feed, signing secrets, and withdraw
-procedure live in the root [README](../../README.md) under **Desktop releases and updates**. This
+procedure live in the root [README](../../README.md) under Desktop releases and updates. This
 file is the agent runbook.
 
 ## What a release is
@@ -40,8 +40,8 @@ Do not hand-edit the version in other manifests.
 
 ## Write notes from every merge since the last tag
 
-Reviewed notes are written from **every merge on `main` since the previous desktop tag**, not from
-the single most visible feature.
+Reviewed notes cover every merge on `main` since the previous desktop tag, not only the most
+visible feature.
 
 ```bash
 git log --merges --format='%h %s' v<previous>..origin/main
@@ -50,12 +50,12 @@ gh pr view <n>
 
 Walk that list, then fill `docs/releases/v<version>.md`:
 
-- Every user-visible behavior change and important fix goes in **Highlights** or **Fixes**. Two
+- Every user-visible behavior change and important fix goes in Highlights or Fixes. Two
   features from two PRs means two Highlights.
-- Keep **Known limitations** and required manual actions that apply to those changes.
+- Keep Known limitations and required manual actions that apply to those changes.
 - Drop empty sections.
 - Omit internal delivery work from the reviewed file: dependency bumps, docs-only changes,
-  CI/release plumbing, and the version-bump PR itself. GitHub's generated **What's Changed**
+  CI/release plumbing, and the version-bump PR itself. GitHub's generated What's Changed
   section still lists those PRs.
 - A merge that is mostly internal still gets a line if it has user-visible behavior. A merge with
   none is omitted from the reviewed file, not from the inventory.
@@ -94,7 +94,7 @@ timeouts inside the version-bump PR.
 2. Title: `chore(release): prepare Hype Comms <version>`.
 3. Open a PR to `main`. The PR does not change renderer UI; Screenshots is `N/A` and can point at
    feature-PR evidence already on `main`.
-4. Merge with a **merge commit**, not squash. Previous releases tag the merge revision.
+4. Merge with a merge commit, not squash. Previous releases tag the merge revision.
 5. After the merge is on `origin/main`, create a lightweight tag on that commit and push it:
 
    ```bash
@@ -108,7 +108,7 @@ does not exactly match the desktop package version.
 
 ## Confirm publication
 
-Watch the **Desktop release** workflow for `v<version>` until every job succeeds: validate,
+Watch the Desktop release workflow for `v<version>` until every job succeeds: validate,
 prepare GitHub Release, Release Linux / macOS / Windows, Publish GitHub Release.
 
 Then verify:

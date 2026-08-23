@@ -1,6 +1,6 @@
 ## What changed
 
-<!-- Describe behavior and motivation. -->
+<!-- Describe user-visible behavior. -->
 
 ## Verification
 

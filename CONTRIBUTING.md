@@ -6,7 +6,7 @@ organization.
 ## Workflow
 
 1. Create a short-lived branch from `main`.
-2. Keep contracts backward compatible or document the intentional version change.
+2. Keep contracts backward compatible. Document any version change that is not compatible.
 3. Run `npm run check` and the relevant native desktop packaging smoke test.
 4. Open a pull request describing user-visible behavior, security impact, and test evidence. For
    renderer or other user-visible desktop UI changes, include final-state screenshot(s) in the
@@ -18,10 +18,8 @@ forward- and backward-compatibility tests before merge.
 
 ## Licensing
 
-Hype Comms is licensed under the [MIT license](LICENSE). Contributions are inbound-license-outbound:
-your contribution is licensed to everyone under MIT, same as the rest of the project.
+Hype Comms is licensed under the [MIT license](LICENSE). Contributions are licensed under MIT,
+with the same rights as the rest of the project.
 
-To keep the project's options open, by submitting a contribution you agree that the maintainers
-may include your contribution in a future version of Hype Comms published under a different
-license. Already-released versions stay available under the MIT license forever; only later
-versions can change terms.
+By submitting a contribution, you allow maintainers to include it in a later Hype Comms version
+under a different license. Versions already released under MIT remain available under MIT.

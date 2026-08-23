@@ -1,6 +1,6 @@
-# Repository Guidelines
+# Repository guidelines
 
-## Project Structure & Module Organization
+## Project structure and modules
 
 Hype Comms is an npm-workspaces TypeScript monorepo. `apps/desktop` contains the Electron
 main, preload, React renderer, and shared IPC types. `apps/server` contains the Fastify HTTP
@@ -11,27 +11,24 @@ implementation behavior is defined by source, shared contracts, and tests. Packa
 live in `scripts/`. Do not edit or commit generated `dist/`, `release/`, `coverage/`, or
 `node_modules/` content.
 
-## Platform-Scoped Delivery
+## Platform-scoped delivery
 
-The supported desktop platform list is a maintenance and release target, not a feature-parity
-requirement or a sequencing rule. A feature, fix, issue, or pull request may target one platform or
-a stated subset. Work on another platform is a separate follow-up, not an implicit blocker.
-
-Require cross-platform parity only when the user or issue acceptance criteria explicitly require
-it, or when a shared security, data, wire-contract, migration, or release-safety invariant makes a
-partial implementation unsafe. Otherwise:
+A feature, fix, issue, or pull request may target one platform or a named subset. Preserve the
+existing behavior on the other platforms. Require cross-platform parity only when acceptance
+criteria or a shared security, data, wire-contract, migration, or release-safety invariant
+requires it. Otherwise:
 
 - preserve existing behavior on platforms outside the stated scope;
 - use capability detection, a platform condition, or a default-off gate where needed;
 - document the supported platform scope and any user-visible limitation; and
 - run shared tests plus the native package or evidence lanes relevant to the changed platforms.
 
-A full release matrix verifies each platform's intended behavior; it does not expand every feature's
-scope to every platform. Native-notification rollout evidence is explicitly platform-scoped.
+The full release matrix checks each platform's intended behavior. Native-notification evidence is
+platform-scoped.
 
-## Build, Test, and Development Commands
+## Build, test, and development
 
-Use Node 24.18.x and npm 11.16.x, then install exactly from the lockfile with `npm ci`.
+Use Node 24.18.x and npm 11.16.x. Install from the lockfile with `npm ci`.
 
 - `npm run dev`: start the Fastify server and Electron client together.
 - `npm run dev:server` / `npm run dev:desktop`: run one workspace in watch mode.
@@ -41,7 +38,7 @@ Use Node 24.18.x and npm 11.16.x, then install exactly from the lockfile with `n
 - `npm run package:desktop:appimage`: build only the Linux AppImage.
 - `npm run verify:desktop-package`: inspect packaged ASAR contents and Electron fuses.
 
-## Coding Style & Naming Conventions
+## Coding style and naming
 
 Use two-space indentation, LF endings, UTF-8, and a 100-column Prettier width. TypeScript
 uses double quotes, semicolons, trailing commas, explicit type-only imports, and no `any`.
@@ -50,14 +47,14 @@ Use PascalCase for React components/types, camelCase for functions and variables
 Keep the renderer unprivileged: no Node APIs, credentials, or direct product networking.
 Validate every external, IPC, and realtime boundary with strict schemas.
 
-## Testing Guidelines
+## Testing
 
 Vitest is the unit-test framework. Add regression tests with behavior changes, especially
 for IPC validation, authorization, configuration, and wire contracts. Target a workspace
 with `npm test --workspace @hype-comms/server -- config.test.ts`. Run `npm run check` before
 every pull request; desktop packaging changes also require the relevant native smoke job.
 
-## Version Control (Git)
+## Version control
 
 This checkout is a plain Git repository with an `origin` remote on GitHub.
 
@@ -68,7 +65,7 @@ This checkout is a plain Git repository with an `origin` remote on GitHub.
 - Before publishing, inspect `git diff` and run the relevant checks. Keep commits focused and use
   the Conventional Commit format below.
 
-## Commit & Pull Request Guidelines
+## Commits and pull requests
 
 Follow the existing Conventional Commit style: `feat(scope): ...`, `fix: ...`,
 `refactor(server): ...`, or `docs: ...`. Keep commits focused and imperative. Codex-created
@@ -84,7 +81,7 @@ must be accompanied by a screenshot before the work is considered complete. Run 
 desktop/demo flow, capture the actual changed state (including the important interaction state when
 applicable), save reusable evidence under `docs/screenshots/`, and embed it in the pull request's
 Screenshots section with a short caption. If the app cannot be launched or the state cannot be
-captured, report that as a blocker; do not silently omit the screenshot or defer it to review.
+captured, report that as a blocker. Do not omit the screenshot or defer it to review.
 
 ## Agent skills
 

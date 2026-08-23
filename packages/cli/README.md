@@ -1,8 +1,8 @@
 # Hype Comms CLI
 
-`hype-comms-cli` is the Node 24 command-line client for Hype Comms. It is designed for both people and
-automation: ordinary commands print readable output, `--json` prints one validated JSON value, and
-`watch --json` prints validated NDJSON events.
+`hype-comms-cli` is the Node 24 command-line client for Hype Comms. Ordinary commands print
+readable output, `--json` prints one validated JSON value, and `watch --json` prints validated
+NDJSON events.
 
 ## Setup and profiles
 
@@ -32,10 +32,8 @@ The following environment variables override a stored profile:
 
 An `HYPE_COMMS_TOKEN` value is used only from the process environment and is never persisted.
 
-The distributable CLI bundles the private `@hype-comms/contracts` implementation from this
-workspace while leaving the public `ws` and `zod` packages as runtime dependencies. This keeps the
-wire schemas sourced from the shared package without requiring consumers to install a private
-workspace package.
+The distributable CLI bundles `@hype-comms/contracts` from this workspace. `ws` and `zod` remain
+runtime dependencies. Consumers do not need to install a private workspace package.
 
 ## Authentication
 
@@ -123,10 +121,10 @@ Errors have this stable shape:
 }
 ```
 
-`watch --json [--after DECIMAL_CURSOR]` emits one complete product event per line, preserving
-cursor strings exactly. It reconnects with jitter from the last accepted cursor. If no cursor is
-given, it starts at bootstrap's current cursor rather than replaying history. A cursor expiry emits
-`system.resync_required` before exit so callers can bootstrap cleanly.
+`watch --json [--after DECIMAL_CURSOR]` emits one complete product event per line and preserves
+cursor strings. It reconnects with jitter from the last accepted cursor. Without a cursor, it starts
+at bootstrap's current cursor and does not replay history. A cursor expiry emits
+`system.resync_required` before exit so callers can bootstrap again.
 
 Exit codes are:
 
