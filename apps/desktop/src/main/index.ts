@@ -1523,7 +1523,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache initialization sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.state ?? null);
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
     if (scope === null) throw new Error("Cache access requires a credential-bound session");
     return cacheCrypto.initialize(scope);
   });
@@ -1532,7 +1532,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoEncrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache encryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.state ?? null);
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
     const activeScope = cacheCrypto.activeScope;
     if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
       throw new Error("Cache access requires a credential-bound session");
@@ -1544,7 +1544,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoDecrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache decryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.state ?? null);
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
     const activeScope = cacheCrypto.activeScope;
     if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
       throw new Error("Cache access requires a credential-bound session");
@@ -1556,7 +1556,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoReset, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache reset sender");
     if (cacheCrypto === null) return;
-    const scope = cacheScopeForSession(chatSession?.state ?? null);
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
     const activeScope = cacheCrypto.activeScope;
     if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
       throw new Error("Cache access requires a credential-bound session");

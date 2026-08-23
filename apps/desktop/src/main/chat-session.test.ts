@@ -472,15 +472,22 @@ describe("ChatSession magic links", () => {
       workspaceId: CURRENT_USER.workspaceId,
     });
     expect(transitions).toEqual([]);
+    expect(session.cacheAuthorizationState).toEqual(session.state);
     expectPreservedCredential(cookies);
     session.stop();
   });
 
   it("publishes one complete state transition when a confirmed link replaces an active identity", async () => {
     const cookies = storedIdentityCookies();
+    const replacementResponse = jsonResponse(OTHER_USER);
+    let cacheAuthorizationWhileParsing: unknown = "not observed";
+    vi.spyOn(replacementResponse, "json").mockImplementation(async () => {
+      cacheAuthorizationWhileParsing = session.cacheAuthorizationState;
+      return OTHER_USER;
+    });
     const session = createSession(async (url) => {
       if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
-      return jsonResponse(OTHER_USER);
+      return replacementResponse;
     }, cookies);
     await session.restore();
     const transitions: unknown[] = [];
@@ -502,6 +509,8 @@ describe("ChatSession magic links", () => {
         workspaceId: OTHER_USER.workspaceId,
       },
     ]);
+    expect(cacheAuthorizationWhileParsing).toBeNull();
+    expect(session.cacheAuthorizationState).toEqual(session.state);
     expect(cookies.removals).toEqual([]);
     session.stop();
   });
@@ -523,6 +532,27 @@ describe("ChatSession magic links", () => {
       userId: CURRENT_USER.user.id,
       workspaceId: CURRENT_USER.workspaceId,
     });
+    expect(transitions).toEqual([]);
+    expect(session.cacheAuthorizationState).toEqual(session.state);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
+  it("restores silent cache authorization when an unreadable success kept the credential", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return new Response("not json");
+    }, cookies);
+    await session.restore();
+    const precedingState = session.state;
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(SESSION_SERVER_ERROR_MESSAGE);
+
+    expect(session.state).toBe(precedingState);
+    expect(session.cacheAuthorizationState).toBe(precedingState);
     expect(transitions).toEqual([]);
     expectPreservedCredential(cookies);
     session.stop();
