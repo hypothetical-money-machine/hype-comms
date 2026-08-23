@@ -6,7 +6,7 @@ interface ConversationHealthProps {
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly notice: string | null;
   readonly onRetry: () => void;
-  readonly onResetCache: () => void;
+  readonly onResetCache?: () => void;
   readonly onCheckForUpdates: () => Promise<void>;
 }
 
@@ -82,7 +82,7 @@ export function ConversationHealth({
             <button className="quiet-button" type="button" onClick={onRetry}>
               Retry
             </button>
-            {notice !== null ? (
+            {notice !== null && onResetCache !== undefined ? (
               <button className="quiet-button" type="button" onClick={onResetCache}>
                 Reset local cache
               </button>

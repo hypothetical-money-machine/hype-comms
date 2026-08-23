@@ -24,7 +24,6 @@ import {
   aiChannelStateSchema,
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
-  cacheScopeSchema,
   channelMemberTargetSchema,
   compactModePreferenceSchema,
   createChannelOperationSchema,
@@ -111,8 +110,9 @@ import {
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
 import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
-import { CacheCrypto } from "./cache-crypto";
+import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
 import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
@@ -1210,6 +1210,15 @@ function registerIpcHandlers(): void {
     return chatSession?.state ?? { status: "signed-out" };
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRetry);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionRetry, async (event): Promise<ChatSessionState> => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted session-retry IPC sender");
+    }
+    if (chatSession === null) throw new Error("Chat is not configured");
+    return chatSession.restore();
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionAuthCapabilities);
   ipcMain.handle(DESKTOP_CHANNELS.sessionAuthCapabilities, async (event) => {
     if (!isTrustedIpcSender(event)) {
@@ -1511,16 +1520,23 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoInitialize);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event, scope: unknown) => {
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache initialization sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    return cacheCrypto.initialize(cacheScopeSchema.parse(scope));
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    if (scope === null) throw new Error("Cache access requires a credential-bound session");
+    return cacheCrypto.initialize(scope);
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoEncrypt);
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoEncrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache encryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
     return cacheCrypto.encrypt(cacheEncryptBatchRequestSchema.parse(input));
   });
 
@@ -1528,13 +1544,24 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoDecrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache decryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
     return cacheCrypto.decrypt(cacheDecryptBatchRequestSchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoReset);
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoReset, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache reset sender");
-    await cacheCrypto?.clear();
+    if (cacheCrypto === null) return;
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
+    await cacheCrypto.clear();
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceBootstrap);
@@ -2416,6 +2443,12 @@ if (!hasSingleInstanceLock) {
         authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
+        contexts: new AuthenticatedSessionContextStore({
+          apiOrigin: __HYPE_COMMS_API_ORIGIN__,
+          platform: process.platform,
+          safeStorage,
+          userDataPath: app.getPath("userData"),
+        }),
       });
       authKitPendingStore = new SafeStorageAuthKitPendingStore({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,

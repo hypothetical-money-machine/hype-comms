@@ -127,6 +127,42 @@ beforeEach(() => {
   removeListener.mockReset();
 });
 
+describe("preload session and cache scope boundary", () => {
+  it("asks main to initialize its authorized cache without a renderer scope argument", async () => {
+    invoke.mockResolvedValueOnce({
+      mode: "persistent",
+      scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+      keyVersion: 1,
+    });
+
+    await expect(desktopApi.initializeCacheCrypto()).resolves.toMatchObject({
+      mode: "persistent",
+      scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+    });
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.cacheCryptoInitialize);
+  });
+
+  it("strictly validates main's credential-free offline session response", async () => {
+    const offline = {
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: "Could not reach the chat server. Your session is preserved.",
+      lastAuthenticatedSession: {
+        method: "email",
+        name: "Morgan",
+        email: "morgan@example.com",
+        userId: USER_ID,
+        workspaceId: WORKSPACE_ID,
+      },
+    } as const;
+    invoke.mockResolvedValueOnce(offline);
+    await expect(desktopApi.retrySession()).resolves.toEqual(offline);
+
+    invoke.mockResolvedValueOnce({ ...offline, credentialFingerprint: "forbidden" });
+    await expect(desktopApi.retrySession()).rejects.toThrow();
+  });
+});
+
 describe("preload theme boundary", () => {
   it("gets a strictly validated System appearance without applying a preference", async () => {
     const systemState = {

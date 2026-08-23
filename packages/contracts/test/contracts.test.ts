@@ -681,6 +681,35 @@ describe("transport contracts", () => {
       }),
     ).toThrow();
     expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
+
+    const offline = {
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: "Could not reach the chat server. Your session is preserved.",
+      lastAuthenticatedSession: {
+        method: "email",
+        name: "Morgan",
+        email: "MORGAN@example.com",
+        userId: USER_ID,
+        workspaceId: WORKSPACE_ID,
+      },
+    } as const;
+    expect(chatSessionStateSchema.parse(offline)).toEqual({
+      ...offline,
+      lastAuthenticatedSession: {
+        ...offline.lastAuthenticatedSession,
+        email: "morgan@example.com",
+      },
+    });
+    expect(() =>
+      chatSessionStateSchema.parse({
+        ...offline,
+        lastAuthenticatedSession: {
+          ...offline.lastAuthenticatedSession,
+          credentialFingerprint: "must-never-cross-ipc",
+        },
+      }),
+    ).toThrow();
   });
 
   it("keeps update state bounded and free of updater diagnostics", () => {

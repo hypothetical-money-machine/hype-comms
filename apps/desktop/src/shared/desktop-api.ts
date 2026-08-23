@@ -11,7 +11,6 @@ import type {
   CacheDecryptBatchResponse,
   CacheEncryptBatchRequest,
   CacheEncryptBatchResponse,
-  CacheScope,
   ChatSessionState,
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
@@ -89,6 +88,7 @@ export type {
 export interface SessionTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
   readonly getSessionState: () => Promise<ChatSessionState>;
+  readonly retrySession: () => Promise<ChatSessionState>;
   /** Optional only so narrow test transports and older embedders remain source-compatible. */
   readonly getAuthCapabilities?: () => Promise<AuthCapabilities>;
   readonly startAuthKitSignIn?: () => Promise<void>;
@@ -174,7 +174,8 @@ export interface DesktopApi
   readonly checkForUpdates: () => Promise<void>;
   readonly restartToInstallUpdate: () => Promise<void>;
   readonly onUpdateStateChanged: (listener: (state: UpdateState) => void) => () => void;
-  readonly initializeCacheCrypto: (scope: CacheScope) => Promise<CacheCryptoStatus>;
+  /** Main derives the authorized cache scope; the renderer supplies no scope selector. */
+  readonly initializeCacheCrypto: () => Promise<CacheCryptoStatus>;
   readonly encryptCacheRecords: (
     input: CacheEncryptBatchRequest,
   ) => Promise<CacheEncryptBatchResponse>;

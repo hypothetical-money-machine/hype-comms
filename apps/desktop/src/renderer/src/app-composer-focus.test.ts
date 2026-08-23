@@ -204,6 +204,7 @@ function createHarness(): Harness {
     platform: "linux",
     isHeadless: true,
     getSessionState: async () => session,
+    retrySession: async () => session,
     onSessionChanged: () => () => undefined,
     signOut: async () => ({ status: "signed-out" }) as const,
     getAppVersion: async () => "0.1.27-test",
@@ -211,10 +212,12 @@ function createHarness(): Harness {
     checkForUpdates: async () => undefined,
     restartToInstallUpdate: async () => undefined,
     onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async (scope: {
-      readonly userId: string;
-      readonly workspaceId: string;
-    }) => ({ mode: "memory_only", scope, reason: "credential_store_unavailable" }) as const,
+    initializeCacheCrypto: async () =>
+      ({
+        mode: "memory_only",
+        scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+        reason: "credential_store_unavailable",
+      }) as const,
     getWorkspaceBootstrap: async () => bootstrap,
     listWorkspaceMembers: async () => ({ members: [] }),
     listConversations: async () => ({

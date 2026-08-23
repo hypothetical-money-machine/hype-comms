@@ -1,6 +1,7 @@
 import {
   sendMessageOperationSchema,
   TASK_PAGE_MAX_LIMIT,
+  type AuthenticatedSessionContext,
   type CacheCryptoStatus,
   type CacheScope,
   type ChannelMembershipMutationResponse,
@@ -8,7 +9,6 @@ import {
   type Attachment,
   type ChannelAccess,
   type ChannelMode,
-  type ChatSessionState,
   type ConversationSummary,
   type Message,
   type MessageSearchResponse,
@@ -86,6 +86,11 @@ export interface WorkspaceRuntimeState {
 export interface WorkspaceRuntimeOptions {
   /** Test seam: lets a test observe cache traffic without reaching for IndexedDB. */
   readonly createCache?: (status: CacheCryptoStatus) => WorkspaceCache;
+}
+
+export interface WorkspaceStartOptions {
+  /** Opens only the already-authorized encrypted replica and performs no product network I/O. */
+  readonly offline?: boolean;
 }
 
 interface OutboxUpdate {
@@ -458,6 +463,7 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
+  #offlineOnly = false;
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
   #outboxFlushOwner: ProjectionGuard | null = null;
   #outboxFlushRequested = false;
@@ -570,7 +576,7 @@ export class WorkspaceRuntime {
     return result;
   }
 
-  async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
+  async start(session: AuthenticatedSessionContext, options: WorkspaceStartOptions = {}) {
     const scope: CacheScope = {
       userId: session.userId,
       workspaceId: session.workspaceId,
@@ -580,6 +586,7 @@ export class WorkspaceRuntime {
       this.#scope.userId !== scope.userId ||
       this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
+    this.#offlineOnly = options.offline === true;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -674,7 +681,7 @@ export class WorkspaceRuntime {
     // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
     // and that reset has to know which member's database it is allowed to delete.
     try {
-      const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
+      const cryptoStatus = await this.#client.initializeCacheCrypto();
       if (generation !== this.#generation || scope !== this.#scope) return;
       if (
         cryptoStatus.scope.userId !== scope.userId ||
@@ -684,14 +691,24 @@ export class WorkspaceRuntime {
       }
       const cache = this.#createCache(cryptoStatus);
       this.#cache = cache;
-      const cached = await cache.load();
+      let cached = await cache.load();
       if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
+      if (
+        cached.bootstrap !== null &&
+        (cached.bootstrap.currentUser.user.id !== scope.userId ||
+          cached.bootstrap.workspace.id !== scope.workspaceId)
+      ) {
+        // A correctly scoped encrypted database cannot contain another identity. Treat any such
+        // projection as corrupt, remove it before first paint, and rebuild only while online.
+        await cache.clearAll();
+        cached = await cache.load();
+        if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
+          return;
+      }
       this.#hydrateRetractReservations(cached.retractReservations);
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
-      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
-      if (generation !== this.#generation || this.#cache !== cache) return;
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -704,7 +721,22 @@ export class WorkspaceRuntime {
         cacheMode: cryptoStatus.mode,
         cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
         stale: true,
+        ...(this.#offlineOnly
+          ? {
+              busy: false,
+              connection: "offline" as const,
+              error:
+                cached.bootstrap === null
+                  ? "No encrypted workspace is available for this signed-in account."
+                  : null,
+            }
+          : {}),
       });
+
+      if (this.#offlineOnly) return;
+
+      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
+      if (generation !== this.#generation || this.#cache !== cache) return;
 
       const replicaAvailable = cached.bootstrap !== null;
       if (cached.repairMarker !== null) {
@@ -729,9 +761,12 @@ export class WorkspaceRuntime {
           this.#setState({ busy: false, stale: true });
           return;
         }
-        this.#startupReplicaCatchUpPending = false;
+        await this.#completeStartupAfterReplicaCatchUp(generation);
+        return;
       }
-      await this.#completeStartupAfterReplicaCatchUp(generation);
+      await this.#refreshSnapshot(generation);
+      if (generation !== this.#generation || this.#cache === null) return;
+      await this.#completeStartupAfterSnapshot(generation);
     } catch (error) {
       if (generation !== this.#generation) return;
       this.#startupReplicaCatchUpPending = false;
@@ -746,6 +781,7 @@ export class WorkspaceRuntime {
 
   async stop(): Promise<void> {
     ++this.#generation;
+    this.#offlineOnly = false;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -821,6 +857,7 @@ export class WorkspaceRuntime {
   }
 
   markConversationReadThrough(conversationId: string, messageId: string): void {
+    if (this.#offlineOnly) return;
     const message = this.#state.messages.find(
       (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
     );
@@ -2000,7 +2037,11 @@ export class WorkspaceRuntime {
    * conversation. Selection must already be published so the pane can paint cached messages first.
    */
   #ensureConversationHistory(conversationId: string): void {
-    if (this.#historyCursors.has(conversationId) || this.#historyHydrations.has(conversationId)) {
+    if (
+      this.#offlineOnly ||
+      this.#historyCursors.has(conversationId) ||
+      this.#historyHydrations.has(conversationId)
+    ) {
       return;
     }
     const hydration = this.loadOlder(conversationId).finally(() => {
@@ -2789,6 +2830,102 @@ export class WorkspaceRuntime {
     }
   }
 
+  /**
+   * Refreshes server-owned workspace and conversation metadata without downloading history,
+   * reactions, tasks, or thread bodies for every conversation. If the metadata snapshot is ahead
+   * of the durable cursor, its intervening events are applied first so replacing the catalog can
+   * never skip message data.
+   */
+  async #refreshWorkspaceMetadata(generation: number): Promise<boolean> {
+    const cache = this.#cache;
+    const scope = this.#scope;
+    if (cache === null || scope === null || generation !== this.#generation) return false;
+    const snapshot = await this.#fetchSnapshot();
+    if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
+      return false;
+    }
+    if (
+      snapshot.currentUser.user.id !== scope.userId ||
+      snapshot.workspace.id !== scope.workspaceId
+    ) {
+      throw new Error("The workspace catalog did not match the signed-in session");
+    }
+
+    const cursorBeforeMetadata = this.#syncCursor ?? "0";
+    if (compareSequence(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
+      await this.#repairAndFlush(generation, false);
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        this.#syncRecoveryPending ||
+        this.#membershipRepairPending
+      ) {
+        return false;
+      }
+    }
+
+    const loaded = await cache.load();
+    if (generation !== this.#generation || cache !== this.#cache || loaded.bootstrap === null) {
+      return false;
+    }
+    const durableCursor = loaded.syncCursor ?? "0";
+    if (compareSequence(durableCursor, snapshot.syncCursor) < 0) {
+      throw new Error("The workspace metadata advanced beyond the repaired cursor");
+    }
+
+    // When events landed after the metadata response, their cached catalog and member projection
+    // is newer. Keep it while still taking workspace, identity-role, and feature metadata from the
+    // response. The final catch-up closes the smaller race after this replacement.
+    const metadataAtDurableCursor = compareSequence(durableCursor, snapshot.syncCursor) === 0;
+    const catalog = metadataAtDurableCursor
+      ? snapshot.conversations
+      : loaded.bootstrap.conversations;
+    const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
+    const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
+    const messages = loaded.messages.filter((message) =>
+      visibleConversationIds.has(message.conversationId),
+    );
+    const visibleMessageIds = new Set(messages.map((message) => message.id));
+    const reactions = loaded.reactions.filter((reaction) =>
+      visibleMessageIds.has(reaction.messageId),
+    );
+    const tasks = loaded.tasks.filter((task) => visibleConversationIds.has(task.conversationId));
+    const signal = this.#projectionAbortController.signal;
+    await cache.replaceSnapshot(
+      {
+        currentUser: snapshot.currentUser,
+        workspace: snapshot.workspace,
+        members,
+        conversations: catalog,
+        syncCursor: durableCursor,
+        featureFlags: snapshot.featureFlags,
+      },
+      messages,
+      reactions,
+      tasks,
+      signal,
+    );
+    if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
+    if (!(await this.#reloadCache(generation, cache))) return false;
+
+    for (const conversationId of this.#historyCursors.keys()) {
+      if (!visibleConversationIds.has(conversationId)) this.#historyCursors.delete(conversationId);
+    }
+    const currentSelection = this.#state.selectedConversationId;
+    if (currentSelection !== null && !visibleConversationIds.has(currentSelection)) {
+      const bootstrap = this.#state.bootstrap;
+      this.#setState({
+        selectedConversationId: bootstrap === null ? null : firstConversation(bootstrap),
+        focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+      });
+    }
+    return true;
+  }
+
   #scheduleResync(generation: number, request: number, delayMs: number): void {
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
@@ -2801,8 +2938,12 @@ export class WorkspaceRuntime {
 
   async #completeStartupAfterReplicaCatchUp(generation: number): Promise<void> {
     if (generation !== this.#generation || this.#cache === null) return;
-    await this.#refreshSnapshot(generation);
-    if (generation !== this.#generation || this.#cache === null) return;
+    const refreshed = await this.#refreshWorkspaceMetadata(generation);
+    if (!refreshed || generation !== this.#generation || this.#cache === null) {
+      if (generation === this.#generation) this.#setState({ busy: false, stale: true });
+      return;
+    }
+    this.#startupReplicaCatchUpPending = false;
     await this.#completeStartupAfterSnapshot(generation);
   }
 
@@ -2866,6 +3007,8 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation) return;
     this.#startupRealtimePending = false;
     this.#setState({ busy: false });
+    const selectedConversationId = this.#state.selectedConversationId;
+    if (selectedConversationId !== null) this.#ensureConversationHistory(selectedConversationId);
   }
 
   async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
@@ -3289,7 +3432,12 @@ export class WorkspaceRuntime {
 
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
-    if (this.#membershipRepairPending || cache === null || generation !== this.#generation) {
+    if (
+      this.#offlineOnly ||
+      this.#membershipRepairPending ||
+      cache === null ||
+      generation !== this.#generation
+    ) {
       return;
     }
     const owner = this.#captureProjection(cache);
@@ -3606,7 +3754,6 @@ export class WorkspaceRuntime {
           this.#startupReplicaCatchUpPending &&
           !this.#syncRecoveryPending
         ) {
-          this.#startupReplicaCatchUpPending = false;
           await this.#completeStartupAfterReplicaCatchUp(generation);
           return;
         }
@@ -3620,6 +3767,10 @@ export class WorkspaceRuntime {
           if (generation !== this.#generation) return;
           this.#startupRealtimePending = false;
           this.#setState({ busy: false });
+          const selectedConversationId = this.#state.selectedConversationId;
+          if (selectedConversationId !== null) {
+            this.#ensureConversationHistory(selectedConversationId);
+          }
         }
       }).catch((error: unknown) => {
         if (generation === this.#generation) {
