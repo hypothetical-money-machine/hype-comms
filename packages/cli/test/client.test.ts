@@ -279,11 +279,11 @@ describe("ApiClient", () => {
     expect(oversized.wasCancelled()).toBe(true);
   });
 
-  it("bounds a compressed success response before its full decompressed body is read", async () => {
+  it("cancels an unfinished compressed success response after the decoded size limit", async () => {
     const chunk = Buffer.alloc(64 * 1_024, "a");
-    const expandedSize = RESPONSE_BODY_MAX_BYTES * 2;
-    let decompressedBytesSent = 0;
+    const chunksToExceedLimit = RESPONSE_BODY_MAX_BYTES / chunk.byteLength;
     let responseClosed: (() => void) | undefined;
+    let responseClosedBeforeEnd = false;
     const closed = new Promise<void>((resolve) => {
       responseClosed = resolve;
     });
@@ -295,20 +295,21 @@ describe("ApiClient", () => {
       const gzip = createGzip();
       gzip.pipe(response);
       response.once("close", () => {
+        responseClosedBeforeEnd = !response.writableEnded;
         gzip.destroy();
         responseClosed?.();
       });
+      let chunksWritten = 0;
       const writeChunk = (): void => {
-        if (decompressedBytesSent >= expandedSize) {
-          gzip.end('"}');
-          return;
-        }
-        decompressedBytesSent += chunk.byteLength;
-        gzip.write(decompressedBytesSent === chunk.byteLength ? '{"payload":"' : chunk, () => {
+        if (chunksWritten >= chunksToExceedLimit) return;
+        chunksWritten += 1;
+        gzip.write(chunk, () => {
           gzip.flush(constants.Z_SYNC_FLUSH, () => setTimeout(writeChunk, 1));
         });
       };
-      writeChunk();
+      gzip.write('{"payload":"', () => {
+        gzip.flush(constants.Z_SYNC_FLUSH, () => setTimeout(writeChunk, 1));
+      });
     });
     const origin = await listen(server);
 
@@ -319,10 +320,10 @@ describe("ApiClient", () => {
       }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, retryable: false });
     await closed;
-    expect(decompressedBytesSent).toBeLessThan(expandedSize);
-    expect(decompressedBytesSent).toBeLessThanOrEqual(
-      RESPONSE_BODY_MAX_BYTES + 4 * chunk.byteLength,
-    );
+    // The prefix plus exactly RESPONSE_BODY_MAX_BYTES of payload crosses the limit. The producer
+    // deliberately leaves the response unfinished after that point, so only reader cancellation
+    // can close it. A fixed producer-side chunk margin would be scheduler and transport dependent.
+    expect(responseClosedBeforeEnd).toBe(true);
   });
 
   it("treats an oversized compressed error response as a non-retryable contract error", async () => {
