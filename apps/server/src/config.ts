@@ -10,6 +10,7 @@ const optionalString = <T extends z.ZodType>(schema: T) =>
 const WORKSPACE_SLUG = "hype-comms";
 /** The pre-cutover default. Migration 0018 renames a workspace row carrying it. */
 const LEGACY_WORKSPACE_SLUG = "hmm-chat";
+const PRODUCTION_LOOPBACK_PROXIES = ["127.0.0.1", "::1"] as const;
 
 const rawConfigSchema = z
   .object({
@@ -338,7 +339,11 @@ export function loadConfig(
   }
 
   const proxyCandidates =
-    result.data.trustedProxies === undefined ? [] : result.data.trustedProxies.split(",");
+    result.data.trustedProxies === undefined
+      ? result.data.nodeEnv === "production"
+        ? [...PRODUCTION_LOOPBACK_PROXIES]
+        : []
+      : result.data.trustedProxies.split(",");
   const trustedProxiesResult = z.array(trustedProxySchema).safeParse(proxyCandidates);
   if (!trustedProxiesResult.success) {
     throw new ConfigError(
@@ -450,7 +455,7 @@ export function loadConfig(
     if (
       result.data.nodeEnv === "production" &&
       result.data.authKitAdmissionEnabled &&
-      trustedProxies.length === 0
+      result.data.trustedProxies === undefined
     ) {
       throw new ConfigError([
         "trustedProxies: HYPE_COMMS_TRUSTED_PROXIES must name the reverse proxy IP/CIDR for " +

@@ -27,6 +27,7 @@ describe("loadConfig", () => {
       allowedOrigins: ["app://bundle"],
       publicApiUrl: "https://chat-api.example.invalid",
       cookieSecure: true,
+      trustedProxies: ["127.0.0.1", "::1"],
       agentProvisioningEnabled: false,
     });
   });
@@ -278,7 +279,7 @@ describe("loadConfig", () => {
     };
     expect(loadConfig(environment)).toMatchObject({
       authKitAdmissionEnabled: false,
-      trustedProxies: [],
+      trustedProxies: ["127.0.0.1", "::1"],
       workos: { clientId: "client_example" },
     });
 

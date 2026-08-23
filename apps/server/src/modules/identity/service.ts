@@ -152,13 +152,7 @@ export class IdentityService {
     logger?: ServiceLogger,
   ): Promise<MagicLinkRequested> {
     const accepted = magicLinkRequestedSchema.parse({ status: "accepted" });
-    const ipKey = `ip:${clientIp}`;
-    const emailKey = `email:${email}`;
-    if (this.#throttle.retryAfterMs(ipKey) > 0 || this.#throttle.retryAfterMs(emailKey) > 0) {
-      return accepted;
-    }
-    this.#throttle.recordFailure(ipKey);
-    this.#throttle.recordFailure(emailKey);
+    const clientAllowed = this.#throttle.recordMagicLinkRequest(email, clientIp);
 
     try {
       const now = this.#clock();
@@ -171,6 +165,7 @@ export class IdentityService {
           ? pendingInvitation
           : null;
       if (membership === null && invitation === null) return accepted;
+      if (!clientAllowed || !this.#throttle.reserveMagicLinkDelivery(email)) return accepted;
 
       const issued = issueToken();
       const normalExpiry = new Date(now.getTime() + MAGIC_LINK_TTL_MS);

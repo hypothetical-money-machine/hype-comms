@@ -3,7 +3,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { apiErrorEnvelopeSchema, systemConnectedEventSchema } from "@hype-comms/contracts";
+import {
+  apiErrorEnvelopeSchema,
+  magicLinkRequestedSchema,
+  systemConnectedEventSchema,
+  type Email,
+  type MagicLinkRequested,
+} from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
@@ -11,6 +17,7 @@ import { buildApp } from "../src/app.js";
 import { Lifecycle } from "../src/lifecycle.js";
 import { MetricsRegistry } from "../src/metrics.js";
 import type { IdentityService } from "../src/modules/identity/service.js";
+import { FixedWindowAttemptThrottle } from "../src/throttle.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -133,6 +140,84 @@ describe("operational routes", () => {
     expect(allowed.headers["access-control-allow-origin"]).toBe("app://bundle");
     expect(allowed.headers["access-control-allow-credentials"]).toBeUndefined();
     expect(rejected.statusCode).toBe(403);
+  });
+});
+
+function addressThrottledIdentity() {
+  const throttle = new FixedWindowAttemptThrottle({ maxAttempts: 1 });
+  const deliveredFrom: string[] = [];
+  const requestMagicLink = vi.fn(
+    async (_email: Email, clientIp: string): Promise<MagicLinkRequested> => {
+      if (throttle.recordAttempt(clientIp) === 0) deliveredFrom.push(clientIp);
+      return magicLinkRequestedSchema.parse({ status: "accepted" });
+    },
+  );
+  return {
+    deliveredFrom,
+    requestMagicLink,
+    service: { requestMagicLink } as unknown as IdentityService,
+  };
+}
+
+describe("client address trust", () => {
+  const requestFrom = (
+    app: Awaited<ReturnType<typeof buildApp>>,
+    remoteAddress: string,
+    forwardedFor?: string,
+  ) =>
+    app.inject({
+      method: "POST",
+      url: "/v1/auth/magic-link",
+      remoteAddress,
+      ...(forwardedFor === undefined ? {} : { headers: { "x-forwarded-for": forwardedFor } }),
+      payload: { email: "member@example.com" },
+    });
+
+  it("gives forwarded clients distinct IP budgets when the immediate peer is trusted", async () => {
+    const identity = addressThrottledIdentity();
+    const app = await buildApp({
+      trustedProxies: ["10.0.0.0/8"],
+      identity: { service: identity.service },
+    });
+    apps.push(app);
+
+    const responses = [
+      await requestFrom(app, "10.20.30.40", "198.51.100.10"),
+      await requestFrom(app, "10.20.30.40", "198.51.100.10"),
+      await requestFrom(app, "10.20.30.40", "203.0.113.10"),
+    ];
+
+    expect(responses.every(({ statusCode }) => statusCode === 202)).toBe(true);
+    expect(identity.deliveredFrom).toEqual(["198.51.100.10", "203.0.113.10"]);
+  });
+
+  it("ignores spoofed forwarded addresses from an untrusted immediate peer", async () => {
+    const identity = addressThrottledIdentity();
+    const app = await buildApp({
+      trustedProxies: ["10.0.0.0/8"],
+      identity: { service: identity.service },
+    });
+    apps.push(app);
+
+    await requestFrom(app, "192.0.2.20", "198.51.100.10");
+    await requestFrom(app, "192.0.2.20", "203.0.113.10");
+
+    expect(identity.requestMagicLink.mock.calls.map((call) => call[1])).toEqual([
+      "192.0.2.20",
+      "192.0.2.20",
+    ]);
+    expect(identity.deliveredFrom).toEqual(["192.0.2.20"]);
+  });
+
+  it("preserves direct client addresses when no proxy is configured", async () => {
+    const identity = addressThrottledIdentity();
+    const app = await buildApp({ identity: { service: identity.service } });
+    apps.push(app);
+
+    await requestFrom(app, "198.51.100.10");
+    await requestFrom(app, "203.0.113.10");
+
+    expect(identity.deliveredFrom).toEqual(["198.51.100.10", "203.0.113.10"]);
   });
 });
 
