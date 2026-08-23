@@ -84,7 +84,32 @@ describe("watch", () => {
     server.on("connection", (socket, request) => {
       connection += 1;
       const url = new URL(request.url ?? "/", `ws://127.0.0.1:${address.port}`);
-      observedCursors.push(url.searchParams.get("after") ?? "");
+      const after = url.searchParams.get("after") ?? "0";
+      observedCursors.push(after);
+      socket.send(
+        JSON.stringify({
+          version: 1,
+          id:
+            connection === 1
+              ? "88888888-8888-4888-8888-888888888888"
+              : "99999999-9999-4999-8999-999999999999",
+          type: "system.connected",
+          occurredAt: TIMESTAMP,
+          workspaceId: WORKSPACE_ID,
+          conversationId: null,
+          workspaceSequence: after,
+          conversationSequence: null,
+          entityVersion: 1,
+          delivery: "at_least_once",
+          payload: {
+            connectionId:
+              connection === 1
+                ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            userId: USER_ID,
+          },
+        }),
+      );
       if (connection === 1) {
         socket.send(
           JSON.stringify({
@@ -173,7 +198,9 @@ describe("watch", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; workspaceSequence: string });
     expect(records).toEqual([
+      expect.objectContaining({ type: "system.connected", workspaceSequence: "5" }),
       expect.objectContaining({ type: "message.created", workspaceSequence: "6" }),
+      expect.objectContaining({ type: "system.connected", workspaceSequence: "6" }),
       expect.objectContaining({ type: "system.resync_required", workspaceSequence: "6" }),
     ]);
     expect(observedCursors).toEqual(["5", "6"]);

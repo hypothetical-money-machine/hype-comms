@@ -3,8 +3,8 @@ import { inspect } from "node:util";
 import type { CliError } from "./errors.js";
 import type { CliIo } from "./types.js";
 
-function write(stream: CliIo["stdout"] | CliIo["stderr"], value: string): void {
-  stream.write(value.endsWith("\n") ? value : `${value}\n`);
+function write(stream: CliIo["stdout"] | CliIo["stderr"], value: string): boolean {
+  return stream.write(value.endsWith("\n") ? value : `${value}\n`);
 }
 
 export function writeResult(io: CliIo, value: unknown, json: boolean): void {
@@ -27,8 +27,8 @@ export function writeResult(io: CliIo, value: unknown, json: boolean): void {
   );
 }
 
-export function writeEvent(io: CliIo, value: unknown): void {
-  write(io.stdout, JSON.stringify(value));
+export function writeEvent(io: CliIo, value: unknown): boolean {
+  return write(io.stdout, JSON.stringify(value));
 }
 
 export function writeDiagnostic(io: CliIo, value: string): void {

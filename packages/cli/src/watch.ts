@@ -61,6 +61,21 @@ interface ConnectionResult {
   readonly delivered: boolean;
 }
 
+function laterCursor(current: string, candidate: string): string {
+  return BigInt(candidate) > BigInt(current) ? candidate : current;
+}
+
+export interface ProductRealtimeWatchOptions {
+  readonly client: ApiClient;
+  readonly origin: string;
+  readonly after: string;
+  readonly timeoutMs: number;
+  readonly workspaceId: string;
+  readonly random: () => number;
+  readonly capabilities?: string;
+  readonly onEvent: (event: ProductRealtimeEvent) => void;
+}
+
 function websocketUrl(origin: string, ticket: string, after: string): string {
   const url = new URL("/v1/realtime", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -107,6 +122,72 @@ export function watchRetryDelayMs(
   return Math.min(MAX_RETRY_AFTER_MS, Math.max(base + jitter, requestedRetryDelay));
 }
 
+/**
+ * Consume the validated product realtime stream until the process is stopped or the cursor needs
+ * repair. Command-specific projections belong in `onEvent`; ticketing, reconnects, cursor resume,
+ * and websocket validation stay centralized here so machine consumers cannot drift from `watch`.
+ */
+export async function watchProductRealtime(
+  input: ProductRealtimeWatchOptions,
+): Promise<{ readonly cursor: string }> {
+  let cursor = input.after;
+  let stopped = false;
+  let currentSocket: WebSocket | undefined;
+  const stop = (): void => {
+    stopped = true;
+    currentSocket?.close(1000);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  let failures = 0;
+  let requestedRetryDelay: number;
+  try {
+    while (!stopped) {
+      try {
+        const ticket = await input.client.request({
+          method: "POST",
+          path: "/v1/realtime/tickets",
+          responseSchema: realtimeTicketResponseSchema,
+          ...(input.capabilities === undefined
+            ? {}
+            : { headers: { "x-hype-comms-capabilities": input.capabilities } }),
+        });
+        const result = await streamOneConnection({
+          origin: input.origin,
+          ticket: ticket.ticket,
+          after: cursor,
+          timeoutMs: input.timeoutMs,
+          workspaceId: input.workspaceId,
+          write(event) {
+            cursor = laterCursor(cursor, event.workspaceSequence);
+            input.onEvent(event);
+          },
+          stopped: () => stopped,
+          registerSocket(socket) {
+            currentSocket = socket;
+          },
+        });
+        cursor = result.cursor;
+        failures = result.delivered ? 0 : failures + 1;
+        requestedRetryDelay = 0;
+      } catch (error) {
+        if (error instanceof ResyncRequiredError) throw error;
+        if (!(error instanceof CliError) || !error.retryable) throw error;
+        requestedRetryDelay = error.retryAfterMs ?? 0;
+        failures += 1;
+      }
+      if (!stopped) {
+        await delay(watchRetryDelayMs(failures, requestedRetryDelay, input.random));
+      }
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    currentSocket?.terminate();
+  }
+  return { cursor };
+}
+
 async function streamOneConnection(input: {
   readonly origin: string;
   readonly ticket: string;
@@ -126,6 +207,7 @@ async function streamOneConnection(input: {
     input.registerSocket(socket);
     let cursor = input.after;
     let delivered = false;
+    let connected = false;
     let resyncRequired = false;
     let settled = false;
     const settle = (error?: unknown): void => {
@@ -177,9 +259,44 @@ async function streamOneConnection(input: {
         );
         return;
       }
+      if (!connected) {
+        if (
+          parsed.data.type !== "system.connected" ||
+          parsed.data.workspaceId !== input.workspaceId
+        ) {
+          socket.terminate();
+          settle(
+            new CliError({
+              exitCode: EXIT_CONTRACT,
+              code: "INVALID_SERVER_CONTRACT",
+              message: "Realtime delivery started before an authoritative connection event",
+              retryable: false,
+            }),
+          );
+          return;
+        }
+        connected = true;
+      } else if (parsed.data.type === "system.connected") {
+        socket.terminate();
+        settle(
+          new CliError({
+            exitCode: EXIT_CONTRACT,
+            code: "INVALID_SERVER_CONTRACT",
+            message: "Realtime sent more than one connection event",
+            retryable: false,
+          }),
+        );
+        return;
+      }
       delivered = true;
-      cursor = parsed.data.workspaceSequence;
-      input.write(parsed.data);
+      cursor = laterCursor(cursor, parsed.data.workspaceSequence);
+      try {
+        input.write(parsed.data);
+      } catch (error) {
+        socket.terminate();
+        settle(error);
+        return;
+      }
       if (parsed.data.type === "system.resync_required") {
         resyncRequired = true;
         socket.close(1000);
@@ -255,59 +372,18 @@ export async function watchCommand(
     path: "/v1/bootstrap",
     responseSchema: workspaceBootstrapResponseSchema,
   });
-  let cursor = afterOption ?? bootstrap.syncCursor;
-  let stopped = false;
-  let currentSocket: WebSocket | undefined;
-  const stop = (): void => {
-    stopped = true;
-    currentSocket?.close(1000);
-  };
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-  let failures = 0;
-  let requestedRetryDelay: number;
-  try {
-    while (!stopped) {
-      try {
-        const ticket = await client.request({
-          method: "POST",
-          path: "/v1/realtime/tickets",
-          responseSchema: realtimeTicketResponseSchema,
-          headers: { "x-hype-comms-capabilities": WATCH_CAPABILITIES },
-        });
-        const result = await streamOneConnection({
-          origin: profile.apiOrigin,
-          ticket: ticket.ticket,
-          after: cursor,
-          timeoutMs: context.options.timeoutMs,
-          workspaceId: bootstrap.workspace.id,
-          write(event) {
-            cursor = event.workspaceSequence;
-            writeEvent(context.runtime.io, event);
-          },
-          stopped: () => stopped,
-          registerSocket(socket) {
-            currentSocket = socket;
-          },
-        });
-        cursor = result.cursor;
-        failures = result.delivered ? 0 : failures + 1;
-        requestedRetryDelay = 0;
-      } catch (error) {
-        if (error instanceof ResyncRequiredError) throw error;
-        if (!(error instanceof CliError) || !error.retryable) throw error;
-        requestedRetryDelay = error.retryAfterMs ?? 0;
-        failures += 1;
-      }
-      if (!stopped) {
-        await delay(watchRetryDelayMs(failures, requestedRetryDelay, context.runtime.random));
-      }
-    }
-  } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-    currentSocket?.terminate();
-  }
+  const { cursor } = await watchProductRealtime({
+    client,
+    origin: profile.apiOrigin,
+    after: afterOption ?? bootstrap.syncCursor,
+    timeoutMs: context.options.timeoutMs,
+    workspaceId: bootstrap.workspace.id,
+    random: context.runtime.random,
+    capabilities: WATCH_CAPABILITIES,
+    onEvent(event) {
+      writeEvent(context.runtime.io, event);
+    },
+  });
   // A stopped watch is a successful command. This is intentionally silent in JSON mode.
   if (!context.options.json) writeResult(context.runtime.io, { cursor }, false);
 }

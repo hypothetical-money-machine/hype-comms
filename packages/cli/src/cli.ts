@@ -15,6 +15,7 @@ import { extractGlobalOptions } from "./argv.js";
 import { asCliError, EXIT_SUCCESS, UsageError, type CliExitCode } from "./errors.js";
 import { writeError, writeResult } from "./output.js";
 import type { CommandContext, Runtime } from "./types.js";
+import { wakeCommand } from "./wake.js";
 import { watchCommand } from "./watch.js";
 
 export const HELP = `hype-comms-cli - Hype Comms command-line client
@@ -50,12 +51,14 @@ Commands:
   channels create NAME [--slug SLUG] [--topic TOPIC]
   channels archive CHANNEL
   dms create MEMBER
+  messages get MESSAGE_ID
   messages history CONVERSATION [--before CURSOR] [--limit N]
   messages send CONVERSATION [BODY] [--file PATH] [--mention MEMBER]...
                 [--client-message-id UUID] [--thread-root-id UUID]
   read-cursors advance CONVERSATION MESSAGE_ID
   sync --after CURSOR [--limit N]
   watch --json [--after CURSOR]
+  wake watch --json [--after CURSOR]
   invitations list
   invitations create EMAIL
   invitations revoke INVITATION_ID
@@ -142,6 +145,10 @@ export async function runCli(argv: readonly string[], runtime: Runtime): Promise
     } else {
       await watchCommand(context, rest);
     }
+    return;
+  }
+  if (command === "wake") {
+    await wakeCommand(context, subcommand, rest);
     return;
   }
   if (command === "invitations") {
