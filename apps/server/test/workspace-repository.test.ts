@@ -19,7 +19,7 @@ import {
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
-import type { ApiError } from "../src/errors.js";
+import { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
@@ -155,6 +155,16 @@ function taskInput(title: string, overrides: Partial<CreateTaskRequest> = {}): C
     sourceMessageId: null,
     ...overrides,
   };
+}
+
+async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> {
+  try {
+    await operation;
+  } catch (error) {
+    if (error instanceof ApiError) return error;
+    throw error;
+  }
+  throw new Error("Expected the operation to reject");
 }
 
 describeWithPostgres("WorkspaceRepository", () => {
@@ -573,6 +583,68 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
     expect(stored.rows[0]).toMatchObject({ body: secret, deleted_at: expect.anything() });
     expect(stored.rows[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("makes a retracted thread root indistinguishable from a nonexistent root", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "confidential thread root"),
+      mentionedUserIds: [],
+    });
+    await repository.retractMessage(owner, root.message.id);
+
+    const [retracted, nonexistent] = await Promise.all([
+      rejectedApiError(repository.thread(member, root.message.id, undefined, 50)),
+      rejectedApiError(repository.thread(member, randomUUID(), undefined, 50)),
+    ]);
+
+    expect({
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Thread not found" });
+    expect({
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    }).toEqual({
+      statusCode: nonexistent.statusCode,
+      code: nonexistent.code,
+      message: nonexistent.message,
+    });
+  });
+
+  it("does not replay retracted message or reaction content through sync or delivery retry", async () => {
+    const clientMessageId = randomUUID();
+    const secret = `sync secret ${randomUUID()}`;
+    const input = {
+      ...message(clientMessageId, secret),
+      mentionedUserIds: [],
+    };
+    const sent = await repository.sendMessage(owner, generalId, input);
+    const reaction = await repository.addReaction(member, sent.message.id, "🎉");
+    const retracted = await repository.retractMessage(owner, sent.message.id);
+
+    const replayError = await rejectedApiError(repository.sendMessage(owner, generalId, input));
+    expect({
+      statusCode: replayError.statusCode,
+      code: replayError.code,
+      message: replayError.message,
+    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Message not found" });
+
+    const sync = await repository.sync(observer, "0", 100, true, false, false, false, false, true);
+    expect(sync.events).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        payload: {
+          messageId: sent.message.id,
+          deletedAt: retracted.message.deletedAt,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(sync)).not.toContain(secret);
+    expect(JSON.stringify(sync)).not.toContain(reaction.reaction.id);
   });
 
   it("rejects retracting another member's message and an author retract after five minutes", async () => {
@@ -1496,6 +1568,35 @@ describeWithPostgres("WorkspaceRepository", () => {
         }),
       ]),
     );
+  });
+
+  it("makes reactions on a retracted message unavailable like reactions on a missing message", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "reaction target to retract"),
+      mentionedUserIds: [],
+    });
+    await repository.addReaction(member, sent.message.id, "🎉");
+    await repository.retractMessage(owner, sent.message.id);
+
+    const [retracted, nonexistent] = await Promise.all([
+      rejectedApiError(repository.listMessageReactions(observer, [sent.message.id])),
+      rejectedApiError(repository.listMessageReactions(observer, [randomUUID()])),
+    ]);
+    const retractedShape = {
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    };
+    expect(retractedShape).toEqual({
+      statusCode: 404,
+      code: "NOT_FOUND",
+      message: "One or more messages were not found",
+    });
+    expect(retractedShape).toEqual({
+      statusCode: nonexistent.statusCode,
+      code: nonexistent.code,
+      message: nonexistent.message,
+    });
   });
 
   it("hides message.retracted from clients that did not negotiate the capability", async () => {
