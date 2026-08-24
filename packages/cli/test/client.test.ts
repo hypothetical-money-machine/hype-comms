@@ -36,7 +36,7 @@ function client(
       configDirectory: "/unused",
     },
     fetch,
-    timeoutMs: 1_000,
+    timeoutMs: 5_000,
   });
 }
 

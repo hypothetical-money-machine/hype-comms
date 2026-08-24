@@ -230,7 +230,7 @@ export function verifyAgentWakeBuild(
   expectedEnabled,
   extractFileImplementation = extractFile,
 ) {
-  const mainPath = "dist/main/index.js";
+  const mainPath = path.join("dist", "main", "index.js");
   let source;
   try {
     source = extractFileImplementation(asarPath, mainPath).toString("utf8");
@@ -257,7 +257,7 @@ export function verifyAgentWakeUpdateIsolation(
   expectedEvidenceBuild,
   extractFileImplementation = extractFile,
 ) {
-  const mainPath = "dist/main/index.js";
+  const mainPath = path.join("dist", "main", "index.js");
   let source;
   try {
     source = extractFileImplementation(asarPath, mainPath).toString("utf8");
