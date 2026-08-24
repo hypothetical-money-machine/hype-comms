@@ -74,6 +74,7 @@ import type {
 } from "./workspace-cache";
 import {
   applyRetractReservation,
+  MemoryWorkspaceCache,
   retractReservationMap,
   upsertRetractReservation,
 } from "./workspace-cache";
@@ -527,6 +528,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
   readonly loadBarriers: Promise<void>[] = [];
+  readonly snapshotReplaceBarriers: Promise<void>[] = [];
   readonly outboxUpdateBarriers: Promise<void>[] = [];
   outboxUpdateAttempts = 0;
   acknowledgedMessageAttempts = 0;
@@ -556,7 +558,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     };
   }
 
-  async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<void> {
+  async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<boolean> {
     const [snapshot, messages, reactions = [], tasks = [], signal] = args;
     const authorizedConversationIds = new Set(
       snapshot.conversations.map((summary) => summary.conversation.id),
@@ -569,6 +571,12 @@ class FakeWorkspaceCache implements WorkspaceCache {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
     this.operations.push("replaceSnapshot");
+    const barrier = this.snapshotReplaceBarriers.shift();
+    if (barrier !== undefined) await barrier;
+    signal?.throwIfAborted();
+    if (this.#syncCursor !== null && BigInt(snapshot.syncCursor) < BigInt(this.#syncCursor)) {
+      return false;
+    }
     const reservations = retractReservationMap(this.#retractReservations);
     this.#snapshot = {
       ...snapshot,
@@ -592,6 +600,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     }
     this.#syncCursor = snapshot.syncCursor;
     this.#repairMarker = null;
+    return true;
   }
 
   async replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void> {
@@ -635,7 +644,17 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async applyEvent(event: WorkspaceEvent, signal?: AbortSignal): Promise<boolean> {
+  async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
+    void messageId;
+    return undefined;
+  }
+
+  async applyEvent(
+    event: WorkspaceEvent,
+    signal?: AbortSignal,
+    retractSource?: Message,
+  ): Promise<boolean> {
+    void retractSource;
     signal?.throwIfAborted();
     if (this.#repairMarker !== null && event.type !== "channel.membership_changed") {
       throw new Error("Membership repair must complete before applying later events");
@@ -692,6 +711,9 @@ class FakeWorkspaceCache implements WorkspaceCache {
         deletedAt: event.payload.deletedAt,
         entityVersion: event.entityVersion,
       });
+      for (const [id, reaction] of this.#reactions) {
+        if (reaction.messageId === event.payload.messageId) this.#reactions.delete(id);
+      }
       const current = this.#messages.get(event.payload.messageId);
       if (current !== undefined) {
         this.#messages.set(event.payload.messageId, {
@@ -1441,7 +1463,9 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async archiveChannel(): Promise<ConversationMutationResponse> {
-    throw new Error("The runtime test does not archive channels");
+    const result = this.channelResults.shift();
+    if (result === undefined) throw new Error("The test queued no archive-channel result");
+    return await result;
   }
 
   async getChannelMembers(conversationId: string): Promise<ChannelMembersResponse> {
@@ -2250,6 +2274,304 @@ describe("WorkspaceRuntime", () => {
     );
   });
 
+  it("reconciles a closed-thread retract during the final HTTP catch-up", async () => {
+    const closedThreadReply: Message = {
+      ...threadReply,
+      body: "@morgan Closed thread reply",
+    };
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000c9",
+      messageId: closedThreadReply.id,
+      uploadedBy: PEER_ID,
+      fileName: "retracted-thread-file.txt",
+      contentType: "text/plain",
+      sizeBytes: 32,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const laterMainMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-0000000000c0",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c1",
+      conversationSequence: "4",
+      body: "Later main-timeline message",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        members: [user, peer],
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            participantIds: [USER_ID, PEER_ID],
+            lastMessage: laterMainMessage,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, laterMainMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: closedThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const finalCatchUp = deferred<SyncAttemptResult>();
+    api.syncResults.push(finalCatchUp.promise);
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    const starting = runtime.start(session);
+    await settle(
+      () => api.syncedFrom.length === 1,
+      "final catch-up begins after history hydration",
+    );
+    api.conversationFileResults.push({ files: [attachment], nextCursor: null, hasMore: false });
+    await runtime.loadConversationFiles(CONVERSATION_ID);
+    expect(runtime.state.conversationFiles).toEqual([attachment]);
+
+    finalCatchUp.resolve({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-0000000000c2",
+            type: "message.retracted",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: closedThreadReply.conversationSequence,
+            entityVersion: 2,
+            delivery: "at_least_once",
+            payload: { messageId: closedThreadReply.id, deletedAt: NOW },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    await starting;
+
+    expect(api.syncedFrom).toEqual(["10"]);
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.attachments).toEqual([]);
+    expect(runtime.state.conversationFiles).toEqual([]);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    const cached = await cache.load();
+    expect(cached.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+
+    await runtime.start(session);
+
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.attachments).toEqual([]);
+    expect(runtime.state.conversationFiles).toEqual([]);
+  });
+
+  it("refreshes source-less retract totals and clears a stale thread summary after final catch-up", async () => {
+    const hiddenMessage: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000e0",
+      clientMessageId: "20000000-0000-4000-8000-0000000000e1",
+      conversationSequence: "3",
+      body: "@morgan Hidden message to retract",
+    };
+    const latestThreadReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000e2",
+      clientMessageId: "20000000-0000-4000-8000-0000000000e3",
+      conversationSequence: "4",
+      body: "Visible latest thread reply",
+    };
+    const laterMainMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-0000000000d0",
+      clientMessageId: "20000000-0000-4000-8000-0000000000d1",
+      conversationSequence: "5",
+      body: "Later main-timeline message",
+    };
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000d2",
+      messageId: hiddenMessage.id,
+      uploadedBy: PEER_ID,
+      fileName: "hidden-retracted-file.txt",
+      contentType: "text/plain",
+      sizeBytes: 32,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const reaction: Reaction = { ...ownReaction, messageId: hiddenMessage.id };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: laterMainMessage,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const afterRetract = {
+      ...beforeRetract,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [latestThreadReply, laterMainMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const finalCatchUp = deferred<SyncAttemptResult>();
+    api.syncResults.push(finalCatchUp.promise);
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    const starting = runtime.start(session);
+    await settle(() => api.syncedFrom.length === 1, "source-less final catch-up begins");
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+    const files = deferred<ConversationFilesResponse>();
+    api.conversationFileResults.push(files.promise);
+    const loadingFiles = runtime.loadConversationFiles(CONVERSATION_ID);
+    await settle(
+      () => api.conversationFileRequests.length === 1,
+      "source-less file request starts",
+    );
+    api.bootstrap = bootstrapAt("11", {
+      members: [user, peer],
+      conversations: [afterRetract],
+    });
+    finalCatchUp.resolve({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-0000000000d3",
+            type: "message.retracted",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: hiddenMessage.conversationSequence,
+            entityVersion: 2,
+            delivery: "at_least_once",
+            payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    await starting;
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect((await cache.load()).bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+
+    files.resolve({ files: [attachment], nextCursor: null, hasMore: false });
+    await loadingFiles;
+    expect(runtime.state.conversationFiles).toEqual([]);
+
+    api.reactionResults.push({ reactions: [reaction] });
+    api.attachmentResults.push({ attachments: [attachment] });
+    await runtime.openSearchResult({ message: hiddenMessage });
+
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({ id: hiddenMessage.id, deletedAt: NOW, version: 2 }),
+    );
+    expect(runtime.state.reactions).toEqual([]);
+    expect(runtime.state.attachments).toEqual([]);
+
+    const offline = runtimeWith(api, cache);
+    await offline.start(session, { offline: true });
+    expect(offline.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(offline.state.messages).toContainEqual(
+      expect.objectContaining({ id: hiddenMessage.id, deletedAt: NOW, version: 2 }),
+    );
+  });
+
+  it("does not recount an old retracted reply on a later cache reload", async () => {
+    const retractedReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000c3",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c4",
+      deletedAt: NOW,
+      version: 2,
+      updatedAt: NOW,
+    };
+    const liveReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000c5",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c6",
+      conversationSequence: "4",
+      body: "Latest live reply",
+    };
+    const snapshot = bootstrapAt("10", {
+      conversations: [
+        {
+          ...channel(CONVERSATION_ID, "general"),
+          lastMessage: liveReply,
+        },
+      ],
+    });
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(snapshot, [ownMessage, retractedReply]);
+    const api = new FakeDesktopApi(snapshot);
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: liveReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+    await settle(
+      () => runtime.state.threadSummaries[0]?.latestReply.id === liveReply.id,
+      "fresh thread summary",
+    );
+    expect(runtime.state.threadSummaries[0]?.replyCount).toBe(3);
+
+    await runtime.start(session);
+
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: liveReply },
+    ]);
+  });
+
   it("does not attach recreated-window realtime until retryable replica catch-up completes", async () => {
     vi.useFakeTimers();
     try {
@@ -2615,8 +2937,484 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.attachments).toEqual([]);
   });
 
-  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+  it("does not restore attachment hydration after a message is retracted", async () => {
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000ba",
+      messageId: PEER_MESSAGE_ID,
+      uploadedBy: PEER_ID,
+      fileName: "retracted-file.txt",
+      contentType: "text/plain",
+      sizeBytes: 64,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const attachmentHydration = deferred<ListMessageAttachmentsResponse>();
     const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.attachmentResults.push(attachmentHydration.promise);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(() => api.attachmentRequests.length === 1, "attachment hydration starts");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000bb",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: peerMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: PEER_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("12"), "attachment target retract");
+
+    attachmentHydration.resolve({ attachments: [attachment] });
+    await drain();
+
+    expect(runtime.state.attachments).toEqual([]);
+    expect(runtime.state.conversationFiles).toEqual([]);
+  });
+
+  it("matches a fresh bootstrap after a live retract", async () => {
+    const earlierReply: Message = {
+      ...threadReply,
+      id: PEER_MESSAGE_ID,
+      clientMessageId: PEER_CLIENT_MESSAGE_ID,
+      conversationSequence: "3",
+      body: "Earlier thread reply",
+    };
+    const latestReply: Message = {
+      ...threadReply,
+      conversationSequence: "4",
+      body: "@morgan Latest thread reply",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: latestReply,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const liveApi = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    liveApi.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    liveApi.threadResults.push({
+      root: ownMessage,
+      replies: [earlierReply, latestReply],
+      nextCursor: null,
+    });
+    const live = runtimeWith(liveApi, new FakeWorkspaceCache());
+    await live.start(session);
+    await live.openThread(OWN_MESSAGE_ID);
+
+    const reaction: Reaction = { ...ownReaction, messageId: latestReply.id };
+    liveApi.emitWorkspaceEvent({
+      ...reactionAddedEvent,
+      workspaceSequence: "11",
+      conversationSequence: latestReply.conversationSequence,
+      payload: { reaction },
+    });
+    await settle(() => live.state.reactions.length === 1, "retract reaction setup");
+    liveApi.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b0",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: latestReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: latestReply.id, deletedAt: NOW },
+    });
+    await settle(() => liveApi.acknowledged.includes("12"), "live retract projection");
+
+    const afterRetract = {
+      ...beforeRetract,
+      lastMessage: earlierReply,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const freshApi = new FakeDesktopApi(
+      bootstrapAt("12", { members: [user, peer], conversations: [afterRetract] }),
+    );
+    freshApi.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: earlierReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    freshApi.threadResults.push({ root: ownMessage, replies: [earlierReply], nextCursor: null });
+    const fresh = runtimeWith(freshApi, new FakeWorkspaceCache());
+    await fresh.start(session);
+    await fresh.openThread(OWN_MESSAGE_ID);
+
+    const projection = (runtime: WorkspaceRuntime) => ({
+      conversations: runtime.state.bootstrap?.conversations,
+      messages: runtime.state.messages.filter((message) => message.deletedAt === null),
+      threadSummaries: runtime.state.threadSummaries,
+      reactions: runtime.state.reactions,
+      attachments: runtime.state.attachments,
+      conversationFiles: runtime.state.conversationFiles,
+    });
+    expect(projection(live)).toEqual(projection(fresh));
+  });
+
+  it("does not reconcile a locally retracted reply twice when its realtime echo arrives", async () => {
+    const ownThreadReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000b5",
+      clientMessageId: "20000000-0000-4000-8000-0000000000b6",
+      authorId: USER_ID,
+      conversationSequence: "4",
+      body: "My thread reply",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: ownThreadReply,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply: ownThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({
+      root: ownMessage,
+      replies: [threadReply, ownThreadReply],
+      nextCursor: null,
+    });
+    const retracted = { ...ownThreadReply, deletedAt: NOW, version: 2, updatedAt: NOW };
+    api.retractResults.push({ message: retracted, syncCursor: "11" });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    await runtime.retractMessage(ownThreadReply.id);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply },
+    ]);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b7",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownThreadReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: ownThreadReply.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "local retract realtime echo");
+
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply },
+    ]);
+    expect(runtime.state.bootstrap?.conversations[0]?.lastMessage).toEqual(threadReply);
+  });
+
+  it("reconciles a history tombstone when its retract event arrives later", async () => {
+    const liveReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000c1",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c2",
+      conversationSequence: "4",
+      body: "@morgan Reply removed before its event arrived",
+    };
+    const deletedReply: Message = {
+      ...liveReply,
+      deletedAt: NOW,
+      version: 2,
+      updatedAt: NOW,
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: liveReply,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, liveReply],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: liveReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({ root: ownMessage, replies: [deletedReply], nextCursor: null });
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await settle(
+      () => runtime.state.threadSummaries[0]?.latestReply.id === liveReply.id,
+      "live thread summary",
+    );
+
+    await runtime.openThread(OWN_MESSAGE_ID);
+    expect(runtime.state.messages).toContainEqual(deletedReply);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 1,
+      mentionCount: 1,
+    });
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000c3",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: liveReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: liveReply.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "history tombstone retract event");
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+      lastMessage: { id: OWN_MESSAGE_ID },
+    });
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect((await cache.load()).bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+      lastMessage: { id: OWN_MESSAGE_ID },
+    });
+  });
+
+  it("removes a deleted thread root's summary while retaining its live replies", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: threadReply,
+            unreadCount: 1,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b1",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "thread-root retract projection");
+
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: THREAD_REPLY_ID },
+      unreadCount: 1,
+    });
+    expect(runtime.state.selectedThreadRootId).toBeNull();
+    expect(runtime.state.focusedThreadMessageId).toBeNull();
+  });
+
+  it("removes a closed thread's stale latest reply after a retract", async () => {
+    const laterMainMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-0000000000b2",
+      clientMessageId: "20000000-0000-4000-8000-0000000000b3",
+      conversationSequence: "4",
+      body: "Later main message",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: laterMainMessage,
+            unreadCount: 1,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, laterMainMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await settle(
+      () =>
+        runtime.state.threadSummaries.some((summary) => summary.latestReply.id === THREAD_REPLY_ID),
+      "closed thread summary",
+    );
+    expect(runtime.state.messages).not.toContainEqual(threadReply);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b4",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: threadReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: THREAD_REPLY_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "closed thread retract projection");
+
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id },
+      unreadCount: 0,
+    });
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({ id: THREAD_REPLY_ID, deletedAt: NOW, version: 2 }),
+    );
+    const cached = await cache.load();
+    expect(cached.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: laterMainMessage.id },
+      unreadCount: 0,
+    });
+  });
+
+  it("does not restore a locally retracted reply when its create event arrives late", async () => {
+    const ownThreadReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000bc",
+      clientMessageId: "20000000-0000-4000-8000-0000000000bd",
+      authorId: USER_ID,
+      conversationSequence: "3",
+      body: "Reply to retract",
+    };
+    const retracted = { ...ownThreadReply, deletedAt: NOW, version: 2, updatedAt: NOW };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: ownThreadReply,
+          },
+        ],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: ownThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.retractResults.push({ message: retracted, syncCursor: "11" });
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    runtime.selectConversation(CONVERSATION_ID);
+
+    await runtime.retractMessage(ownThreadReply.id);
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000be",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownThreadReply.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: ownThreadReply, mentionedUserIds: [] },
+    });
+    await settle(() => api.acknowledged.includes("11"), "late message-created acknowledgement");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000bf",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: ownThreadReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: ownThreadReply.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("12"), "late retract acknowledgement");
+
+    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: OWN_MESSAGE_ID, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({ id: ownThreadReply.id, deletedAt: NOW, version: 2 }),
+    );
+    const cached = await cache.load();
+    expect(cached.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: { id: OWN_MESSAGE_ID, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
+  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          {
+            ...channel(CONVERSATION_ID, "general"),
+            lastMessage: ownMessage,
+            unreadCount: 4,
+            mentionCount: 3,
+          },
+        ],
+      }),
+    );
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2642,11 +3440,26 @@ describe("WorkspaceRuntime", () => {
         version: 2,
       }),
     );
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 4,
+      mentionCount: 3,
+    });
   });
 
   it("does not let stale history resurrect a source-less message.retracted event", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000b9",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "retracted-file.txt",
+      contentType: "text/plain",
+      sizeBytes: 64,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
     api.histories.set(CONVERSATION_ID, {
       messages: [],
       threadSummaries: [],
@@ -2657,6 +3470,12 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
     expect(runtime.state.messages).toEqual([]);
 
+    api.conversationFileResults.push({ files: [attachment], nextCursor: null, hasMore: false });
+    await runtime.loadConversationFiles(CONVERSATION_ID);
+    api.emitWorkspaceEvent(reactionAddedEvent);
+    await settle(() => runtime.state.reactions.length === 1, "source-less retract reaction");
+    expect(runtime.state.conversationFiles).toEqual([attachment]);
+
     api.emitWorkspaceEvent({
       version: 1,
       id: "20000000-0000-4000-8000-0000000000af",
@@ -2664,18 +3483,21 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      workspaceSequence: "12",
       conversationSequence: ownMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
       payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
     });
     await settle(
-      () => api.acknowledged.includes("11"),
+      () => api.acknowledged.includes("12"),
       "source-less message-retracted acknowledgement",
     );
 
     expect(runtime.state.messages).toEqual([]);
+    expect(runtime.state.reactions).toEqual([]);
+    expect(runtime.state.attachments).toEqual([]);
+    expect(runtime.state.conversationFiles).toEqual([]);
     expect((await cache.load()).retractReservations).toEqual([
       {
         messageId: OWN_MESSAGE_ID,
@@ -2702,6 +3524,455 @@ describe("WorkspaceRuntime", () => {
         version: 2,
       }),
     );
+  });
+
+  it("refreshes source-less realtime retract totals and clears a stale thread summary", async () => {
+    const hiddenMessage: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000e4",
+      clientMessageId: "20000000-0000-4000-8000-0000000000e5",
+      conversationSequence: "3",
+      body: "@morgan Hidden realtime message",
+    };
+    const latestThreadReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000e6",
+      clientMessageId: "20000000-0000-4000-8000-0000000000e7",
+      conversationSequence: "4",
+      body: "Visible realtime thread reply",
+    };
+    const laterMainMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-0000000000d4",
+      clientMessageId: "20000000-0000-4000-8000-0000000000d5",
+      conversationSequence: "5",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: laterMainMessage,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [latestThreadReply, laterMainMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+
+    api.bootstrap = bootstrapAt("11", {
+      members: [user, peer],
+      conversations: [afterRetract],
+    });
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000d6",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: hiddenMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+    });
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
+        runtime.state.threadSummaries[0]?.latestReply.id === latestThreadReply.id,
+      "source-less realtime metadata refresh",
+    );
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect((await cache.load()).bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+  });
+
+  it("retries a failed source-less retract metadata refresh without another event", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const hiddenMessage: Message = {
+        ...threadReply,
+        id: "20000000-0000-4000-8000-0000000000e8",
+        clientMessageId: "20000000-0000-4000-8000-0000000000e9",
+        conversationSequence: "3",
+        body: "@morgan Message outside the cached history page",
+      };
+      const laterMainMessage: Message = {
+        ...ownMessage,
+        id: "20000000-0000-4000-8000-0000000000da",
+        clientMessageId: "20000000-0000-4000-8000-0000000000db",
+        conversationSequence: "5",
+        body: "Later main-timeline message",
+      };
+      const beforeRetract = {
+        ...channel(CONVERSATION_ID, "general"),
+        participantIds: [USER_ID, PEER_ID],
+        lastMessage: laterMainMessage,
+        unreadCount: 1,
+        mentionCount: 1,
+      };
+      const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
+      const api = new FakeDesktopApi(
+        bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+      );
+      const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+      await runtime.start(session);
+
+      api.bootstrap = bootstrapAt("11", {
+        members: [user, peer],
+        conversations: [afterRetract],
+      });
+      api.bootstrapFailures = 1;
+      api.emitWorkspaceEvent({
+        version: 1,
+        id: "20000000-0000-4000-8000-0000000000dc",
+        type: "message.retracted",
+        occurredAt: NOW,
+        workspaceId: WORKSPACE_ID,
+        conversationId: CONVERSATION_ID,
+        workspaceSequence: "11",
+        conversationSequence: hiddenMessage.conversationSequence,
+        entityVersion: 2,
+        delivery: "at_least_once",
+        payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+      });
+      await settle(
+        () =>
+          runtime.state.error === "Could not refresh unread counts after a message was deleted.",
+        "failed source-less retract metadata refresh",
+      );
+
+      expect(runtime.state.stale).toBe(true);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 1,
+        mentionCount: 1,
+      });
+      expect(api.acknowledged).toEqual(["10", "11"]);
+      expect(api.bootstrapRequests).toBe(2);
+
+      const hydration = deferred<ListMessageReactionsResponse>();
+      api.reactionResults.push(hydration.promise);
+      const opening = runtime.openSearchResult({ message: ownMessage });
+      await settle(() => api.reactionRequests.length === 1, "queued history hydration");
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.bootstrapRequests).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      // The retry must wait for the serialized history projection instead of replacing the cache
+      // from an older load while this reaction hydration is still pending.
+      expect(api.bootstrapRequests).toBe(2);
+
+      hydration.resolve({ reactions: [] });
+      await opening;
+      await settle(
+        () =>
+          runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
+          runtime.state.bootstrap?.conversations[0]?.mentionCount === 0 &&
+          runtime.state.error === null &&
+          !runtime.state.stale,
+        "retried source-less retract metadata refresh",
+      );
+
+      expect(runtime.state.stale).toBe(false);
+      expect(api.bootstrapRequests).toBe(3);
+      expect(api.acknowledged).toEqual(["10", "11"]);
+      expect(runtime.state.messages).toContainEqual(ownMessage);
+      await runtime.stop();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes the outbox after source-less catch-up metadata fails", async () => {
+    const hiddenMessage: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000ea",
+      clientMessageId: "20000000-0000-4000-8000-0000000000eb",
+      conversationSequence: "3",
+      body: "Message outside the first history page",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: ownMessage,
+      unreadCount: 1,
+      mentionCount: 0,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    const finalCatchUp = deferred<SyncAttemptResult>();
+    api.syncResults.push(finalCatchUp.promise);
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    const starting = runtime.start(session);
+    await settle(() => api.syncedFrom.length === 1, "outbox catch-up begins");
+    const queuedClientMessageId = "20000000-0000-4000-8000-0000000000ec";
+    await cache.enqueue(queuedOperation(queuedClientMessageId, "Send despite badge failure"));
+    api.sendResults.push({
+      status: "accepted",
+      response: {
+        message: {
+          ...ownMessage,
+          id: "20000000-0000-4000-8000-0000000000ed",
+          conversationSequence: "4",
+        },
+        attachments: [],
+        syncCursor: "12",
+      },
+    });
+    api.bootstrapFailures = 1;
+    finalCatchUp.resolve({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-0000000000ee",
+            type: "message.retracted",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: hiddenMessage.conversationSequence,
+            entityVersion: 2,
+            delivery: "at_least_once",
+            payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    await starting;
+
+    expect(runtime.state.error).toBe(
+      "Could not refresh unread counts after a message was deleted.",
+    );
+    expect(api.sent.map((operation) => operation.message.clientMessageId)).toEqual([
+      queuedClientMessageId,
+    ]);
+    expect((await cache.load()).outbox).toEqual([]);
+    await runtime.stop();
+  });
+
+  it("keeps source-less metadata pending when a concurrent cache write wins", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const hiddenMessage: Message = {
+        ...threadReply,
+        id: "20000000-0000-4000-8000-0000000000ea",
+        clientMessageId: "20000000-0000-4000-8000-0000000000eb",
+        conversationSequence: "3",
+        body: "@morgan Hidden message to retract",
+      };
+      const laterMainMessage: Message = {
+        ...ownMessage,
+        id: "20000000-0000-4000-8000-0000000000dd",
+        clientMessageId: "20000000-0000-4000-8000-0000000000de",
+        conversationSequence: "5",
+        body: "Later main-timeline message",
+      };
+      const beforeRetract = {
+        ...channel(CONVERSATION_ID, "general"),
+        participantIds: [USER_ID, PEER_ID],
+        lastMessage: laterMainMessage,
+        unreadCount: 1,
+        mentionCount: 1,
+      };
+      const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
+      const api = new FakeDesktopApi(
+        bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+      );
+      const cache = new FakeWorkspaceCache();
+      const runtime = runtimeWith(api, cache);
+      await runtime.start(session);
+
+      api.bootstrap = bootstrapAt("11", {
+        members: [user, peer],
+        conversations: [afterRetract],
+      });
+      const replacement = deferred<void>();
+      cache.snapshotReplaceBarriers.push(replacement.promise);
+      api.emitWorkspaceEvent({
+        version: 1,
+        id: "20000000-0000-4000-8000-0000000000df",
+        type: "message.retracted",
+        occurredAt: NOW,
+        workspaceId: WORKSPACE_ID,
+        conversationId: CONVERSATION_ID,
+        workspaceSequence: "11",
+        conversationSequence: hiddenMessage.conversationSequence,
+        entityVersion: 2,
+        delivery: "at_least_once",
+        payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+      });
+      await settle(
+        () => cache.operations.filter((operation) => operation === "replaceSnapshot").length === 2,
+        "source-less metadata replacement begins",
+      );
+
+      // A different local projection commits after the metadata cache read. The older catalog
+      // must not satisfy the source-less retraction just because its replacement loses the race.
+      await cache.advanceCursor("12");
+      api.bootstrap = bootstrapAt("12", {
+        members: [user, peer],
+        conversations: [afterRetract],
+      });
+      replacement.resolve();
+      await settle(
+        () => runtime.state.stale && runtime.state.error === null,
+        "stale source-less metadata replacement",
+      );
+
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 1,
+        mentionCount: 1,
+      });
+      expect(runtime.state.stale).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(
+        () =>
+          runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
+          runtime.state.bootstrap?.conversations[0]?.mentionCount === 0 &&
+          runtime.state.error === null &&
+          !runtime.state.stale,
+        "source-less metadata retry after a concurrent cache write",
+      );
+
+      expect(runtime.state.stale).toBe(false);
+      expect(api.bootstrapRequests).toBe(3);
+      await runtime.stop();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a later source-less retract lose its invalidation to a full snapshot", async () => {
+    const hiddenMessage: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000ec",
+      clientMessageId: "20000000-0000-4000-8000-0000000000ed",
+      conversationSequence: "3",
+      body: "@morgan Hidden message to retract",
+    };
+    const latestThreadReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000ee",
+      clientMessageId: "20000000-0000-4000-8000-0000000000ef",
+      conversationSequence: "4",
+      body: "Visible latest thread reply",
+    };
+    const laterMainMessage: Message = {
+      ...ownMessage,
+      id: "20000000-0000-4000-8000-0000000000e3",
+      clientMessageId: "20000000-0000-4000-8000-0000000000e4",
+      conversationSequence: "5",
+      body: "Later main-timeline message",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: laterMainMessage,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [latestThreadReply, laterMainMessage],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+
+    api.channelResults.push({ conversation: beforeRetract, syncCursor: "10" });
+    const snapshotReload = deferred<void>();
+    cache.loadBarriers.push(snapshotReload.promise);
+    const archiving = runtime.archiveChannel(CONVERSATION_ID);
+    await settle(() => {
+      const replacements = cache.operations.filter(
+        (operation) => operation === "replaceSnapshot",
+      ).length;
+      return replacements === 2 && cache.operations[cache.operations.length - 1] === "load";
+    }, "full snapshot waits to reload its cache result");
+
+    api.bootstrap = bootstrapAt("11", {
+      members: [user, peer],
+      conversations: [afterRetract],
+    });
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000e5",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: hiddenMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+    });
+    await settle(
+      () => runtime.state.bootstrap?.conversations[0]?.unreadCount === 0,
+      "source-less retract metadata refresh while the snapshot reload waits",
+    );
+
+    snapshotReload.resolve();
+    await archiving;
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
+    expect((await cache.load()).bootstrap?.conversations[0]).toMatchObject({
+      unreadCount: 0,
+      mentionCount: 0,
+    });
   });
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {
@@ -4353,6 +5624,130 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.messages).toContainEqual(peerMessage);
     expect((await cache.load()).messages).toContainEqual(peerMessage);
     expect(runtime.state.error).toBeNull();
+  });
+
+  it("opens an authorized notification target when optional hydration fails", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(CONVERSATION_ID, "yada-yada"),
+      conversation: {
+        ...channel(CONVERSATION_ID, "yada-yada").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID, PEER_ID],
+      membershipRole: "member",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversations: [privateSummary], members: [user, peer] }),
+    );
+    api.messageByIdResults.push({ message: peerMessage });
+    const reactionFailure = Promise.reject(new Error("Reaction lookup is unavailable"));
+    const attachmentFailure = Promise.reject(new Error("Attachment lookup is unavailable"));
+    void reactionFailure.catch(() => undefined);
+    void attachmentFailure.catch(() => undefined);
+    api.reactionResults.push(reactionFailure);
+    api.attachmentResults.push(attachmentFailure);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    await expect(
+      runtime.handleNotificationAction(notificationAction, notificationContext),
+    ).resolves.toBe("opened");
+
+    expect(api.messageByIdRequests).toEqual([PEER_MESSAGE_ID]);
+    expect(api.reactionRequests).toEqual([[PEER_MESSAGE_ID]]);
+    expect(api.attachmentRequests).toEqual([[PEER_MESSAGE_ID]]);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBe(PEER_MESSAGE_ID);
+    expect(runtime.state.messages).toContainEqual(peerMessage);
+    expect((await cache.load()).messages).toContainEqual(peerMessage);
+    expect(runtime.state.error).toBeNull();
+  });
+
+  it("falls back when a cached notification target has been retracted", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === PEER_MESSAGE_ID),
+      "cached notification target",
+    );
+    await settle(
+      () => api.attachmentRequests.length === 1,
+      "cached notification target attachment hydration",
+    );
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b8",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: peerMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: PEER_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("12"), "notification target retract");
+    const attachmentRequestsBeforeNotification = [...api.attachmentRequests];
+
+    await expect(
+      runtime.handleNotificationAction(notificationAction, notificationContext),
+    ).resolves.toBe("fallback");
+
+    expect(api.messageByIdRequests).toEqual([]);
+    expect(api.reactionRequests).toEqual([]);
+    expect(api.attachmentRequests).toEqual(attachmentRequestsBeforeNotification);
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.error).toBe("That notification is no longer available.");
+  });
+
+  it("falls back when a source-less retract wins during exact notification hydration", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const hydration = deferred<MessageByIdResponse>();
+    api.messageByIdResults.push(hydration.promise);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+
+    const opening = runtime.handleNotificationAction(notificationAction, notificationContext);
+    await settle(() => api.messageByIdRequests.length === 1, "exact notification hydration");
+
+    api.bootstrap = bootstrapAt("11");
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000f0",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: peerMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: PEER_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(
+      () => api.bootstrapRequests === 2,
+      "source-less retract metadata refresh during notification hydration",
+    );
+
+    hydration.resolve({ message: peerMessage, attachments: [] });
+
+    await expect(opening).resolves.toBe("fallback");
+
+    expect(api.reactionRequests).toEqual([]);
+    expect(api.attachmentRequests).toEqual([]);
+    expect(runtime.state.focusedMessageId).toBeNull();
+    expect(runtime.state.error).toBe("That notification is no longer available.");
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).messages).toEqual([]);
+    expect((await cache.load()).retractReservations).toEqual([
+      { messageId: PEER_MESSAGE_ID, deletedAt: NOW, entityVersion: 2 },
+    ]);
   });
 
   it("opens an authorized notification target from the replica before by-ID hydration", async () => {

@@ -52,6 +52,8 @@ import type {
   RealtimeConnectionState,
   RealtimeSessionScope,
   ScopedProductRealtimeEvent,
+  ScopedEphemeralActivityFrame,
+  ScopedTypingActivityUpdate,
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
@@ -275,4 +277,9 @@ export interface DesktopApi
     listener: (state: RealtimeConnectionState) => void,
   ) => () => void;
   readonly onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => () => void;
+  /** Optional so an older main process can still host a renderer during a rolling desktop update. */
+  readonly setWorkspaceTyping?: (input: ScopedTypingActivityUpdate) => Promise<void>;
+  readonly onWorkspaceActivity?: (
+    listener: (frame: ScopedEphemeralActivityFrame) => void,
+  ) => () => void;
 }

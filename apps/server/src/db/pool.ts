@@ -6,6 +6,11 @@ export interface DatabasePoolConfig {
   readonly poolSize: number;
 }
 
+export interface TransactionOptions {
+  /** PostgreSQL can abort either participant in a deadlock; retry only fully transactional work. */
+  readonly deadlockRetries?: number;
+}
+
 /** Create the server's bounded Postgres connection pool. */
 export function createPool(config: DatabasePoolConfig): Pool {
   const pool = new Pool({
@@ -28,17 +33,29 @@ export function createPool(config: DatabasePoolConfig): Pool {
 export async function withTransaction<T>(
   pool: Pool,
   fn: (client: PoolClient) => Promise<T>,
+  options: TransactionOptions = {},
 ): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await fn(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
+  const deadlockRetries = options.deadlockRetries ?? 0;
+  for (let attempt = 0; ; attempt += 1) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (
+        attempt < deadlockRetries &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "40P01"
+      ) {
+        continue;
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

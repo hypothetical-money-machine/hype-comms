@@ -3,10 +3,6 @@
      positions, and the slide-out offset all derive from these two values. */
   --rail-width: 68px;
   --sidebar-width: 284px;
-  --member-list-height: 220px;
-  --member-list-min-height: 80px;
-  --conversation-nav-min-height: 96px;
-  --member-list-resize-handle-height: 8px;
   /* Comfortable density. Compact mode overrides only these tokens so the same rules
      tighten message, sidebar, and chrome spacing without a second visual language. */
   --density-rail-padding: 14px 13px;
@@ -14,7 +10,6 @@
   --density-search-margin: 12px 18px 0;
   --density-search-padding: 9px 11px;
   --density-sidebar-nav-padding: 14px 10px;
-  --density-member-list-padding: 0 10px 14px;
   --density-nav-heading-min-height: 32px;
   --density-nav-heading-margin: 10px 8px 4px;
   --density-row-padding: 9px 10px;
@@ -292,8 +287,9 @@ html[data-sidebar-position="right"] .sidebar {
 
 .workspace-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 10px;
   padding: var(--density-workspace-header-padding);
   border-bottom: 1px solid var(--theme-border-subtle);
 }
@@ -305,6 +301,14 @@ html[data-sidebar-position="right"] .sidebar {
   font-size: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
 }
 
 .workspace-search-button,
@@ -367,59 +371,11 @@ html[data-sidebar-position="right"] .sidebar {
   cursor: pointer;
 }
 
-.sidebar-split {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .sidebar nav {
-  flex: 1 1 0;
-  min-height: var(--conversation-nav-min-height);
+  flex: 1;
+  min-height: 0;
   padding: var(--density-sidebar-nav-padding);
   overflow-y: auto;
-}
-
-.member-list-resize-handle {
-  position: relative;
-  flex: 0 0 var(--member-list-resize-handle-height);
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: row-resize;
-  touch-action: none;
-  user-select: none;
-}
-
-.member-list-resize-handle::before {
-  position: absolute;
-  top: 3px;
-  right: 0;
-  left: 0;
-  height: 1px;
-  background: var(--theme-border-subtle);
-  content: "";
-}
-
-.member-list-resize-handle:hover::before,
-.member-list-resize-handle:focus-visible::before,
-html[data-member-list-resizing] .member-list-resize-handle::before {
-  top: 2px;
-  height: 3px;
-  background: var(--theme-border-accent);
-}
-
-.member-list-resize-handle:focus-visible {
-  outline: none;
-}
-
-html[data-member-list-resizing],
-html[data-member-list-resizing] * {
-  cursor: row-resize !important;
-  user-select: none !important;
 }
 
 .nav-heading {
@@ -684,8 +640,7 @@ html[data-member-list-resizing] * {
   background: var(--theme-action-primary-hover);
 }
 
-.conversation,
-.member-list button {
+.conversation {
   display: flex;
   width: 100%;
   align-items: center;
@@ -741,6 +696,38 @@ html[data-member-list-resizing] * {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.5;
+}
+
+.presence-indicator {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 999px;
+  background: transparent;
+}
+
+.presence-online {
+  border-color: var(--theme-success-action);
+  background: var(--theme-success-action);
+}
+
+.presence-away {
+  border-color: var(--theme-text-warning);
+  background: var(--theme-text-warning);
+}
+
+.member-avatar-presence {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+}
+
+.member-avatar-presence .presence-indicator {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  outline: 2px solid var(--theme-surface-sidebar);
 }
 
 .channel-icon {
@@ -811,8 +798,7 @@ html[data-member-list-resizing] * {
   color: var(--theme-text-accent-muted);
 }
 
-.conversation:hover,
-.member-list button:hover {
+.conversation:hover {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
 }
@@ -849,21 +835,6 @@ html[data-member-list-resizing] * {
   min-width: 25px;
   background: var(--theme-action-primary);
   color: var(--theme-action-primary-text);
-}
-
-.member-list {
-  flex: 0 0 var(--member-list-height);
-  min-height: var(--member-list-min-height);
-  max-height: calc(
-    100% - var(--conversation-nav-min-height) - var(--member-list-resize-handle-height)
-  );
-  padding: var(--density-member-list-padding);
-  overflow-y: auto;
-}
-
-.member-list button {
-  justify-content: flex-start;
-  gap: 9px;
 }
 
 .conversation-pane {
@@ -1306,7 +1277,7 @@ html[data-member-list-resizing] * {
 }
 
 .channel-members-dialog {
-  width: min(620px, 100%);
+  width: min(680px, 100%);
   max-height: min(720px, calc(100vh - 64px));
   overflow-y: auto;
   padding: 22px;
@@ -2346,7 +2317,7 @@ html[data-member-list-resizing] * {
 }
 
 .channel-access-note p,
-.channel-member-list span {
+.channel-member-identity span {
   margin: 3px 0 0;
   color: var(--theme-text-subtle);
   font-size: 12px;
@@ -2388,22 +2359,32 @@ html[data-member-list-resizing] * {
 
 .channel-member-list li {
   min-height: 58px;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 9px 4px;
   border-bottom: 1px solid var(--theme-border-subtle);
 }
 
-.channel-member-list li > div:first-child {
+.channel-member-identity {
   display: grid;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 8rem;
 }
 
+.channel-member-identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel-member-list .member-kind,
 .channel-member-list .channel-role {
+  flex: 0 0 auto;
   padding: 3px 7px;
   border-radius: 999px;
   background: var(--theme-surface-selected);
   color: var(--theme-text-secondary);
+  font-size: 12px;
   text-transform: capitalize;
 }
 
@@ -2413,7 +2394,11 @@ html[data-member-list-resizing] * {
 }
 
 .channel-member-actions {
+  flex: 1 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
+  margin-left: auto;
 }
 
 .channel-members-dialog .danger-button,
@@ -3734,6 +3719,27 @@ html[data-member-list-resizing] * {
   border-top: 1px solid var(--theme-border-subtle);
 }
 
+.typing-indicator {
+  grid-column: 1 / -1;
+  min-height: 15px;
+  margin: 0 2px -4px;
+  overflow: hidden;
+  color: var(--theme-text-subtle);
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity 120ms ease;
+}
+
+.typing-indicator.idle {
+  opacity: 0;
+}
+
+.typing-indicator.active {
+  opacity: 1;
+}
+
 .composer-attachments {
   grid-column: 1 / -1;
   display: flex;
@@ -4360,13 +4366,11 @@ html[data-member-list-resizing] * {
    over the conversation pane. */
 html[data-compact] {
   --compact-chrome-translate-x: calc(-1 * (var(--rail-width) + var(--sidebar-width)));
-  --conversation-nav-min-height: 72px;
   --density-rail-padding: 8px 8px;
   --density-workspace-header-padding: 12px 12px 8px;
   --density-search-margin: 8px 12px 0;
   --density-search-padding: 6px 8px;
   --density-sidebar-nav-padding: 8px 6px;
-  --density-member-list-padding: 0 6px 8px;
   --density-nav-heading-min-height: 24px;
   --density-nav-heading-margin: 6px 6px 2px;
   --density-row-padding: 5px 8px;
@@ -4385,6 +4389,18 @@ html[data-compact] {
   --density-unreads-item-gap: 8px;
   --density-date-separator-margin: 6px 0 4px;
   --density-unread-divider-margin: 8px -8px 6px;
+}
+
+html[data-compact] .typing-indicator {
+  min-height: 13px;
+  font-size: 10px;
+  line-height: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-indicator {
+    transition: none;
+  }
 }
 
 html[data-compact][data-sidebar-position="right"] {

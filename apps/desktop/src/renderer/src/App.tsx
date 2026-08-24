@@ -19,6 +19,8 @@ import {
 
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
+import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
+import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
@@ -36,7 +38,6 @@ import {
 import { ConversationSwitcher } from "./conversation-switcher";
 import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import { MemberListResizeHandle } from "./member-list-resize-handle";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
@@ -329,14 +330,6 @@ export function SignIn({
         <ClientVersion client={client} />
       </section>
     </main>
-  );
-}
-
-function Avatar({ user }: { user: User | undefined }) {
-  return (
-    <span className="avatar" aria-hidden="true">
-      {(user?.displayName ?? "?").slice(0, 1).toUpperCase()}
-    </span>
   );
 }
 
@@ -646,9 +639,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [composerError, setComposerError] = useState("");
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
-  const [showChannelMembers, setShowChannelMembers] = useState(false);
+  const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
   const [showPreferences, setShowPreferences] = useState(false);
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
+  const peopleTrigger = useRef<HTMLButtonElement>(null);
+  const channelMembersTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks" | "files">("chat");
   const [pendingAttachments, setPendingAttachments] = useState<
     Readonly<Record<string, readonly Attachment[]>>
@@ -665,7 +660,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         // Close dialogs before the navigation commits: their close handlers restore focus to
         // their triggers, and that focusin must land before the navigation records its focus
         // intents — after, it would expire them.
-        setShowChannelMembers(false);
+        setPeopleSource(null);
         setShowPreferences(false);
         const result = await runtime.handleNotificationAction(action, context);
         if (result === "discarded") return;
@@ -715,7 +710,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     setAiChannelVisited(true);
     setDestination("ai");
     setPaneView("chat");
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setShowPreferences(false);
     runtime.closeThread();
   }, [runtime]);
@@ -723,7 +718,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const openUnreads = useCallback((): void => {
     setDestination("unreads");
     setPaneView("chat");
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setShowPreferences(false);
     runtime.closeThread();
     chrome.collapse();
@@ -732,7 +727,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const openCommunicationPaths = useCallback((): void => {
     setDestination("admin");
     setPaneView("chat");
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setShowPreferences(false);
     runtime.closeThread();
   }, [runtime]);
@@ -965,6 +960,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   );
   const threadDraft =
     selectedThreadRootId === null ? "" : (threadDrafts[selectedThreadRootId] ?? "");
+  const updateMainDraft = useCallback(
+    (value: string): void => {
+      setDraft(value);
+      const conversationId = runtimeState.selectedConversationId;
+      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
+    },
+    [runtime, runtimeState.selectedConversationId, setDraft],
+  );
+  const updateThreadDraft = useCallback(
+    (value: string): void => {
+      if (selectedThreadRootId === null) return;
+      setThreadDrafts((current) => ({ ...current, [selectedThreadRootId]: value }));
+      const conversationId = runtimeState.selectedConversationId;
+      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
+    },
+    [runtime, runtimeState.selectedConversationId, selectedThreadRootId],
+  );
+  useEffect(() => {
+    const conversationId = runtimeState.selectedConversationId;
+    return () => {
+      if (conversationId !== null) runtime.setTyping(conversationId, false);
+    };
+  }, [runtime, runtimeState.selectedConversationId]);
   const selectedThreadSummary =
     selectedThreadRootId === null ? undefined : threadSummaryByRoot.get(selectedThreadRootId);
   const threadReplyCount = Math.max(selectedThreadSummary?.replyCount ?? 0, threadReplies.length);
@@ -982,7 +1000,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         );
 
   useEffect(() => {
-    setShowChannelMembers(false);
+    setPeopleSource(null);
     setPaneView("chat");
     setTimelineAtLiveTail(false);
     setThreadAtLiveTail(false);
@@ -1571,6 +1589,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setEditingClientMessageId(null);
       }
       clearDraft(submittedDraft);
+      runtime.setTyping(conversationId, false);
       replacePendingAttachments(conversationId, () => []);
       setComposerError("");
     } catch (error) {
@@ -1636,6 +1655,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         delete next[threadRootId];
         return next;
       });
+      runtime.setTyping(conversationId, false);
       if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
     } catch (error) {
@@ -1689,6 +1709,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       }
     },
     [runtime],
+  );
+
+  const messageDirectoryMember = useCallback(
+    (memberId: string) => {
+      setPeopleSource(null);
+      void startDirectMessage(memberId);
+    },
+    [startDirectMessage],
   );
 
   const rebuildLocalCache = (signedIn: SignedInSession): Promise<void> =>
@@ -1794,6 +1822,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
   );
   const currentUserId = bootstrap.currentUser.user.id;
+  const selectedTypingText = typingIndicatorText(
+    runtimeState.selectedConversationId === null
+      ? []
+      : (runtimeState.typingByConversation[runtimeState.selectedConversationId] ?? []),
+    bootstrap.members,
+    currentUserId,
+  );
   const unreadItems = listUnreadConversations(bootstrap.conversations, (summary) =>
     runtime.conversationName(summary),
   );
@@ -1827,9 +1862,19 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             <p className="eyebrow">Workspace</p>
             <h1>{bootstrap.workspace.name}</h1>
           </div>
-          <button className="quiet-button" type="button" onClick={() => void signOut()}>
-            {signingOut ? "…" : "Sign out"}
-          </button>
+          <div className="workspace-header-actions">
+            <button
+              ref={peopleTrigger}
+              className="quiet-button"
+              type="button"
+              onClick={() => setPeopleSource("workspace")}
+            >
+              People
+            </button>
+            <button className="quiet-button" type="button" onClick={() => void signOut()}>
+              {signingOut ? "…" : "Sign out"}
+            </button>
+          </div>
         </header>
 
         <ConversationSwitcher
@@ -1872,121 +1917,123 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           onOpenChange={onWorkspaceDialogOpenChange}
         />
 
-        <div className="sidebar-split">
-          <nav aria-label="Conversations">
-            <div className="nav-heading">
-              <span>Catch up</span>
-            </div>
-            <button
-              className={
-                destination === "unreads"
-                  ? "conversation unreads-destination active"
-                  : "conversation unreads-destination"
-              }
-              type="button"
-              aria-current={destination === "unreads" ? "page" : undefined}
-              onClick={openUnreads}
-            >
-              <span className="conversation-label">
-                <UnreadsIcon />
-                <span className="conversation-label-text">Unreads</span>
-              </span>
-              <ConversationBadge
-                unreadCount={unreadTotals.unreadCount}
-                mentionCount={unreadTotals.mentionCount}
-              />
-            </button>
+        <nav aria-label="Conversations">
+          <div className="nav-heading">
+            <span>Catch up</span>
+          </div>
+          <button
+            className={
+              destination === "unreads"
+                ? "conversation unreads-destination active"
+                : "conversation unreads-destination"
+            }
+            type="button"
+            aria-current={destination === "unreads" ? "page" : undefined}
+            onClick={openUnreads}
+          >
+            <span className="conversation-label">
+              <UnreadsIcon />
+              <span className="conversation-label-text">Unreads</span>
+            </span>
+            <ConversationBadge
+              unreadCount={unreadTotals.unreadCount}
+              mentionCount={unreadTotals.mentionCount}
+            />
+          </button>
 
-            <div className="nav-heading">
-              <span>AI</span>
-            </div>
-            <button
-              className={
-                destination === "ai"
-                  ? "conversation ai-channel-destination active"
-                  : "conversation ai-channel-destination"
-              }
-              type="button"
-              aria-current={destination === "ai" ? "page" : undefined}
-              onClick={openAiChannel}
-            >
-              <span className="conversation-label">
-                <AiChannelIcon />
-                <span className="conversation-label-text">AI Channel</span>
-              </span>
-              <span className="ai-channel-local-badge">Local</span>
-            </button>
+          <div className="nav-heading">
+            <span>AI</span>
+          </div>
+          <button
+            className={
+              destination === "ai"
+                ? "conversation ai-channel-destination active"
+                : "conversation ai-channel-destination"
+            }
+            type="button"
+            aria-current={destination === "ai" ? "page" : undefined}
+            onClick={openAiChannel}
+          >
+            <span className="conversation-label">
+              <AiChannelIcon />
+              <span className="conversation-label-text">AI Channel</span>
+            </span>
+            <span className="ai-channel-local-badge">Local</span>
+          </button>
 
-            {bootstrap.currentUser.role === "owner" && (
-              <>
-                <div className="nav-heading">
-                  <span>Admin</span>
-                </div>
-                <button
-                  className={
-                    destination === "admin"
-                      ? "conversation communication-paths-destination active"
-                      : "conversation communication-paths-destination"
-                  }
-                  type="button"
-                  aria-current={destination === "admin" ? "page" : undefined}
-                  onClick={openCommunicationPaths}
-                >
-                  <span className="conversation-label">
-                    <CommunicationPathsIcon />
-                    <span className="conversation-label-text">Communication paths</span>
-                  </span>
-                </button>
-              </>
-            )}
-
-            <div className="nav-heading">
-              <span>Channels</span>
-              <ChannelCreatePopover
-                canCreateAnnouncements={
-                  bootstrap.featureFlags.announcementChannels &&
-                  bootstrap.currentUser.role === "owner"
-                }
-                onCreate={createChannel}
-                onOpenChange={chrome.onPopoverOpenChange}
-              />
-            </div>
-            {channels.map((summary) => (
+          {bootstrap.currentUser.role === "owner" && (
+            <>
+              <div className="nav-heading">
+                <span>Admin</span>
+              </div>
               <button
                 className={
-                  destination === "workspace" &&
-                  summary.conversation.id === runtimeState.selectedConversationId
-                    ? "conversation active"
-                    : "conversation"
+                  destination === "admin"
+                    ? "conversation communication-paths-destination active"
+                    : "conversation communication-paths-destination"
                 }
                 type="button"
-                key={summary.conversation.id}
-                onClick={() => selectConversation(summary.conversation.id)}
+                aria-current={destination === "admin" ? "page" : undefined}
+                onClick={openCommunicationPaths}
               >
-                <span
-                  className="conversation-label conversation-label-channel"
-                  title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
-                >
-                  <ChannelIcon
-                    access={summary.conversation.access}
-                    channelMode={summary.conversation.channelMode}
-                  />
-                  <span className="conversation-label-text">
-                    {summary.conversation.name}
-                    {summary.conversation.isArchived ? " (archived)" : ""}
-                  </span>
+                <span className="conversation-label">
+                  <CommunicationPathsIcon />
+                  <span className="conversation-label-text">Communication paths</span>
                 </span>
-                <ConversationBadge
-                  unreadCount={summary.unreadCount}
-                  mentionCount={summary.mentionCount}
-                />
               </button>
-            ))}
+            </>
+          )}
 
-            <div className="nav-heading">
-              <span>Direct messages</span>
-            </div>
-            {directMessages.map((summary) => (
+          <div className="nav-heading">
+            <span>Channels</span>
+            <ChannelCreatePopover
+              canCreateAnnouncements={
+                bootstrap.featureFlags.announcementChannels &&
+                bootstrap.currentUser.role === "owner"
+              }
+              onCreate={createChannel}
+              onOpenChange={chrome.onPopoverOpenChange}
+            />
+          </div>
+          {channels.map((summary) => (
+            <button
+              className={
+                destination === "workspace" &&
+                summary.conversation.id === runtimeState.selectedConversationId
+                  ? "conversation active"
+                  : "conversation"
+              }
+              type="button"
+              key={summary.conversation.id}
+              onClick={() => selectConversation(summary.conversation.id)}
+            >
+              <span
+                className="conversation-label conversation-label-channel"
+                title={`${summary.conversation.name}${summary.conversation.isArchived ? " (archived)" : ""}`}
+              >
+                <ChannelIcon
+                  access={summary.conversation.access}
+                  channelMode={summary.conversation.channelMode}
+                />
+                <span className="conversation-label-text">
+                  {summary.conversation.name}
+                  {summary.conversation.isArchived ? " (archived)" : ""}
+                </span>
+              </span>
+              <ConversationBadge
+                unreadCount={summary.unreadCount}
+                mentionCount={summary.mentionCount}
+              />
+            </button>
+          ))}
+
+          <div className="nav-heading">
+            <span>Direct messages</span>
+          </div>
+          {directMessages.map((summary) => {
+            const participantId =
+              summary.participantIds.find((id) => id !== currentUserId) ?? currentUserId;
+            return (
               <button
                 className={
                   destination === "workspace" &&
@@ -2003,6 +2050,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   title={runtime.conversationName(summary)}
                 >
                   <DirectMessageIcon />
+                  <PresenceIndicator
+                    state={runtimeState.presenceByUser[participantId] ?? "offline"}
+                  />
                   <span className="conversation-label-text">
                     {runtime.conversationName(summary)}
                   </span>
@@ -2012,28 +2062,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   mentionCount={summary.mentionCount}
                 />
               </button>
-            ))}
-          </nav>
-
-          <MemberListResizeHandle />
-
-          <section id="workspace-members" className="member-list" aria-label="Members">
-            <p className="nav-heading">Members</p>
-            {bootstrap.members.map((member) => (
-              <button
-                type="button"
-                key={member.id}
-                onClick={() => void startDirectMessage(member.id)}
-              >
-                <Avatar user={member} />
-                <span>
-                  {member.displayName}
-                  {member.id === currentUserId ? " (you)" : ""}
-                </span>
-              </button>
-            ))}
-          </section>
-        </div>
+            );
+          })}
+        </nav>
 
         <footer className="sidebar-footer">
           <button
@@ -2133,9 +2164,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               {selectedSummary.conversation.kind === "channel" && (
                 <>
                   <button
+                    ref={channelMembersTrigger}
                     className="quiet-button"
                     type="button"
-                    onClick={() => setShowChannelMembers(true)}
+                    onClick={() => setPeopleSource("channel")}
                   >
                     {selectedSummary.conversation.access === "members"
                       ? `${String(selectedSummary.participantIds.length)} members`
@@ -2186,7 +2218,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 inputRef={attachComposerInput}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                onDraftChange={setDraft}
+                typingText={selectedTypingText}
+                onDraftChange={updateMainDraft}
                 onAttach={() => attachToComposer(selectedSummary.conversation.id)}
                 onRemoveAttachment={(attachmentId) =>
                   replacePendingAttachments(selectedSummary.conversation.id, (current) =>
@@ -2381,7 +2414,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 currentUserId={currentUserId}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                onDraftChange={setDraft}
+                typingText={selectedTypingText}
+                onDraftChange={updateMainDraft}
                 onAttach={
                   selectedSummary === undefined
                     ? undefined
@@ -2588,12 +2622,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
-              onDraftChange={(value) =>
-                setThreadDrafts((current) => ({
-                  ...current,
-                  [selectedThreadRootId]: value,
-                }))
-              }
+              typingText={selectedTypingText}
+              onDraftChange={updateThreadDraft}
               onAttach={
                 threadComposerKey === null ? undefined : () => attachToComposer(threadComposerKey)
               }
@@ -2608,14 +2638,32 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           )}
         </aside>
       )}
-      {showChannelMembers && selectedSummary?.conversation.kind === "channel" && (
+      {peopleSource === "workspace" && (
         <ChannelMembersDialog
+          source="workspace"
+          currentUserId={currentUserId}
+          workspaceMembers={bootstrap.members}
+          presenceByUser={runtimeState.presenceByUser}
+          triggerRef={peopleTrigger}
+          onClose={() => setPeopleSource(null)}
+          onMessage={messageDirectoryMember}
+          onOpenChange={chrome.onPopoverOpenChange}
+        />
+      )}
+      {peopleSource === "channel" && selectedSummary?.conversation.kind === "channel" && (
+        <ChannelMembersDialog
+          source="channel"
           channelName={
             selectedSummary.conversation.name ?? selectedSummary.conversation.slug ?? "channel"
           }
           conversationId={selectedSummary.conversation.id}
+          currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
-          onClose={() => setShowChannelMembers(false)}
+          presenceByUser={runtimeState.presenceByUser}
+          triggerRef={channelMembersTrigger}
+          onClose={() => setPeopleSource(null)}
+          onMessage={messageDirectoryMember}
+          onOpenChange={chrome.onPopoverOpenChange}
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}
