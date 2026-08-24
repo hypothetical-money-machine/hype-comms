@@ -19,6 +19,7 @@ import {
 
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
+import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
@@ -960,6 +961,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   );
   const threadDraft =
     selectedThreadRootId === null ? "" : (threadDrafts[selectedThreadRootId] ?? "");
+  const updateMainDraft = useCallback(
+    (value: string): void => {
+      setDraft(value);
+      const conversationId = runtimeState.selectedConversationId;
+      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
+    },
+    [runtime, runtimeState.selectedConversationId, setDraft],
+  );
+  const updateThreadDraft = useCallback(
+    (value: string): void => {
+      if (selectedThreadRootId === null) return;
+      setThreadDrafts((current) => ({ ...current, [selectedThreadRootId]: value }));
+      const conversationId = runtimeState.selectedConversationId;
+      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
+    },
+    [runtime, runtimeState.selectedConversationId, selectedThreadRootId],
+  );
+  useEffect(() => {
+    const conversationId = runtimeState.selectedConversationId;
+    return () => {
+      if (conversationId !== null) runtime.setTyping(conversationId, false);
+    };
+  }, [runtime, runtimeState.selectedConversationId]);
   const selectedThreadSummary =
     selectedThreadRootId === null ? undefined : threadSummaryByRoot.get(selectedThreadRootId);
   const threadReplyCount = Math.max(selectedThreadSummary?.replyCount ?? 0, threadReplies.length);
@@ -1566,6 +1590,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setEditingClientMessageId(null);
       }
       clearDraft(submittedDraft);
+      runtime.setTyping(conversationId, false);
       replacePendingAttachments(conversationId, () => []);
       setComposerError("");
     } catch (error) {
@@ -1631,6 +1656,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         delete next[threadRootId];
         return next;
       });
+      runtime.setTyping(conversationId, false);
       if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
     } catch (error) {
@@ -1797,6 +1823,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
   );
   const currentUserId = bootstrap.currentUser.user.id;
+  const selectedTypingText = typingIndicatorText(
+    runtimeState.selectedConversationId === null
+      ? []
+      : (runtimeState.typingByConversation[runtimeState.selectedConversationId] ?? []),
+    bootstrap.members,
+    currentUserId,
+  );
   const unreadItems = listUnreadConversations(bootstrap.conversations, (summary) =>
     runtime.conversationName(summary),
   );
@@ -1998,31 +2031,40 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           <div className="nav-heading">
             <span>Direct messages</span>
           </div>
-          {directMessages.map((summary) => (
-            <button
-              className={
-                destination === "workspace" &&
-                summary.conversation.id === runtimeState.selectedConversationId
-                  ? "conversation active"
-                  : "conversation"
-              }
-              type="button"
-              key={summary.conversation.id}
-              onClick={() => selectConversation(summary.conversation.id)}
-            >
-              <span
-                className="conversation-label conversation-label-direct-message"
-                title={runtime.conversationName(summary)}
+          {directMessages.map((summary) => {
+            const participantId =
+              summary.participantIds.find((id) => id !== currentUserId) ?? currentUserId;
+            return (
+              <button
+                className={
+                  destination === "workspace" &&
+                  summary.conversation.id === runtimeState.selectedConversationId
+                    ? "conversation active"
+                    : "conversation"
+                }
+                type="button"
+                key={summary.conversation.id}
+                onClick={() => selectConversation(summary.conversation.id)}
               >
-                <DirectMessageIcon />
-                <span className="conversation-label-text">{runtime.conversationName(summary)}</span>
-              </span>
-              <ConversationBadge
-                unreadCount={summary.unreadCount}
-                mentionCount={summary.mentionCount}
-              />
-            </button>
-          ))}
+                <span
+                  className="conversation-label conversation-label-direct-message"
+                  title={runtime.conversationName(summary)}
+                >
+                  <DirectMessageIcon />
+                  <PresenceIndicator
+                    state={runtimeState.presenceByUser[participantId] ?? "offline"}
+                  />
+                  <span className="conversation-label-text">
+                    {runtime.conversationName(summary)}
+                  </span>
+                </span>
+                <ConversationBadge
+                  unreadCount={summary.unreadCount}
+                  mentionCount={summary.mentionCount}
+                />
+              </button>
+            );
+          })}
         </nav>
 
         <footer className="sidebar-footer">
@@ -2177,7 +2219,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 inputRef={attachComposerInput}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                onDraftChange={setDraft}
+                typingText={selectedTypingText}
+                onDraftChange={updateMainDraft}
                 onAttach={() => attachToComposer(selectedSummary.conversation.id)}
                 onRemoveAttachment={(attachmentId) =>
                   replacePendingAttachments(selectedSummary.conversation.id, (current) =>
@@ -2372,7 +2415,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 currentUserId={currentUserId}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                onDraftChange={setDraft}
+                typingText={selectedTypingText}
+                onDraftChange={updateMainDraft}
                 onAttach={
                   selectedSummary === undefined
                     ? undefined
@@ -2579,12 +2623,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
-              onDraftChange={(value) =>
-                setThreadDrafts((current) => ({
-                  ...current,
-                  [selectedThreadRootId]: value,
-                }))
-              }
+              typingText={selectedTypingText}
+              onDraftChange={updateThreadDraft}
               onAttach={
                 threadComposerKey === null ? undefined : () => attachToComposer(threadComposerKey)
               }
@@ -2604,6 +2644,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           source="workspace"
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
+          presenceByUser={runtimeState.presenceByUser}
           triggerRef={peopleTrigger}
           onClose={() => setPeopleSource(null)}
           onMessage={messageDirectoryMember}
@@ -2619,6 +2660,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           conversationId={selectedSummary.conversation.id}
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
+          presenceByUser={runtimeState.presenceByUser}
           triggerRef={channelMembersTrigger}
           onClose={() => setPeopleSource(null)}
           onMessage={messageDirectoryMember}

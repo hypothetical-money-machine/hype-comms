@@ -50,6 +50,7 @@ import {
   notificationStateSchema,
   realtimeAcknowledgementSchema,
   realtimeSessionScopeSchema,
+  scopedTypingActivityUpdateSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -65,6 +66,7 @@ import {
   type NotificationState,
   type ProductRealtimeEvent,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
   type ThemeState,
   type UpdateState,
 } from "@hype-comms/contracts";
@@ -78,6 +80,7 @@ import {
   net,
   Notification,
   protocol,
+  powerMonitor,
   safeStorage,
   screen,
   session,
@@ -179,6 +182,7 @@ import { authCapabilitiesForSession } from "./session-auth-lifecycle";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
+import { PresenceController } from "./presence-controller";
 import {
   BeforeQuitCoordinator,
   FinalQuitCoordinator,
@@ -334,6 +338,8 @@ let authKitPendingIntentGeneration: number | null = null;
 let authKitStartPromise: Promise<void> | null = null;
 let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
+let presenceController: PresenceController | null = null;
+let stopPowerMonitorPresence: (() => void) | null = null;
 let macWindowlessRealtimeActive = false;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
@@ -549,6 +555,10 @@ function evaluateWorkspaceNotification(event: ProductRealtimeEvent): void {
 function deliverWorkspaceEvent(frame: ScopedProductRealtimeEvent): boolean {
   evaluateWorkspaceNotification(frame.event);
   return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, frame);
+}
+
+function deliverWorkspaceActivity(frame: ScopedEphemeralActivityFrame): boolean {
+  return sendToRenderer(DESKTOP_CHANNELS.workspaceActivity, frame);
 }
 
 function observeWindowlessWorkspaceEvent(event: ProductRealtimeEvent): void {
@@ -1919,6 +1929,12 @@ function registerIpcHandlers(): void {
     workspaceRealtime?.acknowledge(realtimeAcknowledgementSchema.parse(value));
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceActivityTypingSet);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceActivityTypingSet, (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace activity sender");
+    workspaceRealtime?.setTyping(scopedTypingActivityUpdateSchema.parse(value));
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.realtimeStateGet);
   ipcMain.handle(DESKTOP_CHANNELS.realtimeStateGet, (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime state sender");
@@ -2536,9 +2552,23 @@ if (!hasSingleInstanceLock) {
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
         transport: workspaceTransport,
         onEvent: deliverWorkspaceEvent,
+        onActivity: deliverWorkspaceActivity,
         onWindowlessEvent: observeWindowlessWorkspaceEvent,
         onState: deliverRealtimeState,
       });
+      presenceController = new PresenceController({
+        getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+        publish: (state) => workspaceRealtime?.setPresence(state),
+      });
+      const handleSuspend = (): void => presenceController?.suspend();
+      const handleResume = (): void => presenceController?.resume();
+      powerMonitor.on("suspend", handleSuspend);
+      powerMonitor.on("resume", handleResume);
+      stopPowerMonitorPresence = () => {
+        powerMonitor.removeListener("suspend", handleSuspend);
+        powerMonitor.removeListener("resume", handleResume);
+      };
+      presenceController.start();
       cacheCrypto = new CacheCrypto({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
@@ -2758,6 +2788,10 @@ if (!hasSingleInstanceLock) {
     },
     cleanup: () => {
       macWindowlessRealtimeActive = false;
+      stopPowerMonitorPresence?.();
+      stopPowerMonitorPresence = null;
+      presenceController?.stop();
+      presenceController = null;
       workspaceRealtime?.resetSession();
       notificationScope = null;
       notificationActiveGeneration = null;

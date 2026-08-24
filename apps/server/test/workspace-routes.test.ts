@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
+  EPHEMERAL_ACTIVITY_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -551,7 +552,8 @@ describe("event capability routes", () => {
       cookie: `hype_comms_session=${sessionToken}`,
       "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
-        `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}`,
+        `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ` +
+        EPHEMERAL_ACTIVITY_CAPABILITY,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -584,6 +586,7 @@ describe("event capability routes", () => {
       true,
       true,
       false,
+      true,
     );
   });
 

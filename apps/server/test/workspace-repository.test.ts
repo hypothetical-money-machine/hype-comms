@@ -2506,11 +2506,13 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: false,
       messageRetractEvents: false,
       memberProfiles: false,
+      ephemeralActivity: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
     const capable = await repository.issueRealtimeTicket(
       owner,
+      true,
       true,
       true,
       true,
@@ -2531,6 +2533,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: true,
       messageRetractEvents: true,
       memberProfiles: true,
+      ephemeralActivity: true,
     });
   });
 
