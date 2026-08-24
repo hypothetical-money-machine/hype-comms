@@ -19,11 +19,22 @@ import { integerOption, parseCommandArguments, requirePositionals, stringOption 
 import { clientFromContext } from "../context.js";
 import { UsageError } from "../errors.js";
 import { writeResult } from "../output.js";
+import {
+  PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE,
+  PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES,
+  PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE,
+  privateDownloadConfigMessageSchema,
+  privateDownloadContinuationMessageSchema,
+  privateDownloadWorkerMessageSchema,
+} from "../private-download-protocol.js";
+import type {
+  PrivateDownloadContinuationMessage,
+  PrivateDownloadResultMessage,
+} from "../private-download-protocol.js";
 import { resolveConversationSelector } from "../selectors.js";
 import type { CommandContext } from "../types.js";
 
 const ATTACHMENTS_HEADER = { "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY } as const;
-const MAX_WORKER_CONFIG_BYTES = 1 * 1_024 * 1_024;
 const MAX_WORKER_OUTPUT_BYTES = 16 * 1_024;
 
 interface FileIdentity {
@@ -99,12 +110,27 @@ function privateDownloadWorkerUrl(): URL {
     : new URL("../private-download-worker.ts", import.meta.url);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+function invalidWorkerMessageError(message: unknown): string {
+  // The strict shared schema has already rejected this value. Inspect only its discriminator so
+  // existing protocol diagnostics remain stable; no rejected field is used as data.
+  if (typeof message !== "object" || message === null || Array.isArray(message)) {
+    return "The private download worker returned an invalid message";
+  }
+  if (!("type" in message) || typeof message.type !== "string") {
+    return "The private download worker returned an invalid message";
+  }
+  if (message.type === "phase") {
+    return "The private download worker returned an invalid phase";
+  }
+  if (message.type === "result") {
+    if (!("ok" in message) || typeof message.ok !== "boolean") {
+      return "The private download worker returned an invalid response";
+    }
+    return message.ok
+      ? "The private download worker did not exit cleanly"
+      : "The private download worker returned an invalid failure";
+  }
+  return "The private download worker returned an unknown message";
 }
 
 async function runPrivateDownloadWorker(
@@ -114,7 +140,7 @@ async function runPrivateDownloadWorker(
   directorySnapshot: DirectorySnapshot,
   bytes: Uint8Array,
 ): Promise<void> {
-  const configMessage = {
+  const configMessage = privateDownloadConfigMessageSchema.safeParse({
     type: "config",
     config: {
       byteLength: bytes.byteLength,
@@ -133,8 +159,11 @@ async function runPrivateDownloadWorker(
       targetName,
       temporaryName,
     },
-  } as const;
-  if (Buffer.byteLength(JSON.stringify(configMessage)) > MAX_WORKER_CONFIG_BYTES) {
+  });
+  if (!configMessage.success) {
+    throw new Error("The private download worker configuration is invalid");
+  }
+  if (Buffer.byteLength(JSON.stringify(configMessage.data)) > PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES) {
     throw invalidOutputPath("The output directory is too deep to validate safely");
   }
 
@@ -177,38 +206,33 @@ async function runPrivateDownloadWorker(
   });
 
   let protocolError: Error | undefined;
-  let response: unknown;
+  let response: PrivateDownloadResultMessage | undefined;
   let completedPhases = 0;
   const failProtocol = (message: string): void => {
     protocolError ??= new Error(message);
     child.kill();
   };
-  const sendControl = (message: Record<string, unknown>): void => {
-    child.send?.(message, (error) => {
+  const sendControl = (message: PrivateDownloadContinuationMessage): void => {
+    const parsed = privateDownloadContinuationMessageSchema.parse(message);
+    child.send?.(parsed, (error) => {
       if (error !== null) failProtocol("The private download worker control channel failed");
     });
   };
   child.on("message", (message: unknown) => {
-    if (!isRecord(message) || typeof message.type !== "string") {
-      failProtocol("The private download worker returned an invalid message");
+    const parsed = privateDownloadWorkerMessageSchema.safeParse(message);
+    if (!parsed.success) {
+      failProtocol(invalidWorkerMessageError(message));
       return;
     }
-    if (message.type === "phase") {
-      if (
-        !hasExactKeys(message, ["phase", "type"]) ||
-        typeof message.phase !== "string" ||
-        (message.phase !== "temporary-ready" && message.phase !== "target-linked")
-      ) {
-        failProtocol("The private download worker returned an invalid phase");
-        return;
-      }
-      if (message.phase === "temporary-ready" && completedPhases === 0) {
+    const workerMessage = parsed.data;
+    if (workerMessage.type === "phase") {
+      if (workerMessage.phase === "temporary-ready" && completedPhases === 0) {
         completedPhases = 1;
         child.stdin?.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
         sendControl({ type: "continue", phase: "temporary-ready" });
         return;
       }
-      if (message.phase === "target-linked" && completedPhases === 1) {
+      if (workerMessage.phase === "target-linked" && completedPhases === 1) {
         completedPhases = 2;
         sendControl({ type: "continue", phase: "target-linked" });
         return;
@@ -216,15 +240,14 @@ async function runPrivateDownloadWorker(
       failProtocol("The private download worker phases arrived out of order");
       return;
     }
-    if (message.type === "result") {
+    if (workerMessage.type === "result") {
       if (response !== undefined) {
         failProtocol("The private download worker returned more than one result");
         return;
       }
-      response = message;
+      response = workerMessage;
       return;
     }
-    failProtocol("The private download worker returned an unknown message");
   });
 
   const completion = new Promise<{
@@ -236,7 +259,7 @@ async function runPrivateDownloadWorker(
   });
   try {
     await new Promise<void>((resolvePromise, reject) => {
-      child.send?.(configMessage, (error) => {
+      child.send?.(configMessage.data, (error) => {
         if (error === null) resolvePromise();
         else reject(error);
       });
@@ -252,33 +275,23 @@ async function runPrivateDownloadWorker(
   if (protocolError !== undefined) throw protocolError;
   if (stdoutBytes !== 0) throw new Error("The private download worker wrote unexpected output");
 
-  if (!isRecord(response) || response.type !== "result" || typeof response.ok !== "boolean") {
+  if (response === undefined) {
     throw new Error("The private download worker returned an invalid response");
   }
   if (response.ok) {
-    if (
-      result.code !== 0 ||
-      result.signal !== null ||
-      completedPhases !== 2 ||
-      !hasExactKeys(response, ["ok", "type"])
-    ) {
+    if (result.code !== 0 || result.signal !== null || completedPhases !== 2) {
       throw new Error("The private download worker did not exit cleanly");
     }
     return;
   }
-  if (
-    result.code === 0 ||
-    typeof response.code !== "string" ||
-    typeof response.message !== "string" ||
-    !hasExactKeys(response, ["code", "message", "ok", "type"])
-  ) {
+  if (result.code === 0) {
     throw new Error("The private download worker returned an invalid failure");
   }
   if (response.code === "OUTPUT_EXISTS") {
-    throw new UsageError(response.message, "OUTPUT_EXISTS");
+    throw new UsageError(PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE, "OUTPUT_EXISTS");
   }
   if (response.code === "INVALID_OUTPUT_PATH") {
-    throw invalidOutputPath(response.message);
+    throw invalidOutputPath(PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE);
   }
   throw new Error("The private download worker failed");
 }

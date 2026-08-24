@@ -62,6 +62,31 @@ afterEach(() => {
 });
 
 describe("private attachment publication under directory replacement", () => {
+  it("does not expose a path supplied by the worker in a failure message", async () => {
+    const cwd = await directory();
+    const suppliedPath = "/private/example/should-not-be-exposed";
+
+    race.afterSpawn = (child) => {
+      race.afterSpawn = undefined;
+      queueMicrotask(() => {
+        child.emit("message", {
+          type: "result",
+          ok: false,
+          code: "INVALID_OUTPUT_PATH",
+          message: suppliedPath,
+        });
+        child.kill();
+      });
+    };
+
+    await expect(
+      savePrivateDownload(cwd, "download.bin", new TextEncoder().encode("private attachment")),
+    ).rejects.toMatchObject({
+      code: "INVALID_OUTPUT_PATH",
+      message: "The output directory changed while the file was being saved",
+    });
+  });
+
   it("does not write through a parent replaced after validation but before worker startup", async () => {
     const cwd = await directory();
     const checkedDirectory = join(cwd, "checked");

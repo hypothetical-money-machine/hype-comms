@@ -2,16 +2,28 @@ import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { link, lstat, open, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { isAbsolute, join, parse } from "node:path";
+import { join } from "node:path";
 
-const MAX_CONFIG_BYTES = 1 * 1_024 * 1_024;
+import {
+  PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE,
+  PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES,
+  PRIVATE_DOWNLOAD_MAX_INPUT_BYTES,
+  PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE,
+  privateDownloadConfigMessageSchema,
+  privateDownloadContinuationMessageSchema,
+  privateDownloadWorkerMessageSchema,
+} from "./private-download-protocol.ts";
+import type {
+  PrivateDownloadFailureCode,
+  PrivateDownloadPhase,
+  PrivateDownloadPhaseMessage,
+  PrivateDownloadResultMessage,
+} from "./private-download-protocol.ts";
+
 const PRIVATE_FILE_MODE = 0o600;
-const MAX_INPUT_BYTES = 25 * 1_024 * 1_024;
 
 // The parent process starts this worker with cwd set to the validated output directory. Relative
 // operations remain anchored to that directory inode even if its absolute path is later replaced.
-
-type FailureCode = "INVALID_OUTPUT_PATH" | "OUTPUT_EXISTS" | "WORKER_FAILURE";
 
 interface FileIdentity {
   readonly dev: bigint;
@@ -39,41 +51,12 @@ interface WorkerConfig {
 }
 
 class WorkerFailure extends Error {
-  readonly code: FailureCode;
+  readonly code: PrivateDownloadFailureCode;
 
-  constructor(code: FailureCode, message: string) {
+  constructor(code: PrivateDownloadFailureCode, message: string) {
     super(message);
     this.code = code;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
-}
-
-function parseIdentity(value: unknown): bigint {
-  if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value)) {
-    throw new WorkerFailure("WORKER_FAILURE", "The download worker configuration is invalid");
-  }
-  return BigInt(value);
-}
-
-function parseName(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value === "" ||
-    value === "." ||
-    value === ".." ||
-    value.includes("\0") ||
-    parse(value).base !== value
-  ) {
-    throw new WorkerFailure("WORKER_FAILURE", "The download worker filename is invalid");
-  }
-  return value;
 }
 
 function parseConfig(message: unknown): WorkerConfig {
@@ -83,62 +66,31 @@ function parseConfig(message: unknown): WorkerConfig {
   } catch {
     throw new WorkerFailure("WORKER_FAILURE", "The download worker configuration is invalid");
   }
-  if (Buffer.byteLength(encoded) > MAX_CONFIG_BYTES) {
+  if (Buffer.byteLength(encoded) > PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES) {
     throw new WorkerFailure("WORKER_FAILURE", "The download worker configuration is too large");
   }
-  if (
-    !isRecord(message) ||
-    !hasExactKeys(message, ["config", "type"]) ||
-    message.type !== "config" ||
-    !isRecord(message.config)
-  ) {
+  const parsed = privateDownloadConfigMessageSchema.safeParse(message);
+  if (!parsed.success) {
     throw new WorkerFailure("WORKER_FAILURE", "The download worker configuration is invalid");
   }
-  const decoded = message.config;
-  if (
-    !hasExactKeys(decoded, ["byteLength", "directorySnapshot", "targetName", "temporaryName"]) ||
-    !Number.isSafeInteger(decoded.byteLength) ||
-    (decoded.byteLength as number) < 0 ||
-    (decoded.byteLength as number) > MAX_INPUT_BYTES ||
-    !isRecord(decoded.directorySnapshot) ||
-    !hasExactKeys(decoded.directorySnapshot, ["components", "root"]) ||
-    !isRecord(decoded.directorySnapshot.root) ||
-    !hasExactKeys(decoded.directorySnapshot.root, ["dev", "ino", "path"]) ||
-    typeof decoded.directorySnapshot.root.path !== "string" ||
-    decoded.directorySnapshot.root.path.length === 0 ||
-    decoded.directorySnapshot.root.path.includes("\0") ||
-    !isAbsolute(decoded.directorySnapshot.root.path) ||
-    !Array.isArray(decoded.directorySnapshot.components) ||
-    decoded.directorySnapshot.components.length > 16_384
-  ) {
-    throw new WorkerFailure("WORKER_FAILURE", "The download worker configuration is invalid");
-  }
-  const components = decoded.directorySnapshot.components.map((component: unknown) => {
-    if (
-      !isRecord(component) ||
-      !hasExactKeys(component, ["dev", "ino", "name"]) ||
-      typeof component.name !== "string"
-    ) {
-      throw new WorkerFailure("WORKER_FAILURE", "The directory snapshot is invalid");
-    }
-    return {
-      name: parseName(component.name),
-      dev: parseIdentity(component.dev),
-      ino: parseIdentity(component.ino),
-    };
-  });
+  const decoded = parsed.data.config;
+  const components = decoded.directorySnapshot.components.map((component) => ({
+    name: component.name,
+    dev: BigInt(component.dev),
+    ino: BigInt(component.ino),
+  }));
   return {
-    byteLength: decoded.byteLength as number,
+    byteLength: decoded.byteLength,
     directorySnapshot: {
       root: {
         path: decoded.directorySnapshot.root.path,
-        dev: parseIdentity(decoded.directorySnapshot.root.dev),
-        ino: parseIdentity(decoded.directorySnapshot.root.ino),
+        dev: BigInt(decoded.directorySnapshot.root.dev),
+        ino: BigInt(decoded.directorySnapshot.root.ino),
       },
       components,
     },
-    targetName: parseName(decoded.targetName),
-    temporaryName: parseName(decoded.temporaryName),
+    targetName: decoded.targetName,
+    temporaryName: decoded.temporaryName,
   };
 }
 
@@ -147,10 +99,7 @@ function hasIdentity(info: BigIntStats, identity: FileIdentity): boolean {
 }
 
 function invalidPath(): WorkerFailure {
-  return new WorkerFailure(
-    "INVALID_OUTPUT_PATH",
-    "The output directory changed while the file was being saved",
-  );
+  return new WorkerFailure("INVALID_OUTPUT_PATH", PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE);
 }
 
 async function assertDirectorySnapshot(
@@ -233,19 +182,25 @@ async function receiveControlMessage(): Promise<unknown> {
   });
 }
 
-async function sendControlMessage(message: Record<string, unknown>): Promise<void> {
+async function sendControlMessage(
+  message: PrivateDownloadPhaseMessage | PrivateDownloadResultMessage,
+): Promise<void> {
   if (process.send === undefined || !process.connected) {
     throw new WorkerFailure("WORKER_FAILURE", "The worker control channel is unavailable");
   }
+  const parsed = privateDownloadWorkerMessageSchema.safeParse(message);
+  if (!parsed.success) {
+    throw new WorkerFailure("WORKER_FAILURE", "The worker control message is invalid");
+  }
   await new Promise<void>((resolve, reject) => {
-    process.send?.(message, (error) => {
+    process.send?.(parsed.data, (error) => {
       if (error === null) resolve();
       else reject(error);
     });
   });
 }
 
-async function checkpoint(phase: "target-linked" | "temporary-ready"): Promise<void> {
+async function checkpoint(phase: PrivateDownloadPhase): Promise<void> {
   const continuation = receiveControlMessage();
   try {
     await sendControlMessage({ type: "phase", phase });
@@ -254,13 +209,8 @@ async function checkpoint(phase: "target-linked" | "temporary-ready"): Promise<v
     void continuation.catch(() => undefined);
     throw error;
   }
-  const message = await continuation;
-  if (
-    !isRecord(message) ||
-    !hasExactKeys(message, ["phase", "type"]) ||
-    message.type !== "continue" ||
-    message.phase !== phase
-  ) {
+  const message = privateDownloadContinuationMessageSchema.safeParse(await continuation);
+  if (!message.success || message.data.phase !== phase) {
     throw new WorkerFailure("WORKER_FAILURE", "The worker continuation is invalid");
   }
 }
@@ -271,7 +221,7 @@ async function readInput(expectedBytes: number): Promise<Buffer> {
   for await (const chunk of process.stdin) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
     total += bytes.byteLength;
-    if (total > expectedBytes || total > MAX_INPUT_BYTES) {
+    if (total > expectedBytes || total > PRIVATE_DOWNLOAD_MAX_INPUT_BYTES) {
       throw new WorkerFailure("WORKER_FAILURE", "The download worker received too many bytes");
     }
     chunks.push(bytes);
@@ -296,7 +246,7 @@ async function publish(config: WorkerConfig): Promise<void> {
     await assertDirectorySnapshot(directoryHandle, config.directorySnapshot);
     try {
       await lstat(config.targetName);
-      throw new WorkerFailure("OUTPUT_EXISTS", "The output path already exists");
+      throw new WorkerFailure("OUTPUT_EXISTS", PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -327,7 +277,7 @@ async function publish(config: WorkerConfig): Promise<void> {
       targetPublished = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new WorkerFailure("OUTPUT_EXISTS", "The output path already exists");
+        throw new WorkerFailure("OUTPUT_EXISTS", PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE);
       }
       throw error;
     }
