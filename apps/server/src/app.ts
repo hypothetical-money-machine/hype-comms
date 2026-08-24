@@ -14,6 +14,7 @@ import type { WorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
+import { EphemeralActivityHub } from "./modules/realtime/activity-hub.js";
 import type { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -47,6 +48,7 @@ export interface BuildAppOptions {
   readonly workspace?: {
     readonly repository: WorkspaceRepository;
     readonly realtimeHub: RealtimeEventHub;
+    readonly activityHub?: EphemeralActivityHub;
   };
   readonly webRoot?: string;
 }
@@ -59,6 +61,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
     logger: options.logger ?? false,
     ...(trustProxy === undefined ? {} : { trustProxy }),
   });
+  const activityHub =
+    options.workspace === undefined
+      ? undefined
+      : (options.workspace.activityHub ??
+        new EphemeralActivityHub((workspaceId, userId, conversationId) =>
+          options.workspace!.repository.canViewConversation(workspaceId, userId, conversationId),
+        ));
 
   registerErrorHandling(app);
   app.addHook("onRequest", async (request, reply) => {
@@ -134,6 +143,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
                 options.workspace!.realtimeHub.subscribe(workspaceId, listener),
               revalidate: (principal) =>
                 options.workspace!.repository.revalidateRealtimePrincipal(principal),
+              ...(activityHub === undefined ? {} : { activityHub }),
               ...(options.metrics === undefined ? {} : { metrics: options.metrics.registry }),
             }),
       });
@@ -180,6 +190,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   }
 
   if (options.workspace !== undefined) {
+    app.addHook("onClose", async () => activityHub?.close());
     app.addHook("onClose", async () => options.workspace?.realtimeHub.close());
   }
 

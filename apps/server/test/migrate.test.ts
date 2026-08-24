@@ -107,6 +107,7 @@ describeWithPostgres("runMigrations", () => {
           "0020_message_attachments.sql",
           "0021_message_retract.sql",
           "0022_member_title.sql",
+          "0023_ephemeral_activity_capability.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -138,6 +139,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0020_message_attachments.sql" },
         { filename: "0021_message_retract.sql" },
         { filename: "0022_member_title.sql" },
+        { filename: "0023_ephemeral_activity_capability.sql" },
       ]);
 
       const userId = randomUUID();
