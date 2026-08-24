@@ -128,6 +128,19 @@ describe("native notification eligibility policy", () => {
     ).toEqual({ decision: "eligible", reason: "verified_mention", presentation: "native" });
   });
 
+  it("notifies for group direct messages and preserves mention precedence", () => {
+    const groupMessage = { ...DM_EVENT, conversationKind: "group_direct_message" } as const;
+
+    expect(evaluateNotificationPolicy(withEvent(groupMessage))).toEqual({
+      decision: "eligible",
+      reason: "direct_message",
+      presentation: "native",
+    });
+    expect(
+      evaluateNotificationPolicy(withEvent({ ...groupMessage, mentionedUserIds: [USER_ID] })),
+    ).toEqual({ decision: "eligible", reason: "verified_mention", presentation: "native" });
+  });
+
   it("notifies for a verified mention in a channel", () => {
     expect(
       evaluateNotificationPolicy(
@@ -304,15 +317,6 @@ describe("native notification eligibility policy", () => {
       name: "missing conversation projection",
       input: { ...BASE_INPUT, conversationState: "unknown" },
       reason: "conversation_metadata_unavailable",
-    },
-    {
-      name: "reserved group DM",
-      input: withEvent({
-        ...DM_EVENT,
-        conversationKind: "group_direct_message",
-        mentionedUserIds: [USER_ID],
-      }),
-      reason: "unsupported_group_direct_message",
     },
     {
       name: "null author",

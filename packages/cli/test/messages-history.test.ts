@@ -2,7 +2,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { type AgentContextHistoryResponse, ATTACHMENTS_CAPABILITY } from "@hype-comms/contracts";
+import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  type AgentContextHistoryResponse,
+  ATTACHMENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
+} from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli, HELP } from "../src/cli.js";
@@ -53,7 +59,7 @@ describe("messages history", () => {
         `https://chat.example.test/v1/conversations/${CONVERSATION_ID}/messages?before=older_page&limit=100`,
       );
       expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        ATTACHMENTS_CAPABILITY,
+        `${ATTACHMENTS_CAPABILITY},${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
       );
       return jsonResponse(response);
     });
@@ -94,7 +100,7 @@ describe("messages history", () => {
         limit: "8",
       });
       expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        "agent-context-pack-v1",
+        `${AGENT_CONTEXT_PACK_CAPABILITY},${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
       );
       return jsonResponse(response);
     });

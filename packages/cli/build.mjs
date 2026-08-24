@@ -11,8 +11,11 @@ await rm(outputDirectory, { recursive: true, force: true });
 
 const result = await build({
   absWorkingDir: packageDirectory,
-  entryPoints: ["src/bin.ts"],
-  outfile: "dist/bin.js",
+  entryPoints: {
+    bin: "src/bin.ts",
+    "private-download-worker": "src/private-download-worker.ts",
+  },
+  outdir: "dist",
   bundle: true,
   external: ["ws", "zod"],
   format: "esm",
@@ -23,12 +26,15 @@ const result = await build({
   target: "node24",
 });
 
-const output = result.metafile.outputs["dist/bin.js"];
-if (output === undefined) {
-  throw new Error("The CLI bundle was not produced");
+const expectedOutputs = ["dist/bin.js", "dist/private-download-worker.js"];
+for (const expectedOutput of expectedOutputs) {
+  if (result.metafile.outputs[expectedOutput] === undefined) {
+    throw new Error(`The CLI bundle was not produced: ${expectedOutput}`);
+  }
 }
 
-const unexpectedRuntimeImports = output.imports
+const unexpectedRuntimeImports = expectedOutputs
+  .flatMap((output) => result.metafile.outputs[output]?.imports ?? [])
   .map(({ path }) => path)
   .filter((path) => path !== "ws" && path !== "zod" && !path.startsWith("node:"));
 if (unexpectedRuntimeImports.length > 0) {

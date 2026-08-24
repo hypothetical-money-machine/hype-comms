@@ -107,7 +107,22 @@ export async function requireHumanIdentity(
 }
 
 export function requireAgentScope(identity: AuthenticatedRequestIdentity, scope: AgentScope): void {
-  if (identity.credentialType === "agent" && !identity.currentUser.scopes.includes(scope)) {
+  if (identity.credentialType === "agent" && !identity.authorizationScopes.includes(scope)) {
     throw new ApiError(403, "FORBIDDEN", `Agent token requires the ${scope} scope`);
+  }
+}
+export function requireAnyAgentScope(
+  identity: AuthenticatedRequestIdentity,
+  scopes: readonly AgentScope[],
+): void {
+  if (
+    identity.credentialType === "agent" &&
+    !scopes.some((scope) => identity.authorizationScopes.includes(scope))
+  ) {
+    throw new ApiError(
+      403,
+      "FORBIDDEN",
+      `Agent token requires one of these scopes: ${scopes.join(", ")}`,
+    );
   }
 }

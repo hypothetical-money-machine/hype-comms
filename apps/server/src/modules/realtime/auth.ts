@@ -25,6 +25,8 @@ export type RealtimePrincipal =
       readonly memberProfiles?: boolean;
       /** False/absent for tickets issued to clients predating ephemeral activity frames. */
       readonly ephemeralActivity?: boolean;
+      /** False/absent for tickets issued to clients predating group direct messages. */
+      readonly groupDirectMessages?: boolean;
     }
   | {
       readonly userId: string;
@@ -48,6 +50,8 @@ export type RealtimePrincipal =
       readonly memberProfiles?: boolean;
       /** False/absent for tickets issued to clients predating ephemeral activity frames. */
       readonly ephemeralActivity?: boolean;
+      /** False/absent for tickets issued to clients predating group direct messages. */
+      readonly groupDirectMessages?: boolean;
     };
 
 /**

@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { ATTACHMENT_CONTENT_SHA256_HEADER } from "@hype-comms/contracts";
+import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  ATTACHMENT_CONTENT_SHA256_HEADER,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
+} from "@hype-comms/contracts";
 import type { z } from "zod";
 
 import type { ResolvedProfile, StoredCredential } from "./config.js";
@@ -82,6 +86,19 @@ function authorizationHeaders(credential: StoredCredential | undefined): Record<
     return { cookie: `hype_comms_session=${credential.sessionToken}` };
   }
   return { authorization: `Bearer ${credential.token}` };
+}
+
+function withDefaultCapabilities(headers: Record<string, string>): Record<string, string> {
+  const name = "x-hype-comms-capabilities";
+  const capabilities = new Set(
+    (headers[name] ?? "")
+      .split(",")
+      .map((capability) => capability.trim())
+      .filter((capability) => capability.length > 0),
+  );
+  capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
+  capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
+  return { ...headers, [name]: [...capabilities].join(",") };
 }
 
 function responseAccepted(
@@ -224,12 +241,12 @@ export class ApiClient {
       serializedBody = JSON.stringify(parsed.data);
     }
 
-    const headers: Record<string, string> = {
+    const headers = withDefaultCapabilities({
       accept: "application/json",
       ...(serializedBody === undefined ? {} : { "content-type": "application/json" }),
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
-    };
+    });
     let response: Response;
     try {
       response = await this.#fetch(url, {
@@ -302,12 +319,12 @@ export class ApiClient {
       }
       serializedBody = JSON.stringify(parsed.data);
     }
-    const headers: Record<string, string> = {
+    const headers = withDefaultCapabilities({
       accept: "application/json",
       ...(serializedBody === undefined ? {} : { "content-type": "application/json" }),
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
-    };
+    });
     let response: Response;
     try {
       response = await this.#fetch(new URL(options.path, this.#origin), {
@@ -351,12 +368,12 @@ export class ApiClient {
       throw new Error("Download limits must be positive safe integers");
     }
 
-    const headers: Record<string, string> = {
+    const headers = withDefaultCapabilities({
       accept: "application/octet-stream",
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
       "accept-encoding": "identity",
-    };
+    });
     let response: Response;
     try {
       response = await this.#fetch(new URL(options.path, this.#origin), {

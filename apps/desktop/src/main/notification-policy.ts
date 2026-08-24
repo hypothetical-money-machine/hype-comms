@@ -22,7 +22,6 @@ export type NotificationSuppressionReason =
   | "duplicate_event"
   | "conversation_blocked"
   | "conversation_metadata_unavailable"
-  | "unsupported_group_direct_message"
   | "missing_author"
   | "self_authored"
   | "not_high_signal"
@@ -180,17 +179,16 @@ export function evaluateNotificationPolicy(
   if (input.conversationState === "unknown") {
     return suppressed("conversation_metadata_unavailable");
   }
-  if (input.event.conversationKind === "group_direct_message") {
-    return suppressed("unsupported_group_direct_message");
-  }
-
   if (input.event.authorId === null) return suppressed("missing_author");
   if (input.event.authorId === session.userId) return suppressed("self_authored");
 
   let reason: NotificationEligibilityReason | null = null;
   if (input.event.mentionedUserIds.includes(session.userId)) {
     reason = "verified_mention";
-  } else if (input.event.conversationKind === "direct_message") {
+  } else if (
+    input.event.conversationKind === "direct_message" ||
+    input.event.conversationKind === "group_direct_message"
+  ) {
     reason = "direct_message";
   } else if (
     input.event.recipientNotificationReason === "participated_thread_reply" &&

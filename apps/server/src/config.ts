@@ -31,6 +31,7 @@ const rawConfigSchema = z
     emailFrom: optionalString(z.string().min(1)),
     emailDelivery: z.enum(["smtp", "console", "manual"]).optional(),
     agentProvisioningEnabled: z.enum(["true", "false"]).optional(),
+    defaultAgentAgencyEnabled: z.enum(["true", "false"]).optional(),
     ownerEmail: optionalString(emailSchema),
     workspaceName: z.string().trim().min(1).max(120).default("Hype Comms"),
     workspaceSlug: z
@@ -181,6 +182,8 @@ export interface ServerConfig {
    * provisioning off by default until that release is outside the rollback window.
    */
   readonly agentProvisioningEnabled: boolean;
+  /** Enables the one-way default-agency cutover after every server node is compatible. */
+  readonly defaultAgentAgencyEnabled: boolean;
   readonly owner?: {
     readonly email: Email;
     readonly workspaceName: string;
@@ -223,6 +226,7 @@ export function loadConfig(
     smtpUrl: env.HYPE_COMMS_SMTP_URL,
     emailDelivery: env.HYPE_COMMS_EMAIL_DELIVERY,
     agentProvisioningEnabled: env.HYPE_COMMS_AGENT_PROVISIONING_ENABLED,
+    defaultAgentAgencyEnabled: env.HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED,
     emailFrom: env.HYPE_COMMS_EMAIL_FROM,
     ownerEmail: env.HYPE_COMMS_OWNER_EMAIL,
     workspaceName: env.HYPE_COMMS_WORKSPACE_NAME,
@@ -499,6 +503,10 @@ export function loadConfig(
       result.data.agentProvisioningEnabled === undefined
         ? result.data.nodeEnv !== "production"
         : result.data.agentProvisioningEnabled === "true",
+    defaultAgentAgencyEnabled:
+      result.data.defaultAgentAgencyEnabled === undefined
+        ? result.data.nodeEnv !== "production"
+        : result.data.defaultAgentAgencyEnabled === "true",
     ...(result.data.ownerEmail === undefined
       ? {}
       : {

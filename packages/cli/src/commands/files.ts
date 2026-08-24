@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, link, lstat, open, unlink } from "node:fs/promises";
-import { dirname, join, parse, resolve, sep } from "node:path";
+import type { BigIntStats } from "node:fs";
+import { lstat } from "node:fs/promises";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   ATTACHMENTS_CAPABILITY,
@@ -16,10 +19,41 @@ import { integerOption, parseCommandArguments, requirePositionals, stringOption 
 import { clientFromContext } from "../context.js";
 import { UsageError } from "../errors.js";
 import { writeResult } from "../output.js";
+import {
+  PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE,
+  PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES,
+  PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE,
+  privateDownloadConfigMessageSchema,
+  privateDownloadContinuationMessageSchema,
+  privateDownloadWorkerMessageSchema,
+} from "../private-download-protocol.js";
+import type {
+  PrivateDownloadContinuationMessage,
+  PrivateDownloadResultMessage,
+} from "../private-download-protocol.js";
 import { resolveConversationSelector } from "../selectors.js";
 import type { CommandContext } from "../types.js";
 
 const ATTACHMENTS_HEADER = { "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY } as const;
+const MAX_WORKER_OUTPUT_BYTES = 16 * 1_024;
+
+interface FileIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+interface DirectoryRootIdentity extends FileIdentity {
+  readonly path: string;
+}
+
+interface DirectoryComponentIdentity extends FileIdentity {
+  readonly name: string;
+}
+
+interface DirectorySnapshot {
+  readonly components: readonly DirectoryComponentIdentity[];
+  readonly root: DirectoryRootIdentity;
+}
 
 function entityId(value: string, label: string, code: string): string {
   const parsed = entityIdSchema.safeParse(value);
@@ -27,40 +61,239 @@ function entityId(value: string, label: string, code: string): string {
   return parsed.data;
 }
 
-async function assertDestinationAvailable(target: string): Promise<void> {
+function invalidOutputPath(message: string): UsageError {
+  return new UsageError(message, "INVALID_OUTPUT_PATH");
+}
+
+async function directoryInfo(path: string): Promise<BigIntStats> {
   try {
-    await lstat(target);
-    throw new UsageError("The output path already exists", "OUTPUT_EXISTS");
+    return await lstat(path, { bigint: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw invalidOutputPath("The output directory does not exist");
+    }
+    throw error;
   }
 }
 
-async function assertRealDirectoryPath(directory: string): Promise<void> {
+function assertRealDirectory(info: BigIntStats): void {
+  if (info.isSymbolicLink()) {
+    throw invalidOutputPath("The output path must not traverse a symbolic link");
+  }
+  if (!info.isDirectory()) {
+    throw invalidOutputPath("Every output parent component must be a directory");
+  }
+}
+
+async function realDirectorySnapshot(directory: string): Promise<DirectorySnapshot> {
   const root = parse(directory).root;
   const components = directory.slice(root.length).split(sep).filter(Boolean);
+  const rootInfo = await directoryInfo(root);
+  assertRealDirectory(rootInfo);
+  const snapshot: DirectoryComponentIdentity[] = [];
   let current = root;
   for (const component of components) {
     current = join(current, component);
-    const info = await lstat(current).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new UsageError("The output directory does not exist", "INVALID_OUTPUT_PATH");
-      }
-      throw error;
-    });
-    if (info.isSymbolicLink()) {
-      throw new UsageError(
-        "The output path must not traverse a symbolic link",
-        "INVALID_OUTPUT_PATH",
-      );
-    }
-    if (!info.isDirectory()) {
-      throw new UsageError(
-        "Every output parent component must be a directory",
-        "INVALID_OUTPUT_PATH",
-      );
-    }
+    const info = await directoryInfo(current);
+    assertRealDirectory(info);
+    snapshot.push({ name: component, dev: info.dev, ino: info.ino });
   }
+  return {
+    root: { path: root, dev: rootInfo.dev, ino: rootInfo.ino },
+    components: snapshot,
+  };
+}
+
+function privateDownloadWorkerUrl(): URL {
+  return basename(fileURLToPath(import.meta.url)) === "bin.js"
+    ? new URL("./private-download-worker.js", import.meta.url)
+    : new URL("../private-download-worker.ts", import.meta.url);
+}
+
+function invalidWorkerMessageError(message: unknown): string {
+  // The strict shared schema has already rejected this value. Inspect only its discriminator so
+  // existing protocol diagnostics remain stable; no rejected field is used as data.
+  if (typeof message !== "object" || message === null || Array.isArray(message)) {
+    return "The private download worker returned an invalid message";
+  }
+  if (!("type" in message) || typeof message.type !== "string") {
+    return "The private download worker returned an invalid message";
+  }
+  if (message.type === "phase") {
+    return "The private download worker returned an invalid phase";
+  }
+  if (message.type === "result") {
+    if (!("ok" in message) || typeof message.ok !== "boolean") {
+      return "The private download worker returned an invalid response";
+    }
+    return message.ok
+      ? "The private download worker did not exit cleanly"
+      : "The private download worker returned an invalid failure";
+  }
+  return "The private download worker returned an unknown message";
+}
+
+async function runPrivateDownloadWorker(
+  directory: string,
+  targetName: string,
+  temporaryName: string,
+  directorySnapshot: DirectorySnapshot,
+  bytes: Uint8Array,
+): Promise<void> {
+  const configMessage = privateDownloadConfigMessageSchema.safeParse({
+    type: "config",
+    config: {
+      byteLength: bytes.byteLength,
+      directorySnapshot: {
+        root: {
+          path: directorySnapshot.root.path,
+          dev: directorySnapshot.root.dev.toString(),
+          ino: directorySnapshot.root.ino.toString(),
+        },
+        components: directorySnapshot.components.map(({ name, dev, ino }) => ({
+          name,
+          dev: dev.toString(),
+          ino: ino.toString(),
+        })),
+      },
+      targetName,
+      temporaryName,
+    },
+  });
+  if (!configMessage.success) {
+    throw new Error("The private download worker configuration is invalid");
+  }
+  if (Buffer.byteLength(JSON.stringify(configMessage.data)) > PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES) {
+    throw invalidOutputPath("The output directory is too deep to validate safely");
+  }
+
+  const child = spawn(process.execPath, [fileURLToPath(privateDownloadWorkerUrl())], {
+    cwd: directory,
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+    windowsHide: true,
+  });
+  if (
+    child.stdin === null ||
+    child.stdout === null ||
+    child.stderr === null ||
+    child.send === undefined
+  ) {
+    child.kill();
+    throw new Error("The private download worker pipes are unavailable");
+  }
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let outputOverflow = false;
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdoutBytes += chunk.byteLength;
+    if (stdoutBytes > MAX_WORKER_OUTPUT_BYTES) {
+      outputOverflow = true;
+      child.kill();
+      return;
+    }
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrBytes += chunk.byteLength;
+    if (stderrBytes > MAX_WORKER_OUTPUT_BYTES) {
+      outputOverflow = true;
+      child.kill();
+      return;
+    }
+  });
+  let inputError: Error | undefined;
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") inputError = error;
+  });
+
+  let protocolError: Error | undefined;
+  let response: PrivateDownloadResultMessage | undefined;
+  let completedPhases = 0;
+  const failProtocol = (message: string): void => {
+    protocolError ??= new Error(message);
+    child.kill();
+  };
+  const sendControl = (message: PrivateDownloadContinuationMessage): void => {
+    const parsed = privateDownloadContinuationMessageSchema.parse(message);
+    child.send?.(parsed, (error) => {
+      if (error !== null) failProtocol("The private download worker control channel failed");
+    });
+  };
+  child.on("message", (message: unknown) => {
+    const parsed = privateDownloadWorkerMessageSchema.safeParse(message);
+    if (!parsed.success) {
+      failProtocol(invalidWorkerMessageError(message));
+      return;
+    }
+    const workerMessage = parsed.data;
+    if (workerMessage.type === "phase") {
+      if (workerMessage.phase === "temporary-ready" && completedPhases === 0) {
+        completedPhases = 1;
+        child.stdin?.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+        sendControl({ type: "continue", phase: "temporary-ready" });
+        return;
+      }
+      if (workerMessage.phase === "target-linked" && completedPhases === 1) {
+        completedPhases = 2;
+        sendControl({ type: "continue", phase: "target-linked" });
+        return;
+      }
+      failProtocol("The private download worker phases arrived out of order");
+      return;
+    }
+    if (workerMessage.type === "result") {
+      if (response !== undefined) {
+        failProtocol("The private download worker returned more than one result");
+        return;
+      }
+      response = workerMessage;
+      return;
+    }
+  });
+
+  const completion = new Promise<{
+    readonly code: number | null;
+    readonly signal: string | null;
+  }>((resolvePromise, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolvePromise({ code, signal }));
+  });
+  try {
+    await new Promise<void>((resolvePromise, reject) => {
+      child.send?.(configMessage.data, (error) => {
+        if (error === null) resolvePromise();
+        else reject(error);
+      });
+    });
+  } catch (error) {
+    child.kill();
+    await completion.catch(() => undefined);
+    throw error;
+  }
+  const result = await completion;
+  if (inputError !== undefined) throw inputError;
+  if (outputOverflow) throw new Error("The private download worker exceeded its output limit");
+  if (protocolError !== undefined) throw protocolError;
+  if (stdoutBytes !== 0) throw new Error("The private download worker wrote unexpected output");
+
+  if (response === undefined) {
+    throw new Error("The private download worker returned an invalid response");
+  }
+  if (response.ok) {
+    if (result.code !== 0 || result.signal !== null || completedPhases !== 2) {
+      throw new Error("The private download worker did not exit cleanly");
+    }
+    return;
+  }
+  if (result.code === 0) {
+    throw new Error("The private download worker returned an invalid failure");
+  }
+  if (response.code === "OUTPUT_EXISTS") {
+    throw new UsageError(PRIVATE_DOWNLOAD_OUTPUT_EXISTS_MESSAGE, "OUTPUT_EXISTS");
+  }
+  if (response.code === "INVALID_OUTPUT_PATH") {
+    throw invalidOutputPath(PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE);
+  }
+  throw new Error("The private download worker failed");
 }
 
 /** Publish a complete private file atomically without ever replacing an existing path. */
@@ -74,47 +307,20 @@ export async function savePrivateDownload(
   }
   const target = resolve(cwd, output);
   const directory = dirname(target);
-  await assertRealDirectoryPath(directory);
-  await assertDestinationAvailable(target);
-
-  const temporary = join(directory, `.hype-comms-download.${randomUUID()}.part`);
-  const handle = await open(
-    temporary,
-    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
-    0o600,
-  );
-  let closed = false;
-  let temporaryExists = true;
+  const directorySnapshot = await realDirectorySnapshot(directory);
   try {
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    closed = true;
-    try {
-      // A same-directory hard link is an atomic, no-replace publication primitive. Unlike rename,
-      // it fails if another process creates the destination after our initial safety check.
-      await link(temporary, target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new UsageError("The output path already exists", "OUTPUT_EXISTS");
-      }
-      throw error;
+    await runPrivateDownloadWorker(
+      directory,
+      basename(target),
+      `.hype-comms-download.${randomUUID()}.part`,
+      directorySnapshot,
+      bytes,
+    );
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      throw invalidOutputPath("The output directory changed while the file was being saved");
     }
-    await unlink(temporary);
-    temporaryExists = false;
-    const directoryHandle = await open(directory, constants.O_RDONLY);
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-  } finally {
-    if (!closed) await handle.close().catch(() => undefined);
-    if (temporaryExists) {
-      await unlink(temporary).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      });
-    }
+    throw error;
   }
   return target;
 }

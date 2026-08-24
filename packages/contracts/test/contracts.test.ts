@@ -562,6 +562,18 @@ describe("agent contracts", () => {
       revokedAt: null,
     };
     expect(agentTokenMetadataSchema.parse(metadata)).toEqual(metadata);
+    expect(
+      agentTokenMetadataSchema.parse({
+        ...metadata,
+        effectiveScopes: ["workspace:read", "messages:write", "channels:join"],
+      }),
+    ).toMatchObject({ effectiveScopes: ["workspace:read", "messages:write", "channels:join"] });
+    expect(() =>
+      agentTokenMetadataSchema.parse({
+        ...metadata,
+        effectiveScopes: ["workspace:read"],
+      }),
+    ).toThrow();
     expect(() => agentTokenMetadataSchema.parse({ ...metadata, token: secret })).toThrow();
   });
 
@@ -579,6 +591,7 @@ describe("agent contracts", () => {
       "workspace:read",
       "messages:write",
       "direct-conversations:write",
+      "channels:join",
       "agents:invite",
     ]);
     expect(DEFAULT_AGENT_AGENCY_PROFILE).toBe("default-agency-v1");
@@ -699,6 +712,65 @@ describe("transport contracts", () => {
         readCursor: null,
       }),
     ).toMatchObject({ conversation: { slug: "general" } });
+  });
+
+  it("requires unique participants and a complete direct-conversation audience", () => {
+    const base = {
+      conversation: {
+        id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        isArchived: false,
+        createdBy: USER_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, MESSAGE_ID, REACTION_ID],
+      membershipRole: "owner",
+      lastMessage: null,
+      unreadCount: 0,
+      mentionCount: 0,
+      readCursor: null,
+    } as const;
+    expect(conversationSummarySchema.parse(base).participantIds).toHaveLength(3);
+    expect(() =>
+      conversationSummarySchema.parse({ ...base, participantIds: [USER_ID, MESSAGE_ID] }),
+    ).toThrow();
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        participantIds: [USER_ID, MESSAGE_ID, MESSAGE_ID],
+      }),
+    ).toThrow();
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        conversation: { ...base.conversation, kind: "direct_message" },
+        participantIds: [],
+      }),
+    ).toThrow();
+    for (const conversation of [
+      { ...base.conversation, name: "Hidden title" },
+      { ...base.conversation, slug: "hidden-title" },
+      { ...base.conversation, topic: "Hidden topic" },
+      { ...base.conversation, access: "members" as const },
+      { ...base.conversation, channelMode: "chat" as const },
+      { ...base.conversation, isArchived: true },
+      { ...base.conversation, createdBy: null },
+    ]) {
+      expect(() => conversationSummarySchema.parse({ ...base, conversation })).toThrow();
+    }
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        conversation: { ...base.conversation, createdBy: TASK_ID },
+      }),
+    ).toThrow();
+    expect(() => conversationSummarySchema.parse({ ...base, membershipRole: null })).toThrow();
   });
 
   it("upgrades legacy workspace-channel cache records without relaxing strict fields", () => {
@@ -1330,6 +1402,46 @@ describe("transport contracts", () => {
     ).toMatchObject({ type: "channel.archived" });
     expect(() =>
       workspaceEventSchema.parse({ ...event, type: "direct_conversation.created" }),
+    ).toThrow();
+    const groupEvent = {
+      ...event,
+      type: "direct_conversation.created",
+      payload: {
+        conversation: {
+          ...event.payload.conversation,
+          kind: "group_direct_message",
+          name: null,
+          slug: null,
+          topic: null,
+          access: null,
+        },
+        participantIds: [USER_ID, MESSAGE_ID, REACTION_ID],
+      },
+    } as const;
+    expect(workspaceEventSchema.parse(groupEvent)).toMatchObject({
+      type: "direct_conversation.created",
+      payload: { participantIds: [USER_ID, MESSAGE_ID, REACTION_ID] },
+    });
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: { ...groupEvent.payload, participantIds: [USER_ID, MESSAGE_ID] },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: { ...groupEvent.payload, participantIds: [USER_ID, MESSAGE_ID, MESSAGE_ID] },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: {
+          ...groupEvent.payload,
+          conversation: { ...groupEvent.payload.conversation, createdBy: TASK_ID },
+        },
+      }),
     ).toThrow();
   });
 

@@ -42,9 +42,11 @@ import {
   MemoryWorkspaceCache,
   newestLiveMessage,
   PersistentWorkspaceCache,
+  projectConversationMembershipChange,
   applyRetractReservation,
   preferRetainedMessage,
   retractedMessageIds,
+  membershipRoleForConversationEvent,
   retractReservationMap,
   rememberCreatedMessageMentions,
   tombstoneMessage,
@@ -230,6 +232,16 @@ function compareSequence(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
   return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+function isSelfMembershipChange(
+  event: ProductRealtimeEvent,
+  userId: string | null,
+): event is Extract<WorkspaceEvent, { type: "channel.membership_changed" }> {
+  return (
+    event.type === "channel.membership_changed" &&
+    (userId === null || event.payload.memberId === userId)
+  );
 }
 
 /**
@@ -753,7 +765,7 @@ export class WorkspaceRuntime {
       }
       const event = frame.event;
       const realtimeEpoch = this.#realtimeEpoch;
-      if (event.type === "channel.membership_changed") {
+      if (isSelfMembershipChange(event, frame.scope.userId)) {
         // Abort cache transactions synchronously, before the event queue can wait behind the
         // projection they must roll back. The repair itself receives the fresh signal.
         this.#rotateProjectionBarrier();
@@ -2366,9 +2378,20 @@ export class WorkspaceRuntime {
       const icon = summary.conversation.channelMode === "announcement" ? "📣" : "#";
       return `${icon} ${summary.conversation.name ?? summary.conversation.slug ?? "channel"}`;
     }
-    const otherId = summary.participantIds.find(
-      (id) => id !== this.#state.bootstrap?.currentUser.user.id,
-    );
+    const currentUserId = this.#state.bootstrap?.currentUser.user.id;
+    const otherIds = summary.participantIds.filter((id) => id !== currentUserId);
+    if (summary.conversation.kind === "group_direct_message") {
+      if (otherIds.length === 0) return "Group conversation";
+      const names = otherIds.map(
+        (id) =>
+          this.#state.bootstrap?.members.find((member) => member.id === id)?.displayName ??
+          "Former member",
+      );
+      const visibleNames = names.slice(0, 3);
+      const remaining = names.length - visibleNames.length;
+      return `${visibleNames.join(", ")}${remaining > 0 ? ` +${String(remaining)}` : ""}`;
+    }
+    const otherId = otherIds[0];
     if (otherId === undefined) {
       return this.#state.bootstrap?.currentUser.user.displayName ?? "Direct message";
     }
@@ -2929,7 +2952,7 @@ export class WorkspaceRuntime {
         // here and drained once below. Without this the fix would only work while the app is
         // online, and a disable that landed during a backfill would survive the catch-up.
         if (event.type === "member.updated") this.#membersDirty = true;
-        if (event.type === "channel.membership_changed") {
+        if (isSelfMembershipChange(event, this.#scope?.userId ?? null)) {
           const repaired = await this.#repairMembershipEvent(event, generation, false);
           if (generation !== this.#generation || cache !== this.#cache) return;
           if (repaired) {
@@ -3798,7 +3821,7 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    if (event.type === "channel.membership_changed") {
+    if (isSelfMembershipChange(event, realtimeScope.userId)) {
       await this.#repairMembershipEvent(event, generation, true);
       return;
     }
@@ -4104,18 +4127,29 @@ export class WorkspaceRuntime {
       });
       return;
     }
-    // Both are invalidation signals rather than deltas: `#applyWorkspaceEvent` answers them with a
-    // server re-read and never reaches this projection. `member.updated` in particular must have
-    // no upsert path here — that is the whole reason a disable used to re-assert the disabled
-    // member instead of removing it.
-    if (event.type === "channel.membership_changed" || event.type === "member.updated") {
+    if (event.type === "channel.membership_changed") {
+      this.#setState({
+        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
+          current === undefined ? null : projectConversationMembershipChange(current, event),
+        ),
+      });
+      return;
+    }
+    // `member.updated` is an invalidation signal rather than a delta: `#applyWorkspaceEvent`
+    // answers it with a server re-read and never reaches this projection. It must have no upsert
+    // path here because the payload cannot say that a member was disabled.
+    if (event.type === "member.updated") {
       return;
     }
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,
         participantIds: [...event.payload.participantIds],
-        membershipRole: current?.membershipRole ?? null,
+        membershipRole: membershipRoleForConversationEvent(
+          event.payload.conversation,
+          current?.membershipRole,
+          snapshot.currentUser.user.id,
+        ),
         lastMessage: current?.lastMessage ?? null,
         unreadCount: current?.unreadCount ?? 0,
         mentionCount: current?.mentionCount ?? 0,

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import {
@@ -25,7 +25,11 @@ import { createPool } from "../src/db/pool.js";
 import { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
-import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
+import {
+  LocalAttachmentStore,
+  sha256Hex,
+  type AttachmentStore,
+} from "../src/modules/workspace/file-store.js";
 import {
   type AnnouncementAuditRecord,
   type WorkspaceRepositoryHooks,
@@ -391,13 +395,9 @@ describeWithPostgres("WorkspaceRepository", () => {
       readCursor: expect.objectContaining({ lastReadMessageId: rendered.message.id }),
     });
 
-    const memberSync = await repository.sync(
-      member,
-      committedAfterRender.syncCursor,
-      100,
-      false,
-      true,
-    );
+    const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100, {
+      readStateEvents: true,
+    });
     const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
     expect(readEvent).toMatchObject({
       workspaceSequence: advanced.syncCursor,
@@ -507,17 +507,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(
-      observer,
-      afterCreate,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const capable = await repository.sync(observer, afterCreate, 100, {
+      messageRetractEvents: true,
+    });
     const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
     expect(retractEvents).toEqual(
       expect.arrayContaining([
@@ -545,17 +537,9 @@ describeWithPostgres("WorkspaceRepository", () => {
       retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
     ).toBe(false);
 
-    const dmCapable = await repository.sync(
-      member,
-      dm.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const dmCapable = await repository.sync(member, dm.syncCursor, 100, {
+      messageRetractEvents: true,
+    });
     expect(
       dmCapable.events.filter(
         (event) =>
@@ -615,6 +599,30 @@ describeWithPostgres("WorkspaceRepository", () => {
     });
   });
 
+  it("keeps live replies reachable without disclosing a retracted thread root body", async () => {
+    const secret = `confidential thread root ${randomUUID()}`;
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "live reply stays reachable"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+    const retracted = await repository.retractMessage(owner, root.message.id);
+
+    const thread = await repository.thread(member, root.message.id, undefined, 50);
+
+    expect(thread.root).toMatchObject({
+      id: root.message.id,
+      body: "Message retracted",
+      deletedAt: retracted.message.deletedAt,
+    });
+    expect(thread.replies).toEqual([reply.message]);
+    expect(JSON.stringify(thread)).not.toContain(secret);
+  });
+
   it("does not replay retracted message or reaction content through sync or delivery retry", async () => {
     const clientMessageId = randomUUID();
     const secret = `sync secret ${randomUUID()}`;
@@ -633,7 +641,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       message: replayError.message,
     }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Message not found" });
 
-    const sync = await repository.sync(observer, "0", 100, true, false, false, false, false, true);
+    const sync = await repository.sync(observer, "0", 100, { messageRetractEvents: true });
     expect(sync.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -1199,7 +1207,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     const announcementId = created.conversation.conversation.id;
     expect(created.conversation.conversation.channelMode).toBe("announcement");
     const legacySync = await repository.sync(member, "0", 100);
-    const capableSync = await repository.sync(member, "0", 100, false, false, false, true);
+    const capableSync = await repository.sync(member, "0", 100, {
+      announcementChannels: true,
+    });
     const legacyCreated = legacySync.events.find(
       (event) => event.type === "channel.created" && event.conversationId === announcementId,
     );
@@ -1709,16 +1719,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     const [ownerEvent, memberEvent, observerEvent] = await Promise.all(
       [owner, member, observer].map(async (recipient) =>
         eventFor(
-          await repository.sync(
-            recipient,
-            firstReply.syncCursor,
-            100,
-            false,
-            false,
-            false,
-            false,
-            true,
-          ),
+          await repository.sync(recipient, firstReply.syncCursor, 100, {
+            participatedThreadNotifications: true,
+          }),
           secondReply.message.id,
         ),
       ),
@@ -1734,7 +1737,9 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     // A later participant cannot retroactively become eligible for an earlier reply.
     const earlierForObserver = eventFor(
-      await repository.sync(observer, root.syncCursor, 100, false, false, false, false, true),
+      await repository.sync(observer, root.syncCursor, 100, {
+        participatedThreadNotifications: true,
+      }),
       firstReply.message.id,
     );
     expect(earlierForObserver?.payload).not.toHaveProperty("recipientNotificationReason");
@@ -1784,16 +1789,9 @@ describeWithPostgres("WorkspaceRepository", () => {
         [replyEventId, workspaceId, memberId],
       ),
     ).rejects.toMatchObject({ code: "23503" });
-    const removedMemberSync = await repository.sync(
-      member,
-      removed.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const removedMemberSync = await repository.sync(member, removed.syncCursor, 100, {
+      participatedThreadNotifications: true,
+    });
     expect(
       removedMemberSync.events.some(
         (event) =>
@@ -1943,7 +1941,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacySync.events).toEqual([]);
     expect(legacySync.nextCursor).toBe(legacySync.highWaterCursor);
 
-    const sync = await repository.sync(observer, sent.syncCursor, 100, true);
+    const sync = await repository.sync(observer, sent.syncCursor, 100, {
+      reactionEvents: true,
+    });
     const reactionEvents = sync.events.filter(
       (event) => event.type === "reaction.added" || event.type === "reaction.removed",
     );
@@ -2022,17 +2022,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(
-      observer,
-      sent.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const capable = await repository.sync(observer, sent.syncCursor, 100, {
+      messageRetractEvents: true,
+    });
     expect(capable.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -2414,9 +2406,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(assigned.tasks).toContainEqual(
       expect.objectContaining({ id: createdA.task.id, assigneeId: memberId }),
     );
-    const legacySync = await repository.sync(owner, "0", 100, false, false, false);
+    const legacySync = await repository.sync(owner, "0", 100);
     expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(false);
-    const taskSync = await repository.sync(owner, "0", 100, false, false, true);
+    const taskSync = await repository.sync(owner, "0", 100, { taskEvents: true });
     expect(taskSync.events).toContainEqual(
       expect.objectContaining({
         type: "task.updated",
@@ -2543,7 +2535,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.listConversationTasks(member, conversationId, undefined, 10),
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
-    const memberSync = await repository.sync(member, created.syncCursor, 100, false, false, true);
+    const memberSync = await repository.sync(member, created.syncCursor, 100, {
+      taskEvents: true,
+    });
     expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
   });
 
@@ -2890,6 +2884,23 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
   });
 
+  it("excludes group conversations from realtime visibility for legacy tickets only", async () => {
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const authorize = repository.canViewConversation.bind(repository);
+
+    await expect(
+      authorize(workspaceId, ownerId, group.conversation.conversation.id, false),
+    ).resolves.toBe(false);
+    await expect(
+      authorize(workspaceId, ownerId, group.conversation.conversation.id, true),
+    ).resolves.toBe(true);
+    await expect(authorize(workspaceId, ownerId, generalId, false)).resolves.toBe(true);
+  });
+
   it("consumes realtime tickets exactly once", async () => {
     const issued = await repository.issueRealtimeTicket(owner);
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toEqual({
@@ -2905,20 +2916,21 @@ describeWithPostgres("WorkspaceRepository", () => {
       messageRetractEvents: false,
       memberProfiles: false,
       ephemeralActivity: false,
+      groupDirectMessages: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(
-      owner,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    );
+    const capable = await repository.issueRealtimeTicket(owner, {
+      reactionEvents: true,
+      readStateEvents: true,
+      taskEvents: true,
+      announcementChannels: true,
+      participatedThreadNotifications: true,
+      messageRetractEvents: true,
+      memberProfiles: true,
+      ephemeralActivity: true,
+      groupDirectMessages: true,
+    });
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -2932,6 +2944,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       messageRetractEvents: true,
       memberProfiles: true,
       ephemeralActivity: true,
+      groupDirectMessages: true,
     });
   });
 
@@ -3183,6 +3196,86 @@ describeWithPostgres("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it("decides group attachment read capability before loading stored bytes", async () => {
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const conversationId = group.conversation.conversation.id;
+    const bytes = Buffer.from("group evidence");
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId,
+        fileName: "group.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    const read = vi.fn(attachmentStore.read.bind(attachmentStore));
+    const trackedStore: AttachmentStore = {
+      write: attachmentStore.write.bind(attachmentStore),
+      read,
+      remove: attachmentStore.remove.bind(attachmentStore),
+    };
+    repository = new WorkspaceRepository(pool, { attachmentStore: trackedStore });
+
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).not.toHaveBeenCalled();
+
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await repository.completeFileUpload(
+      owner,
+      staged.attachment.id,
+      { sizeBytes: bytes.byteLength, contentSha256 },
+      randomUUID(),
+    );
+    read.mockClear();
+
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    expect(read).not.toHaveBeenCalled();
+
+    const capable = await repository.readFileContent(owner, staged.attachment.id, true);
+    expect(capable.bytes).toEqual(bytes);
+    expect(read).toHaveBeenCalledOnce();
+
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "Group attachment"),
+      mentionedUserIds: [],
+      attachmentIds: [staged.attachment.id],
+    });
+    const outsiderId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, email, username, display_name)
+       VALUES ($1, 'outsider@example.com', 'outsider', 'Outsider')`,
+      [outsiderId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, outsiderId],
+    );
+    const outsider = identity(currentUser(outsiderId, "outsider", "Outsider", "member"));
+    await expect(
+      repository.readFileContent(outsider, staged.attachment.id, true),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).toHaveBeenCalledOnce();
+
+    await repository.retractMessage(owner, sent.message.id);
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   it("attaches a ready file to a channel message and lists it for the conversation", async () => {
     const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
     const sent = await repository.sendMessage(owner, generalId, {
@@ -3207,7 +3300,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(files.files.map((file) => file.fileName)).toEqual(["brief.txt"]);
     expect(files.hasMore).toBe(false);
 
-    const downloaded = await repository.readFileContent(member, attachmentId);
+    const downloaded = await repository.readFileContent(member, attachmentId, false);
     expect(downloaded.bytes.toString()).toBe("channel notes");
   });
 
@@ -3217,7 +3310,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       mode: 0o600,
     });
 
-    await expect(repository.readFileContent(owner, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(owner, attachmentId, false)).rejects.toMatchObject({
       statusCode: 500,
       code: "INTERNAL_ERROR",
       message: "Stored file failed its integrity check",
@@ -3252,7 +3345,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       statusCode: 404,
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
-    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(member, attachmentId, false)).rejects.toMatchObject({
       statusCode: 404,
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
@@ -3283,7 +3376,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.listConversationFiles(observer, conversationId, undefined, 50),
     ).rejects.toMatchObject({ statusCode: 404 });
-    await expect(repository.readFileContent(observer, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(observer, attachmentId, false)).rejects.toMatchObject({
       statusCode: 404,
     });
   });

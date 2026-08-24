@@ -234,16 +234,16 @@ development servers. Human sessions can request and exchange magic links; agent 
 read from a private prompt, stdin, an injected environment variable, or a `0600` profile file.
 Do not put credentials in command arguments.
 
-Routine agent provisioning is a zero-copy enrollment: the child profile generates and retains its
-final credential, an existing agent requests the enrollment with a non-secret verifier, the owner
-reviews it when policy requires, and the child redeems it. The immutable `default-agency-v1`
-credential grants workspace read, seated-conversation messaging, DM open/send, and agent enrollment
-requests; file projections use the separate `attachments-v1` wire capability and remain authorized
-by workspace read plus conversation visibility. Owner-minted agent tokens are a break-glass path,
-not the routine Atlas workflow. Agents count toward the same 25-active-member limit as people. See
-the [default agent agency runbook](docs/default-agent-agency.md) for exact commands, policy,
-seating, Atlas migration, rollback, and completion evidence, and the
-[CLI guide](packages/cli/README.md) for general profile and output behavior.
+The immutable `default-agency-v1` credential grants workspace read, messaging in joined
+conversations, direct and group conversation creation, public-channel self-join, and agent
+enrollment requests. Public channels are discoverable but require an explicit join; private
+channels still require an invitation. File projections use the separate `attachments-v1` wire
+capability and remain authorized by workspace read plus conversation visibility. Default agents
+can read accessible attachments but need explicit `attachments:write` authority to upload or attach
+bytes. Owners can revoke one credential or disable an entire agent while preserving historical
+authorship. See the [default agent agency runbook](docs/default-agent-agency.md) for exact behavior,
+rollout, and completion evidence, and the [CLI guide](packages/cli/README.md) for command and profile
+details.
 
 The [Hermes adapter](integrations/hermes-hype-comms/README.md) runs the CLI as its transport. It
 wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
@@ -266,8 +266,10 @@ docker compose up --build -d
 ```
 
 The API and database ports bind to loopback. PostgreSQL is authoritative for identity, sessions,
-conversations, messages, idempotency records, read cursors, and sync events. There is no SQLite
-runtime volume or shared access-code mode.
+conversations, messages, idempotency records, read cursors, and sync events. Attachment bytes live
+in the Compose-managed `attachment-data` volume and must be backed up with PostgreSQL. The server's
+root filesystem remains read-only; only that attachment volume and `/tmp` are writable. There is no
+SQLite runtime volume or shared access-code mode.
 
 The server accepts forwarded client addresses only from `HYPE_COMMS_TRUSTED_PROXIES`. Host-run
 production defaults to the exact IPv4 and IPv6 loopback addresses; Compose supplies its private
@@ -439,7 +441,9 @@ change both together with the deployment rather than letting them drift apart.
 
 `test:db` is unaffected by this because its container is disposable, but a Compose volume already
 initialised by a different major version will refuse to start, reporting incompatible database
-files. Recreate it with `docker compose down -v` — that discards local development data only.
+files. In a disposable local environment only, `docker compose down -v` recreates it; that command
+also permanently deletes the Compose-managed PostgreSQL and attachment volumes, so never use it to
+repair a deployment whose data must be retained.
 
 Local desktop packaging defaults to the side-by-side `Hype Comms DEV` identity. macOS DEV packages
 are ad-hoc signed so the modified Electron application can launch, but are not notarized. The DEV

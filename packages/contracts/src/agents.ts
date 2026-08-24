@@ -11,7 +11,9 @@ export const agentScopeSchema = z.enum([
   "conversations:write",
   "read-cursors:write",
   "direct-conversations:write",
+  "channels:join",
   "agents:invite",
+  "attachments:write",
 ]);
 export const agentTokenScopeSchema = agentScopeSchema;
 
@@ -22,10 +24,12 @@ export const DEFAULT_AGENT_SCOPES = ["workspace:read", "messages:write"] as cons
  * owner-minted credentials keep their explicit scopes and their legacy default unchanged.
  */
 export const DEFAULT_AGENT_AGENCY_PROFILE = "default-agency-v1" as const;
+export const AGENT_EFFECTIVE_SCOPES_CAPABILITY = "agent-effective-scopes-v1" as const;
 export const DEFAULT_AGENCY_AGENT_SCOPES = [
   "workspace:read",
   "messages:write",
   "direct-conversations:write",
+  "channels:join",
   "agents:invite",
 ] as const satisfies readonly z.infer<typeof agentScopeSchema>[];
 
@@ -57,8 +61,21 @@ export const agentCurrentPrincipalSchema = z
     workspaceId: entityIdSchema,
     role: z.literal("member"),
     scopes: agentScopesSchema,
+    effectiveScopes: agentScopesSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((principal, context) => {
+    if (
+      principal.effectiveScopes !== undefined &&
+      principal.scopes.some((scope) => !principal.effectiveScopes?.includes(scope))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["effectiveScopes"],
+        message: "Effective agent scopes must include every stored scope",
+      });
+    }
+  });
 export const currentAgentPrincipalSchema = agentCurrentPrincipalSchema;
 
 const agentRecordShape = {
@@ -115,12 +132,25 @@ export const agentTokenSchema = z
     agentUserId: entityIdSchema,
     label: z.string().trim().min(1).max(120),
     scopes: agentScopesSchema,
+    effectiveScopes: agentScopesSchema.optional(),
     createdBy: entityIdSchema,
     createdAt: isoDateTimeSchema,
     lastUsedAt: isoDateTimeSchema.nullable(),
     revokedAt: isoDateTimeSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((token, context) => {
+    if (
+      token.effectiveScopes !== undefined &&
+      token.scopes.some((scope) => !token.effectiveScopes?.includes(scope))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["effectiveScopes"],
+        message: "Effective agent scopes must include every stored scope",
+      });
+    }
+  });
 export const agentTokenMetadataSchema = agentTokenSchema;
 
 export const createAgentTokenRequestSchema = z
@@ -244,6 +274,9 @@ export const listAgentEnrollmentsResponseSchema = z
 export const reviewAgentEnrollmentRequestSchema = z
   .object({ decision: z.enum(["approve", "reject"]) })
   .strict();
+
+/** Cancel and redeem are intentionally bodyless mutations. */
+export const agentEnrollmentNoBodyRequestSchema = z.undefined();
 
 export const redeemAgentEnrollmentResponseSchema = z
   .object({ enrollment: agentEnrollmentSchema, agent: agentSchema })

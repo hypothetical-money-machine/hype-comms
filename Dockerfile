@@ -53,6 +53,10 @@ COPY --from=build /app/packages/contracts/dist ./packages/contracts/dist
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 
+# An empty named volume inherits this directory's ownership on first mount. The server can write
+# attachment bytes there without making the rest of its container filesystem writable.
+RUN install -d -m 0700 -o node -g node /var/lib/hype-comms/attachments
+
 USER node
 EXPOSE 3000
 

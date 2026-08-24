@@ -12,12 +12,11 @@ contract tests.
   CLI; the service rejects a 26th active membership across all three principal kinds.
   Multi-workspace and open signup are deliberate future changes, not emergent ones.
 - Channels are either workspace-visible or restricted to an explicit human-or-agent member list.
-  Human and agent members see workspace-visible channels automatically; bots require an explicit
-  grant for every channel, including workspace-visible channels. A
-  members-only channel always retains at least one channel owner, and only its owners can
-  add, remove, promote, or demote members. Direct conversations contain exactly two participant
-  slots; a self-DM uses the same active member in both slots, and conversations are unique for
-  that unordered pair. Group DMs are not yet supported.
+  Humans see workspace-visible channels automatically. Agents can discover and explicitly join
+  them; bots require an explicit grant for every channel. A members-only channel always retains at
+  least one channel owner, and only its owners can add, remove, promote, or demote members. A
+  one-to-one direct conversation contains one or two distinct participants and is unique for that
+  unordered pair. A group direct conversation has 3–25 fixed human-or-agent participants.
 - Every channel may own a task project. A self-DM owns the member's personal project and its
   My Tasks view may also include tasks assigned to that member from visible channel projects.
   Ordinary two-person DMs remain chat-only.
@@ -30,7 +29,7 @@ contract tests.
   desktop, Fastify on the service, and shared strict Zod wire contracts.
 - PostgreSQL is authoritative. The desktop cache is disposable, realtime delivery is a
   hint, and a client must be able to rebuild from HTTP APIs without losing its local outbox.
-- The target feature set is channels, 1:1 DMs, channel and personal task boards, one-level
+- The target feature set is channels, one-to-one and group DMs, channel and personal task boards, one-level
   threads, emoji reactions, user mentions, unread state, file attachments, message/filename
   search, and native notifications.
 - Transport and managed storage are encrypted, but Hype Comms is not end-to-end encrypted.
@@ -41,7 +40,7 @@ contract tests.
   strings. Sequence and byte-count integers cross JSON as decimal strings when they may
   exceed JavaScript's safe integer range.
 - The shared Zod package is the source of truth for HTTP, IPC, and realtime wire shapes.
-  Reserved schema values such as `group_direct_message`, `editedAt`, and `deletedAt` do not
+  Reserved schema values such as `editedAt` do not
   imply a reachable behavior today; the server rejects unsupported operations.
 
 ### Supported host matrix
@@ -143,15 +142,15 @@ at the current 25-member scale.
 | Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Optional AuthKit uses a ten-minute encrypted provider transaction and a five-minute desktop-PKCE handoff; verified provider identity still passes local invite admission. Both methods create the same rotating, revocable local device session, and only credential hashes plus the upstream session ID needed for revocation are retained. |
 | Bot credential         | Owner-issued service credential with one or both `tasks:read` and `tasks:write` scopes, a required expiry, last-used time, and optional revocation time. The 256-bit token is shown once and only its SHA-256 hash is stored. Rotation atomically revokes every prior credential for that bot.                                                                                                        |
 | Bot channel grant      | Explicit bot-to-channel authorization. A grant is required even when the channel access mode is `workspace`; it never grants a DM. Visibility is the intersection of an active bot membership, credential scope, and channel grant.                                                                                                                                                              |
-| Agent credential       | Non-expiring bearer credential with immutable scopes. Legacy owner-issued credentials may select `workspace:read`, `messages:write`, `conversations:write`, `read-cursors:write`, `direct-conversations:write`, and/or `agents:invite`. Enrollment instead fixes `default-agency-v1` to exactly `workspace:read`, `messages:write`, `direct-conversations:write`, and `agents:invite`. Only a SHA-256 credential hash is stored; disabling an agent revokes its active membership and every token. |
+| Agent credential       | Non-expiring bearer credential with immutable scopes. Credentials may select `workspace:read`, `messages:write`, legacy `conversations:write`, `read-cursors:write`, `direct-conversations:write`, `channels:join`, `agents:invite`, and/or explicit `attachments:write`. Enrollment fixes `default-agency-v1` to `workspace:read`, `messages:write`, `direct-conversations:write`, `channels:join`, and `agents:invite`; it deliberately omits attachment writes. Only a SHA-256 credential hash is stored; disabling an agent revokes its active membership and every token. |
 | Agent enrollment       | A child generates its final 256-bit credential locally and offers only its SHA-256 verifier. Its private profile retains the immutable pending offer for exact output recovery until authenticated redemption clears the marker. An authorized inviter binds that verifier to an immutable identity, label, and restricted-channel seat set. Policy produces `pending_approval` or `ready_to_redeem`; redemption rechecks requester authority, seats, expiry, capacity, username and credential uniqueness, then atomically creates the agent/token. Every transition is audited without plaintext credentials. |
-| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human or agent member, while `members` is readable only by active human or agent conversation memberships. Bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human-or-agent pair. Archived channels remain readable but reject writes. |
+| Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human and by agents with an active conversation seat, while `members` always requires an active human or agent seat. Agents may discover and self-join active public channels; private channels require an invitation. Task-only bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human-or-agent pair; `group_direct_message` has fixed active human-or-agent membership. Archived channels remain readable to existing audiences but reject writes and joins. |
 | Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
 | Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
 | Task                   | Belongs to one channel or self-DM and has a conversation-local number, optimistic version, title, optional description/assignee/due date/source message, priority, fixed `todo`/`in_progress`/`done` status, canonical integer rank within a status column, and latest-mutation actor. Completing sets `completedAt`; reopening clears it. Assignees and linked messages must be able to access the same conversation. |
-| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable object key, size/hash, and `pending`, `ready`, or `failed` scan status. The pilot keeps object bytes on its attachment PVC; private S3 plus a scan worker belongs to the hosted target. An attachment is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. `attachments-v1` negotiates wire projections only; `workspace:read` plus conversation visibility authorizes agent reads. |
+| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable object key, size/hash, and `pending`, `ready`, or `failed` scan status. The pilot keeps object bytes on its attachment PVC; private S3 plus a scan worker belongs to the hosted target. An attachment is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. `attachments-v1` negotiates wire projections only; `workspace:read` plus conversation visibility authorizes agent reads from live messages. Upload, byte write, completion, and attachment claiming require explicit `attachments:write` for an agent credential. |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
 
 Domain mutations, their idempotency result, and corresponding sync events commit in one
@@ -214,10 +213,12 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `POST /v1/agent-enrollments/:id/review`, `POST .../:id/cancel`                 | An owner approves/rejects; an owner or original requester cancels an open enrollment. State transitions are bounded and audited.          |
 | `POST /v1/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
 | `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
+| `GET /v1/channels`, `PUT /v1/channels/:id/membership`                         | Page discoverable public-channel metadata or idempotently self-join one active public channel; private and archived channels remain hidden. |
 | `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
 | `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it. A `workspace:read` agent may reopen its existing DM; creation requires narrow `direct-conversations:write` or legacy `conversations:write`. |
+| `POST /v1/group-direct-conversations`                                         | Idempotently create a fixed-membership group for the caller plus 2–24 distinct active human or agent members in the same workspace.       |
 | `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `agent-context-pack-v1` adds a bounded, anchored agent projection without changing the legacy shape. |
-| `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
+| `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`; agent attachment IDs additionally require `attachments:write`. |
 | `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
 | `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
 | `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
@@ -227,7 +228,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v1/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels. For a bot, this means assigned tasks in explicitly granted channels. |
 | `GET /v1/tasks/:id`                                                           | Return one authorized canonical task by UUID without scanning its board.                                                                  |
 | `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version. Bot callers require `tasks:write`.                       |
-| `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
+| `POST /v1/files/uploads`, `PUT /v1/files/:id/content`, `POST .../:id/complete` | Create a 15-minute quarantine upload, write its bytes, and confirm hash/size. Agent credentials require explicit `attachments:write`.     |
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
 | `GET /v1/conversations/:id/files`, `POST /v1/attachments/query`               | List ready files in one visible conversation or for bounded visible message IDs; agents require `workspace:read`. `attachments-v1` affects shape, not authority. |
 | `GET /v1/files/:id/content`                                                   | Stream one ready, visible attachment with bounded length and a SHA-256 response header for non-desktop clients; agents require `workspace:read`. |
@@ -290,14 +291,27 @@ and continues paginating replies inline. Current clients default an absent summa
 an absent `threadsSupported` flag to empty and `false`, respectively, so a rolled-back or
 immediately previous server remains readable and can be distinguished during a rolling upgrade.
 
+Group direct messages use a separate `group-direct-messages-v1` capability because the immediately
+previous desktop could mistake a group for a one-to-one conversation and conceal recipients. For a
+client without that capability, conversation lists and message search exclude groups in SQL before
+applying `LIMIT`, so hidden rows cannot create empty middle pages or starve later visible results.
+HTTP sync and realtime use the same rule: group events are not delivered, but each scanned event
+still advances the client's cursor. An older client may continue using unrelated workspace routes;
+if it presents a known group conversation, message, or file ID to a group-aware route, the server
+returns an update-required conflict before any mutation. Normal authorization and resource-state
+checks still run first where necessary, so this response cannot reveal a retracted message or
+another participant's staged file.
+
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
 and optional conversation IDs, and a typed payload. Workspace-channel events target active
 workspace members; members-only channel events target active channel members. Membership
 changes target the union of the old and new audience so a removed member can purge the channel
-immediately. DM events target only the two participants. A global cursor may therefore contain
-gaps for a client. Sync advances to the server's scanned cursor rather than the last visible
-event so a client cannot loop on hidden events. Event payloads never contain access tokens,
-email magic links, refresh credentials, presigned object URLs, or file object keys.
+immediately. One-to-one events target their one or two fixed participants. Group direct-message
+events target their fixed three-to-25-person participant set; inactive participants remain in the
+historical roster but stop receiving new events. A global cursor may therefore contain gaps for a
+client. Sync advances to the server's scanned cursor rather than the last visible event so a client
+cannot loop on hidden events. Event payloads never contain access tokens, email magic links,
+refresh credentials, presigned object URLs, or file object keys.
 
 ## Desktop cache, outbox, and convergence
 
@@ -480,8 +494,8 @@ review.
 - Once explicitly enabled, main evaluates only a fresh `message.created` from the connection armed
   by its validated `system.connected`. Replay, catch-up, duplicates, null/self authors, focus, an
   exact stream visible at its live tail, stale scope, disabled/unsupported capability, and OS
-  denial are quiet. Human, bot, and agent authors follow the same policy. Group DMs remain
-  ineligible.
+  denial are quiet. Human, bot, and agent authors follow the same policy. Group direct messages
+  use the same direct-message eligibility, with verified mentions still taking precedence.
 - In a flag-enabled macOS build, closing the last window keeps only notification observation on the
   authenticated realtime connection. That path sends no renderer event, buffers no UI event, and
   cannot advance the renderer cursor. A recreated renderer catches up from the encrypted replica
@@ -564,26 +578,31 @@ after provider-secret loss. AuthKit validity alone never grants workspace access
 
 Agent bearer credentials are accepted only by agent-capable identity and workspace routes. Every
 request checks the token hash, token revocation, active agent membership, and the route's immutable
-scope. An agent may read the same workspace-visible and explicitly joined conversations as a human
-member, open DMs with `direct-conversations:write` (or the broader legacy
-`conversations:write`), send and explicitly identify mentions with `messages:write`, and advance its
-cursor with `read-cursors:write`. `agents:invite` permits only an enrollment request and the
-requester's own status/cancellation; policy, review, legacy agent creation, and token administration
-remain owner-only. The enrolled `default-agency-v1` profile contains exactly `workspace:read`,
-`messages:write`, `direct-conversations:write`, and `agents:invite`. Supplying both a human cookie and
-agent bearer credential to an identity route is rejected as ambiguous. Agent tokens never cross the
-renderer boundary or appear in argv, URLs, logs, or realtime tickets.
+scope. An agent reads and posts only in conversations where it is a participant: it may discover
+and join active public channels with `channels:join`, while private channels require an invitation.
+It may open one-to-one or fixed-membership group conversations with
+`direct-conversations:write` (or the broader legacy `conversations:write`), send and explicitly
+identify mentions with `messages:write`, and advance its cursor with `read-cursors:write`. Mentions
+never add a participant. `agents:invite` permits only an enrollment request and the requester's own
+status/cancellation; policy, review, legacy agent creation, and token administration remain
+owner-only. The enrolled `default-agency-v1` profile contains exactly `workspace:read`,
+`messages:write`, `direct-conversations:write`, `channels:join`, and `agents:invite`.
+`attachments:write` is deliberately outside that default: the default can read files attached to
+accessible, non-retracted messages but cannot upload or attach bytes. Supplying both a human cookie
+and agent bearer credential to an identity route is rejected as ambiguous. Agent tokens never cross
+the renderer boundary or appear in argv, URLs, logs, or realtime tickets.
 
 Enrollment is a claim protocol, not token delivery. The child stores the final credential locally
 before exposing its SHA-256 verifier; the inviter and owner see only the verifier-bound request, and
 the server activates that exact hash only after policy and authorization rechecks. Required review
-is the workspace default. `automatic` is an explicit owner setting intended for controlled spaces
-such as the junkyard and is never derived from a name. Workspace-access channels are visible by
-membership. An agent inviter may delegate a valid, non-archived members-only channel only while it
+is the workspace default. `automatic` is an explicit owner setting and is never derived from a
+workspace name. Public channels are visible to agents only after explicit seating; members-only
+channels remain invitation-only. An agent inviter may delegate a valid, non-archived members-only channel only while it
 has active membership there; a workspace-owner requester may grant any valid restricted channel in
 the workspace. That authority is rechecked at redemption. `attachments-v1` only requests attachment
 wire projections. File list/content routes still require `workspace:read` and repository-level
-conversation visibility.
+conversation visibility. File creation, byte writes, completion, and message attachment also
+require the non-default `attachments:write` scope.
 
 An eligible Hermes wake requests `agent-context-pack-v1` only after its self-message, author
 allowlist, DM/channel-mention, and optional participated-thread gates pass. The server projects at
@@ -659,12 +678,12 @@ deletes active data and objects within 30 days; encrypted backups age out within
   expand/backfill/contract. A release may roll back application tasks without rolling back a
   destructive migration; destructive cleanup waits until the previous client/server version
   is outside the compatibility window.
-- Default agency follows expand/enable: apply the additive enrollment tables, policy column, and
-  scope constraint; deploy a server and CLI that parse the new scopes; leave policy `required`;
-  then enroll or migrate the first `default-agency-v1` identity only after the old server has left
-  the rollback window. A functional rollback sets policy to `required`, cancels open enrollments,
-  and revokes or disables activated credentials; it does not reverse the migration or restore a
-  server that cannot parse the new scopes.
+- Default agency follows a one-way expand/enable sequence. Apply the additive migrations and deploy
+  compatible code with `HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED=false`. Stop every old server and
+  realtime node and remove the old image as a rollback target, then enable the flag on every node.
+  The service records the workspace cutover durably so a lagging compatible process cannot restore
+  implicit public-channel access. After enablement, keep the flag on and forward-fix; do not restore
+  an image that cannot parse the new scopes or membership model.
 - Migration `0005_message_search.sql` populates a stored search vector and builds its GIN index in
   one transaction. Apply it during a maintenance window for an existing populated deployment;
   replace it with a staged online backfill/index build before message history reaches production
@@ -746,14 +765,14 @@ downgrade.
 
 | Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                                                |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, task ordering/version conflicts, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, error redaction, the exact `default-agency-v1` scope set, enrollment states, and child-verifier claim handling. Runs on every pull request. |
-| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, attachment state transitions, required/automatic enrollment policy, idempotent request/review/redeem, expiry/capacity/username races, requester and seat rechecks, and secret-free audit. Runs on every pull request. |
+| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, direct/group participant cardinality and uniqueness, task ordering/version conflicts, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, error redaction, and the exact `default-agency-v1` scope set. Runs on every pull request. |
+| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, fixed group membership, transactional event writes, permanent send and join idempotency, pagination boundaries, search isolation, attachment read/write boundaries, owner token revocation, and agent disablement. Runs on every pull request. |
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
-| Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, notification focus/permission/click routing, zero-copy child enrollment, seated channel write, DM open/send, verified agent mention, agent-invite without administration, and `attachments-v1` file retrieval without a desktop. Runs before a hosted release. |
+| Feature integration        | Three-user scenarios cover channel/direct/group/task isolation, public discovery and join, private invitation, Kanban convergence and reassignment, threads, Unicode reactions/mentions without access changes, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, notification focus/permission/click routing, and read-only `attachments-v1` retrieval without a desktop. Runs before a hosted release. |
 | Native E2E                 | Baseline install/launch/logout/relaunch, deep links, OS keyring, tray/window lifecycle, offline restart, and uninstall run on every shipped platform's full [supported host matrix](#supported-host-matrix) row; a release never scopes this down. Optional-feature evidence—including notifications granted/denied—is scoped to the platforms in the change's declared scope, and an unproven platform ships that feature off rather than untested. Package smoke runs on relevant changes; the full release matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
-| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, enrollment stop/revoke rollback, explicit primary/junkyard policy evidence, Atlas replacement cutover and old-token revocation, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members. |
+| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise the one-way default-agency cutover, migration locking and compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members. |
 
 No release may waive authorization, idempotency/data-loss, artifact-signature, or restore
 tests. Flaky tests are treated as failed gates until fixed or replaced with an equivalent
