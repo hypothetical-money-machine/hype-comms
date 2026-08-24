@@ -12,6 +12,7 @@ describe("loadConfig", () => {
       cookieSecure: false,
       trustedProxies: [],
       agentProvisioningEnabled: true,
+      defaultAgentAgencyEnabled: true,
       authKitAdmissionEnabled: false,
     });
   });
@@ -29,6 +30,7 @@ describe("loadConfig", () => {
       cookieSecure: true,
       trustedProxies: ["127.0.0.1", "::1"],
       agentProvisioningEnabled: false,
+      defaultAgentAgencyEnabled: false,
     });
   });
 
@@ -42,6 +44,20 @@ describe("loadConfig", () => {
       }),
     ).toMatchObject({ agentProvisioningEnabled: true });
     expect(() => loadConfig({ HYPE_COMMS_AGENT_PROVISIONING_ENABLED: "yes" })).toThrow(ConfigError);
+  });
+
+  it("requires an explicit production cutover for default agent agency", () => {
+    expect(
+      loadConfig({
+        NODE_ENV: "production",
+        HYPE_COMMS_DATABASE_URL: "postgres://hype_comms:secret@postgres/hype_comms",
+        HYPE_COMMS_EMAIL_DELIVERY: "manual",
+        HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED: "true",
+      }),
+    ).toMatchObject({ defaultAgentAgencyEnabled: true });
+    expect(() => loadConfig({ HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED: "yes" })).toThrow(
+      ConfigError,
+    );
   });
 
   it("maps HYPE_COMMS_WEB_ROOT to webRoot and omits it when unset", () => {

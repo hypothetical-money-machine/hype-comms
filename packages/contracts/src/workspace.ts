@@ -18,6 +18,7 @@ import {
   reactionSchema,
   readCursorSchema,
   sendMessageRequestSchema,
+  userKindSchema,
   userSchema,
   workspaceSchema,
 } from "./entities.js";
@@ -45,7 +46,9 @@ export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
 export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
+export const AGENT_CONTEXT_PACK_CAPABILITY = "agent-context-pack-v1";
 export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
+export const GROUP_DIRECT_MESSAGES_CAPABILITY = "group-direct-messages-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -65,6 +68,52 @@ export const clientCapabilitiesHeaderSchema = z
 export const CONVERSATION_PAGE_DEFAULT_LIMIT = 50;
 export const CONVERSATION_PAGE_MAX_LIMIT = 100;
 
+function validateConversationParticipants(
+  conversation: z.infer<typeof conversationSchema>,
+  participantIds: readonly string[],
+  context: z.RefinementCtx,
+  path: readonly (string | number)[],
+): void {
+  if (new Set(participantIds).size !== participantIds.length) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "Conversation participant IDs must be unique",
+    });
+  }
+  if (
+    conversation.kind === "direct_message" &&
+    (participantIds.length < 1 || participantIds.length > 2)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A direct conversation must contain one or two participants",
+    });
+  }
+  if (
+    conversation.kind === "group_direct_message" &&
+    (participantIds.length < 3 || participantIds.length > 25)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A group conversation must contain between three and 25 participants",
+    });
+  }
+  if (
+    conversation.kind === "group_direct_message" &&
+    conversation.createdBy !== null &&
+    !participantIds.includes(conversation.createdBy)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A group conversation creator must be one of its participants",
+    });
+  }
+}
+
 export const conversationSummarySchema = z
   .object({
     conversation: conversationSchema,
@@ -77,7 +126,19 @@ export const conversationSummarySchema = z
     mentionCount: z.number().int().nonnegative(),
     readCursor: readCursorSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((summary, context) => {
+    validateConversationParticipants(summary.conversation, summary.participantIds, context, [
+      "participantIds",
+    ]);
+    if (summary.conversation.kind === "group_direct_message" && summary.membershipRole === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["membershipRole"],
+        message: "A visible group conversation must include the current member's role",
+      });
+    }
+  });
 
 export const workspaceBootstrapResponseSchema = z
   .object({
@@ -195,6 +256,34 @@ export const listConversationsResponseSchema = z
   })
   .strict();
 
+export const publicChannelDirectoryEntrySchema = z
+  .object({
+    conversation: conversationSchema,
+    joined: z.boolean(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.conversation.kind !== "channel" ||
+      entry.conversation.access !== "workspace" ||
+      entry.conversation.isArchived
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["conversation"],
+        message: "A public channel directory entry must be an active workspace channel",
+      });
+    }
+  });
+
+export const listPublicChannelsResponseSchema = z
+  .object({
+    channels: z.array(publicChannelDirectoryEntrySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
+    nextCursor: paginationCursorSchema.nullable(),
+    hasMore: z.boolean(),
+  })
+  .strict();
+
 export const createChannelRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(100),
@@ -265,6 +354,22 @@ export const directConversationRequestSchema = z
   })
   .strict();
 
+export const groupDirectConversationRequestSchema = z
+  .object({
+    memberIds: z
+      .array(entityIdSchema)
+      .min(2)
+      .max(24)
+      .refine((ids) => new Set(ids).size === ids.length, "Group members must be unique"),
+  })
+  .strict();
+
+export const joinPublicChannelRequestSchema = z.undefined();
+
+export const groupDirectConversationOperationSchema = groupDirectConversationRequestSchema
+  .extend({ idempotencyKey: idempotencyKeySchema })
+  .strict();
+
 export const conversationMutationResponseSchema = z
   .object({
     conversation: conversationSummarySchema,
@@ -273,8 +378,47 @@ export const conversationMutationResponseSchema = z
   .strict();
 
 export const MESSAGE_HISTORY_MAX_LIMIT = 100;
+export const AGENT_CONTEXT_PACK_DEFAULT_LIMIT = 8;
+export const AGENT_CONTEXT_PACK_MAX_LIMIT = 20;
+export const AGENT_CONTEXT_PACK_MAX_BYTES = 64 * 1_024;
 export const REACTIONS_PER_MEMBER_PER_MESSAGE_MAX = 20;
 export const REACTIONS_PER_MESSAGE_MAX = 250;
+
+function utf8ByteLength(value: string): number {
+  let length = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined) {
+      continue;
+    }
+    length += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return length;
+}
+
+/**
+ * The canonical compact, physical-one-line JSON encoding of a context pack.
+ *
+ * `JSON.stringify` escapes ASCII newlines but emits these Unicode line separators literally, so
+ * they are escaped too, otherwise a message body could manufacture a physical boundary line in a
+ * rendered pack. This is the one definition of that representation; every renderer and every size
+ * check derives from it so a pack pruned to fit is a pack that renders.
+ */
+export function toInjectionSafeCompactJson(value: unknown): string {
+  const compactJson = JSON.stringify(value);
+  if (compactJson === undefined) {
+    throw new TypeError("Value does not have a JSON representation");
+  }
+  return compactJson
+    .replaceAll("\u0085", "\\u0085")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+}
+
+/** Byte length of {@link toInjectionSafeCompactJson}'s output: the size a pack is pruned to. */
+export function injectionSafeCompactJsonByteLength(value: unknown): number {
+  return utf8ByteLength(toInjectionSafeCompactJson(value));
+}
 
 export const messageHistoryQuerySchema = z
   .object({
@@ -282,6 +426,29 @@ export const messageHistoryQuerySchema = z
     limit: z.coerce.number().int().min(1).max(MESSAGE_HISTORY_MAX_LIMIT).default(50),
   })
   .strict();
+
+export const agentContextHistoryQuerySchema = z
+  .object({
+    contextPack: z.union([z.literal("true"), z.literal(true)]).transform(() => true as const),
+    before: paginationCursorSchema.optional(),
+    throughMessageId: entityIdSchema.optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(AGENT_CONTEXT_PACK_MAX_LIMIT)
+      .default(AGENT_CONTEXT_PACK_DEFAULT_LIMIT),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.before !== undefined && value.throughMessageId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["throughMessageId"],
+        message: "Context history cannot combine before and throughMessageId",
+      });
+    }
+  });
 
 export const messageThreadRequestSchema = messageHistoryQuerySchema
   .extend({ messageId: entityIdSchema })
@@ -350,6 +517,231 @@ export const messageHistoryResponseSchema = z
       summarizedRoots.add(summary.threadRootId);
     }
   });
+
+export const agentContextAuthorSchema = z
+  .object({
+    id: entityIdSchema,
+    kind: userKindSchema,
+    username: userSchema.shape.username,
+    displayName: userSchema.shape.displayName,
+  })
+  .strict();
+
+const channelContextLocationSchema = z
+  .object({
+    id: entityIdSchema,
+    kind: z.literal("channel"),
+    slug: channelSlugSchema,
+    // Equality to the code-point-bounded canonical slug below is the complete
+    // selector bound. A redundant z.string().max() would count UTF-16 code
+    // units instead and reject valid astral-letter slugs.
+    selector: z.string().min(2),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.selector !== `#${value.slug}`) {
+      context.addIssue({
+        code: "custom",
+        path: ["selector"],
+        message: "Channel selector must be derived from its canonical slug",
+      });
+    }
+  });
+
+const directMessageContextLocationSchema = z
+  .object({
+    id: entityIdSchema,
+    kind: z.literal("direct_message"),
+    selector: z.string().min(2).max(81),
+    peer: agentContextAuthorSchema,
+    self: z.boolean(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.selector !== `@${value.peer.username}`) {
+      context.addIssue({
+        code: "custom",
+        path: ["selector"],
+        message: "Direct-message selector must be derived from the peer username",
+      });
+    }
+  });
+
+export const agentContextLocationSchema = z.discriminatedUnion("kind", [
+  channelContextLocationSchema,
+  directMessageContextLocationSchema,
+]);
+
+export const agentContextMessageSchema = z
+  .object({
+    id: entityIdSchema,
+    conversationSequence: sequenceSchema,
+    createdAt: isoDateTimeSchema,
+    body: messageSchema.shape.body,
+    author: agentContextAuthorSchema,
+    mentionedYou: z.boolean(),
+    threadRootId: entityIdSchema.nullable(),
+  })
+  .strict();
+
+export const agentContextReplyTargetSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("flat"),
+      conversationId: entityIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("thread"),
+      conversationId: entityIdSchema,
+      rootMessageId: entityIdSchema,
+    })
+    .strict(),
+]);
+
+export const agentContextPackSchema = z
+  .object({
+    version: z.literal(1),
+    conversation: agentContextLocationSchema,
+    anchorMessageId: entityIdSchema.nullable(),
+    messages: z.array(agentContextMessageSchema).max(AGENT_CONTEXT_PACK_MAX_LIMIT),
+    threadRoot: agentContextMessageSchema.nullable(),
+    replyTarget: agentContextReplyTargetSchema.nullable(),
+    readThroughMessageId: entityIdSchema.nullable(),
+    truncatedBefore: z.boolean(),
+    nextCursor: paginationCursorSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const empty = value.messages.length === 0;
+    const nullableAnchorFields = [
+      value.anchorMessageId,
+      value.replyTarget,
+      value.readThroughMessageId,
+    ];
+    if (empty !== nullableAnchorFields.every((field) => field === null)) {
+      context.addIssue({
+        code: "custom",
+        message: "Empty context packs must not carry an anchor, read target, or reply target",
+      });
+    }
+    if (empty && value.threadRoot !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["threadRoot"],
+        message: "Empty context packs must not carry a separate thread root",
+      });
+    }
+    if (empty && (value.truncatedBefore || value.nextCursor !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["truncatedBefore"],
+        message: "Empty context packs must not carry pagination metadata",
+      });
+    }
+    if (value.truncatedBefore !== (value.nextCursor !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["truncatedBefore"],
+        message: "Context truncation and its next cursor must be reported together",
+      });
+    }
+
+    const ids = new Set<string>();
+    let previousSequence = -1n;
+    for (const [index, message] of value.messages.entries()) {
+      if (ids.has(message.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["messages", index, "id"],
+          message: "Context messages must be unique",
+        });
+      }
+      ids.add(message.id);
+      const sequence = BigInt(message.conversationSequence);
+      if (sequence <= previousSequence) {
+        context.addIssue({
+          code: "custom",
+          path: ["messages", index, "conversationSequence"],
+          message: "Context messages must be in chronological order",
+        });
+      }
+      previousSequence = sequence;
+    }
+
+    const anchor = value.messages.at(-1);
+    if (anchor !== undefined) {
+      if (value.anchorMessageId !== anchor.id || value.readThroughMessageId !== anchor.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["anchorMessageId"],
+          message: "Context anchor and read target must match the newest message",
+        });
+      }
+      if (value.replyTarget?.conversationId !== value.conversation.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["replyTarget", "conversationId"],
+          message: "Reply target must belong to the context conversation",
+        });
+      }
+      if (value.conversation.kind === "direct_message") {
+        if (value.replyTarget?.kind !== "flat") {
+          context.addIssue({
+            code: "custom",
+            path: ["replyTarget"],
+            message: "Direct-message context must use a flat reply target",
+          });
+        }
+      } else {
+        const expectedRoot = anchor.threadRootId ?? anchor.id;
+        if (
+          value.replyTarget?.kind !== "thread" ||
+          value.replyTarget.rootMessageId !== expectedRoot
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["replyTarget"],
+            message: "Channel context must target the anchor's canonical thread root",
+          });
+        }
+      }
+    }
+
+    if (value.threadRoot !== null) {
+      if (ids.has(value.threadRoot.id) || value.threadRoot.threadRootId !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadRoot"],
+          message: "A separate thread root must be top-level and absent from the context tail",
+        });
+      }
+      if (
+        value.replyTarget?.kind !== "thread" ||
+        value.replyTarget.rootMessageId !== value.threadRoot.id
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["threadRoot", "id"],
+          message: "Separate thread root must match the reply target",
+        });
+      }
+    }
+
+    if (injectionSafeCompactJsonByteLength(value) > AGENT_CONTEXT_PACK_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: "Context pack exceeds the maximum serialized size",
+      });
+    }
+  });
+
+export const agentContextHistoryResponseSchema = z
+  .object({
+    contextPack: agentContextPackSchema,
+  })
+  .strict();
 
 export const messageThreadResponseSchema = z
   .object({
@@ -594,6 +986,10 @@ export const conversationUpdatedEventSchema = workspaceEventBaseSchema
   })
   .superRefine((event, context) => {
     const conversation = event.payload.conversation;
+    validateConversationParticipants(conversation, event.payload.participantIds, context, [
+      "payload",
+      "participantIds",
+    ]);
     if (conversation.id !== event.conversationId) {
       context.addIssue({
         code: "custom",
@@ -863,6 +1259,8 @@ export type CommunicationPath = z.infer<typeof communicationPathSchema>;
 export type CommunicationPathsResponse = z.infer<typeof communicationPathsResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
+export type PublicChannelDirectoryEntry = z.infer<typeof publicChannelDirectoryEntrySchema>;
+export type ListPublicChannelsResponse = z.infer<typeof listPublicChannelsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
 export type CreateChannelOperation = z.infer<typeof createChannelOperationSchema>;
 export type ChannelMember = z.infer<typeof channelMemberSchema>;
@@ -875,8 +1273,19 @@ export type ChannelMembershipMutationResponse = z.infer<
 >;
 export type ArchiveChannelRequest = z.infer<typeof archiveChannelRequestSchema>;
 export type DirectConversationRequest = z.infer<typeof directConversationRequestSchema>;
+export type GroupDirectConversationRequest = z.infer<typeof groupDirectConversationRequestSchema>;
+export type GroupDirectConversationOperation = z.infer<
+  typeof groupDirectConversationOperationSchema
+>;
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
+export type AgentContextHistoryQuery = z.infer<typeof agentContextHistoryQuerySchema>;
+export type AgentContextAuthor = z.infer<typeof agentContextAuthorSchema>;
+export type AgentContextLocation = z.infer<typeof agentContextLocationSchema>;
+export type AgentContextMessage = z.infer<typeof agentContextMessageSchema>;
+export type AgentContextReplyTarget = z.infer<typeof agentContextReplyTargetSchema>;
+export type AgentContextPack = z.infer<typeof agentContextPackSchema>;
+export type AgentContextHistoryResponse = z.infer<typeof agentContextHistoryResponseSchema>;
 export type MessageThreadRequest = z.infer<typeof messageThreadRequestSchema>;
 export type MessageThreadSummary = z.infer<typeof messageThreadSummarySchema>;
 export type MessageHistoryResponse = z.infer<typeof messageHistoryResponseSchema>;

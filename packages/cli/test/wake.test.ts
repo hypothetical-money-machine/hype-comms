@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 
 import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   agentWakeStreamRecordSchema,
   type AgentWakeBootstrapResponse,
   type AgentWakeCheckpoint,
@@ -293,7 +295,9 @@ async function runScenario(input: {
       return jsonResponse(input.bootstrap ?? wakeBootstrap());
     }
     if (url.pathname === "/v1/realtime/tickets") {
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
+        `${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
+      );
       return jsonResponse({
         ticket: "ticket_value_that_is_at_least_32_chars",
         expiresAt: "2026-07-26T21:00:00.000Z",

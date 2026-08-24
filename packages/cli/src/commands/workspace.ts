@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+  AGENT_CONTEXT_PACK_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   advanceReadCursorRequestSchema,
   advanceReadCursorResponseSchema,
+  agentContextHistoryQuerySchema,
+  agentContextHistoryResponseSchema,
   archiveChannelRequestSchema,
   channelSlugFromName,
   clientMessageIdSchema,
@@ -11,8 +17,11 @@ import {
   createChannelRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
+  groupDirectConversationRequestSchema,
+  idempotencyKeySchema,
   listConversationsResponseSchema,
   listMembersResponseSchema,
+  listPublicChannelsResponseSchema,
   messageByIdResponseSchema,
   messageHistoryResponseSchema,
   paginationCursorSchema,
@@ -38,9 +47,15 @@ import { writeResult } from "../output.js";
 import {
   listAllConversations,
   resolveConversationSelector,
+  resolveDirectMemberSelector,
   resolveMemberSelector,
+  resolvePublicChannelSelector,
 } from "../selectors.js";
 import type { CommandContext } from "../types.js";
+
+const GROUP_DIRECT_MESSAGES_HEADER = {
+  "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+} as const;
 
 export async function workspaceCommand(
   context: CommandContext,
@@ -55,6 +70,7 @@ export async function workspaceCommand(
       await client.request({
         path: "/v1/bootstrap",
         responseSchema: workspaceBootstrapResponseSchema,
+        headers: GROUP_DIRECT_MESSAGES_HEADER,
       }),
       context.options.json,
     );
@@ -114,6 +130,7 @@ export async function conversationsCommand(
     path: "/v1/conversations",
     query: { after, limit: integerOption(parsed, "limit", 50, 100) },
     responseSchema: listConversationsResponseSchema,
+    headers: GROUP_DIRECT_MESSAGES_HEADER,
   });
   writeResult(context.runtime.io, response, context.options.json);
 }
@@ -124,6 +141,29 @@ export async function channelsCommand(
   args: readonly string[],
 ): Promise<void> {
   const client = await clientFromContext(context);
+  if (subcommand === "list") {
+    const parsed = parseCommandArguments(args, {
+      after: { kind: "string" },
+      limit: { kind: "string" },
+    });
+    requirePositionals(parsed, 0);
+    const afterValue = stringOption(parsed, "after");
+    const parsedAfter =
+      afterValue === undefined ? undefined : paginationCursorSchema.safeParse(afterValue);
+    if (parsedAfter !== undefined && !parsedAfter.success) {
+      throw new UsageError("--after is not a valid pagination cursor", "INVALID_CURSOR");
+    }
+    const response = await client.request({
+      path: "/v1/channels",
+      query: {
+        after: parsedAfter?.data,
+        limit: integerOption(parsed, "limit", 50, 100),
+      },
+      responseSchema: listPublicChannelsResponseSchema,
+    });
+    writeResult(context.runtime.io, response, context.options.json);
+    return;
+  }
   if (subcommand === "create") {
     const parsed = parseCommandArguments(args, {
       slug: { kind: "string" },
@@ -160,7 +200,19 @@ export async function channelsCommand(
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hype-comms-cli channels <create|archive>");
+  if (subcommand === "join") {
+    const parsed = parseCommandArguments(args, {});
+    const [selector] = requirePositionals(parsed, 1);
+    const id = await resolvePublicChannelSelector(client, selector!);
+    const response = await client.request({
+      method: "PUT",
+      path: `/v1/channels/${id}/membership`,
+      responseSchema: conversationMutationResponseSchema,
+    });
+    writeResult(context.runtime.io, response, context.options.json);
+    return;
+  }
+  throw new UsageError("Usage: hype-comms-cli channels <list|create|archive|join>");
 }
 
 export async function dmsCommand(
@@ -168,19 +220,62 @@ export async function dmsCommand(
   subcommand: string | undefined,
   args: readonly string[],
 ): Promise<void> {
-  if (subcommand !== "create") throw new UsageError("Usage: hype-comms-cli dms create <member>");
-  const parsed = parseCommandArguments(args, {});
-  const [member] = requirePositionals(parsed, 1);
   const client = await clientFromContext(context);
-  const body = { memberId: await resolveMemberSelector(client, member!) };
-  const response = await client.request({
-    method: "POST",
-    path: "/v1/direct-conversations",
-    body,
-    requestSchema: directConversationRequestSchema,
-    responseSchema: conversationMutationResponseSchema,
-  });
-  writeResult(context.runtime.io, response, context.options.json);
+  if (subcommand === "create") {
+    const parsed = parseCommandArguments(args, {});
+    const [member] = requirePositionals(parsed, 1);
+    const body = { memberId: await resolveDirectMemberSelector(client, member!) };
+    const response = await client.request({
+      method: "POST",
+      path: "/v1/direct-conversations",
+      body,
+      requestSchema: directConversationRequestSchema,
+      responseSchema: conversationMutationResponseSchema,
+    });
+    writeResult(context.runtime.io, response, context.options.json);
+    return;
+  }
+  if (subcommand === "create-group") {
+    const parsed = parseCommandArguments(args, {
+      "idempotency-key": { kind: "string" },
+    });
+    const members = parsed.positionals;
+    if (members.length < 2 || members.length > 24) {
+      throw new UsageError(
+        "A group direct conversation requires between 2 and 24 members",
+        "INVALID_GROUP_SIZE",
+      );
+    }
+    const key = idempotencyKeySchema.safeParse(
+      stringOption(parsed, "idempotency-key") ?? randomUUID(),
+    );
+    if (!key.success) {
+      throw new UsageError("--idempotency-key is invalid", "INVALID_IDEMPOTENCY_KEY");
+    }
+    const memberIds = await Promise.all(
+      members.map((member) => resolveDirectMemberSelector(client, member)),
+    );
+    if (new Set(memberIds).size !== memberIds.length) {
+      throw new UsageError("Group members must be unique", "DUPLICATE_MEMBER");
+    }
+    const body = { memberIds };
+    const response = await client.request({
+      method: "POST",
+      path: "/v1/group-direct-conversations",
+      body,
+      requestSchema: groupDirectConversationRequestSchema,
+      responseSchema: conversationMutationResponseSchema,
+      headers: {
+        "idempotency-key": key.data,
+        "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+      },
+    });
+    writeResult(context.runtime.io, response, context.options.json);
+    return;
+  }
+  throw new UsageError(
+    "Usage: hype-comms-cli dms <create MEMBER|create-group MEMBER MEMBER [MEMBER...]>",
+  );
 }
 
 export async function messagesCommand(
@@ -207,7 +302,9 @@ export async function messagesCommand(
   if (subcommand === "history") {
     const parsed = parseCommandArguments(args, {
       before: { kind: "string" },
+      "context-pack": { kind: "boolean" },
       limit: { kind: "string" },
+      "through-message-id": { kind: "string" },
     });
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolveConversationSelector(client, selector!);
@@ -218,6 +315,44 @@ export async function messagesCommand(
       throw new UsageError("--before is not a valid pagination cursor", "INVALID_CURSOR");
     }
     const before = parsedBefore?.data;
+    const contextPack = booleanOption(parsed, "context-pack");
+    const throughMessageValue = stringOption(parsed, "through-message-id");
+    if (!contextPack && throughMessageValue !== undefined) {
+      throw new UsageError("--through-message-id requires --context-pack");
+    }
+    if (before !== undefined && throughMessageValue !== undefined) {
+      throw new UsageError("--before cannot be combined with --through-message-id");
+    }
+    const throughMessageId =
+      throughMessageValue === undefined ? undefined : entityIdSchema.safeParse(throughMessageValue);
+    if (throughMessageId !== undefined && !throughMessageId.success) {
+      throw new UsageError("--through-message-id must be a UUID", "INVALID_MESSAGE_ID");
+    }
+    if (contextPack) {
+      const query = agentContextHistoryQuerySchema.safeParse({
+        contextPack: true,
+        throughMessageId: throughMessageId?.data,
+        before,
+        limit: integerOption(
+          parsed,
+          "limit",
+          AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+          AGENT_CONTEXT_PACK_MAX_LIMIT,
+        ),
+      });
+      if (!query.success) {
+        throw new UsageError("The context-pack history options are invalid");
+      }
+      const response = await client.request({
+        path: `/v1/conversations/${id}/messages`,
+        query: query.data,
+        responseSchema: agentContextHistoryResponseSchema,
+        headers: { "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY },
+      });
+      writeResult(context.runtime.io, response, context.options.json);
+      return;
+    }
+
     const response = await client.request({
       path: `/v1/conversations/${id}/messages`,
       query: { before, limit: integerOption(parsed, "limit", 50, 100) },

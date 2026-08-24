@@ -1100,10 +1100,17 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect((await cache.load()).reactions).toEqual([]);
   });
 
-  it("does not purge a conversation when a different member is removed", async () => {
+  it("projects another member's removal without opening a membership repair", async () => {
     const cache = create();
     await cache.replaceSnapshot(
-      snapshot,
+      {
+        ...snapshot,
+        conversations: snapshot.conversations.map((summary) =>
+          summary.conversation.id === ALPHA_ID
+            ? { ...summary, participantIds: [MORGAN_ID, ALICE_ID] }
+            : summary,
+        ),
+      },
       [messageSequence2],
       [reactionAddedEvent.payload.reaction],
       [task],
@@ -1120,10 +1127,13 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.reactions).toContainEqual(reactionAddedEvent.payload.reaction);
     expect(state.tasks).toContainEqual(task);
     expect(state.outbox[0]?.operation).toEqual(queuedAlphaMessage);
-    expect(state.repairMarker).toMatchObject({
-      conversationId: ALPHA_ID,
-      selfRemoval: false,
-    });
+    expect(
+      state.bootstrap?.conversations.find((summary) => summary.conversation.id === ALPHA_ID)
+        ?.participantIds,
+    ).toEqual([MORGAN_ID]);
+    expect(state.syncCursor).toBe(otherMemberRemovedEvent.workspaceSequence);
+    expect(state.repairMarker).toBeNull();
+    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(false);
   });
 
   it("prunes only outbox rows outside an authoritative conversation catalog", async () => {

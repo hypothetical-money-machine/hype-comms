@@ -50,11 +50,16 @@ Commands:
   workspace bootstrap
   workspace members
   conversations list [--after CURSOR] [--limit N] [--all]
+  channels list [--after CURSOR] [--limit N]
+  channels join CHANNEL
   channels create NAME [--slug SLUG] [--topic TOPIC]
   channels archive CHANNEL
   dms create MEMBER
+  dms create-group MEMBER MEMBER [MEMBER...] [--idempotency-key KEY]
   messages get MESSAGE_ID
   messages history CONVERSATION [--before CURSOR] [--limit N]
+  messages history CONVERSATION --context-pack [--through-message-id UUID]
+                [--before CURSOR] [--limit N]
   messages send CONVERSATION [BODY] [--file PATH] [--mention MEMBER]...
                 [--client-message-id UUID] [--thread-root-id UUID]
   files list CONVERSATION [--before CURSOR] [--limit N]

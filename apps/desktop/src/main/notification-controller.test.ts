@@ -552,6 +552,31 @@ describe("NotificationController freshness and policy integration", () => {
     expect(harness.controller.diagnostics.rendererReady).toBe(false);
   });
 
+  it("labels a group direct-message notification with every other participant", () => {
+    const harness = createHarness({
+      conversations: [
+        conversationSummary({
+          kind: "group_direct_message",
+          participantIds: [USER_ID, AUTHOR_ID, OTHER_USER_ID],
+        }),
+      ],
+    });
+    const presenter = harness.presenter as FakePresenter;
+    arm(harness.controller);
+
+    expect(
+      harness.controller.handleEvent(messageEvent({ eventNumber: 12, sequence: 6 })),
+    ).toMatchObject({
+      policy: { decision: "eligible", reason: "direct_message" },
+      presentationAttempted: true,
+    });
+    expect(presenter.presentations[0]?.presentation).toEqual({
+      title: "Claire",
+      body: "Claire, Woots",
+      reason: "direct_message",
+    });
+  });
+
   it("consumes a server-authorized participated-thread reason and opens the exact reply", () => {
     const harness = createHarness({
       conversations: [conversationSummary({ kind: "channel", name: "engineering" })],

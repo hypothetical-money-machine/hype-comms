@@ -86,6 +86,10 @@ interface ExistingTokenRow extends QueryResultRow {
   readonly id: string;
 }
 
+interface EnrollmentCredentialRow extends QueryResultRow {
+  readonly credential_verifier: unknown;
+}
+
 const enrollmentCredentialVerifierBufferSchema = z
   .instanceof(Buffer)
   .refine((value) => value.byteLength === 32, "Expected a SHA-256 credential verifier");
@@ -395,8 +399,13 @@ export class AgentEnrollmentModule {
     input: RequestAgentEnrollment,
     idempotencyKey: string,
   ): Promise<AgentEnrollment> {
-    const response = await this.#transaction(async (client) =>
-      runIdempotentMutation(
+    const response = await this.#transaction(async (client) => {
+      // A cached response is still privileged enrollment information. Hold the requester's
+      // authority rows for the whole transaction so replay and revocation serialize against the
+      // same live authorization state.
+      await this.#requireRequester(client, actor, true);
+      await this.#hooks.afterRequesterLocked?.();
+      return runIdempotentMutation(
         client,
         {
           actorUserId: actor.userId,
@@ -408,8 +417,6 @@ export class AgentEnrollmentModule {
         },
         async () => {
           const now = this.#clock();
-          await this.#requireRequester(client, actor, true);
-          await this.#hooks.afterRequesterLocked?.();
           await this.#expireWorkspaceEnrollments(client, actor.workspaceId, now);
           // Different idempotency keys for the same requester still share one live-row bound.
           // Serialize the count+insert pair across every server process before enforcing it.
@@ -513,8 +520,8 @@ export class AgentEnrollmentModule {
           if (inserted === null) throw new Error("Enrollment insert returned no row");
           return agentEnrollmentResponseSchema.parse({ enrollment: mapEnrollment(inserted) });
         },
-      ),
-    );
+      );
+    });
     return response.enrollment;
   }
 
@@ -842,6 +849,29 @@ export class AgentEnrollmentModule {
       throw new ApiError(401, "UNAUTHORIZED", "Enrollment credential is invalid");
     }
     throw new ApiError(409, "CONFLICT", outcome.message);
+  }
+
+  async authenticateRedemptionCredential(
+    enrollmentId: EntityId,
+    candidateCredential: AgentTokenSecret,
+  ): Promise<void> {
+    // This read-only preflight prevents the rollout gate from becoming an authentication oracle.
+    // redeem() repeats the comparison while holding its transaction lock before making any write.
+    const result = await this.#pool.query<EnrollmentCredentialRow>(
+      `SELECT credential_verifier
+         FROM agent_enrollments
+        WHERE id = $1`,
+      [enrollmentId],
+    );
+    const found = result.rows[0];
+    if (found === undefined) {
+      throw new ApiError(404, "NOT_FOUND", "Agent enrollment not found");
+    }
+    const candidateHash = credentialHash(candidateCredential);
+    const verifier = enrollmentCredentialVerifierBufferSchema.parse(found.credential_verifier);
+    if (!sameHash(verifier, candidateHash)) {
+      throw new ApiError(401, "UNAUTHORIZED", "Enrollment credential is invalid");
+    }
   }
 
   async #requireRequester(

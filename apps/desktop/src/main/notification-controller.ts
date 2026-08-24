@@ -953,9 +953,19 @@ export class NotificationController {
 
   #conversationLabel(conversation: ProjectedConversation, session: ActiveSession): string | null {
     if (conversation.kind === "channel") return conversation.name ?? conversation.slug;
-    const otherParticipant = conversation.participantIds.find(
+    const otherParticipants = conversation.participantIds.filter(
       (participantId) => participantId !== session.userId,
     );
+    if (conversation.kind === "group_direct_message") {
+      if (otherParticipants.length === 0) return "Group conversation";
+      const names = otherParticipants.map(
+        (participantId) => this.#members.get(participantId)?.displayName ?? "Former member",
+      );
+      const visibleNames = names.slice(0, 3);
+      const remaining = names.length - visibleNames.length;
+      return `${visibleNames.join(", ")}${remaining > 0 ? ` +${String(remaining)}` : ""}`;
+    }
+    const otherParticipant = otherParticipants[0];
     if (otherParticipant === undefined) return null;
     return this.#members.get(otherParticipant)?.displayName ?? null;
   }
