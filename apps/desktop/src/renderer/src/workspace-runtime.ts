@@ -443,9 +443,19 @@ function retractReplySummary(
         : candidate,
     );
   }
+  const remainingReplyCount = summary.replyCount - 1;
+  if (remainingReplyCount === 0) {
+    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+  }
+  const retainedLiveReplyCount = messages.filter(
+    (message) => message.threadRootId === tombstone.threadRootId && message.deletedAt === null,
+  ).length;
+  // A partial page cannot prove which surviving server reply is latest. Drop its summary until a
+  // refresh can replace it instead of promoting a reply that is known to be incomplete.
+  if (retainedLiveReplyCount !== remainingReplyCount) {
+    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+  }
   const latestReply = newestLiveReply(messages, tombstone.threadRootId);
-  // A page can know the aggregate count while not retaining another reply locally. Removing this
-  // incomplete summary is more honest than advertising the tombstone or guessing its replacement.
   if (latestReply === null) {
     return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
   }
@@ -453,7 +463,7 @@ function retractReplySummary(
     candidate.threadRootId === tombstone.threadRootId
       ? {
           ...candidate,
-          replyCount: Math.max(1, candidate.replyCount - 1),
+          replyCount: remainingReplyCount,
           latestReply,
         }
       : candidate,
@@ -608,7 +618,7 @@ export class WorkspaceRuntime {
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
   #retractReservations: RetractReservation[] = [];
-  /** Exact mention IDs from live creates, retained only until a matching retract arrives. */
+  /** Exact mention IDs from live creates, retained while the corresponding message is retained. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
@@ -636,6 +646,13 @@ export class WorkspaceRuntime {
   #setState(update: Partial<WorkspaceRuntimeState>): void {
     this.#state = { ...this.#state, ...update };
     for (const listener of this.#listeners) listener(this.#state);
+  }
+
+  #pruneCreatedMessageMentions(messages: readonly Message[]): void {
+    const retainedMessageIds = new Set(messages.map((message) => message.id));
+    for (const messageId of this.#createdMessageMentions.keys()) {
+      if (!retainedMessageIds.has(messageId)) this.#createdMessageMentions.delete(messageId);
+    }
   }
 
   /**
@@ -792,6 +809,7 @@ export class WorkspaceRuntime {
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
+      this.#pruneCreatedMessageMentions(cached.messages);
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -2459,6 +2477,7 @@ export class WorkspaceRuntime {
         : null;
     const focusedThreadMessageId =
       selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId;
+    this.#pruneCreatedMessageMentions(loaded.messages);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
@@ -3242,6 +3261,7 @@ export class WorkspaceRuntime {
       if (!visibleMessageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
     this.#historyCursors.delete(conversationId);
+    this.#pruneCreatedMessageMentions(state.messages);
     this.#setState({
       bootstrap: state.bootstrap,
       messages: state.messages,
@@ -3307,6 +3327,7 @@ export class WorkspaceRuntime {
     for (const [rootId] of this.#threadCursors) {
       if (!messageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
+    this.#pruneCreatedMessageMentions(messages);
     this.#setState({
       bootstrap,
       messages,
@@ -3790,6 +3811,7 @@ export class WorkspaceRuntime {
       knownMessageIds.add(message.id);
     }
     this.#syncCursor = loaded.syncCursor;
+    this.#pruneCreatedMessageMentions(loaded.messages);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,

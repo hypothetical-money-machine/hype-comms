@@ -2710,6 +2710,65 @@ describe("WorkspaceRuntime", () => {
     expect(projection(live)).toEqual(projection(fresh));
   });
 
+  it("drops a partial thread summary when its latest reply is retracted", async () => {
+    const retainedEarlierReply: Message = {
+      ...threadReply,
+      id: PEER_MESSAGE_ID,
+      clientMessageId: PEER_CLIENT_MESSAGE_ID,
+      conversationSequence: "3",
+      body: "Retained earlier reply",
+    };
+    const unretainedReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000b2",
+      clientMessageId: "20000000-0000-4000-8000-0000000000b3",
+      conversationSequence: "4",
+      body: "Newer reply outside the retained page",
+    };
+    const latestReply: Message = {
+      ...threadReply,
+      conversationSequence: "5",
+      body: "Latest reply",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [{ ...channel(CONVERSATION_ID, "general"), lastMessage: latestReply }],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({
+      root: ownMessage,
+      replies: [retainedEarlierReply],
+      nextCursor: unretainedReply.id,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b4",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: latestReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: latestReply.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "partial thread retract projection");
+
+    expect(runtime.state.messages).toContainEqual(retainedEarlierReply);
+    expect(runtime.state.threadSummaries).toEqual([]);
+  });
+
   it("removes a deleted thread root's summary while retaining its live replies", async () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", {
