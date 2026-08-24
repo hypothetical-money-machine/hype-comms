@@ -135,6 +135,10 @@ function capabilities(value: string | string[] | undefined): readonly string[] {
   return parsed.data;
 }
 
+function missingDirectConversationWriteScope(): ApiError {
+  return new ApiError(403, "FORBIDDEN", "Agent token requires the conversations:write scope");
+}
+
 function withoutChannelMode(summary: ConversationSummary) {
   const conversation: Partial<ConversationSummary["conversation"]> = { ...summary.conversation };
   delete conversation.channelMode;
@@ -346,13 +350,8 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       identity.credentialType === "session" ||
       identity.currentUser.scopes.includes("direct-conversations:write") ||
       identity.currentUser.scopes.includes("conversations:write");
-    const missingWriteScope = new ApiError(
-      403,
-      "FORBIDDEN",
-      "Agent token requires the conversations:write scope",
-    );
     if (!canCreate && !identity.currentUser.scopes.includes("workspace:read")) {
-      throw missingWriteScope;
+      throw missingDirectConversationWriteScope();
     }
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
@@ -364,7 +363,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       : await repository.findDirectConversation(identity, result.data);
     if (opened === null) {
       // Read-only lookup found nothing; opening it would need the write scope.
-      throw missingWriteScope;
+      throw missingDirectConversationWriteScope();
     }
     return reply
       .code(201)
