@@ -359,6 +359,9 @@ clear an ambiguous target outcome safely.
   ambiguity enter durable `blocked-repair` state and emit body-free notices.
 - Transient source and provider unavailability retry with bounded exponential backoff.
 - A crash-restored `delivering` item is ambiguous; queued and due retry items resume in FIFO order.
+- If a source failure arrives while a provider outcome is unknown, the durable provider repair
+  retains that source failure as `deferredSourceRepair`. Provider reconciliation promotes it to the
+  primary repair instead of discarding the source reset or re-enrollment action still required.
 - The private startup operator interface can export status/evidence, confirm a
   provider-correlated accepted/duplicate/coalesced result, explicitly retry after adapter-specific
   reconciliation, reset an expired source from a newly captured high-water, and resume. Each
@@ -749,9 +752,17 @@ npm run collect:agent-wake-evidence -- \
 Replaying the exact same observation is idempotent. Reusing a case ID, observation ID, or artifact
 name for different evidence fails closed. The journal also rejects run-identity changes,
 non-chronological normalized timestamps, non-private files, symlinks, changed authority exports,
-schema additions such as a message body, and tampered pointer artifacts. A stale
-`.collector.lock` is deliberately not removed automatically; first prove that no collector process
-is active, retain incident context, and then remove only that exact lock file.
+schema additions such as a message body, and tampered pointer artifacts. Each contender stages and
+syncs a private record before atomically publishing its UUID-named `.collector-lock-*.json` file.
+The unique pathname is never reused, so one stale contender can be removed without racing a later
+owner at a shared lock path. A well-formed lock is reclaimed automatically only when two liveness
+checks report that its recorded PID does not exist. Simultaneous live contenders fail closed (both
+may back off), a live or reused PID remains the owner, and permission errors, malformed records, or
+any other ambiguous liveness result fail closed. In those ambiguous cases, first prove that no
+collector process is active, retain incident context, and then remove only that exact UUID-named
+lock file. A legacy shared `.collector.lock` also fails closed and requires that manual procedure.
+This PID policy assumes the protected local filesystem required below; it is not suitable for a
+shared filesystem spanning hosts with independent PID namespaces.
 
 The run directory, observation, authority subject, and every ancestor must use canonical paths and
 must be owned by the current account or root. The collector rejects group- or world-writable
