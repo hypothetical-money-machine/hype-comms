@@ -6,6 +6,7 @@ import path from "node:path";
 import { entityIdSchema } from "@hype-comms/contracts";
 import { z } from "zod";
 
+import { agentWakeApiOriginSchema } from "./agent-wake-validation";
 import { readPrivateBoundedUtf8File } from "./preference-file";
 
 export const AGENT_WAKE_CONFIGURATION_ENV = "HYPE_COMMS_AGENT_WAKE_CONFIGURATION";
@@ -38,26 +39,6 @@ const executablePathSchema = z
   .refine((value) => path.resolve(value) !== path.parse(path.resolve(value)).root, {
     message: "Executable path cannot be a filesystem root",
   });
-const apiOriginSchema = z
-  .string()
-  .min(1)
-  .max(2_048)
-  .superRefine((value, context) => {
-    try {
-      const url = new URL(value);
-      if (
-        (url.protocol !== "https:" && url.protocol !== "http:") ||
-        url.username !== "" ||
-        url.password !== "" ||
-        url.origin !== value
-      ) {
-        context.addIssue({ code: "custom", message: "Expected a credential-free HTTP origin" });
-      }
-    } catch {
-      context.addIssue({ code: "custom", message: "Expected a valid API origin" });
-    }
-  });
-
 const agentWakeConfigurationSchema = z
   .object({
     version: z.literal(1),
@@ -71,7 +52,7 @@ const agentWakeConfigurationSchema = z
         cliEntrypointPath: executablePathSchema,
         cliEntrypointSha256: sha256Schema,
         profile: profileSchema,
-        apiOrigin: apiOriginSchema,
+        apiOrigin: agentWakeApiOriginSchema,
       })
       .strict(),
     target: z

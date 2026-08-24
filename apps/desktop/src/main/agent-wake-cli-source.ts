@@ -23,6 +23,7 @@ import {
   type AgentWakeExecutablePin,
   verifyAgentWakeExecutablePin,
 } from "./agent-wake-configuration";
+import { agentWakeProcessEnvironment, normalizeAgentWakeApiOrigin } from "./agent-wake-validation";
 
 const DEFAULT_MAX_STDOUT_LINE_BYTES = 16 * 1_024;
 const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 256 * 1_024;
@@ -30,22 +31,6 @@ const DEFAULT_MAX_RECORD_QUEUE_DEPTH = 128;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_GRACE_MS = 1_000;
 const MAX_STOP_GRACE_MS = 2_000;
-const MAX_TRACKED_STDERR_BYTES = 64 * 1_024;
-
-const SAFE_ENVIRONMENT_KEYS = new Set([
-  "APPDATA",
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LOCALAPPDATA",
-  "SYSTEMROOT",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "USERPROFILE",
-  "WINDIR",
-  "XDG_CONFIG_HOME",
-]);
 
 export interface AgentWakeCliBinding {
   readonly runtimeExecutablePath: string;
@@ -149,31 +134,8 @@ function classifyExit(code: number | null): AgentWakeSourceFailure {
   }
 }
 
-function normalizeApiOrigin(value: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  if (
-    url.username !== "" ||
-    url.password !== "" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    (url.pathname !== "" && url.pathname !== "/")
-  ) {
-    return null;
-  }
-  const hostname = url.hostname.replace(/^\[(.*)\]$/u, "$1").toLowerCase();
-  const loopback =
-    hostname === "localhost" || hostname === "::1" || /^127(?:\.\d{1,3}){3}$/u.test(hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) return null;
-  return url.origin;
-}
-
 function normalizeBinding(binding: AgentWakeCliBinding): NormalizedAgentWakeCliBinding | null {
-  const apiOrigin = normalizeApiOrigin(binding.apiOrigin);
+  const apiOrigin = normalizeAgentWakeApiOrigin(binding.apiOrigin);
   if (
     !isAbsolute(binding.runtimeExecutablePath) ||
     binding.runtimeExecutablePath.includes("\0") ||
@@ -205,21 +167,11 @@ function normalizeBinding(binding: AgentWakeCliBinding): NormalizedAgentWakeCliB
 }
 
 function sanitizedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const sanitized: NodeJS.ProcessEnv = { NO_COLOR: "1" };
-  for (const [key, value] of Object.entries(environment)) {
-    if (value === undefined) continue;
-    const upperKey = key.toUpperCase();
-    if (SAFE_ENVIRONMENT_KEYS.has(upperKey) || upperKey === "HYPE_COMMS_CONFIG_DIR") {
-      sanitized[key] = value;
-    }
-  }
-  return sanitized;
-}
-
-function byteLength(chunk: unknown): number {
-  if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) return chunk.byteLength;
-  if (typeof chunk === "string") return Buffer.byteLength(chunk);
-  return 0;
+  return agentWakeProcessEnvironment({
+    source: environment,
+    fixed: { NO_COLOR: "1" },
+    additionalAllowedKeys: ["HYPE_COMMS_CONFIG_DIR"],
+  });
 }
 
 function bufferFromChunk(chunk: unknown): Buffer | null {
@@ -245,13 +197,23 @@ function recordMatchesAccess(
 }
 
 function drainStderr(stream: Readable): void {
-  let observedBytes = 0;
-  stream.on("data", (chunk: unknown) => {
-    observedBytes = Math.min(MAX_TRACKED_STDERR_BYTES, observedBytes + byteLength(chunk));
-  });
   stream.on("error", () => {
     // Diagnostics are untrusted and deliberately never decoded, retained, logged, or rethrown.
   });
+  stream.resume();
+}
+
+function destroyChildStreams(child: AgentWakeCliChildProcess): void {
+  try {
+    child.stdout.destroy();
+  } catch {
+    // The stable source failure remains authoritative during forced teardown.
+  }
+  try {
+    child.stderr.destroy();
+  } catch {
+    // The stable source failure remains authoritative during forced teardown.
+  }
 }
 
 function defaultProcessFactory(
@@ -487,7 +449,7 @@ class WakeCliSession implements AgentWakeSourceSession {
   }
 
   #abort(error: AgentWakeSourceFailure): void {
-    if (this.#terminalFailure !== null && !this.#closed) return;
+    if (this.#terminalFailure !== null) return;
     this.#terminalFailure = error;
     this.#buffer = Buffer.alloc(0);
     this.#queue = [];
@@ -522,7 +484,8 @@ class WakeCliSession implements AgentWakeSourceSession {
     } catch {
       // A process that raced to exit is already stopped.
     }
-    await this.#closedPromise;
+    if (await this.#waitForClose(this.#limits.stopGraceMs)) return;
+    destroyChildStreams(this.#child);
   }
 
   #waitForClose(timeoutMs: number): Promise<boolean> {
@@ -668,7 +631,7 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
       throw sourceFailure("source-scope-invalid", false);
     }
     const binding = await this.#binding(access.credentialHandle);
-    if (normalizeApiOrigin(access.apiOrigin) !== binding.apiOrigin) {
+    if (normalizeAgentWakeApiOrigin(access.apiOrigin) !== binding.apiOrigin) {
       throw sourceFailure("source-scope-invalid", false);
     }
     const args = [
@@ -743,11 +706,15 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
       let terminalError: AgentWakeSourceFailure | null = null;
       const timeout: { handle?: unknown } = {};
       const forceKill: { handle?: unknown } = {};
+      const forceSettlement: { handle?: unknown } = {};
       const settle = (outcome: { readonly value: unknown } | { readonly error: unknown }): void => {
         if (settled) return;
         settled = true;
         if (timeout.handle !== undefined) this.#timers.clearTimeout(timeout.handle);
         if (forceKill.handle !== undefined) this.#timers.clearTimeout(forceKill.handle);
+        if (forceSettlement.handle !== undefined) {
+          this.#timers.clearTimeout(forceSettlement.handle);
+        }
         signal?.removeEventListener("abort", abort);
         if ("error" in outcome) reject(outcome.error);
         else resolve(outcome.value);
@@ -756,13 +723,22 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
         if (settled || terminalError !== null) return;
         terminalError = error;
         if (timeout.handle !== undefined) this.#timers.clearTimeout(timeout.handle);
-        forceKill.handle = this.#timers.setTimeout(() => {
+        const forceKillHandle = this.#timers.setTimeout(() => {
           try {
             child.kill("SIGKILL");
           } catch {
             // A process that raced to exit is already stopped.
           }
+          if (settled) return;
+          const forceSettlementHandle = this.#timers.setTimeout(() => {
+            destroyChildStreams(child);
+            settle({ error });
+          }, this.#limits.stopGraceMs);
+          forceSettlement.handle = forceSettlementHandle;
+          if (settled) this.#timers.clearTimeout(forceSettlementHandle);
         }, this.#limits.stopGraceMs);
+        forceKill.handle = forceKillHandle;
+        if (settled) this.#timers.clearTimeout(forceKillHandle);
         try {
           child.kill("SIGTERM");
         } catch {

@@ -492,6 +492,32 @@ describe("AgentWakeProviderProcessTarget", () => {
     await expect(started.pending).rejects.toMatchObject({ code: "provider-outcome-ambiguous" });
   });
 
+  it("settles a failed request when inherited stdio prevents close", async () => {
+    const value = harness({ autoCloseOnKill: false });
+    const started = await startRequest(value);
+    let settled = false;
+    const rejection = started.pending.catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+
+    value.timer.fire();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(settled).toBe(false);
+    expect(value.child.kill).toHaveBeenCalledWith("SIGKILL");
+
+    value.timer.fire();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const settledAfterDeadline = settled;
+    if (!settledAfterDeadline) value.child.close(null, "SIGKILL");
+
+    expect(settledAfterDeadline).toBe(true);
+    expect(value.child.stdin.destroyed).toBe(true);
+    expect(value.child.stdout.destroyed).toBe(true);
+    expect(value.child.stderr.destroyed).toBe(true);
+    await expect(rejection).resolves.toMatchObject({ code: "provider-outcome-ambiguous" });
+  });
+
   it("kills an aborted post-handoff request without retrying it", async () => {
     const value = harness();
     const controller = new AbortController();

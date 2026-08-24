@@ -15,6 +15,7 @@ import {
   type AgentWakeExecutablePin,
   verifyAgentWakeExecutablePin,
 } from "./agent-wake-configuration";
+import { agentWakeProcessEnvironment } from "./agent-wake-validation";
 
 export const AGENT_WAKE_PROVIDER_DEFAULT_TIMEOUT_MS = 30_000;
 export const AGENT_WAKE_PROVIDER_DEFAULT_MAX_STDOUT_BYTES = 16 * 1_024;
@@ -22,6 +23,7 @@ export const AGENT_WAKE_PROVIDER_DEFAULT_MAX_STDERR_BYTES = 8 * 1_024;
 
 const MAX_REQUEST_BYTES = 16 * 1_024;
 const MAX_RETRY_AFTER_MS = 86_400_000;
+const FAILURE_SETTLEMENT_GRACE_MS = 1_000;
 
 const adapterIdSchema = z
   .string()
@@ -193,31 +195,21 @@ function validExecutableConfig(value: unknown): value is AgentWakeProviderExecut
   );
 }
 
-const ALLOWED_ENVIRONMENT_KEYS = [
-  "SYSTEMROOT",
-  "SystemRoot",
-  "WINDIR",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "HOME",
-  "USERPROFILE",
-  "APPDATA",
-  "LOCALAPPDATA",
-  "XDG_CONFIG_HOME",
-] as const;
-
 function sanitizedEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { HYPE_AGENT_WAKE_PROTOCOL: "1" };
-  for (const key of ALLOWED_ENVIRONMENT_KEYS) {
-    const value = source[key];
-    if (value !== undefined && value.length <= 4_096 && !value.includes("\0")) {
-      environment[key] = value;
+  return agentWakeProcessEnvironment({
+    source,
+    fixed: { HYPE_AGENT_WAKE_PROTOCOL: "1" },
+  });
+}
+
+function destroyProcessStreams(child: ChildProcessWithoutNullStreams): void {
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    try {
+      stream.destroy();
+    } catch {
+      // The stable provider failure remains authoritative during forced teardown.
     }
   }
-  return environment;
 }
 
 function parseSingleResponse(bytes: Buffer): unknown {
@@ -384,6 +376,7 @@ export class AgentWakeProviderProcessTarget implements AgentWakeTarget {
       let failure: AgentWakeProviderProcessErrorCode | null = null;
       const stdoutChunks: Buffer[] = [];
       let timeout: AgentWakeProviderTimerHandle | null = null;
+      let failureSettlementTimeout: AgentWakeProviderTimerHandle | null = null;
 
       const kill = (): void => {
         try {
@@ -394,6 +387,7 @@ export class AgentWakeProviderProcessTarget implements AgentWakeTarget {
       };
       const cleanup = (): void => {
         timeout?.cancel();
+        failureSettlementTimeout?.cancel();
         input.signal.removeEventListener("abort", abort);
       };
       const complete = (result: AgentWakeTargetResult): void => {
@@ -406,16 +400,19 @@ export class AgentWakeProviderProcessTarget implements AgentWakeTarget {
         if (settled || failure === null) return;
         settled = true;
         cleanup();
+        destroyProcessStreams(child);
         reject(new AgentWakeProviderProcessError(failure));
       };
       const fail = (code: AgentWakeProviderProcessErrorCode): void => {
         if (settled || failure !== null) return;
         failure = code;
-        cleanup();
         if (closed) {
           rejectFailure();
           return;
         }
+        const settlementTimeout = this.#timer.schedule(FAILURE_SETTLEMENT_GRACE_MS, rejectFailure);
+        failureSettlementTimeout = settlementTimeout;
+        if (settled) settlementTimeout.cancel();
         kill();
       };
       const abort = (): void => fail("provider-operation-aborted");

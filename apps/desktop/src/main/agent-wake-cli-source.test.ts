@@ -94,6 +94,29 @@ class FakeChildProcess extends EventEmitter implements AgentWakeCliChildProcess 
   }
 }
 
+class ManualTimers implements AgentWakeCliTimers {
+  readonly #tasks: Array<{ active: boolean; readonly task: () => void }> = [];
+
+  readonly setTimeout = (task: () => void): object => {
+    const handle = { active: true, task };
+    this.#tasks.push(handle);
+    return handle;
+  };
+
+  readonly clearTimeout = (value: unknown): void => {
+    const handle = value as { active?: boolean };
+    handle.active = false;
+  };
+
+  fireNext(): boolean {
+    const next = this.#tasks.find((task) => task.active);
+    if (next === undefined) return false;
+    next.active = false;
+    next.task();
+    return true;
+  }
+}
+
 function principal(
   scopes: readonly ("workspace:read" | "messages:write")[] = ["workspace:read", "messages:write"],
 ): unknown {
@@ -299,11 +322,39 @@ describe("AgentWakeCliSourceAdapter", () => {
     controller.abort();
 
     await vi.waitFor(() => expect(harness.children[0]?.kill).toHaveBeenCalledTimes(2));
-    expect(settled).toBe(false);
-    harness.children[0]?.close(null, "SIGKILL");
+    await vi.waitFor(() => expect(settled).toBe(true));
     await expectFailure(verifying, "source-unavailable", true);
     expect(harness.children[0]?.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
     expect(harness.children[0]?.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
+  it("settles an aborted auth command when inherited stdio prevents close", async () => {
+    const timers = new ManualTimers();
+    const harness = processHarness(undefined, false);
+    const source = adapter(harness.factory, { timers, stopGraceMs: 1 });
+    const controller = new AbortController();
+    const verifying = source.verify({
+      credentialHandle: CREDENTIAL_HANDLE,
+      expectedAgentUserId: AGENT_USER_ID,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(harness.children).toHaveLength(1));
+
+    controller.abort();
+    expect(timers.fireNext()).toBe(true);
+    expect(harness.children[0]?.kill).toHaveBeenLastCalledWith("SIGKILL");
+    expect(timers.fireNext()).toBe(true);
+    const settledWithoutClose = await Promise.race([
+      verifying.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    if (!settledWithoutClose) harness.children[0]?.close(null, "SIGKILL");
+
+    expect(settledWithoutClose).toBe(true);
+    await expectFailure(verifying, "source-unavailable", true);
   });
 
   it("captures the first future-only checkpoint without supplying an after cursor", async () => {
@@ -341,8 +392,7 @@ describe("AgentWakeCliSourceAdapter", () => {
     controller.abort();
 
     await vi.waitFor(() => expect(harness.children[0]?.kill).toHaveBeenCalledTimes(2));
-    expect(settled).toBe(false);
-    harness.children[0]?.close(null, "SIGKILL");
+    await vi.waitFor(() => expect(settled).toBe(true));
     await expectFailure(capturing, "source-unavailable", true);
     expect(harness.children[0]?.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
     expect(harness.children[0]?.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
@@ -453,6 +503,33 @@ describe("AgentWakeCliSourceAdapter", () => {
     await session.stop();
   });
 
+  it("preserves the first terminal failure across late teardown errors", async () => {
+    const harness = processHarness();
+    const source = adapter(harness.factory);
+    const session = await source.open({ ...access(), after: "7" });
+    const child = harness.children[0]!;
+
+    child.close(3);
+    child.stdout.emit("error", new Error("late pipe teardown"));
+
+    await expectFailure(session.next(), "source-authentication-required", false);
+    await session.stop();
+  });
+
+  it("drains stderr without installing per-chunk accounting", async () => {
+    const harness = processHarness();
+    const source = adapter(harness.factory);
+    const session = await source.open({ ...access(), after: "7" });
+    const child = harness.children[0]!;
+    const dataListenerCount = child.stderr.listenerCount("data");
+    const stderrIsFlowing = child.stderr.readableFlowing;
+
+    await session.stop();
+
+    expect(dataListenerCount).toBe(0);
+    expect(stderrIsFlowing).toBe(true);
+  });
+
   it("maps a transient CLI exit to a retryable source failure", async () => {
     const harness = processHarness();
     const source = adapter(harness.factory);
@@ -487,5 +564,27 @@ describe("AgentWakeCliSourceAdapter", () => {
     expect(harness.children[0]?.kill).toHaveBeenCalledWith("SIGTERM");
     expect(setTimer).toHaveBeenCalledWith(expect.any(Function), 100);
     expect(clearTimer).toHaveBeenCalled();
+  });
+
+  it("settles session stop when inherited stdio prevents close after force-kill", async () => {
+    const timers = new ManualTimers();
+    const harness = processHarness(undefined, false);
+    const source = adapter(harness.factory, { timers, stopGraceMs: 1 });
+    const session = await source.open({ ...access(), after: "7" });
+    let settled = false;
+    const stopping = Promise.resolve(session.stop()).then(() => {
+      settled = true;
+    });
+
+    expect(timers.fireNext()).toBe(true);
+    await vi.waitFor(() => expect(harness.children[0]?.kill).toHaveBeenLastCalledWith("SIGKILL"));
+    const postKillDeadlineArmed = timers.fireNext();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const settledWithoutClose = settled;
+    if (!settledWithoutClose) harness.children[0]?.close(null, "SIGKILL");
+    await stopping;
+
+    expect(postKillDeadlineArmed).toBe(true);
+    expect(settledWithoutClose).toBe(true);
   });
 });

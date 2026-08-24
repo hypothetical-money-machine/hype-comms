@@ -194,6 +194,20 @@ describe("agent wake configuration", () => {
     ).rejects.toMatchObject({ code: "configuration-invalid" });
   });
 
+  it("rejects non-loopback plaintext source origins before executable validation", async () => {
+    const executable = await executableConfiguration();
+    const value = executable.value;
+    value.source = {
+      ...(value.source as object),
+      apiOrigin: "http://internal.example.test",
+    };
+    const file = await privateConfigurationFile(value);
+
+    await expect(
+      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+    ).rejects.toMatchObject({ code: "configuration-invalid" });
+  });
+
   it("loads one unambiguous agent, source profile, and opaque runtime adapter", async () => {
     const grokBot = await executableConfiguration();
     const grokBotEnrollmentFile = await privateConfigurationFile(grokBot.value);
