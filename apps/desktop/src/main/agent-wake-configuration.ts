@@ -6,7 +6,11 @@ import path from "node:path";
 import { entityIdSchema } from "@hype-comms/contracts";
 import { z } from "zod";
 
-import { agentWakeApiOriginSchema } from "./agent-wake-validation";
+import {
+  agentWakeApiOriginSchema,
+  agentWakeSha256Schema,
+  isAgentWakeSha256Digest,
+} from "./agent-wake-validation";
 import { readPrivateBoundedUtf8File } from "./preference-file";
 
 export const AGENT_WAKE_CONFIGURATION_ENV = "HYPE_COMMS_AGENT_WAKE_CONFIGURATION";
@@ -22,10 +26,6 @@ const profileSchema = z
   .min(1)
   .max(64)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
-const sha256Schema = z
-  .string()
-  .length(64)
-  .regex(/^[0-9a-f]{64}$/u);
 const executablePathSchema = z
   .string()
   .min(1)
@@ -48,9 +48,9 @@ const agentWakeConfigurationSchema = z
       .object({
         credentialHandle: handleSchema,
         runtimeExecutablePath: executablePathSchema,
-        runtimeExecutableSha256: sha256Schema,
+        runtimeExecutableSha256: agentWakeSha256Schema,
         cliEntrypointPath: executablePathSchema,
-        cliEntrypointSha256: sha256Schema,
+        cliEntrypointSha256: agentWakeSha256Schema,
         profile: profileSchema,
         apiOrigin: agentWakeApiOriginSchema,
       })
@@ -60,7 +60,7 @@ const agentWakeConfigurationSchema = z
         targetHandle: handleSchema,
         adapterId: handleSchema,
         executablePath: executablePathSchema,
-        executableSha256: sha256Schema,
+        executableSha256: agentWakeSha256Schema,
         arguments: z.array(z.never()).length(0).default([]),
       })
       .strict(),
@@ -555,7 +555,7 @@ export function isAgentWakeExecutablePin(
     typeof candidate.changeTimeNs === "string" &&
     /^\d+$/u.test(candidate.changeTimeNs) &&
     typeof candidate.sha256 === "string" &&
-    /^[0-9a-f]{64}$/u.test(candidate.sha256) &&
+    isAgentWakeSha256Digest(candidate.sha256) &&
     Array.isArray(candidate.ancestors) &&
     candidate.ancestors.length === expectedAncestorPaths.length &&
     candidate.ancestors.every((ancestor, index) => {

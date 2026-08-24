@@ -23,7 +23,11 @@ import {
   type AgentWakeExecutablePin,
   verifyAgentWakeExecutablePin,
 } from "./agent-wake-configuration";
-import { agentWakeProcessEnvironment, normalizeAgentWakeApiOrigin } from "./agent-wake-validation";
+import {
+  agentWakePositiveInteger,
+  agentWakeProcessEnvironment,
+  normalizeAgentWakeApiOrigin,
+} from "./agent-wake-validation";
 
 const DEFAULT_MAX_STDOUT_LINE_BYTES = 16 * 1_024;
 const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 256 * 1_024;
@@ -87,25 +91,18 @@ export interface AgentWakeCliSourceAdapterOptions {
   readonly stopGraceMs?: number;
 }
 
-type NormalizedAgentWakeCliBinding = AgentWakeCliBinding;
+declare const normalizedBinding: unique symbol;
+
+/** An `AgentWakeCliBinding` proven to have passed `normalizeBinding`, which alone produces one. */
+type NormalizedAgentWakeCliBinding = AgentWakeCliBinding & {
+  readonly [normalizedBinding]: true;
+};
 
 interface SessionLimits {
   readonly maxLineBytes: number;
   readonly maxBufferBytes: number;
   readonly maxQueueDepth: number;
   readonly stopGraceMs: number;
-}
-
-function positiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
-
-function boundedPositiveInteger(
-  value: number | undefined,
-  fallback: number,
-  maximum: number,
-): number {
-  return Math.min(positiveInteger(value, fallback), maximum);
 }
 
 function sourceFailure(
@@ -163,7 +160,7 @@ function normalizeBinding(binding: AgentWakeCliBinding): NormalizedAgentWakeCliB
     cliEntrypointPin: binding.cliEntrypointPin,
     profile: binding.profile,
     apiOrigin,
-  };
+  } as NormalizedAgentWakeCliBinding;
 }
 
 function sanitizedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -525,19 +522,28 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
     this.#timers = options.timers ?? defaultTimers;
     this.#environment = sanitizedEnvironment(options.environment ?? process.env);
     this.#limits = {
-      maxLineBytes: positiveInteger(options.maxStdoutLineBytes, DEFAULT_MAX_STDOUT_LINE_BYTES),
-      maxBufferBytes: positiveInteger(
+      maxLineBytes: agentWakePositiveInteger(
+        options.maxStdoutLineBytes,
+        DEFAULT_MAX_STDOUT_LINE_BYTES,
+      ),
+      maxBufferBytes: agentWakePositiveInteger(
         options.maxStdoutBufferBytes,
         DEFAULT_MAX_STDOUT_BUFFER_BYTES,
       ),
-      maxQueueDepth: positiveInteger(options.maxRecordQueueDepth, DEFAULT_MAX_RECORD_QUEUE_DEPTH),
-      stopGraceMs: boundedPositiveInteger(
+      maxQueueDepth: agentWakePositiveInteger(
+        options.maxRecordQueueDepth,
+        DEFAULT_MAX_RECORD_QUEUE_DEPTH,
+      ),
+      stopGraceMs: agentWakePositiveInteger(
         options.stopGraceMs,
         DEFAULT_STOP_GRACE_MS,
         MAX_STOP_GRACE_MS,
       ),
     };
-    this.#commandTimeoutMs = positiveInteger(options.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
+    this.#commandTimeoutMs = agentWakePositiveInteger(
+      options.commandTimeoutMs,
+      DEFAULT_COMMAND_TIMEOUT_MS,
+    );
   }
 
   async verify(input: {
@@ -663,8 +669,10 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
     let runtimeExecutablePath: string;
     let cliEntrypointPath: string;
     try {
-      runtimeExecutablePath = await this.#verifyExecutable(binding.runtimeExecutablePin);
-      cliEntrypointPath = await this.#verifyExecutable(binding.cliEntrypointPin);
+      [runtimeExecutablePath, cliEntrypointPath] = await Promise.all([
+        this.#verifyExecutable(binding.runtimeExecutablePin),
+        this.#verifyExecutable(binding.cliEntrypointPin),
+      ]);
     } catch {
       throw sourceFailure("source-scope-invalid", false);
     }

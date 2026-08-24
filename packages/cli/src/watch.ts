@@ -31,6 +31,27 @@ import {
 import { writeEvent, writeResult } from "./output.js";
 import type { CommandContext } from "./types.js";
 
+/** Builds the body-free repair signal the client emits when it cannot continue from its cursor. */
+function syntheticResyncEvent(
+  workspaceId: string,
+  cursor: string,
+  reason: "client_replay_overflow" | "cursor_expired",
+): ProductRealtimeEvent {
+  return productRealtimeEventSchema.parse({
+    version: 1,
+    id: randomUUID(),
+    type: "system.resync_required",
+    occurredAt: new Date().toISOString(),
+    workspaceId,
+    conversationId: null,
+    workspaceSequence: cursor,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { reason },
+  });
+}
+
 // Negotiated on the ticket request, which is where a websocket connection
 // settles its capabilities; the socket upgrade itself carries no headers.
 // participated-thread-notifications-v1 subscribes to nothing new: a watcher
@@ -229,7 +250,7 @@ async function streamOneConnection(input: {
       if (error !== undefined) reject(error);
       else resolve({ cursor, delivered });
     };
-    const rejectContract = (message: string): void => {
+    const rejectContract = (message: string, cause?: unknown): void => {
       socket.terminate();
       settle(
         new CliError({
@@ -237,6 +258,7 @@ async function streamOneConnection(input: {
           code: "INVALID_SERVER_CONTRACT",
           message,
           retryable: false,
+          cause,
         }),
       );
     };
@@ -255,15 +277,7 @@ async function streamOneConnection(input: {
     socket.on("message", (data: RawData, isBinary: boolean) => {
       if (settled) return;
       if (isBinary) {
-        socket.terminate();
-        settle(
-          new CliError({
-            exitCode: EXIT_CONTRACT,
-            code: "INVALID_SERVER_CONTRACT",
-            message: "The realtime server sent a binary message",
-            retryable: false,
-          }),
-        );
+        rejectContract("The realtime server sent a binary message");
         return;
       }
       const serialized = data.toString("utf8");
@@ -272,29 +286,12 @@ async function streamOneConnection(input: {
       try {
         value = JSON.parse(serialized) as unknown;
       } catch (error) {
-        socket.terminate();
-        settle(
-          new CliError({
-            exitCode: EXIT_CONTRACT,
-            code: "INVALID_SERVER_CONTRACT",
-            message: "The realtime server sent malformed JSON",
-            retryable: false,
-            cause: error,
-          }),
-        );
+        rejectContract("The realtime server sent malformed JSON", error);
         return;
       }
       const parsed = productRealtimeEventSchema.safeParse(value);
       if (!parsed.success) {
-        socket.terminate();
-        settle(
-          new CliError({
-            exitCode: EXIT_CONTRACT,
-            code: "INVALID_SERVER_CONTRACT",
-            message: "The realtime server sent an invalid event",
-            retryable: false,
-          }),
-        );
+        rejectContract("The realtime server sent an invalid event");
         return;
       }
       const event = parsed.data;
@@ -349,19 +346,7 @@ async function streamOneConnection(input: {
           // realtime client so durable consumers can reset deliberately from their last cursor.
           pendingReplay.length = 0;
           pendingReplayBytes = 0;
-          const event = productRealtimeEventSchema.parse({
-            version: 1,
-            id: randomUUID(),
-            type: "system.resync_required",
-            occurredAt: new Date().toISOString(),
-            workspaceId: input.workspaceId,
-            conversationId: null,
-            workspaceSequence: cursor,
-            conversationSequence: null,
-            entityVersion: 1,
-            delivery: "at_least_once",
-            payload: { reason: "client_replay_overflow" },
-          });
+          const event = syntheticResyncEvent(input.workspaceId, cursor, "client_replay_overflow");
           if (!deliver(event)) return;
           socket.terminate();
           settle(new ResyncRequiredError());
@@ -391,19 +376,7 @@ async function streamOneConnection(input: {
         settle();
       } else if (resyncRequired || code === 4009) {
         if (!resyncRequired) {
-          const event = productRealtimeEventSchema.parse({
-            version: 1,
-            id: randomUUID(),
-            type: "system.resync_required",
-            occurredAt: new Date().toISOString(),
-            workspaceId: input.workspaceId,
-            conversationId: null,
-            workspaceSequence: cursor,
-            conversationSequence: null,
-            entityVersion: 1,
-            delivery: "at_least_once",
-            payload: { reason: "cursor_expired" },
-          });
+          const event = syntheticResyncEvent(input.workspaceId, cursor, "cursor_expired");
           try {
             input.write(event);
           } catch (error) {

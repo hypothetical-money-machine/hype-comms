@@ -15,7 +15,11 @@ import {
   type AgentWakeExecutablePin,
   verifyAgentWakeExecutablePin,
 } from "./agent-wake-configuration";
-import { agentWakeProcessEnvironment } from "./agent-wake-validation";
+import {
+  agentWakePositiveInteger,
+  agentWakeProcessEnvironment,
+  isAgentWakeOpaqueHandle,
+} from "./agent-wake-validation";
 
 export const AGENT_WAKE_PROVIDER_DEFAULT_TIMEOUT_MS = 30_000;
 export const AGENT_WAKE_PROVIDER_DEFAULT_MAX_STDOUT_BYTES = 16 * 1_024;
@@ -168,14 +172,6 @@ const defaultProcessFactory: AgentWakeProviderProcessFactory = (
     stdio: [...options.stdio],
   });
 
-function positiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
-
-function validOpaqueHandle(value: string): boolean {
-  return value.length > 0 && value.length <= 512 && !value.includes("\0");
-}
-
 function validExecutableConfig(value: unknown): value is AgentWakeProviderExecutableConfig {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<AgentWakeProviderExecutableConfig>;
@@ -285,12 +281,15 @@ export class AgentWakeProviderProcessTarget implements AgentWakeTarget {
     this.#processFactory = options.processFactory ?? defaultProcessFactory;
     this.#timer = options.timer ?? defaultTimer;
     this.#environment = sanitizedEnvironment(options.environment ?? process.env);
-    this.#timeoutMs = positiveInteger(options.timeoutMs, AGENT_WAKE_PROVIDER_DEFAULT_TIMEOUT_MS);
-    this.#maxStdoutBytes = positiveInteger(
+    this.#timeoutMs = agentWakePositiveInteger(
+      options.timeoutMs,
+      AGENT_WAKE_PROVIDER_DEFAULT_TIMEOUT_MS,
+    );
+    this.#maxStdoutBytes = agentWakePositiveInteger(
       options.maxStdoutBytes,
       AGENT_WAKE_PROVIDER_DEFAULT_MAX_STDOUT_BYTES,
     );
-    this.#maxStderrBytes = positiveInteger(
+    this.#maxStderrBytes = agentWakePositiveInteger(
       options.maxStderrBytes,
       AGENT_WAKE_PROVIDER_DEFAULT_MAX_STDERR_BYTES,
     );
@@ -301,8 +300,8 @@ export class AgentWakeProviderProcessTarget implements AgentWakeTarget {
       throw new AgentWakeProviderProcessError("provider-operation-aborted");
     }
     if (
-      !validOpaqueHandle(input.provider.adapterId) ||
-      !validOpaqueHandle(input.provider.targetHandle) ||
+      !isAgentWakeOpaqueHandle(input.provider.adapterId) ||
+      !isAgentWakeOpaqueHandle(input.provider.targetHandle) ||
       !Number.isSafeInteger(input.attempt) ||
       input.attempt <= 0 ||
       !agentWakeSignalSchema.safeParse(input.wake).success

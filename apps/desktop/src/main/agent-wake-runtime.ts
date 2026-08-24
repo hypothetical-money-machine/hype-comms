@@ -18,6 +18,7 @@ import {
   AgentWakeProviderProcessTarget,
   type AgentWakeProviderExecutableConfig,
 } from "./agent-wake-provider-process";
+import { agentWakeBackoffDelay, agentWakePositiveInteger } from "./agent-wake-validation";
 
 const DEFAULT_STARTUP_RETRY_BASE_MS = 1_000;
 const DEFAULT_STARTUP_RETRY_MAX_MS = 30_000;
@@ -73,10 +74,6 @@ export class AgentWakeRuntimeError extends Error {
   }
 }
 
-function boundedPositiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
-
 function startupRetryCode(error: unknown): AgentWakeStartupRetryNotice["code"] | null {
   if (
     typeof error !== "object" ||
@@ -100,10 +97,6 @@ function startupRetryCode(error: unknown): AgentWakeStartupRetryNotice["code"] |
     default:
       return null;
   }
-}
-
-function startupRetryDelay(baseMs: number, maximumMs: number, attempt: number): number {
-  return Math.min(maximumMs, baseMs * 2 ** Math.min(20, Math.max(0, attempt - 1)));
 }
 
 function startupDisposed(): AgentWakeRuntimeError {
@@ -210,11 +203,11 @@ export async function startAgentWakeRuntime(
   const target = options.target ?? providerTarget(options.configuration, options.environment);
   const clock = options.clock ?? systemClock;
   const scheduler = options.scheduler ?? systemScheduler;
-  const retryBaseMs = boundedPositiveInteger(
+  const retryBaseMs = agentWakePositiveInteger(
     options.startupRetryBaseMs,
     DEFAULT_STARTUP_RETRY_BASE_MS,
   );
-  const retryMaxMs = boundedPositiveInteger(
+  const retryMaxMs = agentWakePositiveInteger(
     options.startupRetryMaxMs,
     DEFAULT_STARTUP_RETRY_MAX_MS,
   );
@@ -264,7 +257,7 @@ export async function startAgentWakeRuntime(
       const code = startupRetryCode(error);
       if (code === null) throw error;
       retryAttempt += 1;
-      const delayMs = startupRetryDelay(retryBaseMs, retryMaxMs, retryAttempt);
+      const delayMs = agentWakeBackoffDelay(retryBaseMs, retryMaxMs, retryAttempt);
       try {
         options.onStartupRetry?.({
           enrollmentId: options.configuration.enrollmentId,

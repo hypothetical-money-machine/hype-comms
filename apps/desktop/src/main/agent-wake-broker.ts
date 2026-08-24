@@ -4,6 +4,12 @@ import {
   type AgentWakeStreamRecord,
 } from "@hype-comms/contracts";
 import { deriveAgentWakeId } from "@hype-comms/contracts/wake-node";
+import {
+  agentWakeBackoffDelay,
+  agentWakePositiveInteger,
+  isAgentWakeOpaqueHandle,
+  isAgentWakeSha256Digest,
+} from "./agent-wake-validation";
 
 const DEFAULT_MAX_QUEUE_DEPTH = 100;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 1_000;
@@ -244,19 +250,7 @@ export interface AgentWakeBrokerStatus {
     readonly nextAttemptAt: number;
   } | null;
   readonly repair: StoredAgentWakeRepair | null;
-  readonly lastCompletion: {
-    readonly wakeId: string;
-    readonly conversationId: string;
-    readonly messageId: string;
-    readonly reason: AgentWakeSignal["reason"];
-    readonly occurredAt: string;
-    readonly sourceCursor: string;
-    readonly attempt: number;
-    readonly brokerDurableAt: number;
-    readonly disposition: AgentWakeCompletionDisposition;
-    readonly providerReceiptId: string;
-    readonly completedAt: number;
-  } | null;
+  readonly lastCompletion: StoredAgentWakeCompletion | null;
 }
 
 /** Body-free durable evidence available to the privileged local operator surface. */
@@ -358,26 +352,14 @@ export interface AgentWakeBrokerOptions {
   readonly onNotice?: (notice: AgentWakeNotice) => void;
 }
 
-function boundedPositiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-}
-
 function isRetryableFailure(error: unknown): boolean {
   return (
     typeof error === "object" && error !== null && "retryable" in error && error.retryable === true
   );
 }
 
-function validOpaqueHandle(value: string): boolean {
-  return value.length > 0 && value.length <= 512 && !/[\p{Cc}\p{Cf}]/u.test(value);
-}
-
 function validCursor(value: string): boolean {
   return /^(0|[1-9][0-9]*)$/u.test(value);
-}
-
-function validOperatorActionId(value: string): boolean {
-  return /^[0-9a-f]{64}$/u.test(value);
 }
 
 function newerCursor(candidate: string, current: string): boolean {
@@ -418,22 +400,7 @@ function repairAfterProviderResolution(
 function completionStatus(
   state: StoredAgentWakeEnrollment,
 ): AgentWakeBrokerStatus["lastCompletion"] {
-  const completion = state.completions.at(-1);
-  return completion === undefined
-    ? null
-    : {
-        wakeId: completion.wakeId,
-        conversationId: completion.conversationId,
-        messageId: completion.messageId,
-        reason: completion.reason,
-        occurredAt: completion.occurredAt,
-        sourceCursor: completion.sourceCursor,
-        attempt: completion.attempt,
-        brokerDurableAt: completion.brokerDurableAt,
-        disposition: completion.disposition,
-        providerReceiptId: completion.providerReceiptId,
-        completedAt: completion.completedAt,
-      };
+  return state.completions.at(-1) ?? null;
 }
 
 function projectStatus(state: StoredAgentWakeEnrollment): AgentWakeBrokerStatus {
@@ -471,10 +438,6 @@ function projectStatus(state: StoredAgentWakeEnrollment): AgentWakeBrokerStatus 
     repair: state.repair,
     lastCompletion: completionStatus(state),
   };
-}
-
-function backoff(baseMs: number, maximumMs: number, attempt: number): number {
-  return Math.min(maximumMs, baseMs * 2 ** Math.min(20, Math.max(0, attempt - 1)));
 }
 
 function createWaiter(): { readonly promise: Promise<void>; readonly resolve: () => void } {
@@ -520,28 +483,28 @@ export class AgentWakeBroker {
     this.#clock = options.clock;
     this.#scheduler = options.scheduler;
     this.#target = options.target;
-    this.#maxQueueDepth = boundedPositiveInteger(options.maxQueueDepth, DEFAULT_MAX_QUEUE_DEPTH);
-    this.#maxCompletionRecords = boundedPositiveInteger(
+    this.#maxQueueDepth = agentWakePositiveInteger(options.maxQueueDepth, DEFAULT_MAX_QUEUE_DEPTH);
+    this.#maxCompletionRecords = agentWakePositiveInteger(
       options.maxCompletionRecords,
       DEFAULT_MAX_COMPLETION_RECORDS,
     );
-    this.#maxProviderAttempts = boundedPositiveInteger(
+    this.#maxProviderAttempts = agentWakePositiveInteger(
       options.maxProviderAttempts,
       DEFAULT_MAX_PROVIDER_ATTEMPTS,
     );
-    this.#providerRetryBaseMs = boundedPositiveInteger(
+    this.#providerRetryBaseMs = agentWakePositiveInteger(
       options.providerRetryBaseMs,
       DEFAULT_PROVIDER_RETRY_BASE_MS,
     );
-    this.#providerRetryMaxMs = boundedPositiveInteger(
+    this.#providerRetryMaxMs = agentWakePositiveInteger(
       options.providerRetryMaxMs,
       DEFAULT_PROVIDER_RETRY_MAX_MS,
     );
-    this.#sourceRetryBaseMs = boundedPositiveInteger(
+    this.#sourceRetryBaseMs = agentWakePositiveInteger(
       options.sourceRetryBaseMs,
       DEFAULT_SOURCE_RETRY_BASE_MS,
     );
-    this.#sourceRetryMaxMs = boundedPositiveInteger(
+    this.#sourceRetryMaxMs = agentWakePositiveInteger(
       options.sourceRetryMaxMs,
       DEFAULT_SOURCE_RETRY_MAX_MS,
     );
@@ -551,11 +514,11 @@ export class AgentWakeBroker {
   async enrollNow(request: AgentWakeEnrollmentRequest): Promise<AgentWakeBrokerStatus> {
     this.#assertActive();
     if (
-      !validOpaqueHandle(request.enrollmentId) ||
-      !validOpaqueHandle(request.expectedAgentUserId) ||
-      !validOpaqueHandle(request.credentialHandle) ||
-      !validOpaqueHandle(request.provider.adapterId) ||
-      !validOpaqueHandle(request.provider.targetHandle)
+      !isAgentWakeOpaqueHandle(request.enrollmentId) ||
+      !isAgentWakeOpaqueHandle(request.expectedAgentUserId) ||
+      !isAgentWakeOpaqueHandle(request.credentialHandle) ||
+      !isAgentWakeOpaqueHandle(request.provider.adapterId) ||
+      !isAgentWakeOpaqueHandle(request.provider.targetHandle)
     ) {
       throw new AgentWakeBrokerError("enrollment-invalid");
     }
@@ -725,7 +688,10 @@ export class AgentWakeBroker {
     readonly evidenceReference: string;
   }): Promise<AgentWakeBrokerStatus> {
     this.#assertActive();
-    if (!validOperatorActionId(input.actionId) || !validOpaqueHandle(input.evidenceReference)) {
+    if (
+      !isAgentWakeSha256Digest(input.actionId) ||
+      !isAgentWakeOpaqueHandle(input.evidenceReference)
+    ) {
       throw new AgentWakeBrokerError("repair-action-invalid");
     }
     await this.#withControl(input.enrollmentId, async () => {
@@ -791,9 +757,9 @@ export class AgentWakeBroker {
   ): Promise<AgentWakeBrokerStatus> {
     this.#assertActive();
     if (
-      !validOperatorActionId(input.actionId) ||
-      !validOpaqueHandle(input.evidenceReference) ||
-      !validOperatorActionId(input.expectedWakeId) ||
+      !isAgentWakeSha256Digest(input.actionId) ||
+      !isAgentWakeOpaqueHandle(input.evidenceReference) ||
+      !isAgentWakeSha256Digest(input.expectedWakeId) ||
       !input.expectedRepairCode.startsWith("provider-") ||
       !Number.isSafeInteger(input.expectedRepairOccurredAt) ||
       input.expectedRepairOccurredAt < 0
@@ -873,7 +839,7 @@ export class AgentWakeBroker {
           };
         }
         const disposition = input.action.replace("confirm-", "") as AgentWakeCompletionDisposition;
-        if (!validOpaqueHandle(input.providerReceiptId)) {
+        if (!isAgentWakeOpaqueHandle(input.providerReceiptId)) {
           throw new AgentWakeBrokerError("repair-action-invalid");
         }
         const completion: StoredAgentWakeCompletion = {
@@ -916,12 +882,12 @@ export class AgentWakeBroker {
     this.#assertActive();
     const { enrollmentId } = input;
     if (
-      !validOperatorActionId(input.actionId) ||
-      !validOpaqueHandle(input.evidenceReference) ||
+      !isAgentWakeSha256Digest(input.actionId) ||
+      !isAgentWakeOpaqueHandle(input.evidenceReference) ||
       !input.expectedRepairCode.startsWith("source-") ||
       !Number.isSafeInteger(input.expectedRepairOccurredAt) ||
       input.expectedRepairOccurredAt < 0 ||
-      (input.expectedWakeId !== null && !validOperatorActionId(input.expectedWakeId))
+      (input.expectedWakeId !== null && !isAgentWakeSha256Digest(input.expectedWakeId))
     ) {
       throw new AgentWakeBrokerError("repair-action-invalid");
     }
@@ -1320,7 +1286,8 @@ export class AgentWakeBroker {
           code,
           attempt,
           nextAttemptAt:
-            this.#clock.now() + backoff(this.#sourceRetryBaseMs, this.#sourceRetryMaxMs, attempt),
+            this.#clock.now() +
+            agentWakeBackoffDelay(this.#sourceRetryBaseMs, this.#sourceRetryMaxMs, attempt),
         },
       };
     });
@@ -1449,7 +1416,7 @@ export class AgentWakeBroker {
           result.status === "duplicate" ||
           result.status === "coalesced"
         ) {
-          if (!validOpaqueHandle(result.providerReceiptId)) {
+          if (!isAgentWakeOpaqueHandle(result.providerReceiptId)) {
             await this.#enterRepair(runtime, "provider-contract-invalid", item.wake.wakeId);
             return;
           }
@@ -1562,7 +1529,7 @@ export class AgentWakeBroker {
     const delay =
       requested !== undefined && Number.isSafeInteger(requested) && requested >= 0
         ? Math.min(this.#providerRetryMaxMs, requested)
-        : backoff(this.#providerRetryBaseMs, this.#providerRetryMaxMs, item.attempts);
+        : agentWakeBackoffDelay(this.#providerRetryBaseMs, this.#providerRetryMaxMs, item.attempts);
     const nextAttemptAt = this.#clock.now() + delay;
     await this.#transactRequired(runtime.enrollmentId, (current) => {
       const head = current.queue[0];
@@ -1648,7 +1615,11 @@ export class AgentWakeBroker {
   #scheduleProviderAmbiguityRecovery(runtime: Runtime): void {
     const pending = runtime.pendingProviderAmbiguity;
     if (!this.#isCurrent(runtime) || pending === null || runtime.deliveryTimer !== null) return;
-    const delay = backoff(this.#providerRetryBaseMs, this.#providerRetryMaxMs, pending.attempt);
+    const delay = agentWakeBackoffDelay(
+      this.#providerRetryBaseMs,
+      this.#providerRetryMaxMs,
+      pending.attempt,
+    );
     runtime.deliveryTimer = this.#scheduler.schedule(delay, () => {
       runtime.deliveryTimer = null;
       void this.#recoverProviderAmbiguity(runtime);
