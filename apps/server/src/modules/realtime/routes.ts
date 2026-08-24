@@ -179,6 +179,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           do {
             flushAgain = false;
             if (loadEvents === undefined) {
+              sendConnected();
               return;
             }
             let response: SyncResponse;
@@ -197,6 +198,12 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
               }
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);
+
+            // The desktop holds message-bearing replay frames until this user-bound handshake,
+            // then applies them while notifications are still disarmed. Agent authorization is
+            // still checked immediately before every replay page above; moving the boundary after
+            // the initial drain changes only client freshness classification, not authorization.
+            sendConnected();
           } while (flushAgain && !closed);
         } catch (error) {
           if (error instanceof ApiError && error.code === "CURSOR_EXPIRED") {
@@ -260,9 +267,6 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       void serializedRevalidatePrincipal().then((mayReplay) => {
         if (!mayReplay || closed || socket.readyState !== 1) return;
         initialRevalidationComplete = true;
-        // This authenticated boundary must be the first wire record. Clients use it to bind the
-        // connection and its starting cursor before applying any replayed product event.
-        sendConnected();
         void flush();
       });
     },

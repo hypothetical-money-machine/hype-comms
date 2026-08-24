@@ -1,18 +1,15 @@
-import { createHash } from "node:crypto";
-
 import {
   agentWakeBootstrapResponseSchema,
   agentWakeStreamRecordSchema,
   classifyAgentWake,
   createAgentWakeSignal,
-  encodeAgentWakeKeyInput,
-  getAgentWakeKeyInput,
   sequenceSchema,
   type AgentWakeBootstrapResponse,
   type AgentWakeStreamRecord,
   type ConversationKind,
   type ProductRealtimeEvent,
 } from "@hype-comms/contracts";
+import { deriveAgentWakeId } from "@hype-comms/contracts/wake-node";
 
 import { parseCommandArguments, requirePositionals, stringOption } from "./argv.js";
 import { ApiClient } from "./client.js";
@@ -20,7 +17,7 @@ import { resolveProfile } from "./config.js";
 import { CliError, EXIT_TRANSIENT, UsageError, contractError } from "./errors.js";
 import { writeEvent } from "./output.js";
 import type { CommandContext } from "./types.js";
-import { watchProductRealtime } from "./watch.js";
+import { laterCursor, watchProductRealtime } from "./watch.js";
 
 class WakeOutputBackpressureError extends CliError {
   constructor() {
@@ -34,10 +31,6 @@ class WakeOutputBackpressureError extends CliError {
     });
     this.name = "WakeOutputBackpressureError";
   }
-}
-
-function laterCursor(current: string, candidate: string): string {
-  return BigInt(candidate) > BigInt(current) ? candidate : current;
 }
 
 function emitRecord(context: CommandContext, record: AgentWakeStreamRecord): void {
@@ -89,12 +82,6 @@ function applyConversationProjection(
   }
 }
 
-function wakeIdFor(candidate: Parameters<typeof getAgentWakeKeyInput>[0]): string {
-  return createHash("sha256")
-    .update(encodeAgentWakeKeyInput(getAgentWakeKeyInput(candidate)), "utf8")
-    .digest("hex");
-}
-
 export async function wakeCommand(
   context: CommandContext,
   subcommand: string | undefined,
@@ -143,12 +130,14 @@ export async function wakeCommand(
     timeoutMs: context.options.timeoutMs,
     workspaceId,
     random: context.runtime.random,
+    validateConnected(event) {
+      if (event.payload.userId !== agentUserId) {
+        throw contractError("Realtime connected with the wrong agent identity");
+      }
+    },
     onEvent(event) {
       checkpointCursor = laterCursor(checkpointCursor, event.workspaceSequence);
       if (event.type === "system.connected") {
-        if (event.workspaceId !== workspaceId || event.payload.userId !== agentUserId) {
-          throw contractError("Realtime connected with the wrong agent identity");
-        }
         emitRecord(context, {
           version: 1,
           type: "agent.wake.checkpoint",
@@ -181,7 +170,7 @@ export async function wakeCommand(
         }
         const candidate = classifyAgentWake(event, conversationKind, agentUserId);
         if (candidate !== null) {
-          emitRecord(context, createAgentWakeSignal(candidate, wakeIdFor(candidate)));
+          emitRecord(context, createAgentWakeSignal(candidate, deriveAgentWakeId(candidate)));
         }
       }
       emitRecord(context, {

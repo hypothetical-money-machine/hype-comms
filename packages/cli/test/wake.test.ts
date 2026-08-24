@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
 import { executeCli } from "../src/cli.js";
+import { PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT } from "../src/watch.js";
 import { CONVERSATION_ID, TIMESTAMP, USER_ID, WORKSPACE_ID } from "./fixtures.js";
 import { jsonResponse, testRuntime, type TestRuntime } from "./helpers.js";
 
@@ -164,7 +165,7 @@ function repairEvent(sequence: number): ProductRealtimeEvent {
   };
 }
 
-function connectedEvent(sequence: string, number: number): ProductRealtimeEvent {
+function connectedEvent(sequence: string, number: number, userId = USER_ID): ProductRealtimeEvent {
   return {
     version: 1,
     id: id(6_000 + number),
@@ -176,7 +177,7 @@ function connectedEvent(sequence: string, number: number): ProductRealtimeEvent 
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
-    payload: { connectionId: id(7_000 + number), userId: USER_ID },
+    payload: { connectionId: id(7_000 + number), userId },
   };
 }
 
@@ -209,6 +210,7 @@ async function runScenario(input: {
   readonly events: readonly ProductRealtimeEvent[];
   readonly bootstrap?: AgentWakeBootstrapResponse;
   readonly after?: string;
+  readonly initialReplay?: boolean;
 }): Promise<{
   readonly runtime: TestRuntime;
   readonly observedAfter: readonly string[];
@@ -226,8 +228,26 @@ async function runScenario(input: {
     const url = new URL(request.url ?? "/", `ws://127.0.0.1:${address.port}`);
     const after = url.searchParams.get("after") ?? "0";
     observedAfter.push(after);
-    socket.send(JSON.stringify(connectedEvent(after, connectionNumber)));
-    for (const event of input.events) socket.send(JSON.stringify(event));
+    if (input.initialReplay === true) {
+      const boundaryIndex = input.events.findIndex(
+        (event) => event.type === "system.resync_required",
+      );
+      const replayEvents =
+        boundaryIndex === -1 ? input.events : input.events.slice(0, boundaryIndex);
+      const postBoundaryEvents = boundaryIndex === -1 ? [] : input.events.slice(boundaryIndex);
+      let boundaryCursor = after;
+      for (const event of replayEvents) {
+        socket.send(JSON.stringify(event));
+        if (BigInt(event.workspaceSequence) > BigInt(boundaryCursor)) {
+          boundaryCursor = event.workspaceSequence;
+        }
+      }
+      socket.send(JSON.stringify(connectedEvent(boundaryCursor, connectionNumber)));
+      for (const event of postBoundaryEvents) socket.send(JSON.stringify(event));
+    } else {
+      socket.send(JSON.stringify(connectedEvent(after, connectionNumber)));
+      for (const event of input.events) socket.send(JSON.stringify(event));
+    }
   });
 
   const requestedPaths: string[] = [];
@@ -274,7 +294,20 @@ describe("wake watch", () => {
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("Missing test address");
-    server.on("connection", (socket) => socket.close(4401, "revoked before ready"));
+    server.on("connection", (socket) => {
+      socket.send(
+        JSON.stringify(
+          messageEvent({
+            number: 12,
+            sequence: 6,
+            conversationId: CONVERSATION_ID,
+            mentionedUserIds: [USER_ID],
+            body: "revoked replay must remain private",
+          }),
+        ),
+        () => socket.close(4401, "revoked before ready"),
+      );
+    });
     const requestedPaths: string[] = [];
     const runtime = testRuntime({
       homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-wake-")),
@@ -301,6 +334,59 @@ describe("wake watch", () => {
     expect(runtime.stdoutText()).toBe("");
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: { code: "REALTIME_AUTH_REVOKED", retryable: false },
+    });
+  });
+
+  it("validates the connected agent identity before releasing buffered replay", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing test address");
+    server.on("connection", (socket) => {
+      socket.send(
+        JSON.stringify(
+          messageEvent({
+            number: 11,
+            sequence: 6,
+            conversationId: CONVERSATION_ID,
+            body: "must remain behind the identity boundary",
+          }),
+        ),
+      );
+      socket.send(JSON.stringify(connectedEvent("6", 1, id(98))));
+    });
+    const runtime = testRuntime({
+      homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-wake-")),
+      env: {
+        HYPE_COMMS_API_ORIGIN: `http://127.0.0.1:${address.port}`,
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+      },
+      fetch: vi.fn<typeof globalThis.fetch>(async (request) => {
+        const url = new URL(String(request));
+        if (url.pathname === "/v1/agent-wake/bootstrap") {
+          return jsonResponse(
+            wakeBootstrap([{ conversationId: CONVERSATION_ID, kind: "direct_message" }]),
+          );
+        }
+        if (url.pathname === "/v1/realtime/tickets") {
+          return jsonResponse({
+            ticket: "ticket_value_that_is_at_least_32_chars",
+            expiresAt: "2026-07-26T21:00:00.000Z",
+          });
+        }
+        throw new Error(`Unexpected route ${url.pathname}`);
+      }),
+    });
+
+    expect(await executeCli(["wake", "watch", "--json", "--after", "5"], runtime)).toBe(6);
+    expect(runtime.stdoutText()).toBe("");
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: {
+        code: "INVALID_SERVER_CONTRACT",
+        message: "Realtime connected with the wrong agent identity",
+        retryable: false,
+      },
     });
   });
 
@@ -416,6 +502,7 @@ describe("wake watch", () => {
         "50",
       ),
       after: "5",
+      initialReplay: true,
       events: [
         messageEvent({
           number: 7,
@@ -431,15 +518,34 @@ describe("wake watch", () => {
     expect(observedAfter).toEqual(["5"]);
     expect(requestedPaths).toEqual(["/v1/agent-wake/bootstrap", "/v1/realtime/tickets"]);
     expect(records.map((record) => record.type)).toEqual([
-      "agent.wake.checkpoint",
       "agent.wake",
+      "agent.wake.checkpoint",
       "agent.wake.checkpoint",
       "agent.wake.repair_required",
     ]);
-    expect(records[0]).toMatchObject({ cursor: "5" });
-    expect(records[1]).toMatchObject({ reason: "direct_message", workspaceSequence: "6" });
+    expect(records[0]).toMatchObject({ reason: "direct_message", workspaceSequence: "6" });
+    expect(records[1]).toMatchObject({ cursor: "6" });
     expect(records[2]).toMatchObject({ cursor: "6" });
     expect(records[3]).toMatchObject({ cursor: "6", reason: "cursor_expired" });
+  });
+
+  it("turns a bounded initial replay overflow into a body-free source repair", async () => {
+    const events = Array.from(
+      { length: PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 1 },
+      (_, index) => channelMembershipEvent(index + 6),
+    );
+    const { runtime } = await runScenario({ events, initialReplay: true });
+
+    expect(outputRecords(runtime)).toEqual([
+      {
+        version: 1,
+        type: "agent.wake.repair_required",
+        workspaceId: WORKSPACE_ID,
+        agentUserId: USER_ID,
+        cursor: "5",
+        reason: "client_replay_overflow",
+      },
+    ]);
   });
 
   it("updates DM and private-channel kinds from ordered realtime metadata", async () => {

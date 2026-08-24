@@ -11,6 +11,7 @@ import {
   sequenceSchema,
   workspaceBootstrapResponseSchema,
   type ProductRealtimeEvent,
+  type SystemConnectedEvent,
 } from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
 
@@ -44,6 +45,9 @@ const WATCH_CAPABILITIES = [
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
 ].join(",");
+const PRODUCT_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
+export const PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT = 1_024;
+export const PRODUCT_REALTIME_PENDING_REPLAY_BYTE_LIMIT = 4 * 1_024 * 1_024;
 
 class ResyncRequiredError extends CliError {
   constructor() {
@@ -61,7 +65,7 @@ interface ConnectionResult {
   readonly delivered: boolean;
 }
 
-function laterCursor(current: string, candidate: string): string {
+export function laterCursor(current: string, candidate: string): string {
   return BigInt(candidate) > BigInt(current) ? candidate : current;
 }
 
@@ -73,6 +77,8 @@ export interface ProductRealtimeWatchOptions {
   readonly workspaceId: string;
   readonly random: () => number;
   readonly capabilities?: string;
+  /** Validates the user-bound handshake before any buffered replay is exposed to the projection. */
+  readonly validateConnected?: (event: SystemConnectedEvent) => void;
   readonly onEvent: (event: ProductRealtimeEvent) => void;
 }
 
@@ -158,6 +164,7 @@ export async function watchProductRealtime(
           after: cursor,
           timeoutMs: input.timeoutMs,
           workspaceId: input.workspaceId,
+          validateConnected: input.validateConnected,
           write(event) {
             cursor = laterCursor(cursor, event.workspaceSequence);
             input.onEvent(event);
@@ -194,6 +201,7 @@ async function streamOneConnection(input: {
   readonly after: string;
   readonly timeoutMs: number;
   readonly workspaceId: string;
+  readonly validateConnected: ((event: SystemConnectedEvent) => void) | undefined;
   readonly write: (event: ProductRealtimeEvent) => void;
   readonly stopped: () => boolean;
   readonly registerSocket: (socket: WebSocket | undefined) => void;
@@ -201,7 +209,7 @@ async function streamOneConnection(input: {
   return new Promise<ConnectionResult>((resolve, reject) => {
     const socket = new WebSocket(websocketUrl(input.origin, input.ticket, input.after), {
       handshakeTimeout: input.timeoutMs,
-      maxPayload: 4 * 1_024 * 1_024,
+      maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
       perMessageDeflate: false,
     });
     input.registerSocket(socket);
@@ -210,14 +218,42 @@ async function streamOneConnection(input: {
     let connected = false;
     let resyncRequired = false;
     let settled = false;
+    const pendingReplay: ProductRealtimeEvent[] = [];
+    let pendingReplayBytes = 0;
     const settle = (error?: unknown): void => {
       if (settled) return;
       settled = true;
+      pendingReplay.length = 0;
+      pendingReplayBytes = 0;
       input.registerSocket(undefined);
       if (error !== undefined) reject(error);
       else resolve({ cursor, delivered });
     };
+    const rejectContract = (message: string): void => {
+      socket.terminate();
+      settle(
+        new CliError({
+          exitCode: EXIT_CONTRACT,
+          code: "INVALID_SERVER_CONTRACT",
+          message,
+          retryable: false,
+        }),
+      );
+    };
+    const deliver = (event: ProductRealtimeEvent): boolean => {
+      delivered = true;
+      cursor = laterCursor(cursor, event.workspaceSequence);
+      try {
+        input.write(event);
+        return true;
+      } catch (error) {
+        socket.terminate();
+        settle(error);
+        return false;
+      }
+    };
     socket.on("message", (data: RawData, isBinary: boolean) => {
+      if (settled) return;
       if (isBinary) {
         socket.terminate();
         settle(
@@ -230,9 +266,11 @@ async function streamOneConnection(input: {
         );
         return;
       }
+      const serialized = data.toString("utf8");
+      const frameBytes = Buffer.byteLength(serialized);
       let value: unknown;
       try {
-        value = JSON.parse(data.toString("utf8")) as unknown;
+        value = JSON.parse(serialized) as unknown;
       } catch (error) {
         socket.terminate();
         settle(
@@ -259,45 +297,83 @@ async function streamOneConnection(input: {
         );
         return;
       }
-      if (!connected) {
-        if (
-          parsed.data.type !== "system.connected" ||
-          parsed.data.workspaceId !== input.workspaceId
-        ) {
-          socket.terminate();
-          settle(
-            new CliError({
-              exitCode: EXIT_CONTRACT,
-              code: "INVALID_SERVER_CONTRACT",
-              message: "Realtime delivery started before an authoritative connection event",
-              retryable: false,
-            }),
-          );
+      const event = parsed.data;
+      if (event.workspaceId !== input.workspaceId) {
+        rejectContract("Realtime sent an event for the wrong workspace");
+        return;
+      }
+
+      if (event.type === "system.connected") {
+        if (connected) {
+          rejectContract("Realtime sent more than one connection event");
           return;
         }
         connected = true;
-      } else if (parsed.data.type === "system.connected") {
-        socket.terminate();
-        settle(
-          new CliError({
-            exitCode: EXIT_CONTRACT,
-            code: "INVALID_SERVER_CONTRACT",
-            message: "Realtime sent more than one connection event",
-            retryable: false,
-          }),
-        );
+        // The server sends its authorized initial replay before the user-bound handshake. Keep
+        // those frames private and bounded until the connection identity is validated. Release
+        // replay before its high-water handshake so a durable consumer cannot checkpoint past a
+        // wake it has not received yet.
+        try {
+          input.validateConnected?.(event);
+        } catch (error) {
+          socket.terminate();
+          settle(error);
+          return;
+        }
+        for (const replayEvent of pendingReplay) {
+          if (!deliver(replayEvent)) return;
+        }
+        pendingReplay.length = 0;
+        pendingReplayBytes = 0;
+        if (!deliver(event)) return;
         return;
       }
-      delivered = true;
-      cursor = laterCursor(cursor, parsed.data.workspaceSequence);
-      try {
-        input.write(parsed.data);
-      } catch (error) {
-        socket.terminate();
-        settle(error);
+
+      if (!connected) {
+        if (event.type === "system.resync_required") {
+          // Cursor recovery is body-free and may replace the handshake. Never release a partial
+          // replay when the server could not establish its authoritative boundary.
+          pendingReplay.length = 0;
+          pendingReplayBytes = 0;
+          if (!deliver(event)) return;
+          resyncRequired = true;
+          socket.close(1000);
+          return;
+        }
+        if (
+          pendingReplay.length >= PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT ||
+          pendingReplayBytes + frameBytes > PRODUCT_REALTIME_PENDING_REPLAY_BYTE_LIMIT
+        ) {
+          // This is a local capacity limit rather than malformed server data. Discard the
+          // unvalidated replay and surface the same body-free repair signal used by the desktop
+          // realtime client so durable consumers can reset deliberately from their last cursor.
+          pendingReplay.length = 0;
+          pendingReplayBytes = 0;
+          const event = productRealtimeEventSchema.parse({
+            version: 1,
+            id: randomUUID(),
+            type: "system.resync_required",
+            occurredAt: new Date().toISOString(),
+            workspaceId: input.workspaceId,
+            conversationId: null,
+            workspaceSequence: cursor,
+            conversationSequence: null,
+            entityVersion: 1,
+            delivery: "at_least_once",
+            payload: { reason: "client_replay_overflow" },
+          });
+          if (!deliver(event)) return;
+          socket.terminate();
+          settle(new ResyncRequiredError());
+          return;
+        }
+        pendingReplay.push(event);
+        pendingReplayBytes += frameBytes;
         return;
       }
-      if (parsed.data.type === "system.resync_required") {
+
+      if (!deliver(event)) return;
+      if (event.type === "system.resync_required") {
         resyncRequired = true;
         socket.close(1000);
       }
@@ -328,7 +404,12 @@ async function streamOneConnection(input: {
             delivery: "at_least_once",
             payload: { reason: "cursor_expired" },
           });
-          input.write(event);
+          try {
+            input.write(event);
+          } catch (error) {
+            settle(error);
+            return;
+          }
         }
         settle(new ResyncRequiredError());
       } else if (code === 4401 || code === 4403) {

@@ -1,9 +1,21 @@
 import { once } from "node:events";
 
-import { systemConnectedEventSchema, type SyncResponse } from "@hype-comms/contracts";
+import {
+  systemConnectedEventSchema,
+  type ConversationSummary,
+  type NotificationState,
+  type SyncResponse,
+  type User,
+} from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
+import {
+  NotificationController,
+  type NotificationSettingsPort,
+} from "../../desktop/src/main/notification-controller.js";
+import type { NotificationPresenter } from "../../desktop/src/main/notification-presenter.js";
+import { WorkspaceRealtime } from "../../desktop/src/main/workspace-realtime.js";
 import { buildApp } from "../src/app.js";
 import { ApiError } from "../src/errors.js";
 import type {
@@ -18,6 +30,9 @@ const userId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const deviceSessionId = "10000000-0000-4000-8000-000000000003";
 const replayEventId = "10000000-0000-4000-8000-000000000004";
+const authorId = "10000000-0000-4000-8000-000000000005";
+const conversationId = "10000000-0000-4000-8000-000000000006";
+const messageId = "10000000-0000-4000-8000-000000000007";
 const ticket = "a".repeat(32);
 const now = "2026-08-23T12:00:00.000Z";
 
@@ -50,6 +65,101 @@ const secondReplayEvent: SyncResponse["events"][number] = {
   id: "10000000-0000-4000-8000-000000000006",
   workspaceSequence: "11",
 };
+
+const replayMessageEvent: SyncResponse["events"][number] = {
+  version: 1,
+  id: replayEventId,
+  type: "message.created",
+  occurredAt: now,
+  workspaceId,
+  conversationId,
+  workspaceSequence: "10",
+  conversationSequence: "1",
+  entityVersion: 1,
+  delivery: "at_least_once",
+  payload: {
+    message: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 1,
+      clientMessageId: "10000000-0000-4000-8000-000000000008",
+      authorId,
+      threadRootId: null,
+      body: "initial replay must remain quiet",
+      bodyFormat: "hype_comms_markdown_v1",
+      editedAt: null,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    mentionedUserIds: [],
+  },
+};
+
+const currentUser: User = {
+  id: userId,
+  kind: "human",
+  username: "current-user",
+  displayName: "Current User",
+  avatarUrl: null,
+  createdAt: now,
+  updatedAt: now,
+};
+
+const replayAuthor: User = {
+  id: authorId,
+  kind: "human",
+  username: "replay-author",
+  displayName: "Replay Author",
+  avatarUrl: null,
+  createdAt: now,
+  updatedAt: now,
+};
+
+const directConversation: ConversationSummary = {
+  conversation: {
+    id: conversationId,
+    workspaceId,
+    kind: "direct_message",
+    name: null,
+    slug: null,
+    topic: null,
+    access: null,
+    channelMode: null,
+    isArchived: false,
+    createdBy: userId,
+    createdAt: now,
+    updatedAt: now,
+  },
+  participantIds: [userId, authorId],
+  membershipRole: null,
+  lastMessage: null,
+  unreadCount: 1,
+  mentionCount: 0,
+  readCursor: null,
+};
+
+class NotificationSettingsStub implements NotificationSettingsPort {
+  state: NotificationState = {
+    version: 1,
+    devicePreference: "enabled",
+    contentPreviewPreference: "disabled",
+    nativeSupport: "supported",
+    osPermission: "granted",
+  };
+
+  readonly markPresenterFailure = vi.fn((): NotificationState => this.state);
+
+  subscribe(): () => void {
+    return () => undefined;
+  }
+}
+
+class NotificationPresenterSpy implements NotificationPresenter {
+  readonly kind = "native" as const;
+  readonly present = vi.fn<NotificationPresenter["present"]>(() => ({ close: () => undefined }));
+}
 
 class FakeWorkspaceRepository {
   readonly consumedTickets: string[] = [];
@@ -125,9 +235,13 @@ class FakeRealtimeEventHub {
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 const sockets: WebSocket[] = [];
+const realtimeClients: WorkspaceRealtime[] = [];
+const notificationControllers: NotificationController[] = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  for (const realtime of realtimeClients.splice(0)) realtime.stop();
+  for (const controller of notificationControllers.splice(0)) controller.shutdown();
   for (const socket of sockets.splice(0)) socket.close();
   await Promise.all(apps.splice(0).map(async (app) => app.close()));
 });
@@ -155,7 +269,71 @@ async function connectedApp(
 }
 
 describe("realtime session revalidation", () => {
-  it("sends system.connected before an authorized initial replay", async () => {
+  it("keeps an initial message replay quiet across the server and desktop boundary", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.syncResponse = {
+      events: [replayMessageEvent],
+      nextCursor: "10",
+      highWaterCursor: "10",
+      hasMore: false,
+    };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const presenter = new NotificationPresenterSpy();
+    const controller = new NotificationController({
+      presenter,
+      settings: new NotificationSettingsStub(),
+      headless: false,
+      getWindowState: () => ({ focused: false, shown: true, minimized: false }),
+    });
+    notificationControllers.push(controller);
+    controller.startSession({
+      sessionGeneration: 1,
+      userId,
+      workspaceId,
+      bootstrapCursor: "9",
+    });
+    controller.replaceMembers([currentUser, replayAuthor]);
+    controller.replaceConversations([directConversation]);
+
+    const observeForNotifications = (
+      event: Parameters<NotificationController["handleEvent"]>[0],
+    ): void => {
+      controller.handleEvent(event, {
+        sessionGeneration: 1,
+        ...(event.type === "system.connected" ? { connectionId: event.payload.connectionId } : {}),
+      });
+    };
+    const realtime = new WorkspaceRealtime({
+      apiOrigin: address,
+      rendererOrigin: "app://bundle",
+      transport: {
+        ticket: async () => ({ ticket, expiresAt: "2026-08-23T12:01:00.000Z" }),
+      },
+      onEvent: (frame) => {
+        observeForNotifications(frame.event);
+        return true;
+      },
+      onState: (state) => controller.setRealtimeState(state),
+    });
+    realtimeClients.push(realtime);
+    realtime.start("9", { userId, workspaceId });
+
+    await vi.waitFor(() => {
+      expect(controller.diagnostics.connectionArmed).toBe(true);
+      expect(controller.diagnostics.watermark).toBe("10");
+    });
+    expect(presenter.present).not.toHaveBeenCalled();
+  });
+
+  it("revalidates an agent before replay and sends system.connected after the initial drain", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {
       workspaceId,
@@ -168,6 +346,10 @@ describe("realtime session revalidation", () => {
       nextCursor: "10",
       highWaterCursor: "10",
       hasMore: false,
+    };
+    let revalidationsObservedAtSync = 0;
+    repository.afterSync = () => {
+      revalidationsObservedAtSync = repository.revalidations.length;
     };
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
@@ -193,12 +375,14 @@ describe("realtime session revalidation", () => {
     });
 
     expect(frames).toMatchObject([
-      { type: "system.connected", workspaceSequence: "9" },
       { type: "member.updated", workspaceSequence: "10" },
+      { type: "system.connected", workspaceSequence: "10" },
     ]);
+    expect(revalidationsObservedAtSync).toBe(2);
+    expect(repository.revalidations).toHaveLength(2);
   });
 
-  it("sends system.connected before a replay cursor failure", async () => {
+  it("sends only the body-free recovery control when the replay cursor has expired", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {
       workspaceId,
@@ -228,7 +412,6 @@ describe("realtime session revalidation", () => {
 
     expect(code).toBe(4009);
     expect(frames).toMatchObject([
-      { type: "system.connected", workspaceSequence: "9" },
       {
         type: "system.resync_required",
         workspaceSequence: "9",
@@ -511,10 +694,7 @@ describe("realtime session revalidation", () => {
     const [code] = await once(socket, "close");
 
     expect(code).toBe(REALTIME_SESSION_REVOKED_CLOSE_CODE);
-    expect(frames).toMatchObject([
-      { type: "system.connected", workspaceSequence: "9" },
-      { type: "member.updated", workspaceSequence: "10" },
-    ]);
+    expect(frames).toMatchObject([{ type: "member.updated", workspaceSequence: "10" }]);
   });
 
   it("keeps a socket whose session is still valid open on the heartbeat", async () => {
