@@ -324,10 +324,9 @@ async function streamOneConnection(input: {
           return;
         }
         connected = true;
-        // Legacy servers and non-preamble connections send authorized initial replay before the
-        // user-bound handshake. Keep those frames private and bounded until identity validation.
-        // Release replay before its high-water handshake so a durable consumer cannot checkpoint
-        // past an event it has not received yet.
+        // Consumers that require a user-bound handshake keep legacy-server replay private and
+        // bounded until identity validation. Release that replay before its high-water handshake
+        // so a durable consumer cannot checkpoint past an event it has not received yet.
         try {
           input.validateConnected?.(event);
         } catch (error) {
@@ -344,7 +343,7 @@ async function streamOneConnection(input: {
         return;
       }
 
-      if (!connected) {
+      if (!connected && input.validateConnected !== undefined) {
         if (event.type === "system.resync_required") {
           // Cursor recovery is body-free and may replace the handshake. Never release a partial
           // replay when the server could not establish its authoritative boundary.

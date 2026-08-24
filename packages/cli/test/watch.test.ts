@@ -86,7 +86,7 @@ describe("watch", () => {
     });
   });
 
-  it("buffers wire replay until the handshake, reconnects from its cursor, and exits with resync", async () => {
+  it("streams wire replay before the handshake, reconnects from its cursor, and exits with resync", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -219,7 +219,7 @@ describe("watch", () => {
     });
   });
 
-  it("fails closed when replay exceeds the bounded pre-handshake buffer", async () => {
+  it("streams replay beyond the wake-only pre-handshake buffer limit", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -259,6 +259,39 @@ describe("watch", () => {
       for (let index = 0; index <= PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT; index += 1) {
         socket.send(frame);
       }
+      socket.send(
+        JSON.stringify({
+          version: 1,
+          id: "88888888-8888-4888-8888-888888888888",
+          type: "system.connected",
+          occurredAt: TIMESTAMP,
+          workspaceId: WORKSPACE_ID,
+          conversationId: null,
+          workspaceSequence: "6",
+          conversationSequence: null,
+          entityVersion: 1,
+          delivery: "at_least_once",
+          payload: {
+            connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            userId: USER_ID,
+          },
+        }),
+      );
+      socket.send(
+        JSON.stringify({
+          version: 1,
+          id: "77777777-7777-4777-8777-777777777777",
+          type: "system.resync_required",
+          occurredAt: TIMESTAMP,
+          workspaceId: WORKSPACE_ID,
+          conversationId: null,
+          workspaceSequence: "6",
+          conversationSequence: null,
+          entityVersion: 1,
+          delivery: "at_least_once",
+          payload: { reason: "cursor_expired" },
+        }),
+      );
     });
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       const url = new URL(String(input));
@@ -281,12 +314,21 @@ describe("watch", () => {
     });
 
     expect(await executeCli(["watch", "--json", "--after", "5"], runtime)).toBe(4);
-    expect(JSON.parse(runtime.stdoutText())).toMatchObject({
-      type: "system.resync_required",
-      workspaceId: WORKSPACE_ID,
-      workspaceSequence: "5",
-      payload: { reason: "client_replay_overflow" },
+    const records = runtime
+      .stdoutText()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; payload?: { reason?: string } });
+    expect(records).toHaveLength(PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 3);
+    expect(records[0]).toMatchObject({ type: "message.created" });
+    expect(records[PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 1]).toMatchObject({
+      type: "system.connected",
     });
+    expect(records.at(-1)).toMatchObject({
+      type: "system.resync_required",
+      payload: { reason: "cursor_expired" },
+    });
+    expect(runtime.stdoutText()).not.toContain("client_replay_overflow");
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: {
         code: "RESYNC_REQUIRED",
