@@ -10,6 +10,7 @@ import {
   realtimeTicketResponseSchema,
   sequenceSchema,
   workspaceBootstrapResponseSchema,
+  type AGENT_WAKE_REALTIME_PREAMBLE,
   type ProductRealtimeEvent,
   type SystemConnectedEvent,
 } from "@hype-comms/contracts";
@@ -98,16 +99,24 @@ export interface ProductRealtimeWatchOptions {
   readonly workspaceId: string;
   readonly random: () => number;
   readonly capabilities?: string;
+  /** Requests the Wake-only, requested-cursor handshake before authorized replay begins. */
+  readonly preamble?: typeof AGENT_WAKE_REALTIME_PREAMBLE;
   /** Validates the user-bound handshake before any buffered replay is exposed to the projection. */
   readonly validateConnected?: (event: SystemConnectedEvent) => void;
-  readonly onEvent: (event: ProductRealtimeEvent) => void;
+  readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
 }
 
-function websocketUrl(origin: string, ticket: string, after: string): string {
+function websocketUrl(
+  origin: string,
+  ticket: string,
+  after: string,
+  preamble: typeof AGENT_WAKE_REALTIME_PREAMBLE | undefined,
+): string {
   const url = new URL("/v1/realtime", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("ticket", ticket);
   url.searchParams.set("after", after);
+  if (preamble !== undefined) url.searchParams.set("preamble", preamble);
   return url.toString();
 }
 
@@ -185,10 +194,11 @@ export async function watchProductRealtime(
           after: cursor,
           timeoutMs: input.timeoutMs,
           workspaceId: input.workspaceId,
+          preamble: input.preamble,
           validateConnected: input.validateConnected,
-          write(event) {
+          async write(event) {
+            await input.onEvent(event);
             cursor = laterCursor(cursor, event.workspaceSequence);
-            input.onEvent(event);
           },
           stopped: () => stopped,
           registerSocket(socket) {
@@ -222,17 +232,21 @@ async function streamOneConnection(input: {
   readonly after: string;
   readonly timeoutMs: number;
   readonly workspaceId: string;
+  readonly preamble: typeof AGENT_WAKE_REALTIME_PREAMBLE | undefined;
   readonly validateConnected: ((event: SystemConnectedEvent) => void) | undefined;
-  readonly write: (event: ProductRealtimeEvent) => void;
+  readonly write: (event: ProductRealtimeEvent) => void | Promise<void>;
   readonly stopped: () => boolean;
   readonly registerSocket: (socket: WebSocket | undefined) => void;
 }): Promise<ConnectionResult> {
   return new Promise<ConnectionResult>((resolve, reject) => {
-    const socket = new WebSocket(websocketUrl(input.origin, input.ticket, input.after), {
-      handshakeTimeout: input.timeoutMs,
-      maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
-      perMessageDeflate: false,
-    });
+    const socket = new WebSocket(
+      websocketUrl(input.origin, input.ticket, input.after, input.preamble),
+      {
+        handshakeTimeout: input.timeoutMs,
+        maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
+        perMessageDeflate: false,
+      },
+    );
     input.registerSocket(socket);
     let cursor = input.after;
     let delivered = false;
@@ -241,6 +255,8 @@ async function streamOneConnection(input: {
     let settled = false;
     const pendingReplay: ProductRealtimeEvent[] = [];
     let pendingReplayBytes = 0;
+    let queuedMessages = 0;
+    let messageTail: Promise<void> = Promise.resolve();
     const settle = (error?: unknown): void => {
       if (settled) return;
       settled = true;
@@ -262,11 +278,11 @@ async function streamOneConnection(input: {
         }),
       );
     };
-    const deliver = (event: ProductRealtimeEvent): boolean => {
-      delivered = true;
-      cursor = laterCursor(cursor, event.workspaceSequence);
+    const deliver = async (event: ProductRealtimeEvent): Promise<boolean> => {
       try {
-        input.write(event);
+        await input.write(event);
+        delivered = true;
+        cursor = laterCursor(cursor, event.workspaceSequence);
         return true;
       } catch (error) {
         socket.terminate();
@@ -274,7 +290,7 @@ async function streamOneConnection(input: {
         return false;
       }
     };
-    socket.on("message", (data: RawData, isBinary: boolean) => {
+    const handleMessage = async (data: RawData, isBinary: boolean): Promise<void> => {
       if (settled) return;
       if (isBinary) {
         rejectContract("The realtime server sent a binary message");
@@ -306,10 +322,10 @@ async function streamOneConnection(input: {
           return;
         }
         connected = true;
-        // The server sends its authorized initial replay before the user-bound handshake. Keep
-        // those frames private and bounded until the connection identity is validated. Release
-        // replay before its high-water handshake so a durable consumer cannot checkpoint past a
-        // wake it has not received yet.
+        // Legacy servers and non-preamble connections send authorized initial replay before the
+        // user-bound handshake. Keep those frames private and bounded until identity validation.
+        // Release replay before its high-water handshake so a durable consumer cannot checkpoint
+        // past an event it has not received yet.
         try {
           input.validateConnected?.(event);
         } catch (error) {
@@ -318,11 +334,11 @@ async function streamOneConnection(input: {
           return;
         }
         for (const replayEvent of pendingReplay) {
-          if (!deliver(replayEvent)) return;
+          if (!(await deliver(replayEvent))) return;
         }
         pendingReplay.length = 0;
         pendingReplayBytes = 0;
-        if (!deliver(event)) return;
+        if (!(await deliver(event))) return;
         return;
       }
 
@@ -332,7 +348,7 @@ async function streamOneConnection(input: {
           // replay when the server could not establish its authoritative boundary.
           pendingReplay.length = 0;
           pendingReplayBytes = 0;
-          if (!deliver(event)) return;
+          if (!(await deliver(event))) return;
           resyncRequired = true;
           socket.close(1000);
           return;
@@ -347,7 +363,7 @@ async function streamOneConnection(input: {
           pendingReplay.length = 0;
           pendingReplayBytes = 0;
           const event = syntheticResyncEvent(input.workspaceId, cursor, "client_replay_overflow");
-          if (!deliver(event)) return;
+          if (!(await deliver(event))) return;
           socket.terminate();
           settle(new ResyncRequiredError());
           return;
@@ -357,46 +373,71 @@ async function streamOneConnection(input: {
         return;
       }
 
-      if (!deliver(event)) return;
+      if (!(await deliver(event))) return;
       if (event.type === "system.resync_required") {
         resyncRequired = true;
         socket.close(1000);
       }
+    };
+    socket.on("message", (data: RawData, isBinary: boolean) => {
+      if (settled) return;
+      queuedMessages += 1;
+      socket.pause();
+      const handling = messageTail.then(() => handleMessage(data, isBinary));
+      messageTail = handling.then(
+        () => undefined,
+        (error: unknown) => {
+          socket.terminate();
+          settle(error);
+        },
+      );
+      void messageTail.then(() => {
+        queuedMessages -= 1;
+        if (queuedMessages === 0 && !settled) socket.resume();
+      });
     });
     socket.once("unexpected-response", (_request, response) => {
       response.resume();
       settle(unexpectedStatusError(response.statusCode ?? 500));
     });
     socket.once("error", (error) => {
-      if (input.stopped()) settle();
-      else settle(networkError(error));
+      void messageTail.then(() => {
+        if (settled) return;
+        if (input.stopped()) settle();
+        else settle(networkError(error));
+      });
     });
     socket.once("close", (code) => {
-      if (input.stopped()) {
-        settle();
-      } else if (resyncRequired || code === 4009) {
-        if (!resyncRequired) {
-          const event = syntheticResyncEvent(input.workspaceId, cursor, "cursor_expired");
-          try {
-            input.write(event);
-          } catch (error) {
-            settle(error);
-            return;
-          }
+      void messageTail.then(async () => {
+        if (settled) return;
+        if (input.stopped()) {
+          settle();
+          return;
         }
-        settle(new ResyncRequiredError());
-      } else if (code === 4401 || code === 4403) {
-        settle(
-          new CliError({
-            exitCode: EXIT_AUTH,
-            code: "REALTIME_AUTH_REVOKED",
-            message: "Realtime access was revoked",
-            retryable: false,
-          }),
-        );
-      } else {
-        settle();
-      }
+        if (resyncRequired || code === 4009) {
+          if (!resyncRequired) {
+            const event = syntheticResyncEvent(input.workspaceId, cursor, "cursor_expired");
+            try {
+              await input.write(event);
+            } catch (error) {
+              settle(error);
+              return;
+            }
+          }
+          settle(new ResyncRequiredError());
+        } else if (code === 4401 || code === 4403) {
+          settle(
+            new CliError({
+              exitCode: EXIT_AUTH,
+              code: "REALTIME_AUTH_REVOKED",
+              message: "Realtime access was revoked",
+              retryable: false,
+            }),
+          );
+        } else {
+          settle();
+        }
+      });
     });
   });
 }

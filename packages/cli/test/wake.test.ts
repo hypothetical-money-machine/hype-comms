@@ -214,6 +214,7 @@ async function runScenario(input: {
 }): Promise<{
   readonly runtime: TestRuntime;
   readonly observedAfter: readonly string[];
+  readonly observedPreambles: readonly (string | null)[];
   readonly requestedPaths: readonly string[];
 }> {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -222,12 +223,14 @@ async function runScenario(input: {
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Missing test address");
   const observedAfter: string[] = [];
+  const observedPreambles: (string | null)[] = [];
   let connectionNumber = 0;
   server.on("connection", (socket, request) => {
     connectionNumber += 1;
     const url = new URL(request.url ?? "/", `ws://127.0.0.1:${address.port}`);
     const after = url.searchParams.get("after") ?? "0";
     observedAfter.push(after);
+    observedPreambles.push(url.searchParams.get("preamble"));
     if (input.initialReplay === true) {
       const boundaryIndex = input.events.findIndex(
         (event) => event.type === "system.resync_required",
@@ -284,7 +287,7 @@ async function runScenario(input: {
   expect(JSON.parse(runtime.stderrText())).toMatchObject({
     error: { code: "RESYNC_REQUIRED", retryable: false },
   });
-  return { runtime, observedAfter, requestedPaths };
+  return { runtime, observedAfter, observedPreambles, requestedPaths };
 }
 
 describe("wake watch", () => {
@@ -434,6 +437,33 @@ describe("wake watch", () => {
     expect(runtime.stdoutText()).not.toContain(staleBody);
   });
 
+  it("requests the wake preamble and checkpoints its durable cursor before replay wakes", async () => {
+    const replayBody = "body must never cross the wake output boundary";
+    const { runtime, observedAfter, observedPreambles } = await runScenario({
+      bootstrap: wakeBootstrap([{ conversationId: CONVERSATION_ID, kind: "direct_message" }]),
+      after: "5",
+      events: [
+        messageEvent({
+          number: 21,
+          sequence: 6,
+          conversationId: CONVERSATION_ID,
+          body: replayBody,
+        }),
+        repairEvent(6),
+      ],
+    });
+
+    expect(observedAfter).toEqual(["5"]);
+    expect(observedPreambles).toEqual(["agent-wake-v1"]);
+    expect(outputRecords(runtime)).toMatchObject([
+      { type: "agent.wake.checkpoint", cursor: "5" },
+      { type: "agent.wake", workspaceSequence: "6" },
+      { type: "agent.wake.checkpoint", cursor: "6" },
+      { type: "agent.wake.repair_required", cursor: "6", reason: "cursor_expired" },
+    ]);
+    expect(runtime.stdoutText()).not.toContain(replayBody);
+  });
+
   it("wakes for a DM and verified mention, but not text mentions, self messages, or group DMs", async () => {
     const snapshot = wakeBootstrap([
       { conversationId: CONVERSATION_ID, kind: "direct_message" },
@@ -548,6 +578,32 @@ describe("wake watch", () => {
     ]);
   });
 
+  it("streams more than the legacy replay buffer limit after the wake preamble", async () => {
+    const replayEvents = Array.from(
+      { length: PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 1 },
+      (_, index) => channelMembershipEvent(index + 6),
+    );
+    const finalCursor = String(PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 6);
+    const { runtime, observedPreambles } = await runScenario({
+      events: [...replayEvents, repairEvent(Number(finalCursor))],
+    });
+    const records = outputRecords(runtime);
+
+    expect(observedPreambles).toEqual(["agent-wake-v1"]);
+    expect(records).toHaveLength(PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 3);
+    expect(records[0]).toMatchObject({ type: "agent.wake.checkpoint", cursor: "5" });
+    expect(records.at(-2)).toMatchObject({
+      type: "agent.wake.checkpoint",
+      cursor: finalCursor,
+    });
+    expect(records.at(-1)).toMatchObject({
+      type: "agent.wake.repair_required",
+      cursor: finalCursor,
+      reason: "cursor_expired",
+    });
+    expect(runtime.stdoutText()).not.toContain("client_replay_overflow");
+  });
+
   it("updates DM and private-channel kinds from ordered realtime metadata", async () => {
     const newDm = conversationSummary(NEW_DM_ID, "direct_message");
     const { runtime } = await runScenario({
@@ -618,7 +674,7 @@ describe("wake watch", () => {
     expect(runtime.fetch).not.toHaveBeenCalled();
   });
 
-  it("stops before consuming realtime when stdout applies backpressure", async () => {
+  it("waits for stdout drain without restarting the wake stream", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -626,6 +682,7 @@ describe("wake watch", () => {
     if (address === null || typeof address === "string") throw new Error("Missing test address");
     server.on("connection", (socket) => {
       socket.send(JSON.stringify(connectedEvent("5", 1)));
+      socket.send(JSON.stringify(repairEvent(5)));
     });
     const runtime = testRuntime({
       homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-wake-")),
@@ -647,10 +704,19 @@ describe("wake watch", () => {
         throw new Error(`Unexpected route ${url.pathname}`);
       }),
     });
+    const outputChunks: string[] = [];
+    const firstWriteStarted = Promise.withResolvers<() => void>();
+    let writeCount = 0;
     const blockedStdout = new Writable({
       highWaterMark: 1,
-      write() {
-        // Deliberately leave the single write pending so Writable.write returns false.
+      write(chunk: Buffer, _encoding, callback) {
+        outputChunks.push(chunk.toString("utf8"));
+        writeCount += 1;
+        if (writeCount === 1) {
+          firstWriteStarted.resolve(callback);
+          return;
+        }
+        callback();
       },
     });
     const blockedRuntime: TestRuntime = {
@@ -658,9 +724,28 @@ describe("wake watch", () => {
       io: { ...runtime.io, stdout: blockedStdout },
     };
 
-    expect(await executeCli(["wake", "watch", "--json"], blockedRuntime)).toBe(5);
+    let settled = false;
+    const command = executeCli(["wake", "watch", "--json"], blockedRuntime).finally(() => {
+      settled = true;
+    });
+    const releaseFirstWrite = await firstWriteStarted.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseFirstWrite();
+
+    expect(await command).toBe(4);
+    expect(
+      outputChunks
+        .join("")
+        .trim()
+        .split("\n")
+        .map((line) => agentWakeStreamRecordSchema.parse(JSON.parse(line) as unknown)),
+    ).toMatchObject([
+      { type: "agent.wake.checkpoint", cursor: "5" },
+      { type: "agent.wake.repair_required", cursor: "5", reason: "cursor_expired" },
+    ]);
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
-      error: { code: "OUTPUT_BACKPRESSURE", retryable: false },
+      error: { code: "RESYNC_REQUIRED", retryable: false },
     });
     expect(runtime.fetch).toHaveBeenCalledTimes(2);
     blockedStdout.destroy();

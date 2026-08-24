@@ -1,4 +1,5 @@
 import {
+  AGENT_WAKE_REALTIME_PREAMBLE,
   agentWakeBootstrapResponseSchema,
   agentWakeStreamRecordSchema,
   classifyAgentWake,
@@ -24,22 +25,45 @@ class WakeOutputBackpressureError extends CliError {
     super({
       exitCode: EXIT_TRANSIENT,
       code: "OUTPUT_BACKPRESSURE",
-      message: "Wake output reached its bounded stream capacity",
-      // The owning broker restarts the process from its durable cursor. Retrying inside this
-      // process while stdout remains blocked would only create another buffered record.
+      message: "Wake output closed before its accepted write drained",
+      // A retry inside this child cannot restore its closed parent pipe. The owning broker may
+      // restart from the last durable cursor without acknowledging this record.
       retryable: false,
     });
     this.name = "WakeOutputBackpressureError";
   }
 }
 
-function emitRecord(context: CommandContext, record: AgentWakeStreamRecord): void {
+function waitForOutputDrain(context: CommandContext): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const output = context.runtime.io.stdout;
+    const cleanup = (): void => {
+      output.off("drain", drained);
+      output.off("error", failed);
+      output.off("close", failed);
+    };
+    const drained = (): void => {
+      cleanup();
+      resolve();
+    };
+    const failed = (): void => {
+      cleanup();
+      reject(new WakeOutputBackpressureError());
+    };
+    output.once("drain", drained);
+    output.once("error", failed);
+    output.once("close", failed);
+    if (output.destroyed || output.writableEnded) failed();
+    else if (!output.writableNeedDrain) drained();
+  });
+}
+
+async function emitRecord(context: CommandContext, record: AgentWakeStreamRecord): Promise<void> {
   // Keep stdout pinned to the strict, body-free protocol even when a projection bug supplies an
-  // accidental extra field. Stop consuming realtime as soon as Node signals pipe backpressure;
-  // natural process shutdown drains at most the stream high-water mark, and the durable parent
-  // restarts from its last acknowledged cursor.
+  // accidental extra field. A false return means Node accepted the bounded write but needs the
+  // producer to pause until `drain`; the realtime transport applies that backpressure upstream.
   if (!writeEvent(context.runtime.io, agentWakeStreamRecordSchema.parse(record))) {
-    throw new WakeOutputBackpressureError();
+    await waitForOutputDrain(context);
   }
 }
 
@@ -130,32 +154,35 @@ export async function wakeCommand(
     timeoutMs: context.options.timeoutMs,
     workspaceId,
     random: context.runtime.random,
+    preamble: AGENT_WAKE_REALTIME_PREAMBLE,
     validateConnected(event) {
       if (event.payload.userId !== agentUserId) {
         throw contractError("Realtime connected with the wrong agent identity");
       }
     },
-    onEvent(event) {
-      checkpointCursor = laterCursor(checkpointCursor, event.workspaceSequence);
+    async onEvent(event) {
+      const nextCheckpointCursor = laterCursor(checkpointCursor, event.workspaceSequence);
       if (event.type === "system.connected") {
-        emitRecord(context, {
+        await emitRecord(context, {
           version: 1,
           type: "agent.wake.checkpoint",
           workspaceId,
           agentUserId,
-          cursor: checkpointCursor,
+          cursor: nextCheckpointCursor,
         });
+        checkpointCursor = nextCheckpointCursor;
         return;
       }
       if (event.type === "system.resync_required") {
-        emitRecord(context, {
+        await emitRecord(context, {
           version: 1,
           type: "agent.wake.repair_required",
           workspaceId,
           agentUserId,
-          cursor: checkpointCursor,
+          cursor: nextCheckpointCursor,
           reason: event.payload.reason,
         });
+        checkpointCursor = nextCheckpointCursor;
         return;
       }
 
@@ -170,16 +197,17 @@ export async function wakeCommand(
         }
         const candidate = classifyAgentWake(event, conversationKind, agentUserId);
         if (candidate !== null) {
-          emitRecord(context, createAgentWakeSignal(candidate, deriveAgentWakeId(candidate)));
+          await emitRecord(context, createAgentWakeSignal(candidate, deriveAgentWakeId(candidate)));
         }
       }
-      emitRecord(context, {
+      await emitRecord(context, {
         version: 1,
         type: "agent.wake.checkpoint",
         workspaceId,
         agentUserId,
-        cursor: checkpointCursor,
+        cursor: nextCheckpointCursor,
       });
+      checkpointCursor = nextCheckpointCursor;
     },
   });
 }

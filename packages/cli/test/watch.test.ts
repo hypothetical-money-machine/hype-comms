@@ -92,12 +92,14 @@ describe("watch", () => {
     const address = server.address();
     if (typeof address === "string" || address === null) throw new Error("Missing test address");
     const observedCursors: string[] = [];
+    const observedPreambles: (string | null)[] = [];
     let connection = 0;
     server.on("connection", (socket, request) => {
       connection += 1;
       const url = new URL(request.url ?? "/", `ws://127.0.0.1:${address.port}`);
       const after = url.searchParams.get("after") ?? "0";
       observedCursors.push(after);
+      observedPreambles.push(url.searchParams.get("preamble"));
       if (connection === 1) {
         socket.send(
           JSON.stringify({
@@ -209,6 +211,7 @@ describe("watch", () => {
       expect.objectContaining({ type: "system.resync_required", workspaceSequence: "6" }),
     ]);
     expect(observedCursors).toEqual(["5", "6"]);
+    expect(observedPreambles).toEqual([null, null]);
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: { code: "RESYNC_REQUIRED", retryable: false },
     });
@@ -349,7 +352,8 @@ describe("watch", () => {
       let writeCount = 0;
       process.stdout.write = () => {
         writeCount += 1;
-        return writeCount === 1;
+        if (writeCount === 2) throw new Error("stdout pipe failed");
+        return true;
       };
       await import(${JSON.stringify(cliBundleUrl)});
       const cliExitCode = process.exitCode;

@@ -9,6 +9,8 @@ import {
 import { apiErrorEnvelopeSchema } from "./http.js";
 
 export const realtimeDeliverySemanticsSchema = z.literal("at_least_once");
+/** Wake-only opt-in for a requested-cursor handshake before authorized realtime replay. */
+export const AGENT_WAKE_REALTIME_PREAMBLE = "agent-wake-v1";
 export const realtimeTicketSchema = z
   .string()
   .min(32)

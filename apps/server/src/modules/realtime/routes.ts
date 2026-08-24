@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_WAKE_REALTIME_PREAMBLE,
   realtimeTicketSchema,
   sequenceSchema,
   type SyncResponse,
@@ -19,11 +20,13 @@ import type {
 /** Close code telling the client to re-authenticate rather than reconnect with a stale session. */
 export const REALTIME_SESSION_REVOKED_CLOSE_CODE = 4401;
 const HEARTBEAT_INTERVAL_MS = 30_000;
+type RealtimePreamble = typeof AGENT_WAKE_REALTIME_PREAMBLE | null;
 
 declare module "fastify" {
   interface FastifyRequest {
     realtimePrincipal: RealtimePrincipal | null;
     realtimeCursor: string | null;
+    realtimePreamble: RealtimePreamble;
   }
 }
 
@@ -43,6 +46,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
 ) => {
   app.decorateRequest("realtimePrincipal", null);
   app.decorateRequest("realtimeCursor", null);
+  app.decorateRequest("realtimePreamble", null);
 
   app.get(
     "/realtime",
@@ -64,6 +68,10 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         if (!cursor.success) {
           throw new ApiError(400, "BAD_REQUEST", "A valid realtime cursor is required");
         }
+        const preamble = (request.query as { preamble?: unknown }).preamble;
+        if (preamble !== undefined && preamble !== AGENT_WAKE_REALTIME_PREAMBLE) {
+          throw new ApiError(400, "BAD_REQUEST", "Invalid realtime preamble capability");
+        }
 
         // An absent Origin is accepted for human and agent tickets alike. Requiring it here would
         // break every non-browser client that holds a human session -- `hype-comms-cli watch` opens
@@ -79,6 +87,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         });
         request.realtimePrincipal = principal;
         request.realtimeCursor = cursor.data;
+        request.realtimePreamble = preamble ?? null;
       },
     },
     (socket, request) => {
@@ -90,6 +99,12 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       }
       metrics?.realtimeConnected();
 
+      // This ordering is a Wake-only protocol capability. Desktop and plain-watch clients retain
+      // replay-before-connected freshness semantics, and human principals cannot opt themselves in.
+      const sendAgentWakePreamble =
+        request.realtimePreamble === AGENT_WAKE_REALTIME_PREAMBLE &&
+        principal.agentTokenId !== null;
+
       let cursor = initialCursor;
       let closed = false;
       let flushing = false;
@@ -97,6 +112,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       let connectedSent = false;
       let pongReceived = true;
       let initialRevalidationComplete = false;
+      let agentAuthorizationReadyForPage = false;
 
       const sendConnected = (): void => {
         if (connectedSent || socket.readyState !== 1) return;
@@ -168,6 +184,26 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         return current;
       };
 
+      const loadAgentPage = async (): Promise<SyncResponse | null> => {
+        if (loadEvents === undefined) return null;
+        if (agentAuthorizationReadyForPage) {
+          agentAuthorizationReadyForPage = false;
+          return loadEvents(principal, cursor);
+        }
+
+        // Loading and authorization are independent database reads. Overlap them to avoid adding
+        // their latencies while still withholding every byte until this page's check resolves valid.
+        const authorization = serializedRevalidatePrincipal();
+        const loaded = loadEvents(principal, cursor).then(
+          (response) => ({ status: "loaded" as const, response }),
+          (error: unknown) => ({ status: "failed" as const, error }),
+        );
+        if (!(await authorization)) return null;
+        const outcome = await loaded;
+        if (outcome.status === "failed") throw outcome.error;
+        return outcome.response;
+      };
+
       const flush = async (): Promise<void> => {
         if (closed || !initialRevalidationComplete) return;
         if (flushing) {
@@ -184,14 +220,16 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
             }
             let response: SyncResponse;
             do {
-              // Re-authorize an agent before every replay page. This covers the initial backlog,
-              // every hub-notified flush, each pagination step, and the follow-up cycle for a
-              // notification coalesced while a page was loading. Humans retain heartbeat-based
-              // revalidation.
-              if (principal.agentTokenId !== null && !(await serializedRevalidatePrincipal())) {
-                return;
+              if (principal.agentTokenId === null) {
+                response = await loadEvents(principal, cursor);
+              } else {
+                // The initial connection check authorizes page one. Every later page and notified
+                // flush performs its own check, concurrent with loading but complete before send.
+                const authorizedResponse = await loadAgentPage();
+                if (authorizedResponse === null) return;
+                response = authorizedResponse;
               }
-              response = await loadEvents(principal, cursor);
+              if (sendAgentWakePreamble) sendConnected();
               for (const event of response.events) {
                 if (socket.readyState !== 1) return;
                 socket.send(JSON.stringify(event));
@@ -199,10 +237,10 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);
 
-            // The desktop holds message-bearing replay frames until this user-bound handshake,
-            // then applies them while notifications are still disarmed. Agent authorization is
-            // still checked immediately before every replay page above; moving the boundary after
-            // the initial drain changes only client freshness classification, not authorization.
+            // In legacy ordering the desktop holds message-bearing replay until this user-bound
+            // handshake, then applies it while notifications are still disarmed. Every agent page
+            // remains withheld until its authorization resolves; the handshake position changes
+            // only client freshness classification, not delivery authorization.
             sendConnected();
           } while (flushAgain && !closed);
         } catch (error) {
@@ -267,6 +305,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       void serializedRevalidatePrincipal().then((mayReplay) => {
         if (!mayReplay || closed || socket.readyState !== 1) return;
         initialRevalidationComplete = true;
+        agentAuthorizationReadyForPage = principal.agentTokenId !== null;
         void flush();
       });
     },
