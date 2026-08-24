@@ -4,6 +4,8 @@ import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
+  DEFAULT_AGENT_AGENCY_PROFILE,
+  DEFAULT_AGENCY_AGENT_SCOPES,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MESSAGE_RETRACT_WINDOW_MS,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -14,6 +16,8 @@ import {
   apiErrorEnvelopeSchema,
   agentTokenMetadataSchema,
   agentTokenSecretSchema,
+  agentEnrollmentCredentialVerifierSchema,
+  agentEnrollmentSchema,
   agentUserSchema,
   botAccessTokenSchema,
   botScopesSchema,
@@ -23,6 +27,7 @@ import {
   conversationSummarySchema,
   conversationSchema,
   createAgentTokenRequestSchema,
+  requestAgentEnrollmentSchema,
   currentAgentPrincipalSchema,
   currentPrincipalSchema,
   createChannelOperationSchema,
@@ -549,6 +554,61 @@ describe("agent contracts", () => {
     };
     expect(agentTokenMetadataSchema.parse(metadata)).toEqual(metadata);
     expect(() => agentTokenMetadataSchema.parse({ ...metadata, token: secret })).toThrow();
+  });
+
+  it("pins strict child enrollment requests and the exact default-agency-v1 profile", () => {
+    const credentialVerifier = Buffer.alloc(32, 7).toString("base64url");
+    const request = requestAgentEnrollmentSchema.parse({
+      username: "mira-child",
+      displayName: "Mira Child",
+      label: "Mira child default agency",
+      credentialVerifier,
+      restrictedChannelIds: [CONVERSATION_ID],
+    });
+    expect(request.credentialVerifier).toBe(credentialVerifier);
+    expect(DEFAULT_AGENCY_AGENT_SCOPES).toEqual([
+      "workspace:read",
+      "messages:write",
+      "direct-conversations:write",
+      "agents:invite",
+    ]);
+    expect(DEFAULT_AGENT_AGENCY_PROFILE).toBe("default-agency-v1");
+    expect(() => requestAgentEnrollmentSchema.parse({ ...request, unexpected: true })).toThrow();
+    expect(() =>
+      requestAgentEnrollmentSchema.parse({
+        ...request,
+        restrictedChannelIds: [CONVERSATION_ID, CONVERSATION_ID],
+      }),
+    ).toThrow();
+    expect(() => agentEnrollmentCredentialVerifierSchema.parse("a".repeat(43))).toThrow();
+
+    const enrollment = {
+      id: MESSAGE_ID,
+      workspaceId: WORKSPACE_ID,
+      profile: DEFAULT_AGENT_AGENCY_PROFILE,
+      status: "pending_approval",
+      username: request.username,
+      displayName: request.displayName,
+      label: request.label,
+      requestedBy: USER_ID,
+      requestedByKind: "agent",
+      restrictedChannelIds: request.restrictedChannelIds,
+      expiresAt: NOW,
+      reviewedBy: null,
+      reviewedAt: null,
+      activatedAgentUserId: null,
+      activatedAgentTokenId: null,
+      activatedAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    } as const;
+    expect(agentEnrollmentSchema.parse(enrollment)).toEqual(enrollment);
+    expect(() =>
+      agentEnrollmentSchema.parse({
+        ...enrollment,
+        status: "active",
+      }),
+    ).toThrow();
   });
 
   it("represents active and disabled agent records without adding fields to public users", () => {

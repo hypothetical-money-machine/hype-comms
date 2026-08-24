@@ -8,6 +8,7 @@ coverage/
 *.tsbuildinfo
 .claude/
 worktrees/
+.worktrees/
 .clog/
 
 .env

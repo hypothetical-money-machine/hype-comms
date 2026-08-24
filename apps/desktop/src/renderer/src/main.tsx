@@ -6,7 +6,6 @@ import "./styles.css";
 import { CompactModeRuntime } from "./compact-mode-runtime";
 import { FencedBlockquoteProvider } from "./fenced-blockquote-context";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import { restoreMemberListHeight } from "./member-list-height";
 import { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeRuntime } from "./theme-runtime";
 
@@ -19,7 +18,6 @@ const theme = new ThemeRuntime(window.hypeComms, document.documentElement);
 const compactMode = new CompactModeRuntime(window.hypeComms, document.documentElement);
 const fencedBlockquotes = new FencedBlockquoteRuntime();
 const sidebarPosition = new SidebarPositionRuntime(document.documentElement);
-restoreMemberListHeight(document.documentElement);
 
 void theme.start();
 void compactMode.start();

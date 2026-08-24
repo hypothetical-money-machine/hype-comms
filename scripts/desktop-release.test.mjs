@@ -167,24 +167,28 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     packageSmokeWorkflow,
     /'\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
   );
+  assert.match(packageSmokeWorkflow, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/mu);
+  assert.match(packageSmokeWorkflow, /^permissions:\n {2}contents: read$/mu);
   assert.match(
     matrixEntry(smokePackageJob, "macOS"),
-    /github\.event_name == 'pull_request' && '\["macos-15"\]'/u,
+    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "macOS", "ARM64", "notarize"\]' \|\| '\["macos-15"\]' \}\}/u,
   );
   assert.match(
     matrixEntry(smokePackageJob, "Windows"),
-    /github\.event_name == 'pull_request' && '\["windows-11-arm"\]'/u,
+    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "Windows", "ARM64", "windows-release"\]' \|\| '\["windows-11-arm"\]' \}\}/u,
   );
   assert.match(
     matrixEntry(smokePackageJob, "Linux"),
-    /github\.event_name == 'pull_request' && '\["ubuntu-24\.04-arm"\]'/u,
+    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]' \|\| '\["ubuntu-24\.04-arm"\]' \}\}/u,
   );
   assert.equal(
-    smokePackageJob.match(/self_hosted: \$\{\{ github\.event_name != 'pull_request' \}\}/gu)
-      ?.length,
+    smokePackageJob.match(
+      /self_hosted: \$\{\{ github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch' \}\}/gu,
+    )?.length,
     3,
   );
   assert.doesNotMatch(smokePackageJob, /head\.repo\.full_name/u);
+  assert.doesNotMatch(smokePackageJob, /secrets\.|^ {4}environment:/mu);
   assert.equal(
     packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
     2,
@@ -226,7 +230,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.doesNotMatch(smokePackageJob, /^ {6}HYPE_COMMS_BUILD_FLAVOR:/mu);
   assert.match(
     smokePackageJob,
-    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && github\.event_name == 'pull_request' && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
+    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && !matrix\.self_hosted && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
   );
   assert.match(
     smokePackageJob,

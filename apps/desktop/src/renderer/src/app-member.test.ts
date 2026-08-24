@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type {
   ChatSessionState,
   ConversationMutationResponse,
@@ -328,14 +328,16 @@ describe("workspace member directory", () => {
   it("renders member titles when present and starts a direct message", async () => {
     const client = await renderWorkspace();
 
-    const morganButton = screen.getByRole("button", { name: /Morgan/u });
-    expect(morganButton.querySelector(".member-title")?.textContent).toBe("Founder");
-    const samButton = screen.getByRole("button", { name: /Sam/u });
-    expect(samButton.querySelector(".member-title")?.textContent).toBe("Product");
-    const taylorButton = screen.getByRole("button", { name: /Taylor/u });
-    expect(taylorButton.querySelector(".member-title")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "People" }));
+    const morganRow = screen.getByText("Morgan (you)").closest("li");
+    expect(morganRow?.querySelector(".channel-member-title")?.textContent).toBe("Founder");
+    const samRow = screen.getByText("Sam").closest("li");
+    expect(samRow?.querySelector(".channel-member-title")?.textContent).toBe("Product");
+    const taylorRow = screen.getByText("Taylor").closest("li");
+    expect(taylorRow?.querySelector(".channel-member-title")).toBeNull();
 
-    fireEvent.click(samButton);
+    if (samRow === null) throw new Error("Sam directory row was not rendered");
+    fireEvent.click(within(samRow).getByRole("button", { name: "Message" }));
 
     expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
   });

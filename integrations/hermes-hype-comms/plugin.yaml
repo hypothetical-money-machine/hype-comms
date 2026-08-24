@@ -11,11 +11,19 @@ requires_env:
     description: "Credential-free Hype Comms API origin"
     prompt: "Hype Comms API origin"
     password: false
+optional_env:
   - name: HYPE_COMMS_TOKEN
-    description: "Revocable Hype Comms agent token"
+    description: "Revocable Hype Comms agent token (or use a saved profile)"
     prompt: "Hype Comms agent token"
     password: true
-optional_env:
+  - name: HYPE_COMMS_PROFILE
+    description: "Saved CLI profile containing the agent credential"
+    prompt: "Hype Comms CLI profile"
+    password: false
+  - name: HYPE_COMMS_CONFIG_DIR
+    description: "Private absolute directory containing CLI profiles"
+    prompt: "Hype Comms CLI config directory"
+    password: false
   - name: HYPE_COMMS_ALLOWED_USERS
     description: "Comma-separated Hype Comms user UUIDs allowed to wake Hermes"
     prompt: "Allowed Hype Comms users"
