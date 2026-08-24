@@ -337,15 +337,18 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
+    // Only a `conversations:write` credential may open a DM. A read-only agent token may still
+    // look one up, so `workspace:read` alone reaches the read path below.
     const canCreate =
       identity.credentialType === "session" ||
       identity.currentUser.scopes.includes("conversations:write");
-    if (
-      identity.credentialType === "agent" &&
-      !canCreate &&
-      !identity.currentUser.scopes.includes("workspace:read")
-    ) {
-      requireAgentScope(identity, "conversations:write");
+    const missingWriteScope = new ApiError(
+      403,
+      "FORBIDDEN",
+      "Agent token requires the conversations:write scope",
+    );
+    if (!canCreate && !identity.currentUser.scopes.includes("workspace:read")) {
+      throw missingWriteScope;
     }
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
@@ -356,8 +359,8 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       ? await repository.createDirectConversation(identity, result.data)
       : await repository.findDirectConversation(identity, result.data);
     if (opened === null) {
-      requireAgentScope(identity, "conversations:write");
-      throw new Error("An agent without conversations:write unexpectedly passed scope validation");
+      // Read-only lookup found nothing; opening it would need the write scope.
+      throw missingWriteScope;
     }
     return reply
       .code(201)

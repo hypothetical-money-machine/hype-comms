@@ -511,6 +511,39 @@ function conversationVisibilitySql(
   )`;
 }
 
+/**
+ * The projection every `AgentContextMessageRow` is read through.
+ *
+ * `mapAgentContextMessage` depends on this exact column set, so both the page query and the
+ * thread-root lookup select it from here rather than repeating it.
+ */
+function agentContextMessageSql(mentionParameter: string): string {
+  return `SELECT message.*,
+                 author.kind AS author_kind,
+                 author.username AS author_username,
+                 author.display_name AS author_display_name,
+                 EXISTS (
+                   SELECT 1
+                     FROM message_mentions AS mention
+                    WHERE mention.message_id = message.id
+                      AND mention.mentioned_user_id = ${mentionParameter}
+                 ) AS mentioned_you
+            FROM messages AS message
+            JOIN users AS author ON author.id = message.author_id`;
+}
+
+/**
+ * The canonical low/high ordering behind the `(workspace_id, dm_user_low_id, dm_user_high_id)`
+ * unique index. Every DM lookup and insert derives its pair here so the two cannot drift.
+ */
+function directMessagePair(actorId: string, memberId: string): { low: string; high: string } {
+  const pair = [actorId, memberId].sort();
+  const low = pair[0];
+  const high = pair[1];
+  if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+  return { low, high };
+}
+
 function participants(row: ConversationRow): string[] {
   if (row.dm_user_low_id === null || row.dm_user_high_id === null) return [];
   return row.dm_user_low_id === row.dm_user_high_id
@@ -1475,10 +1508,7 @@ export class WorkspaceRepository {
         [identity.currentUser.workspaceId, input.memberId],
       );
       if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
-      const pair = [identity.currentUser.user.id, input.memberId].sort();
-      const low = pair[0];
-      const high = pair[1];
-      if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+      const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
       const inserted = await client.query<ConversationRow>(
         `INSERT INTO conversations
            (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
@@ -1527,10 +1557,7 @@ export class WorkspaceRepository {
   ): Promise<ConversationMutationResponse | null> {
     return this.#transaction(
       async (client) => {
-        const pair = [identity.currentUser.user.id, input.memberId].sort();
-        const low = pair[0];
-        const high = pair[1];
-        if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+        const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
         const existing = await client.query<ConversationRow>(
           `SELECT conversation.*
              FROM conversations AS conversation
@@ -1660,18 +1687,7 @@ export class WorkspaceRepository {
         }
 
         const result = await client.query<AgentContextMessageRow>(
-          `SELECT message.*,
-                  author.kind AS author_kind,
-                  author.username AS author_username,
-                  author.display_name AS author_display_name,
-                  EXISTS (
-                    SELECT 1
-                      FROM message_mentions AS mention
-                     WHERE mention.message_id = message.id
-                       AND mention.mentioned_user_id = $4
-                  ) AS mentioned_you
-             FROM messages AS message
-             JOIN users AS author ON author.id = message.author_id
+          `${agentContextMessageSql("$4")}
             WHERE message.conversation_id = $1
               AND message.deleted_at IS NULL
               AND ($2::bigint IS NULL OR message.conversation_sequence < $2::bigint)
@@ -1704,33 +1720,39 @@ export class WorkspaceRepository {
           );
         }
 
+        // Trimming only ever drops from the front, so everything derived from the newest message
+        // is invariant across passes and is computed once here.
+        const anchor = messages.at(-1);
+        const anchorMessageId = anchor?.id ?? null;
+        const replyTarget =
+          anchor === undefined
+            ? null
+            : location.kind === "direct_message"
+              ? { kind: "flat" as const, conversationId: conversation.id }
+              : {
+                  kind: "thread" as const,
+                  conversationId: conversation.id,
+                  rootMessageId: anchor.threadRootId ?? anchor.id,
+                };
+        // The root is only carried separately once it has fallen out of the page. Membership can
+        // only go selected -> dropped, so it is tracked incrementally instead of rebuilt per pass.
+        const canonicalThreadRootId = canonicalThreadRoot?.id ?? null;
+        let threadRootSelected =
+          canonicalThreadRootId !== null &&
+          messages.some((message) => message.id === canonicalThreadRootId);
+
         let droppedForSize = false;
         while (true) {
-          const anchor = messages.at(-1);
           const oldest = messages.at(0);
           const hasEarlier = anchor !== undefined && (queryTruncated || droppedForSize);
-          const selectedIds = new Set(messages.map((message) => message.id));
-          const threadRoot =
-            canonicalThreadRoot === null || selectedIds.has(canonicalThreadRoot.id)
-              ? null
-              : canonicalThreadRoot;
           const contextPack = {
             version: 1 as const,
             conversation: location,
-            anchorMessageId: anchor?.id ?? null,
+            anchorMessageId,
             messages,
-            threadRoot,
-            replyTarget:
-              anchor === undefined
-                ? null
-                : location.kind === "direct_message"
-                  ? { kind: "flat" as const, conversationId: conversation.id }
-                  : {
-                      kind: "thread" as const,
-                      conversationId: conversation.id,
-                      rootMessageId: anchor.threadRootId ?? anchor.id,
-                    },
-            readThroughMessageId: anchor?.id ?? null,
+            threadRoot: threadRootSelected ? null : canonicalThreadRoot,
+            replyTarget,
+            readThroughMessageId: anchorMessageId,
             truncatedBefore: hasEarlier,
             nextCursor:
               hasEarlier && oldest !== undefined
@@ -1743,7 +1765,10 @@ export class WorkspaceRepository {
           if (messages.length <= 1) {
             throw new Error("A single context message exceeded the context-pack byte cap");
           }
-          messages.shift();
+          const dropped = messages.shift();
+          if (dropped !== undefined && dropped.id === canonicalThreadRootId) {
+            threadRootSelected = false;
+          }
           droppedForSize = true;
         }
       },
@@ -3816,18 +3841,7 @@ export class WorkspaceRepository {
     messageId: string,
   ): Promise<AgentContextMessage | null> {
     const result = await client.query<AgentContextMessageRow>(
-      `SELECT message.*,
-              author.kind AS author_kind,
-              author.username AS author_username,
-              author.display_name AS author_display_name,
-              EXISTS (
-                SELECT 1
-                  FROM message_mentions AS mention
-                 WHERE mention.message_id = message.id
-                   AND mention.mentioned_user_id = $3
-              ) AS mentioned_you
-         FROM messages AS message
-         JOIN users AS author ON author.id = message.author_id
+      `${agentContextMessageSql("$3")}
         WHERE message.id = $1
           AND message.conversation_id = $2
           AND message.deleted_at IS NULL`,

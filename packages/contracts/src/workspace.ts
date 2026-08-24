@@ -293,19 +293,27 @@ function utf8ByteLength(value: string): number {
 }
 
 /**
- * Measures compact JSON after escaping the line separators that must not reach a one-line
- * injection boundary literally. Keep this representation aligned with context-pack renderers.
+ * The canonical compact, physical-one-line JSON encoding of a context pack.
+ *
+ * `JSON.stringify` escapes ASCII newlines but emits these Unicode line separators literally, so
+ * they are escaped too \u2014 otherwise a message body could manufacture a physical boundary line in a
+ * rendered pack. This is the one definition of that representation; every renderer and every size
+ * check derives from it so a pack pruned to fit is a pack that renders.
  */
-export function injectionSafeCompactJsonByteLength(value: unknown): number {
+export function toInjectionSafeCompactJson(value: unknown): string {
   const compactJson = JSON.stringify(value);
   if (compactJson === undefined) {
     throw new TypeError("Value does not have a JSON representation");
   }
-  const injectionSafeJson = compactJson
+  return compactJson
     .replaceAll("\u0085", "\\u0085")
     .replaceAll("\u2028", "\\u2028")
     .replaceAll("\u2029", "\\u2029");
-  return utf8ByteLength(injectionSafeJson);
+}
+
+/** Byte length of {@link toInjectionSafeCompactJson}'s output \u2014 the size a pack is pruned against. */
+export function injectionSafeCompactJsonByteLength(value: unknown): number {
+  return utf8ByteLength(toInjectionSafeCompactJson(value));
 }
 
 export const messageHistoryQuerySchema = z

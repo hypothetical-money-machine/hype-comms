@@ -238,15 +238,17 @@ def _configured_context_limit(config: Optional[PlatformConfig] = None) -> int:
     raw: object = os.getenv("HYPE_COMMS_CONTEXT_LIMIT")
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         raw = extra.get("context_limit", DEFAULT_CONTEXT_LIMIT)
-    if isinstance(raw, bool):
-        raise ValueError("HYPE_COMMS_CONTEXT_LIMIT must be an integer from 1 through 20")
+    # A bool stringifies to "True"/"False", which the digit match rejects alongside every other
+    # non-numeric value, so one guard covers format and range together.
     text = str(raw).strip()
-    if re.fullmatch(r"[0-9]+", text) is None:
-        raise ValueError("HYPE_COMMS_CONTEXT_LIMIT must be an integer from 1 through 20")
-    value = int(text)
-    if value < MIN_CONTEXT_LIMIT or value > MAX_CONTEXT_LIMIT:
-        raise ValueError("HYPE_COMMS_CONTEXT_LIMIT must be an integer from 1 through 20")
-    return value
+    if re.fullmatch(r"[0-9]+", text) is None or not (
+        MIN_CONTEXT_LIMIT <= int(text) <= MAX_CONTEXT_LIMIT
+    ):
+        raise ValueError(
+            "HYPE_COMMS_CONTEXT_LIMIT must be an integer from "
+            f"{MIN_CONTEXT_LIMIT} through {MAX_CONTEXT_LIMIT}"
+        )
+    return int(text)
 
 
 def _author_is_allowed(author_id: str) -> bool:
@@ -347,7 +349,7 @@ def _valid_context_message(value: object) -> bool:
     if not isinstance(body, str):
         return False
     try:
-        body_length = len(body.encode("utf-16-le")) // 2
+        body_length = _utf16_length(body)
     except UnicodeEncodeError:
         return False
     return (
@@ -359,6 +361,28 @@ def _valid_context_message(value: object) -> bool:
         and _valid_context_author(value.get("author"))
         and isinstance(value.get("mentionedYou"), bool)
         and (thread_root_id is None or _is_entity_id(thread_root_id))
+    )
+
+
+def _utf16_length(value: str) -> int:
+    """Length in UTF-16 code units.
+
+    Hype Comms's Zod contract runs in JavaScript, where string length is measured that way, so
+    every comparison against MAX_MESSAGE_LENGTH counts the same units the server counts.
+    """
+
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _invalid_context_pack() -> CliFailure:
+    """The single failure raised whenever a context pack fails validation or rendering."""
+
+    return CliFailure(
+        6,
+        "INVALID_CONTEXT_PACK",
+        "Hype Comms CLI returned an invalid agent context pack",
+        False,
+        error_kind="bad_format",
     )
 
 
@@ -388,13 +412,7 @@ def _validate_context_pack(
     """Validate the strict context-pack v1 projection before model exposure."""
 
     pack = result.get("contextPack")
-    invalid = CliFailure(
-        6,
-        "INVALID_CONTEXT_PACK",
-        "Hype Comms CLI returned an invalid agent context pack",
-        False,
-        error_kind="bad_format",
-    )
+    invalid = _invalid_context_pack()
     if set(result) != {"contextPack"} or not isinstance(pack, dict) or set(pack) != {
         "version",
         "conversation",
@@ -525,40 +543,23 @@ def _render_context_pack(
 ) -> str:
     """Render one-line JSON between injection-resistant, model-visible boundaries."""
 
+    invalid = _invalid_context_pack()
     encoded = _injection_safe_context_json(pack)
     try:
         encoded_size = len(encoded.encode("utf-8"))
     except UnicodeEncodeError as exc:
-        raise CliFailure(
-            6,
-            "INVALID_CONTEXT_PACK",
-            "Hype Comms CLI returned an invalid agent context pack",
-            False,
-            error_kind="bad_format",
-        ) from exc
+        raise invalid from exc
     if encoded_size > MAX_CONTEXT_PACK_BYTES:
         # Defense in depth for direct callers: the shared contract and server
         # prune against this same injection-safe compact representation, so a
         # valid server pack always fits and only malformed CLI output lands here.
-        raise CliFailure(
-            6,
-            "INVALID_CONTEXT_PACK",
-            "Hype Comms CLI returned an invalid agent context pack",
-            False,
-            error_kind="bad_format",
-        )
+        raise invalid
     unique_denied_ids = tuple(sorted(set(denied_author_ids)))
     if (
         len(unique_denied_ids) > _MAX_CONTEXT_PACK_AUTHORS
         or any(not _is_entity_id(author_id) for author_id in unique_denied_ids)
     ):
-        raise CliFailure(
-            6,
-            "INVALID_CONTEXT_PACK",
-            "Hype Comms CLI returned an invalid agent context pack",
-            False,
-            error_kind="bad_format",
-        )
+        raise invalid
     routing_line = _CONTEXT_PACK_ROUTING_PREFIX + json.dumps(
         {"deniedAuthorIds": unique_denied_ids},
         separators=(",", ":"),
@@ -571,13 +572,7 @@ def _render_context_pack(
         # The server owns the 64 KiB pack cap; only the adapter-generated,
         # UUID-only routing line is additional, and its maximum is reserved in
         # MAX_RENDERED_CONTEXT_PACK_BYTES above.
-        raise CliFailure(
-            6,
-            "INVALID_CONTEXT_PACK",
-            "Hype Comms CLI returned an invalid agent context pack",
-            False,
-            error_kind="bad_format",
-        )
+        raise invalid
     return rendered
 
 
@@ -950,9 +945,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
-        # Hype Comms's Zod contract runs in JavaScript, where string length is
-        # measured in UTF-16 code units.
-        return lambda value: len(value.encode("utf-16-le")) // 2
+        return _utf16_length
 
     def __init__(
         self,
@@ -1251,32 +1244,21 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 False,
                 error_kind="bad_format",
             ) from exc
+        unsupported = CliFailure(
+            6,
+            "CURSOR_STATE_INVALID",
+            "Hype Comms cursor checkpoint has an unsupported format",
+            False,
+            error_kind="bad_format",
+        )
         if not isinstance(payload, dict):
-            raise CliFailure(
-                6,
-                "CURSOR_STATE_INVALID",
-                "Hype Comms cursor checkpoint has an unsupported format",
-                False,
-                error_kind="bad_format",
-            )
+            raise unsupported
         version = payload.get("version")
         if type(version) is not int:
-            raise CliFailure(
-                6,
-                "CURSOR_STATE_INVALID",
-                "Hype Comms cursor checkpoint has an unsupported format",
-                False,
-                error_kind="bad_format",
-            )
+            raise unsupported
         if version == LEGACY_CURSOR_FILE_VERSION:
             if set(payload) != {"version", "cursor"}:
-                raise CliFailure(
-                    6,
-                    "CURSOR_STATE_INVALID",
-                    "Hype Comms cursor checkpoint has an unsupported format",
-                    False,
-                    error_kind="bad_format",
-                )
+                raise unsupported
             self._state_needs_migration = True
             return self._checked_cursor(payload.get("cursor"))
         if version != CURSOR_FILE_VERSION or set(payload) != {
@@ -1284,22 +1266,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
             "cursor",
             "pendingReadCursors",
         }:
-            raise CliFailure(
-                6,
-                "CURSOR_STATE_INVALID",
-                "Hype Comms cursor checkpoint has an unsupported format",
-                False,
-                error_kind="bad_format",
-            )
+            raise unsupported
         pending = payload.get("pendingReadCursors")
         if not isinstance(pending, dict):
-            raise CliFailure(
-                6,
-                "CURSOR_STATE_INVALID",
-                "Hype Comms cursor checkpoint has an unsupported format",
-                False,
-                error_kind="bad_format",
-            )
+            raise unsupported
         next_pending: Dict[str, PendingReadCursor] = {}
         for conversation_id, target in pending.items():
             if (
@@ -1309,13 +1279,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 or not _is_entity_id(target.get("messageId"))
                 or not _is_sequence(target.get("conversationSequence"))
             ):
-                raise CliFailure(
-                    6,
-                    "CURSOR_STATE_INVALID",
-                    "Hype Comms cursor checkpoint has an unsupported format",
-                    False,
-                    error_kind="bad_format",
-                )
+                raise unsupported
             next_pending[conversation_id] = PendingReadCursor(
                 message_id=str(target["messageId"]),
                 conversation_sequence=str(target["conversationSequence"]),
