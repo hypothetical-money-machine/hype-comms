@@ -62,30 +62,50 @@ test("waits a bounded number of times for PostgreSQL", async () => {
   assert.equal(attempts, 2);
 });
 
-test("gates every promotion path through the guarded PostgreSQL entrypoint", async () => {
-  const [packageJson, localDatabase, github, woodpecker] = await Promise.all([
+test("gates every published server image through the guarded PostgreSQL entrypoint", async () => {
+  const [packageJson, localDatabase, github, woodpecker, dockerfile] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("./test-database.sh", import.meta.url), "utf8"),
     readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8"),
     readFile(new URL("../.woodpecker.yml", import.meta.url), "utf8"),
+    readFile(new URL("../Dockerfile", import.meta.url), "utf8"),
   ]);
 
   assert.equal(JSON.parse(packageJson).scripts["test:postgres"], "node scripts/test-postgres.mjs");
   assert.match(localDatabase, /npm run test:postgres/);
   assert.match(github, /run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/);
   assert.match(woodpecker, /image: postgres:16-alpine/);
-  assert.match(woodpecker, /limit: 1/);
+  assert.doesNotMatch(woodpecker, /^concurrency:/mu);
   assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run test:postgres/);
   assert.match(woodpecker, /name: build-push[\s\S]*?depends_on:\n\s+- check/);
-  assert.match(woodpecker, /name: promote-gitops[\s\S]*?depends_on:\n\s+- build-push/);
+  assert.match(woodpecker, /registry: &registry registry\.fastnfree\.dev/);
+  assert.match(woodpecker, /project: &project homelab/);
+  assert.match(
+    woodpecker,
+    /image: gcr\.io\/kaniko-project\/executor:v1\.23\.2-debug@sha256:[a-f0-9]{64}/,
+  );
+  assert.match(
+    woodpecker,
+    /--destination=\$\$\{REGISTRY\}\/\$\$\{PROJECT\}\/\$\$\{APP\}:\$\$\{CI_COMMIT_SHA\}/,
+  );
+  assert.match(woodpecker, /--custom-platform=linux\/amd64/);
+  assert.match(woodpecker, /--label=org\.opencontainers\.image\.revision=\$\$\{CI_COMMIT_SHA\}/);
+  assert.match(
+    woodpecker,
+    /--label=org\.opencontainers\.image\.source=https:\/\/github\.com\/hypothetical-money-machine\/hype-comms/,
+  );
+  assert.match(woodpecker, /--image-name-tag-with-digest-file=\/tmp\/image-reference/);
+  assert.match(woodpecker, /--reproducible/);
+  assert.match(woodpecker, /cat \/tmp\/image-reference/);
+  assert.doesNotMatch(
+    woodpecker,
+    /:latest|name: promote-gitops|github_token|GITHUB_TOKEN|git push/,
+  );
+  assert.match(dockerfile, /FROM node:24\.18\.0-alpine@sha256:[a-f0-9]{64} AS base/);
 
   const buildPushStart = woodpecker.indexOf("  - name: build-push");
-  const promotionStart = woodpecker.indexOf("  - name: promote-gitops");
   assert.notEqual(buildPushStart, -1);
-  assert.notEqual(promotionStart, -1);
-  const buildPush = woodpecker.slice(buildPushStart, promotionStart);
-  const promotion = woodpecker.slice(promotionStart);
+  const buildPush = woodpecker.slice(buildPushStart);
   const mainOnly = /when:\n\s+- event: push\n\s+branch: main\n\s+- event: manual\n\s+branch: main/;
   assert.match(buildPush, mainOnly);
-  assert.match(promotion, mainOnly);
 });

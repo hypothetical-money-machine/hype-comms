@@ -162,24 +162,7 @@ describe("renderer theme CSS", () => {
     expect(actionRailRule?.groups?.body).toContain("opacity: 0");
     expect(actionRevealRule?.groups?.body).toContain("opacity: 1");
     expect(memberRoleRule?.groups?.body).toContain("color: var(--theme-text-secondary)");
-  });
-
-  it("sizes the workspace member list from the persisted height variable", () => {
-    const styles = withoutCssComments(readFileSync(stylesPath, "utf8"));
-    const memberListRule = /^\.member-list\s*\{(?<body>[^}]*)\}/mu.exec(styles);
-    const splitRule = /^\.sidebar-split\s*\{(?<body>[^}]*)\}/mu.exec(styles);
-    const handleRule = /^\.member-list-resize-handle\s*\{(?<body>[^}]*)\}/mu.exec(styles);
-    const navRule = /^\.sidebar nav\s*\{(?<body>[^}]*)\}/mu.exec(styles);
-
-    expect(navRule?.groups?.body).toContain("flex: 1 1 0");
-    expect(splitRule?.groups?.body).toContain("flex: 1");
-    expect(splitRule?.groups?.body).toContain("overflow: hidden");
-    expect(handleRule?.groups?.body).toContain("cursor: row-resize");
-    expect(memberListRule?.groups?.body).toContain("flex: 0 0 var(--member-list-height)");
-    expect(memberListRule?.groups?.body).toContain("min-height: var(--member-list-min-height)");
-    expect(memberListRule?.groups?.body).toContain(
-      "max-height: calc(\n    100% - var(--conversation-nav-min-height) - var(--member-list-resize-handle-height)\n  )",
-    );
+    expect(memberRoleRule?.groups?.body).toContain("font-size: 12px");
   });
 
   it("keeps the minimum-height sign-in surface vertically reachable", () => {

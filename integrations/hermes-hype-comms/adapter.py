@@ -1,8 +1,9 @@
 """Hermes platform adapter for Hype Comms.
 
 The adapter deliberately delegates every product-network operation to
-``hype-comms-cli``. Agent tokens remain in the child environment, message bodies
-travel over stdin, and watch stdout is parsed as NDJSON only.
+``hype-comms-cli``. Credentials come from a private saved CLI profile or an
+explicit child-environment override, message bodies travel over stdin, and
+watch stdout is parsed as NDJSON only.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ SUPPORTED_EVENT_TYPES = frozenset(
     }
 )
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _DECIMAL_CURSOR = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _TOKEN_PATTERN = re.compile(r"\bhype_comms_agent_[A-Za-z0-9_-]+\b")
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+\b")
@@ -396,11 +398,24 @@ def _configured_origin(config: Optional[PlatformConfig] = None) -> str:
     return _canonical_origin(value)
 
 
-def _configured_token() -> str:
+def _configured_credential() -> tuple[Optional[str], Optional[str]]:
+    """Return the selected CLI credential source without reading profile contents.
+
+    An environment token remains the explicit override supported by the CLI. In
+    profile mode the adapter passes only the profile name and lets the CLI read
+    its private profile store; the plaintext credential never enters the
+    Hermes process environment.
+    """
+
     token = os.getenv("HYPE_COMMS_TOKEN", "")
-    if not token:
-        raise ValueError("HYPE_COMMS_TOKEN is required")
-    return token
+    profile = os.getenv("HYPE_COMMS_PROFILE", "").strip()
+    if profile and _PROFILE_NAME.fullmatch(profile) is None:
+        raise ValueError("HYPE_COMMS_PROFILE is invalid")
+    if token:
+        return token, profile or None
+    if not profile:
+        raise ValueError("HYPE_COMMS_TOKEN or HYPE_COMMS_PROFILE is required")
+    return None, profile
 
 
 def _has_access_policy() -> bool:
@@ -409,10 +424,21 @@ def _has_access_policy() -> bool:
     )
 
 
-def _child_environment(origin: str, token: str) -> Dict[str, str]:
+def _child_environment(
+    origin: str,
+    credential: tuple[Optional[str], Optional[str]],
+) -> Dict[str, str]:
+    token, profile = credential
     child_env = dict(os.environ)
     child_env["HYPE_COMMS_API_ORIGIN"] = origin
-    child_env["HYPE_COMMS_TOKEN"] = token
+    if token is None:
+        child_env.pop("HYPE_COMMS_TOKEN", None)
+    else:
+        child_env["HYPE_COMMS_TOKEN"] = token
+    if profile is None:
+        child_env.pop("HYPE_COMMS_PROFILE", None)
+    else:
+        child_env["HYPE_COMMS_PROFILE"] = profile
     return child_env
 
 
@@ -421,7 +447,7 @@ async def _run_cli_json(
     args: List[str],
     *,
     origin: str,
-    token: str,
+    credential: tuple[Optional[str], Optional[str]],
     stdin_text: Optional[str] = None,
     timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     process_factory: ProcessFactory = asyncio.create_subprocess_exec,
@@ -433,7 +459,7 @@ async def _run_cli_json(
             stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_child_environment(origin, token),
+            env=_child_environment(origin, credential),
         )
     except FileNotFoundError as exc:
         raise CliFailure(2, "CLI_NOT_FOUND", "hype-comms-cli is not installed", False) from exc
@@ -519,12 +545,12 @@ async def _standalone_send(
         return {"error": "Hype Comms adapter does not support media delivery"}
     try:
         origin = _configured_origin(pconfig)
-        token = _configured_token()
+        credential = _configured_credential()
         result = await _run_cli_json(
             _cli_path(pconfig),
             ["messages", "send", str(chat_id), "--json"],
             origin=origin,
-            token=token,
+            credential=credential,
             stdin_text=message,
         )
         return {"success": True, "message_id": _message_id(result)}
@@ -643,12 +669,12 @@ class HypeCommsAdapter(BasePlatformAdapter):
         stdin_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
-            token = _configured_token()
+            credential = _configured_credential()
         except ValueError as exc:
             raise CliFailure(
                 2,
                 "CONFIG_INVALID",
-                "HYPE_COMMS_TOKEN is required",
+                "HYPE_COMMS_TOKEN or HYPE_COMMS_PROFILE is required",
                 False,
                 error_kind="forbidden",
             ) from exc
@@ -656,7 +682,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             _cli_path(self.config),
             args,
             origin=self._api_origin,
-            token=token,
+            credential=credential,
             stdin_text=stdin_text,
             process_factory=self._process_factory,
         )
@@ -906,7 +932,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                     error_kind="forbidden",
                 )
             self._api_origin = _configured_origin(self.config)
-            _configured_token()
+            _configured_credential()
             self._require_compatible_gateway_session_config()
 
             principal = await self._command(["auth", "whoami", "--json"])
@@ -966,12 +992,12 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 False,
             )
         try:
-            token = _configured_token()
+            credential = _configured_credential()
         except ValueError as exc:
             raise CliFailure(
                 2,
                 "CONFIG_INVALID",
-                "HYPE_COMMS_TOKEN is required",
+                "HYPE_COMMS_TOKEN or HYPE_COMMS_PROFILE is required",
                 False,
                 error_kind="forbidden",
             ) from exc
@@ -985,7 +1011,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=_child_environment(self._api_origin, token),
+                env=_child_environment(self._api_origin, credential),
                 limit=MAX_CLI_OUTPUT_BYTES + 1,
             )
         except FileNotFoundError as exc:
@@ -1944,7 +1970,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
 def check_requirements() -> bool:
     try:
         _configured_origin()
-        _configured_token()
+        _configured_credential()
     except ValueError:
         return False
     return _has_access_policy() and shutil.which(_cli_path()) is not None
@@ -1953,7 +1979,7 @@ def check_requirements() -> bool:
 def validate_config(config: PlatformConfig) -> bool:
     try:
         _configured_origin(config)
-        _configured_token()
+        _configured_credential()
     except ValueError:
         return False
     return _has_access_policy() and bool(_cli_path(config))
@@ -1966,7 +1992,7 @@ def is_connected(config: PlatformConfig) -> bool:
 def _env_enablement() -> Optional[Dict[str, Any]]:
     try:
         origin = _configured_origin()
-        _configured_token()
+        _configured_credential()
     except ValueError:
         return None
     if not _has_access_policy():
@@ -1997,8 +2023,11 @@ def register(ctx: Any) -> None:
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["HYPE_COMMS_API_ORIGIN", "HYPE_COMMS_TOKEN"],
-        install_hint="Install hype-comms-cli and configure an Hype Comms agent token",
+        required_env=["HYPE_COMMS_API_ORIGIN"],
+        install_hint=(
+            "Install hype-comms-cli and configure HYPE_COMMS_TOKEN or a saved "
+            "HYPE_COMMS_PROFILE"
+        ),
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="HYPE_COMMS_HOME_CONVERSATION",
         standalone_sender_fn=_standalone_send,

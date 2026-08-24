@@ -93,7 +93,12 @@ export async function requireAuthenticatedIdentity(
 export async function requireHumanIdentity(
   request: FastifyRequest,
   service: IdentityService,
-): Promise<AuthenticatedHumanIdentity & { readonly token: SessionToken }> {
+): Promise<
+  AuthenticatedHumanIdentity & {
+    readonly credentialType: "session";
+    readonly token: SessionToken;
+  }
+> {
   const identity = await requireAuthenticatedIdentity(request, service);
   if (identity.credentialType !== "session") {
     throw new ApiError(403, "FORBIDDEN", "A signed-in human session is required");
@@ -104,5 +109,21 @@ export async function requireHumanIdentity(
 export function requireAgentScope(identity: AuthenticatedRequestIdentity, scope: AgentScope): void {
   if (identity.credentialType === "agent" && !identity.currentUser.scopes.includes(scope)) {
     throw new ApiError(403, "FORBIDDEN", `Agent token requires the ${scope} scope`);
+  }
+}
+
+export function requireAnyAgentScope(
+  identity: AuthenticatedRequestIdentity,
+  scopes: readonly AgentScope[],
+): void {
+  if (
+    identity.credentialType === "agent" &&
+    !scopes.some((scope) => identity.currentUser.scopes.includes(scope))
+  ) {
+    throw new ApiError(
+      403,
+      "FORBIDDEN",
+      `Agent token requires one of these scopes: ${scopes.join(", ")}`,
+    );
   }
 }

@@ -105,6 +105,8 @@ const AGENT_SCOPE_ORDER: readonly AgentScope[] = [
   "messages:write",
   "conversations:write",
   "read-cursors:write",
+  "direct-conversations:write",
+  "agents:invite",
 ];
 
 function usernameBase(email: Email): string {
@@ -467,20 +469,26 @@ export class IdentityService {
     agentUserId: EntityId,
     tokenId: EntityId,
   ): Promise<boolean> {
-    return this.#repository.transaction(async (repository) => {
-      const owner = await this.#requireLockedOwner(
-        actorUserId,
-        repository,
-        "Only a workspace owner may revoke agent tokens",
-      );
-      if ((await repository.findAgent(owner.workspaceId, agentUserId)) === null) return false;
-      return repository.revokeAgentToken(
-        owner.workspaceId,
-        agentUserId,
-        tokenId,
-        iso(this.#clock()),
-      );
-    });
+    return this.#repository.transaction(
+      async (repository) => {
+        const owner = await this.#requireLockedOwner(
+          actorUserId,
+          repository,
+          "Only a workspace owner may revoke agent tokens",
+        );
+        if ((await repository.findAgent(owner.workspaceId, agentUserId)) === null) return false;
+        return repository.revokeAgentToken(
+          owner.workspaceId,
+          agentUserId,
+          tokenId,
+          iso(this.#clock()),
+        );
+      },
+      // Enrollment intentionally follows membership/token/conversation before workspace so it
+      // matches message delivery. PostgreSQL may choose this workspace-first legacy mutation as
+      // the victim when both paths meet; retry the fully transactional operation either way.
+      { deadlockRetries: 2 },
+    );
   }
 
   async seedOwner(input: SeedOwnerInput): Promise<void> {

@@ -213,6 +213,49 @@ describeWithPostgres("agent identity and owner administration", () => {
     expect((await pool.query("SELECT id FROM users WHERE kind = 'agent'")).rows).toEqual([]);
   });
 
+  it("keeps legacy token minting available but rejects new scopes during rollback", async () => {
+    const enabledApp = await appWithWorkspace();
+    const agent = await createAgent(enabledApp);
+    const rollbackApp = await appWithWorkspace({ agentProvisioningEnabled: false });
+    const legacy = await rollbackApp.inject({
+      method: "POST",
+      url: `/v1/agents/${agent.user.id}/tokens`,
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+      payload: {
+        label: "Rollback break-glass",
+        scopes: ["workspace:read", "messages:write", "conversations:write", "read-cursors:write"],
+      },
+    });
+
+    expect(legacy.statusCode).toBe(201);
+    expect(createAgentTokenResponseSchema.parse(legacy.json()).agentToken.scopes).toEqual([
+      "workspace:read",
+      "messages:write",
+      "conversations:write",
+      "read-cursors:write",
+    ]);
+
+    for (const scope of ["direct-conversations:write", "agents:invite"] as const) {
+      const rejected = await rollbackApp.inject({
+        method: "POST",
+        url: `/v1/agents/${agent.user.id}/tokens`,
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+        payload: { label: `Rejected ${scope}`, scopes: ["workspace:read", scope] },
+      });
+
+      expect(rejected.statusCode).toBe(503);
+      expect(apiErrorEnvelopeSchema.parse(rejected.json()).error.code).toBe("SERVICE_UNAVAILABLE");
+    }
+
+    const stored = await pool.query<{ scopes: string[] } & QueryResultRow>(
+      "SELECT scopes FROM agent_tokens WHERE agent_user_id = $1 ORDER BY created_at, id",
+      [agent.user.id],
+    );
+    expect(stored.rows.map((row) => row.scopes)).toEqual([
+      ["workspace:read", "messages:write", "conversations:write", "read-cursors:write"],
+    ]);
+  });
+
   it("creates, lists, authenticates, and disables a non-email agent without leaking token hashes", async () => {
     const app = await appWithWorkspace();
     const agent = await createAgent(app);
@@ -616,6 +659,18 @@ describeWithPostgres("agent identity and owner administration", () => {
       "conversations:write",
     ]);
     const cursors = await createToken(app, agent.user.id, "Cursors", ["read-cursors:write"]);
+    const defaultAgency = await createToken(app, agent.user.id, "Default agency", [
+      "agents:invite",
+      "direct-conversations:write",
+      "messages:write",
+      "workspace:read",
+    ]);
+    expect(defaultAgency.agentToken.scopes).toEqual([
+      "workspace:read",
+      "messages:write",
+      "direct-conversations:write",
+      "agents:invite",
+    ]);
 
     const readRequests = [
       { method: "GET", url: "/v1/bootstrap" },
@@ -691,6 +746,12 @@ describeWithPostgres("agent identity and owner administration", () => {
       headers: { authorization: `Bearer ${conversations.token}` },
       payload: { memberId: ownerId },
     });
+    const narrowDirect = await app.inject({
+      method: "POST",
+      url: "/v1/direct-conversations",
+      headers: { authorization: `Bearer ${defaultAgency.token}` },
+      payload: { memberId: ownerId },
+    });
     const cursor = await app.inject({
       method: "PUT",
       url: `/v1/conversations/${generalId}/read-cursor`,
@@ -699,6 +760,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     });
     expect(channel.statusCode).toBe(201);
     expect(direct.statusCode).toBe(201);
+    expect(narrowDirect.statusCode).toBe(201);
     expect(cursor.statusCode).toBe(200);
     const createdChannelId = conversationMutationResponseSchema.parse(channel.json()).conversation
       .conversation.id;

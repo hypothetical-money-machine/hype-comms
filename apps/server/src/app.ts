@@ -9,6 +9,7 @@ import type { MetricsRegistry } from "./metrics.js";
 import type { BotService } from "./modules/bots/service.js";
 import { authKitRoutes } from "./modules/identity/authkit-routes.js";
 import type { AuthKitService } from "./modules/identity/authkit-service.js";
+import type { AgentEnrollmentModule } from "./modules/identity/agent-enrollment.js";
 import { workOSWebhookRoutes } from "./modules/identity/authkit-webhook-routes.js";
 import type { WorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
@@ -34,6 +35,7 @@ export interface BuildAppOptions {
   };
   readonly identity?: {
     readonly service: IdentityService;
+    readonly agentEnrollment?: AgentEnrollmentModule;
     readonly botService?: BotService;
     /** False when links are issued by an administrator, which disables self-service requests. */
     readonly selfServiceMagicLink?: boolean;
@@ -140,6 +142,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (options.identity !== undefined) {
         await v1.register(identityRoutes, {
           service: options.identity.service,
+          ...(options.identity.agentEnrollment === undefined
+            ? {}
+            : { agentEnrollment: options.identity.agentEnrollment }),
           ...(options.identity.authKitService === undefined
             ? {}
             : { authKitService: options.identity.authKitService }),

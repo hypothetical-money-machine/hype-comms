@@ -10,10 +10,26 @@ export const agentScopeSchema = z.enum([
   "messages:write",
   "conversations:write",
   "read-cursors:write",
+  "direct-conversations:write",
+  "agents:invite",
 ]);
 export const agentTokenScopeSchema = agentScopeSchema;
 
 export const DEFAULT_AGENT_SCOPES = ["workspace:read", "messages:write"] as const;
+
+/**
+ * The immutable day-one capability profile assigned only by the enrollment workflow. Existing
+ * owner-minted credentials keep their explicit scopes and their legacy default unchanged.
+ */
+export const DEFAULT_AGENT_AGENCY_PROFILE = "default-agency-v1" as const;
+export const DEFAULT_AGENCY_AGENT_SCOPES = [
+  "workspace:read",
+  "messages:write",
+  "direct-conversations:write",
+  "agents:invite",
+] as const satisfies readonly z.infer<typeof agentScopeSchema>[];
+
+export const AGENT_ENROLLMENT_AUTHORIZATION_SCHEME = "Enrollment" as const;
 
 export const agentScopesSchema = z
   .array(agentScopeSchema)
@@ -127,6 +143,112 @@ export const listAgentTokensResponseSchema = z
   })
   .strict();
 
+export const agentEnrollmentPolicyModeSchema = z.enum(["required", "automatic"]);
+
+export const agentEnrollmentPolicySchema = z
+  .object({
+    workspaceId: entityIdSchema,
+    mode: agentEnrollmentPolicyModeSchema,
+    updatedAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const updateAgentEnrollmentPolicyRequestSchema = z
+  .object({ mode: agentEnrollmentPolicyModeSchema })
+  .strict();
+
+export const agentEnrollmentPolicyResponseSchema = z
+  .object({ policy: agentEnrollmentPolicySchema })
+  .strict();
+
+export const agentEnrollmentStatusSchema = z.enum([
+  "pending_approval",
+  "ready_to_redeem",
+  "active",
+  "rejected",
+  "cancelled",
+  "expired",
+]);
+
+/** Unpadded base64url SHA-256 of the complete, child-generated final agent credential. */
+export const agentEnrollmentCredentialVerifierSchema = z
+  .string()
+  .length(43)
+  .regex(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, "Expected a canonical SHA-256 verifier");
+
+const requestedRestrictedChannelIdsSchema = z
+  .array(entityIdSchema)
+  .max(100)
+  .refine((ids) => new Set(ids).size === ids.length, "Restricted channel IDs must be unique");
+
+export const requestAgentEnrollmentSchema = createAgentRequestSchema
+  .extend({
+    label: agentTokenSchema.shape.label,
+    credentialVerifier: agentEnrollmentCredentialVerifierSchema,
+    restrictedChannelIds: requestedRestrictedChannelIdsSchema.default([]),
+  })
+  .strict();
+
+export const agentEnrollmentSchema = z
+  .object({
+    id: entityIdSchema,
+    workspaceId: entityIdSchema,
+    profile: z.literal(DEFAULT_AGENT_AGENCY_PROFILE),
+    status: agentEnrollmentStatusSchema,
+    username: createAgentRequestSchema.shape.username,
+    displayName: createAgentRequestSchema.shape.displayName,
+    label: agentTokenSchema.shape.label,
+    requestedBy: entityIdSchema,
+    requestedByKind: z.enum(["human", "agent"]),
+    restrictedChannelIds: requestedRestrictedChannelIdsSchema,
+    expiresAt: isoDateTimeSchema,
+    reviewedBy: entityIdSchema.nullable(),
+    reviewedAt: isoDateTimeSchema.nullable(),
+    activatedAgentUserId: entityIdSchema.nullable(),
+    activatedAgentTokenId: entityIdSchema.nullable(),
+    activatedAt: isoDateTimeSchema.nullable(),
+    createdAt: isoDateTimeSchema,
+    updatedAt: isoDateTimeSchema,
+  })
+  .strict()
+  .superRefine((enrollment, context) => {
+    const activationFields = [
+      enrollment.activatedAgentUserId,
+      enrollment.activatedAgentTokenId,
+      enrollment.activatedAt,
+    ];
+    const hasEveryActivationField = activationFields.every((value) => value !== null);
+    const hasNoActivationField = activationFields.every((value) => value === null);
+    if (
+      (enrollment.status === "active" && !hasEveryActivationField) ||
+      (enrollment.status !== "active" && !hasNoActivationField)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Only active enrollments carry complete activation metadata",
+      });
+    }
+    if ((enrollment.reviewedBy === null) !== (enrollment.reviewedAt === null)) {
+      context.addIssue({ code: "custom", message: "Review metadata must be complete" });
+    }
+  });
+
+export const agentEnrollmentResponseSchema = z
+  .object({ enrollment: agentEnrollmentSchema })
+  .strict();
+
+export const listAgentEnrollmentsResponseSchema = z
+  .object({ enrollments: z.array(agentEnrollmentSchema).max(1_000) })
+  .strict();
+
+export const reviewAgentEnrollmentRequestSchema = z
+  .object({ decision: z.enum(["approve", "reject"]) })
+  .strict();
+
+export const redeemAgentEnrollmentResponseSchema = z
+  .object({ enrollment: agentEnrollmentSchema, agent: agentSchema })
+  .strict();
+
 export type AgentScope = z.infer<typeof agentScopeSchema>;
 export type AgentTokenScope = AgentScope;
 export type AgentTokenSecret = z.infer<typeof agentTokenSecretSchema>;
@@ -139,3 +261,19 @@ export type AgentToken = z.infer<typeof agentTokenSchema>;
 export type CreateAgentTokenRequest = z.infer<typeof createAgentTokenRequestSchema>;
 export type CreateAgentTokenResponse = z.infer<typeof createAgentTokenResponseSchema>;
 export type ListAgentTokensResponse = z.infer<typeof listAgentTokensResponseSchema>;
+export type AgentEnrollmentPolicyMode = z.infer<typeof agentEnrollmentPolicyModeSchema>;
+export type AgentEnrollmentPolicy = z.infer<typeof agentEnrollmentPolicySchema>;
+export type UpdateAgentEnrollmentPolicyRequest = z.infer<
+  typeof updateAgentEnrollmentPolicyRequestSchema
+>;
+export type AgentEnrollmentPolicyResponse = z.infer<typeof agentEnrollmentPolicyResponseSchema>;
+export type AgentEnrollmentStatus = z.infer<typeof agentEnrollmentStatusSchema>;
+export type AgentEnrollmentCredentialVerifier = z.infer<
+  typeof agentEnrollmentCredentialVerifierSchema
+>;
+export type RequestAgentEnrollment = z.infer<typeof requestAgentEnrollmentSchema>;
+export type AgentEnrollment = z.infer<typeof agentEnrollmentSchema>;
+export type AgentEnrollmentResponse = z.infer<typeof agentEnrollmentResponseSchema>;
+export type ListAgentEnrollmentsResponse = z.infer<typeof listAgentEnrollmentsResponseSchema>;
+export type ReviewAgentEnrollmentRequest = z.infer<typeof reviewAgentEnrollmentRequestSchema>;
+export type RedeemAgentEnrollmentResponse = z.infer<typeof redeemAgentEnrollmentResponseSchema>;

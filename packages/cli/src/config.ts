@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   constants,
   open,
@@ -13,7 +13,11 @@ import {
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { agentTokenSecretSchema, sessionTokenSchema } from "@hype-comms/contracts";
+import {
+  agentTokenSecretSchema,
+  requestAgentEnrollmentSchema,
+  sessionTokenSchema,
+} from "@hype-comms/contracts";
 import { z } from "zod";
 
 import { UsageError } from "./errors.js";
@@ -36,8 +40,30 @@ const storedProfileSchema = z
   .object({
     apiOrigin: z.string().min(1),
     credential: storedCredentialSchema.optional(),
+    enrollmentOffer: z.object({ request: requestAgentEnrollmentSchema }).strict().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((profile, context) => {
+    if (profile.enrollmentOffer === undefined) return;
+    if (profile.credential?.kind !== "agent") {
+      context.addIssue({
+        code: "custom",
+        path: ["enrollmentOffer"],
+        message: "An enrollment offer requires its candidate credential",
+      });
+      return;
+    }
+    const verifier = createHash("sha256")
+      .update(profile.credential.token, "utf8")
+      .digest("base64url");
+    if (verifier !== profile.enrollmentOffer.request.credentialVerifier) {
+      context.addIssue({
+        code: "custom",
+        path: ["enrollmentOffer", "request", "credentialVerifier"],
+        message: "The enrollment offer does not match its candidate credential",
+      });
+    }
+  });
 
 const profileStoreSchema = z
   .object({
@@ -58,6 +84,11 @@ export interface ResolvedProfile {
   readonly credentialOrigin?: string;
   readonly credentialFromEnvironment: boolean;
   readonly configDirectory: string;
+}
+
+export interface ResolvedProfileSnapshot {
+  readonly profile: ResolvedProfile;
+  readonly storedProfile?: StoredProfile;
 }
 
 const EMPTY_STORE: ProfileStore = {
@@ -267,13 +298,13 @@ export async function updateProfileStore(
   });
 }
 
-export async function resolveProfile(
+function resolveProfileFromStore(
   runtime: Pick<Runtime, "env" | "homeDirectory">,
   options: Pick<GlobalOptions, "profile" | "apiOrigin">,
-  behavior: { readonly ignoreEnvironmentToken?: boolean } = {},
-): Promise<ResolvedProfile> {
-  const directory = configDirectory(runtime);
-  const store = await loadProfileStore(directory);
+  behavior: { readonly ignoreEnvironmentToken?: boolean },
+  directory: string,
+  store: ProfileStore,
+): ResolvedProfile {
   const name = validateProfileName(
     options.profile ?? runtime.env.HYPE_COMMS_PROFILE ?? store.defaultProfile,
   );
@@ -308,6 +339,31 @@ export async function resolveProfile(
   };
 }
 
+export async function resolveProfileSnapshot(
+  runtime: Pick<Runtime, "env" | "homeDirectory">,
+  options: Pick<GlobalOptions, "profile" | "apiOrigin">,
+  behavior: { readonly ignoreEnvironmentToken?: boolean } = {},
+): Promise<ResolvedProfileSnapshot> {
+  const directory = configDirectory(runtime);
+  // Atomic profile-store replacement means this single read binds the effective origin,
+  // credential, and any pending enrollment offer to one coherent filesystem snapshot.
+  const store = await loadProfileStore(directory);
+  const profile = resolveProfileFromStore(runtime, options, behavior, directory, store);
+  const storedProfile = store.profiles[profile.name];
+  return {
+    profile,
+    ...(storedProfile === undefined ? {} : { storedProfile }),
+  };
+}
+
+export async function resolveProfile(
+  runtime: Pick<Runtime, "env" | "homeDirectory">,
+  options: Pick<GlobalOptions, "profile" | "apiOrigin">,
+  behavior: { readonly ignoreEnvironmentToken?: boolean } = {},
+): Promise<ResolvedProfile> {
+  return (await resolveProfileSnapshot(runtime, options, behavior)).profile;
+}
+
 export async function saveProfile(
   runtime: Pick<Runtime, "env" | "homeDirectory" | "now">,
   name: string,
@@ -330,7 +386,13 @@ export async function saveProfile(
       canonicalProfile.credential === undefined &&
       existing?.credential !== undefined &&
       normalizeApiOrigin(existing.apiOrigin) === canonicalProfile.apiOrigin
-        ? { ...canonicalProfile, credential: existing.credential }
+        ? {
+            ...canonicalProfile,
+            credential: existing.credential,
+            ...(existing.enrollmentOffer === undefined
+              ? {}
+              : { enrollmentOffer: existing.enrollmentOffer }),
+          }
         : canonicalProfile;
     store.profiles[canonicalName] = saved;
     if (makeDefault) store.defaultProfile = canonicalName;
