@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   cacheDecryptBatchResponseSchema,
   cacheEncryptBatchResponseSchema,
+  messageSchema,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
   type ConversationSummary,
@@ -19,8 +20,10 @@ import {
 
 import {
   clearPersistentWorkspaceCaches,
+  MAX_RETRACT_RESERVATIONS,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  upsertRetractReservation,
   type CachedWorkspaceState,
   type WorkspaceCache,
 } from "./workspace-cache";
@@ -421,6 +424,81 @@ class FakeCrypto {
   }
 }
 
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+interface EncryptionGate {
+  readonly started: Promise<void>;
+  readonly release: () => void;
+}
+
+class DeferredFakeCrypto extends FakeCrypto {
+  #nextGate: {
+    readonly started: Deferred<void>;
+    readonly release: Deferred<void>;
+  } | null = null;
+
+  pauseNextEncryption(): EncryptionGate {
+    const started = deferred<void>();
+    const release = deferred<void>();
+    this.#nextGate = { started, release };
+    return { started: started.promise, release: () => release.resolve() };
+  }
+
+  override async encryptCacheRecords(input: CacheEncryptBatchRequest) {
+    const gate = this.#nextGate;
+    if (gate !== null) {
+      this.#nextGate = null;
+      gate.started.resolve();
+      await gate.release.promise;
+    }
+    return super.encryptCacheRecords(input);
+  }
+}
+
+interface RawMessageRow {
+  readonly id: string;
+  readonly value: {
+    readonly ciphertext: string;
+  };
+}
+
+function decryptRawMessage(row: RawMessageRow): Message {
+  const ciphertext = row.value.ciphertext
+    .replaceAll("-", "+")
+    .replaceAll("_", "/")
+    .padEnd(Math.ceil(row.value.ciphertext.length / 4) * 4, "=");
+  const plaintext = new TextDecoder().decode(
+    Uint8Array.from(atob(ciphertext), (character) => character.charCodeAt(0)),
+  );
+  return messageSchema.parse(JSON.parse(plaintext) as unknown);
+}
+
+async function readRawCacheMessagesAndReactionCount(): Promise<{
+  readonly messages: readonly Message[];
+  readonly reactionCount: number;
+}> {
+  const database = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
+  await database.open();
+  try {
+    const messages = (await database.table("messages").toArray()) as unknown as RawMessageRow[];
+    const reactionCount = await database.table("reactions").count();
+    return { messages: messages.map(decryptRawMessage), reactionCount };
+  } finally {
+    database.close();
+  }
+}
+
 interface CacheImplementation {
   readonly name: string;
   readonly create: () => WorkspaceCache;
@@ -518,6 +596,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("applies a message.retracted tombstone and refuses to resurrect the body", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    await cache.upsertReaction(reactionAddedEvent.payload.reaction, ALPHA_ID);
     await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
     await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
     await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
@@ -531,14 +610,11 @@ describe.each(implementations)("$name conformance", ({ create }) => {
         version: 2,
       }),
     ]);
+    expect(retracted.reactions).toEqual([]);
     const alpha = retracted.bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
-    expect(alpha?.lastMessage).toMatchObject({
-      id: MESSAGE_SEQUENCE_2_ID,
-      body: "Message 2",
-      deletedAt: NOW,
-    });
+    expect(alpha).toMatchObject({ lastMessage: null, unreadCount: 0, mentionCount: 0 });
 
     await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2])).resolves.toBe(true);
     const afterHistory = await cache.load();
@@ -547,6 +623,137 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       body: "Message 2",
       deletedAt: NOW,
     });
+  });
+
+  it("retains a created message's exact mention IDs until its retract arrives", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+
+    await cache.applyEvent(messageRetractedEvent);
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
+  });
+
+  it("reconciles a retracted summary to its newest cached live message", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          { ...alphaSummary, lastMessage: messageSequence1 },
+        ],
+      },
+      [messageSequence1],
+    );
+
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence2,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: messageCreatedEvent.workspaceSequence,
+      },
+      [messageSequence1, messageSequence2],
+    );
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      lastMessage: { id: MESSAGE_SEQUENCE_1_ID, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
+  it("uses a retained closed-thread reply to reconcile a retract", async () => {
+    const closedThreadReply: Message = {
+      ...messageSequence2,
+      threadRootId: MESSAGE_SEQUENCE_1_ID,
+      conversationSequence: "3",
+      body: "@morgan Closed thread reply",
+    };
+    const laterMainMessage: Message = {
+      ...messageSequence10,
+      authorId: MORGAN_ID,
+      conversationSequence: "4",
+      body: "Later main-timeline message",
+    };
+    const retract: WorkspaceEvent = {
+      ...messageRetractedEvent,
+      id: "10000000-0000-4000-8000-000000000089",
+      workspaceSequence: "11",
+      conversationSequence: closedThreadReply.conversationSequence,
+      payload: { messageId: closedThreadReply.id, deletedAt: NOW },
+    };
+    const cache = create();
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            participantIds: [MORGAN_ID, ALICE_ID],
+            lastMessage: laterMainMessage,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+      },
+      [messageSequence1, laterMainMessage],
+    );
+
+    await expect(cache.applyEvent(retract, undefined, closedThreadReply)).resolves.toBe(true);
+
+    const state = await cache.load();
+    const alpha = state.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      lastMessage: { id: laterMainMessage.id, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: closedThreadReply.id, deletedAt: NOW, version: 2 }),
+    );
+  });
+
+  it("does not acknowledge a retract with a mismatched retained source", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+
+    await expect(
+      cache.applyEvent(messageRetractedEvent, undefined, messageSequence1),
+    ).rejects.toThrow("retract source does not match the retracted message");
+    expect((await cache.load()).syncCursor).toBe("0");
+
+    await expect(
+      cache.applyEvent(messageRetractedEvent, undefined, messageSequence2),
+    ).resolves.toBe(true);
+    const state = await cache.load();
+    expect(state.syncCursor).toBe("9");
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
+    );
   });
 
   it("does not let stale history resurrect a source-less message.retracted event", async () => {
@@ -575,6 +782,143 @@ describe.each(implementations)("$name conformance", ({ create }) => {
         version: 2,
       }),
     ]);
+  });
+
+  it("does not restore a reaction from stale history after a source-less retract", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [reactionAddedEvent.payload.reaction]),
+    ).resolves.toBe(true);
+
+    const state = await cache.load();
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
+    );
+    expect(state.reactions).toEqual([]);
+  });
+
+  it("reserves a tombstone received through history before a later live page arrives", async () => {
+    const cache = create();
+    const deleted = { ...messageSequence2, deletedAt: NOW, version: 2, updatedAt: NOW };
+    await cache.replaceSnapshot(
+      snapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+
+    await expect(cache.upsertHistory(ALPHA_ID, [deleted])).resolves.toBe(true);
+    expect((await cache.load()).retractReservations).toContainEqual({
+      messageId: MESSAGE_SEQUENCE_2_ID,
+      deletedAt: NOW,
+      entityVersion: 2,
+    });
+
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [reactionAddedEvent.payload.reaction]),
+    ).resolves.toBe(true);
+
+    const state = await cache.load();
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
+    );
+    expect(state.reactions).toEqual([]);
+  });
+
+  it("reconciles counts when history sees a tombstone before its retract event", async () => {
+    const cache = create();
+    const mentioned = { ...messageSequence2, body: "@morgan Message 2" };
+    const deleted = { ...mentioned, deletedAt: NOW, version: 2, updatedAt: NOW };
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            participantIds: [MORGAN_ID, ALICE_ID],
+            lastMessage: mentioned,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+      },
+      [mentioned],
+    );
+
+    await expect(cache.upsertHistory(ALPHA_ID, [deleted])).resolves.toBe(true);
+    let alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({ unreadCount: 1, mentionCount: 1 });
+
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({ unreadCount: 0, mentionCount: 0, lastMessage: null });
+
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
+    alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({ unreadCount: 0, mentionCount: 0 });
+  });
+
+  it("retains a tombstone supplied by a stale snapshot", async () => {
+    const cache = create();
+    const deleted = { ...messageSequence2, deletedAt: NOW, version: 2, updatedAt: NOW };
+    await cache.replaceSnapshot(
+      { ...snapshot, syncCursor: "10" },
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+
+    await expect(
+      cache.replaceSnapshot(
+        { ...snapshot, syncCursor: "9" },
+        [deleted],
+        [reactionAddedEvent.payload.reaction],
+      ),
+    ).resolves.toBe(false);
+
+    const state = await cache.load();
+    expect(state.retractReservations).toContainEqual({
+      messageId: MESSAGE_SEQUENCE_2_ID,
+      deletedAt: NOW,
+      entityVersion: 2,
+    });
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
+    );
+    expect(state.reactions).toEqual([]);
+  });
+
+  it("does not let an older snapshot replace a newer retract cursor", async () => {
+    const cache = create();
+    const staleSnapshot = { ...snapshot, syncCursor: "8" };
+    await cache.replaceSnapshot(
+      staleSnapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+
+    await cache.replaceSnapshot(
+      staleSnapshot,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+
+    const state = await cache.load();
+    expect(state.syncCursor).toBe(messageRetractedEvent.workspaceSequence);
+    expect(state.messages).toContainEqual(
+      expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
+    );
+    expect(state.reactions).toEqual([]);
   });
 
   it("counts an unread mention once and rejects the duplicate event", async () => {
@@ -1208,6 +1552,148 @@ describe("PersistentWorkspaceCache durability", () => {
       ALICE_ID,
       MORGAN_ID,
     ]);
+  });
+});
+
+describe("retract reservation retention", () => {
+  it("keeps only the newest bounded reservations", () => {
+    const existing = Array.from({ length: MAX_RETRACT_RESERVATIONS }, (_, index) => ({
+      messageId: `retracted-message-${index}`,
+      deletedAt: NOW,
+      entityVersion: 2,
+    }));
+    const reservations = upsertRetractReservation(existing, {
+      messageId: `retracted-message-${MAX_RETRACT_RESERVATIONS}`,
+      deletedAt: NOW,
+      entityVersion: 2,
+    });
+
+    expect(reservations).toHaveLength(MAX_RETRACT_RESERVATIONS);
+    expect(reservations[0]?.messageId).toBe("retracted-message-1");
+    expect(reservations.at(-1)?.messageId).toBe(`retracted-message-${MAX_RETRACT_RESERVATIONS}`);
+  });
+});
+
+describe("PersistentWorkspaceCache retraction write races", () => {
+  it("retries a snapshot write when a source-less retract arrives during encryption", async () => {
+    const writerCrypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
+    const retracting = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, []);
+
+    const gate = writerCrypto.pauseNextEncryption();
+    const replacing = writer.replaceSnapshot(
+      { ...snapshot, syncCursor: messageRetractedEvent.workspaceSequence },
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+    await gate.started;
+    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    gate.release();
+    await expect(replacing).resolves.toBe(true);
+
+    const raw = await readRawCacheMessagesAndReactionCount();
+    expect(raw.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        deletedAt: NOW,
+        version: messageRetractedEvent.entityVersion,
+      }),
+    ]);
+    expect(raw.reactionCount).toBe(0);
+  });
+
+  it("retries a history write when a source-less retract arrives during encryption", async () => {
+    const writerCrypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
+    const retracting = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, []);
+
+    const gate = writerCrypto.pauseNextEncryption();
+    const writingHistory = writer.upsertHistory(
+      ALPHA_ID,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+    );
+    await gate.started;
+    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    gate.release();
+    await expect(writingHistory).resolves.toBe(true);
+
+    const raw = await readRawCacheMessagesAndReactionCount();
+    expect(raw.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        deletedAt: NOW,
+        version: messageRetractedEvent.entityVersion,
+      }),
+    ]);
+    expect(raw.reactionCount).toBe(0);
+  });
+
+  it("rewrites an in-flight create as a tombstone after a history retraction", async () => {
+    const writerCrypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
+    const retracting = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, []);
+    const tombstone = {
+      ...messageSequence2,
+      deletedAt: NOW,
+      version: messageRetractedEvent.entityVersion,
+      updatedAt: NOW,
+    };
+
+    const gate = writerCrypto.pauseNextEncryption();
+    const creating = writer.applyEvent(messageCreatedEvent);
+    await gate.started;
+    await expect(retracting.upsertHistory(ALPHA_ID, [tombstone])).resolves.toBe(true);
+    gate.release();
+    await expect(creating).resolves.toBe(true);
+
+    const raw = await readRawCacheMessagesAndReactionCount();
+    expect(raw.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        deletedAt: NOW,
+        version: messageRetractedEvent.entityVersion,
+      }),
+    ]);
+    expect(raw.reactionCount).toBe(0);
+  });
+
+  it("keeps concurrent retraction reservations while a tombstone is encrypting", async () => {
+    const writerCrypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
+    const history = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, [messageSequence1, messageSequence2]);
+    const firstTombstone = {
+      ...messageSequence1,
+      deletedAt: NOW,
+      version: 2,
+      updatedAt: NOW,
+    };
+
+    const gate = writerCrypto.pauseNextEncryption();
+    const retracting = writer.applyEvent(messageRetractedEvent);
+    await gate.started;
+    await expect(history.upsertHistory(ALPHA_ID, [firstTombstone])).resolves.toBe(true);
+    gate.release();
+    await expect(retracting).resolves.toBe(true);
+
+    expect((await writer.load()).retractReservations).toEqual(
+      expect.arrayContaining([
+        {
+          messageId: MESSAGE_SEQUENCE_1_ID,
+          deletedAt: NOW,
+          entityVersion: firstTombstone.version,
+        },
+        {
+          messageId: MESSAGE_SEQUENCE_2_ID,
+          deletedAt: NOW,
+          entityVersion: messageRetractedEvent.entityVersion,
+        },
+      ]),
+    );
   });
 });
 
