@@ -509,6 +509,21 @@ class FakeBlockingCommandProcess:
         return int(self.returncode or 0)
 
 
+class FakeControlledCommandProcess(FakeProcess):
+    """CLI child that records startup and completes only when released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def communicate(self, input: Optional[bytes] = None) -> tuple[bytes, bytes]:
+        self.input = input
+        self.started.set()
+        await self.release.wait()
+        return self._communicate_stdout, self._communicate_stderr
+
+
 class FakeWatchProcess:
     def __init__(
         self,
@@ -2087,6 +2102,152 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(adapter._cursor, "101")
         self.assertEqual(adapter._pending_read_cursors, {})
+
+    async def test_unrelated_read_cursors_advance_independently(self) -> None:
+        first_message_id = message_id_for("101")
+        second_message_id = message_id_for("102")
+        first = FakeControlledCommandProcess()
+        second = FakeControlledCommandProcess()
+        factory = FakeProcessFactory(
+            [
+                read_cursor_spec(DM_ID, first_message_id, first),
+                read_cursor_spec(PEER_AGENT_DM_ID, second_message_id, second),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        adapter._queue_read_cursor(
+            workspace_cursor="101",
+            conversation_id=DM_ID,
+            message_id=first_message_id,
+            conversation_sequence="101",
+        )
+        adapter._queue_read_cursor(
+            workspace_cursor="102",
+            conversation_id=PEER_AGENT_DM_ID,
+            message_id=second_message_id,
+            conversation_sequence="102",
+        )
+
+        flush = asyncio.create_task(adapter._flush_pending_read_cursors())
+        try:
+            await asyncio.wait_for(first.started.wait(), timeout=0.5)
+            # The blocked first conversation must not hold the second one's
+            # read-state advancement behind its subprocess lifetime.
+            await asyncio.wait_for(second.started.wait(), timeout=0.1)
+            second.release.set()
+
+            async def wait_for_second_completion() -> None:
+                while PEER_AGENT_DM_ID in adapter._pending_read_cursors:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_second_completion(), timeout=0.5)
+            self.assertIn(DM_ID, adapter._pending_read_cursors)
+            self.assertNotIn(PEER_AGENT_DM_ID, adapter._pending_read_cursors)
+        finally:
+            first.release.set()
+            second.release.set()
+            await flush
+
+        self.assertEqual(adapter._pending_read_cursors, {})
+
+    async def test_read_cursor_targets_for_one_conversation_remain_ordered(self) -> None:
+        first_message_id = message_id_for("101")
+        second_message_id = message_id_for("102")
+        first = FakeControlledCommandProcess()
+        second = FakeControlledCommandProcess()
+        factory = FakeProcessFactory(
+            [
+                read_cursor_spec(DM_ID, first_message_id, first),
+                read_cursor_spec(DM_ID, second_message_id, second),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        adapter._queue_read_cursor(
+            workspace_cursor="101",
+            conversation_id=DM_ID,
+            message_id=first_message_id,
+            conversation_sequence="101",
+        )
+
+        first_flush = asyncio.create_task(adapter._flush_pending_read_cursors(DM_ID))
+        second_flush: Optional[asyncio.Task[Any]] = None
+        try:
+            await asyncio.wait_for(first.started.wait(), timeout=0.5)
+            adapter._queue_read_cursor(
+                workspace_cursor="102",
+                conversation_id=DM_ID,
+                message_id=second_message_id,
+                conversation_sequence="102",
+            )
+            second_flush = asyncio.create_task(adapter._flush_pending_read_cursors(DM_ID))
+            await asyncio.sleep(0)
+            self.assertEqual(len(factory.calls), 1)
+
+            first.release.set()
+            await asyncio.wait_for(second.started.wait(), timeout=0.5)
+            self.assertEqual(
+                adapter._pending_read_cursors[DM_ID].message_id,
+                second_message_id,
+            )
+            persisted = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["pendingReadCursors"][DM_ID]["messageId"],
+                second_message_id,
+            )
+            second.release.set()
+            await asyncio.gather(first_flush, second_flush)
+        finally:
+            first.release.set()
+            second.release.set()
+            cleanup = [first_flush]
+            if second_flush is not None:
+                cleanup.append(second_flush)
+            await asyncio.gather(*cleanup, return_exceptions=True)
+
+        self.assertEqual(adapter._pending_read_cursors, {})
+        self.assertEqual(
+            [call["args"][3] for call in factory.calls],
+            [first_message_id, second_message_id],
+        )
+
+    async def test_concurrent_flushes_deduplicate_one_read_cursor_target(self) -> None:
+        anchor_id = message_id_for("101")
+        process = FakeControlledCommandProcess()
+        factory = FakeProcessFactory([read_cursor_spec(DM_ID, anchor_id, process)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        adapter._queue_read_cursor(
+            workspace_cursor="101",
+            conversation_id=DM_ID,
+            message_id=anchor_id,
+            conversation_sequence="101",
+        )
+
+        first_flush = asyncio.create_task(adapter._flush_pending_read_cursors(DM_ID))
+        second_flush = asyncio.create_task(adapter._flush_pending_read_cursors(DM_ID))
+        try:
+            await asyncio.wait_for(process.started.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            self.assertEqual(len(factory.calls), 1)
+            process.release.set()
+            await asyncio.gather(first_flush, second_flush)
+        finally:
+            process.release.set()
+            await asyncio.gather(first_flush, second_flush, return_exceptions=True)
+
+        self.assertEqual(adapter._pending_read_cursors, {})
+        self.assertEqual(len(factory.calls), 1)
 
     async def test_failed_hermes_handoff_does_not_checkpoint_or_advance_read_state(self) -> None:
         factory = FakeProcessFactory([])

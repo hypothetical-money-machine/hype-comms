@@ -1035,7 +1035,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # generation. The durable V2 target remains unchanged, so reconnect
         # gets one fresh attempt in case credentials or server policy changed.
         self._parked_read_cursors: Dict[str, PendingReadCursor] = {}
-        self._read_cursor_flush_lock = asyncio.Lock()
+        self._read_cursor_flush_locks: Dict[str, asyncio.Lock] = {}
         self._read_cursor_retry_task: Optional[asyncio.Task[Any]] = None
         # Retry-After is an absolute monotonic deadline rather than a delay
         # consumed at the start of one sleep. An opportunistic flush can learn
@@ -1480,6 +1480,73 @@ class HypeCommsAdapter(BasePlatformAdapter):
             "read-cursors:write; server read cursors will not be advanced"
         )
 
+    def _read_cursor_flush_lock(self, conversation_id: str) -> asyncio.Lock:
+        lock = self._read_cursor_flush_locks.get(conversation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._read_cursor_flush_locks[conversation_id] = lock
+        return lock
+
+    async def _flush_one_read_cursor(
+        self,
+        conversation_id: str,
+    ) -> ReadCursorFlushOutcome:
+        """Advance one conversation without serializing unrelated targets."""
+
+        async with self._read_cursor_flush_lock(conversation_id):
+            target = self._pending_read_cursors.get(conversation_id)
+            if target is None or self._parked_read_cursors.get(conversation_id) == target:
+                return ReadCursorFlushOutcome(retryable_pending=False)
+            try:
+                await self._command(
+                    [
+                        "read-cursors",
+                        "advance",
+                        conversation_id,
+                        target.message_id,
+                        "--json",
+                    ]
+                )
+                # Persisting removal is part of the independent update. If it
+                # fails, _complete_read_cursor restores the in-memory target
+                # and the already-durable file still contains it.
+                self._complete_read_cursor(conversation_id, target)
+            except CliFailure as failure:
+                # Park only the target that actually failed. A newer target
+                # may have been queued while the CLI was in flight and must
+                # remain independently retryable.
+                if (
+                    not failure.retryable
+                    and self._pending_read_cursors.get(conversation_id) == target
+                ):
+                    self._parked_read_cursors[conversation_id] = target
+                if failure.retryable:
+                    logger.warning(
+                        "Hype Comms read-cursor advance is pending (%s)",
+                        _safe_text(failure.code),
+                    )
+                else:
+                    logger.warning(
+                        "Hype Comms read-cursor advance is parked until reconnect (%s)",
+                        _safe_text(failure.code),
+                    )
+                current = self._pending_read_cursors.get(conversation_id)
+                return ReadCursorFlushOutcome(
+                    retryable_pending=(
+                        current is not None
+                        and self._parked_read_cursors.get(conversation_id) != current
+                    ),
+                    retry_after=failure.retry_after if failure.retryable else None,
+                )
+
+            current = self._pending_read_cursors.get(conversation_id)
+            return ReadCursorFlushOutcome(
+                retryable_pending=(
+                    current is not None
+                    and self._parked_read_cursors.get(conversation_id) != current
+                )
+            )
+
     async def _flush_pending_read_cursors(
         self,
         conversation_id: Optional[str] = None,
@@ -1489,69 +1556,32 @@ class HypeCommsAdapter(BasePlatformAdapter):
         if READ_CURSOR_SCOPE not in self._agent_scopes:
             self._warn_missing_read_cursor_scope()
             return ReadCursorFlushOutcome(retryable_pending=False)
-        retryable_pending = False
-        retry_after: Optional[float] = None
-        # A later wake can opportunistically flush its conversation while the
-        # background loop is alive. Serialize snapshots and CLI calls so both
-        # paths can never advance the same durable target concurrently.
-        async with self._read_cursor_flush_lock:
-            if conversation_id is None:
-                candidates = [
-                    (candidate_id, target)
-                    for candidate_id, target in sorted(self._pending_read_cursors.items())
-                    if self._parked_read_cursors.get(candidate_id) != target
-                ]
-            else:
-                target = self._pending_read_cursors.get(conversation_id)
-                candidates = (
-                    []
-                    if target is None or self._parked_read_cursors.get(conversation_id) == target
-                    else [(conversation_id, target)]
-                )
-            for target_conversation_id, target in candidates:
-                try:
-                    await self._command(
-                        [
-                            "read-cursors",
-                            "advance",
-                            target_conversation_id,
-                            target.message_id,
-                            "--json",
-                        ]
-                    )
-                    # Persisting removal is part of the independent update. If
-                    # it fails, _complete_read_cursor restores the in-memory
-                    # target and the already-durable file still contains it,
-                    # so the same retry loop can safely try again without
-                    # model inference.
-                    self._complete_read_cursor(target_conversation_id, target)
-                except CliFailure as failure:
-                    # The workspace event cursor was atomically saved alongside
-                    # this target after handle_message returned. Keeping the
-                    # target and swallowing only this independent update failure
-                    # ensures replay never performs a second model inference.
-                    if failure.retryable:
-                        retryable_pending = True
-                        if failure.retry_after is not None:
-                            retry_after = max(retry_after or 0.0, failure.retry_after)
-                        logger.warning(
-                            "Hype Comms read-cursor advance is pending (%s)",
-                            _safe_text(failure.code),
-                        )
-                    else:
-                        # Park only the target that actually failed. A newer
-                        # target may have been queued while the CLI was in
-                        # flight and must remain independently retryable.
-                        if self._pending_read_cursors.get(target_conversation_id) == target:
-                            self._parked_read_cursors[target_conversation_id] = target
-                        logger.warning(
-                            "Hype Comms read-cursor advance is parked until reconnect (%s)",
-                            _safe_text(failure.code),
-                        )
-                    continue
+        candidate_ids = (
+            tuple(sorted(self._pending_read_cursors))
+            if conversation_id is None
+            else (conversation_id,)
+        )
+        tasks = [
+            asyncio.create_task(self._flush_one_read_cursor(candidate_id))
+            for candidate_id in candidate_ids
+        ]
+        try:
+            outcomes = await asyncio.gather(*tasks)
+        except BaseException:
+            # A persistence failure must not leave sibling CLI children
+            # detached from the aggregate flush operation.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        retry_after = max(
+            (outcome.retry_after or 0.0 for outcome in outcomes),
+            default=0.0,
+        )
         return ReadCursorFlushOutcome(
-            retryable_pending=retryable_pending,
-            retry_after=retry_after,
+            retryable_pending=self._has_retryable_read_cursor(),
+            retry_after=retry_after or None,
         )
 
     def _has_retryable_read_cursor(self) -> bool:
