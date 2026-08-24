@@ -163,7 +163,7 @@ notifications for **Hype Comms** and grant Screen Recording and Accessibility to
 Evidence**, then rerun the lane after macOS applies them. The capture helper and evidence build are
 not release artifacts, and the evidence
 directory must never contain real message content. The signed macOS ARM64 lane passed delivery and
-click restoration in [run 31757537323](https://github.com/hype-comms/hype-comms/actions/runs/31757537323);
+click restoration in [run 31757537323](https://github.com/hypothetical-money-machine/hype-comms/actions/runs/31757537323);
 the checked-in [toast](screenshots/macos-native-notification-toast.png) and
 [restored-window](screenshots/macos-native-notification-click-through.png) captures contain only the
 synthetic evidence state. Each external lane covers every cell of that platform's row in the

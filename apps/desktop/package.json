@@ -8,12 +8,12 @@
     "email": "callmemorgan@users.noreply.github.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/hype-comms/hype-comms",
+  "homepage": "https://github.com/hypothetical-money-machine/hype-comms",
   "desktopName": "com.hypemm.hypecomms.desktop",
   "main": "./dist/main/index.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hype-comms/hype-comms.git"
+    "url": "https://github.com/hypothetical-money-machine/hype-comms.git"
   },
   "scripts": {
     "prebuild": "npm run build --workspace @hype-comms/contracts",

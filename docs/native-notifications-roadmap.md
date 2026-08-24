@@ -12,7 +12,7 @@ the required native matrix, not completion of the macOS gate.
 implementation and security contract. This roadmap sequences the remaining proof and rollout work
 and does not override those documents.
 
-Tracking issue: [#42](https://github.com/hype-comms/hype-comms/issues/42) remains open
+Tracking issue: [#42](https://github.com/hypothetical-money-machine/hype-comms/issues/42) remains open
 for Milestone 4 evidence and the eventual default decision.
 
 ## Outcome
