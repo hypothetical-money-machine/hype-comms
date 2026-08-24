@@ -83,6 +83,8 @@ class MemoryWakeStore implements AgentWakeInboxStore {
   #nextReadStarted: (() => void) | null = null;
   #numberedReadBarrier: { readonly call: number; readonly barrier: Promise<void> } | null = null;
   #numberedReadStarted: (() => void) | null = null;
+  #nextTransactionBarrier: Promise<void> | null = null;
+  #nextTransactionStarted: (() => void) | null = null;
   #resumePausedTransaction: (() => void) | null = null;
   #tail: Promise<void> = Promise.resolve();
 
@@ -120,6 +122,14 @@ class MemoryWakeStore implements AgentWakeInboxStore {
     await previous;
     let released = false;
     try {
+      const transactionBarrier = this.#nextTransactionBarrier;
+      if (transactionBarrier !== null) {
+        this.#nextTransactionBarrier = null;
+        const started = this.#nextTransactionStarted;
+        this.#nextTransactionStarted = null;
+        started?.();
+        await transactionBarrier;
+      }
       if (this.failTransactions > 0) {
         this.failTransactions -= 1;
         throw new Error("credential=must-not-escape store failure");
@@ -166,6 +176,16 @@ class MemoryWakeStore implements AgentWakeInboxStore {
     this.#nextReadBarrier = barrier;
     return new Promise<void>((resolve) => {
       this.#nextReadStarted = resolve;
+    });
+  }
+
+  pauseNextTransactionUntil(barrier: Promise<void>): Promise<void> {
+    if (this.#nextTransactionBarrier !== null) {
+      throw new Error("A transaction is already paused");
+    }
+    this.#nextTransactionBarrier = barrier;
+    return new Promise<void>((resolve) => {
+      this.#nextTransactionStarted = resolve;
     });
   }
 
@@ -623,6 +643,102 @@ describe("AgentWakeBroker enrollment and source commit boundary", () => {
       expect(harness.source.opens).toHaveLength(1);
     },
   );
+
+  it.each(["start", "resume"] as const)(
+    "aborts and fences an in-flight provider call when active %s restarts authorization",
+    async (operation) => {
+      const delivery = deferred<AgentWakeTargetResult>();
+      const reauthorization = deferred<{
+        readonly apiOrigin: string;
+        readonly workspaceId: string;
+        readonly agentUserId: string;
+      }>();
+      const harness = createHarness({ target: () => delivery.promise });
+      const session = await start(harness);
+      const signal = makeSignal("11");
+      session.emit(signal);
+      await eventually(() => expect(harness.targetCalls).toHaveLength(1));
+      harness.verify.mockImplementationOnce(() => reauthorization.promise);
+
+      if (operation === "start") {
+        await harness.broker.start(ENROLLMENT_ID);
+      } else {
+        await harness.broker.resume({
+          enrollmentId: ENROLLMENT_ID,
+          actionId: "8".repeat(64),
+          evidenceReference: "active-resume-provider-fence",
+        });
+      }
+      await eventually(() => expect(harness.verify).toHaveBeenCalledTimes(3));
+
+      try {
+        delivery.resolve({
+          status: "accepted",
+          providerReceiptId: "accepted-under-replaced-authorization",
+        });
+        await eventually(() =>
+          expect(harness.store.states.get(ENROLLMENT_ID)).toMatchObject({
+            runState: "stopped",
+            queue: [{ phase: "blocked", wake: { wakeId: signal.wakeId } }],
+            completions: [],
+            repair: { code: "provider-outcome-ambiguous", wakeId: signal.wakeId },
+          }),
+        );
+        expect(harness.targetCalls[0]?.signal.aborted).toBe(true);
+      } finally {
+        reauthorization.resolve({
+          apiOrigin: "https://api.example.test",
+          workspaceId: WORKSPACE_ID,
+          agentUserId: AGENT_ID,
+        });
+        await harness.broker.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it("fences a provider completion transaction overtaken by an authorization restart", async () => {
+    const delivery = deferred<AgentWakeTargetResult>();
+    const reauthorization = deferred<{
+      readonly apiOrigin: string;
+      readonly workspaceId: string;
+      readonly agentUserId: string;
+    }>();
+    const harness = createHarness({ target: () => delivery.promise });
+    const session = await start(harness);
+    const signal = makeSignal("11");
+    session.emit(signal);
+    await eventually(() => expect(harness.targetCalls).toHaveLength(1));
+
+    const releaseCompletion = deferred<void>();
+    const completionStarted = harness.store.pauseNextTransactionUntil(releaseCompletion.promise);
+    delivery.resolve({
+      status: "accepted",
+      providerReceiptId: "accepted-before-authorization-restart",
+    });
+    await completionStarted;
+    harness.verify.mockImplementationOnce(() => reauthorization.promise);
+    await harness.broker.start(ENROLLMENT_ID);
+    await eventually(() => expect(harness.verify).toHaveBeenCalledTimes(3));
+    releaseCompletion.resolve(undefined);
+
+    try {
+      await eventually(() =>
+        expect(harness.store.states.get(ENROLLMENT_ID)).toMatchObject({
+          runState: "stopped",
+          queue: [{ phase: "blocked", wake: { wakeId: signal.wakeId } }],
+          completions: [],
+          repair: { code: "provider-outcome-ambiguous", wakeId: signal.wakeId },
+        }),
+      );
+    } finally {
+      reauthorization.resolve({
+        apiOrigin: "https://api.example.test",
+        workspaceId: WORKSPACE_ID,
+        agentUserId: AGENT_ID,
+      });
+      await harness.broker.dispose().catch(() => undefined);
+    }
+  });
 
   it("quiesces a delivery read already in progress until active restart is freshly ready", async () => {
     const harness = createHarness();

@@ -319,6 +319,7 @@ export class AgentWakeSourceFailure extends Error {
 interface Runtime {
   readonly enrollmentId: string;
   readonly epoch: number;
+  authorizationEpoch: number;
   active: boolean;
   sourceBusy: boolean;
   sourceQuiescing: boolean;
@@ -629,6 +630,7 @@ export class AgentWakeBroker {
       const runtime: Runtime = {
         enrollmentId,
         epoch: ++this.#nextEpoch,
+        authorizationEpoch: 1,
         active: true,
         sourceBusy: false,
         sourceQuiescing: false,
@@ -1422,6 +1424,7 @@ export class AgentWakeBroker {
         }
 
         const controller = new AbortController();
+        const authorizationEpoch = runtime.authorizationEpoch;
         runtime.providerAbort = controller;
         let result: AgentWakeTargetResult;
         try {
@@ -1440,6 +1443,10 @@ export class AgentWakeBroker {
           if (runtime.providerAbort === controller) runtime.providerAbort = null;
         }
         if (!this.#isCurrent(runtime)) return;
+        if (runtime.authorizationEpoch !== authorizationEpoch) {
+          await this.#enterRepair(runtime, "provider-outcome-ambiguous", item.wake.wakeId);
+          return;
+        }
 
         if (
           result.status === "accepted" ||
@@ -1451,7 +1458,17 @@ export class AgentWakeBroker {
             return;
           }
           try {
-            await this.#complete(runtime, item, result.status, result.providerReceiptId);
+            const authorizationCurrent = await this.#complete(
+              runtime,
+              item,
+              result.status,
+              result.providerReceiptId,
+              authorizationEpoch,
+            );
+            if (!authorizationCurrent) {
+              await this.#enterRepair(runtime, "provider-outcome-ambiguous", item.wake.wakeId);
+              return;
+            }
           } catch {
             this.#notice(runtime.enrollmentId, "durable-store-unavailable", null);
             await this.#superviseProviderAmbiguity(runtime, item);
@@ -1487,8 +1504,14 @@ export class AgentWakeBroker {
     item: StoredAgentWakeItem,
     disposition: AgentWakeCompletionDisposition,
     providerReceiptId: string,
-  ): Promise<void> {
+    authorizationEpoch: number,
+  ): Promise<boolean> {
+    let authorizationCurrent = true;
     await this.#transactRequired(runtime.enrollmentId, (current) => {
+      if (runtime.authorizationEpoch !== authorizationEpoch) {
+        authorizationCurrent = false;
+        return current;
+      }
       const head = current.queue[0];
       if (
         head === undefined ||
@@ -1519,6 +1542,7 @@ export class AgentWakeBroker {
         completions: [...current.completions, completion].slice(-this.#maxCompletionRecords),
       };
     });
+    return authorizationCurrent;
   }
 
   async #restoreUninvokedClaim(
@@ -1610,8 +1634,12 @@ export class AgentWakeBroker {
 
   async #restartSourceAuthorization(runtime: Runtime): Promise<void> {
     if (!this.#isCurrent(runtime) || runtime.pendingProviderAmbiguity !== null) return;
+    // A target may ignore cancellation, so active start/resume both aborts best-effort and advances
+    // a fence checked again at the durable completion boundary.
+    runtime.authorizationEpoch += 1;
     runtime.sourceQuiescing = true;
     runtime.sourceReady = false;
+    runtime.providerAbort?.abort();
     runtime.sourceTimer?.cancel();
     runtime.deliveryTimer?.cancel();
     runtime.sourceTimer = null;
