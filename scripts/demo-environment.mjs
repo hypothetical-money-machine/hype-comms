@@ -6,7 +6,6 @@ import path from "node:path";
 export const DEMO_COMPOSE_PROJECT = "hype-comms-demo";
 export const DEFAULT_DEMO_POSTGRES_BIND_PORT = 54330;
 export const DEFAULT_DEMO_CDP_BASE_PORT = 9222;
-export const DEMO_API_PORT = 3000;
 export const DEMO_RENDERER_PORT = 5173;
 export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
 export const HEADLESS_DEMO_MANIFEST_KIND = "hype-comms-headless-demo";
@@ -15,6 +14,34 @@ export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
 
 const HEADLESS_DEMO_CLIENT_PROFILES = ["claire", "woots"];
 const TCP_PORT_MAX = 65_535;
+
+function resolveDemoApiPort() {
+  const raw = process.env.HYPE_COMMS_DEMO_API_PORT?.trim() ?? "";
+  if (raw === "") return 3_000;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > TCP_PORT_MAX) {
+    throw new Error("HYPE_COMMS_DEMO_API_PORT must be a TCP port");
+  }
+  return port;
+}
+
+export const DEMO_API_PORT = resolveDemoApiPort();
+
+/**
+ * Chromium/Electron flags that keep the headless demo renderer alive inside a sandboxed/CI
+ * environment. The separate GPU and Network Service utility processes otherwise crash from
+ * seccomp restrictions, /dev/shm exhaustion, or missing graphics drivers before the renderer
+ * reaches its readiness marker.
+ */
+const HEADLESS_ELECTRON_STABILITY_FLAGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-software-rasterizer",
+  "--enable-features=NetworkServiceInProcess",
+  "--disable-features=IsolateOrigins,site-per-process",
+];
 
 function assertTcpPort(port, label) {
   if (!Number.isInteger(port) || port < 1 || port > TCP_PORT_MAX) {
@@ -202,12 +229,21 @@ export function headlessCdpClients(cdpBasePort = DEFAULT_DEMO_CDP_BASE_PORT) {
 
 export function headlessElectronArguments(cdpPort) {
   const port = assertTcpPort(cdpPort, "The CDP port");
-  return ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${String(port)}`];
+  return [
+    "--remote-debugging-address=127.0.0.1",
+    `--remote-debugging-port=${String(port)}`,
+    ...HEADLESS_ELECTRON_STABILITY_FLAGS,
+  ];
 }
 
 export function headlessElectronViteArguments(cdpPort) {
   const port = assertTcpPort(cdpPort, "The CDP port");
-  return [`--remoteDebuggingPort=${String(port)}`, "--", "--remote-debugging-address=127.0.0.1"];
+  return [
+    `--remoteDebuggingPort=${String(port)}`,
+    "--",
+    "--remote-debugging-address=127.0.0.1",
+    ...HEADLESS_ELECTRON_STABILITY_FLAGS,
+  ];
 }
 
 export function deriveHeadlessDesktopEnvironment(
@@ -234,6 +270,8 @@ export function deriveHeadlessDesktopEnvironment(
     HYPE_COMMS_DESKTOP_PROFILE: profile,
     HYPE_COMMS_DEVELOPMENT_AUTH_CALLBACK_FILE: callbackFile,
     [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: path.resolve(artifactsDirectory),
+    ELECTRON_ENABLE_LOGGING: "1",
+    ELECTRON_ENABLE_STACK_DUMPING: "1",
   };
 }
 
@@ -343,6 +381,8 @@ export function deriveDemoEnvironment(baseEnv, projectRoot) {
     ...baseEnv,
     NODE_ENV: "development",
     HYPE_COMMS_DATABASE_URL: databaseUrl.toString(),
+    HYPE_COMMS_API_ORIGIN: `http://127.0.0.1:${String(DEMO_API_PORT)}`,
+    HYPE_COMMS_PORT: String(DEMO_API_PORT),
     HYPE_COMMS_POSTGRES_BIND_PORT: String(port),
     HYPE_COMMS_DEMO_POSTGRES_BIND_PORT: String(port),
     HYPE_COMMS_DEMO_CALLBACK_DIRECTORY: paths.callbackDirectory,

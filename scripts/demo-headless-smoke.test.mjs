@@ -288,28 +288,37 @@ function page(name, receivedMessages) {
         },
       };
     },
-    getByText: (value, options) => ({
-      locator: (selector) => ({
-        getAttribute: async (attribute) => {
-          events.push(["target-id", value, options, selector, attribute]);
-          return messageId;
-        },
-      }),
-      waitFor: async (waitOptions) => {
-        assert.ok(receivedMessages.includes(value), "the sent body is visible to Woots");
-        events.push(["receipt", value, options, waitOptions]);
-      },
-    }),
-    locator: (selector) => ({
-      getByText: (value, options) => ({
+    locator: (selector) => {
+      if (selector === "article[data-message-id]") {
+        return {
+          filter: (filterOptions) => ({
+            first: () => ({
+              waitFor: async (waitOptions) => {
+                assert.ok(
+                  receivedMessages.includes(filterOptions.hasText),
+                  "the sent body is visible to Woots",
+                );
+                events.push(["receipt", filterOptions.hasText, waitOptions]);
+              },
+              getAttribute: async (attribute) => {
+                events.push(["target-id", filterOptions.hasText, selector, attribute]);
+                return messageId;
+              },
+            }),
+          }),
+        };
+      }
+      return {
+        getByText: (value, options) => ({
+          waitFor: async (waitOptions) => {
+            events.push(["highlighted-body", selector, value, options, waitOptions]);
+          },
+        }),
         waitFor: async (waitOptions) => {
-          events.push(["highlighted-body", selector, value, options, waitOptions]);
+          events.push(["highlighted-target", selector, waitOptions]);
         },
-      }),
-      waitFor: async (waitOptions) => {
-        events.push(["highlighted-target", selector, waitOptions]);
-      },
-    }),
+      };
+    },
     name,
   };
 }
@@ -492,23 +501,27 @@ function participatedThreadPage(name, messages, messageIds) {
       if (role === "dialog") return dialog;
       return { click: async () => events.push(["click", role, options.name]) };
     },
-    getByText: (value, options) => ({
-      waitFor: async (waitOptions) => {
-        assert.ok(messages.has(value), "the committed message is visible");
-        events.push(["receipt", value, options, waitOptions]);
-      },
-      locator: (selector) => ({
-        getAttribute: async (attribute) => {
-          events.push(["target-id", value, selector, attribute]);
-          return messageIds.get(value) ?? null;
-        },
-        hover: async () => events.push(["hover", value]),
-        getByRole: (role, roleOptions) => ({
-          click: async () => events.push(["open-thread", role, String(roleOptions.name)]),
-        }),
-      }),
-    }),
     locator: (selector) => {
+      if (selector === "article[data-message-id]") {
+        return {
+          filter: (filterOptions) => ({
+            first: () => ({
+              waitFor: async (waitOptions) => {
+                assert.ok(messages.has(filterOptions.hasText), "the committed message is visible");
+                events.push(["receipt", filterOptions.hasText, waitOptions]);
+              },
+              getAttribute: async (attribute) => {
+                events.push(["target-id", filterOptions.hasText, selector, attribute]);
+                return messageIds.get(filterOptions.hasText) ?? null;
+              },
+              hover: async () => events.push(["hover", filterOptions.hasText]),
+              getByRole: (role, roleOptions) => ({
+                click: async () => events.push(["open-thread", role, String(roleOptions.name)]),
+              }),
+            }),
+          }),
+        };
+      }
       assert.equal(selector, 'aside[aria-label="Thread"]');
       return thread;
     },

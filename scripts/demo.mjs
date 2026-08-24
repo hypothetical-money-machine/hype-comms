@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
@@ -209,6 +210,9 @@ async function main() {
   activeRunMarker = demo.paths.runMarker;
   if (options.headless) {
     activeHeadlessDemoPaths = demo.paths;
+    // A headless automation run must start from a clean slate; leftover encrypted cache keys or
+    // other profile state from previous runs can break safeStorage decryption on the next launch.
+    await rm(demo.paths.desktopUserDataRoot, { recursive: true, force: true });
     await ensurePrivateHeadlessProfileDirectories(demo.paths);
     await Promise.all([
       removeHeadlessDemoManifest(demo.paths),
