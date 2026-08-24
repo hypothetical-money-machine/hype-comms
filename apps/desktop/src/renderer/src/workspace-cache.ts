@@ -1478,6 +1478,15 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         protectedRecord("reaction", reaction.id, reaction),
       ),
     ]);
+    const existingRows = await this.#database.messages.bulkGet(parsed.map((message) => message.id));
+    const existing = await decryptRows(
+      this.#crypto,
+      "message",
+      existingRows.filter((row): row is NonNullable<typeof row> => row !== undefined),
+      existingRows.flatMap((row) => (row === undefined ? [] : [row.id])),
+      (value) => messageSchema.parse(value),
+    );
+    const existingById = new Map(existing.map((message) => [message.id, message]));
     if (signal?.aborted) return false;
     let committed: boolean;
     try {
@@ -1497,17 +1506,6 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             throw new Error("Membership repair must complete before mutating the cache");
           }
           if (conversation === undefined) return false;
-          const existingRows = await this.#database.messages.bulkGet(
-            parsed.map((message) => message.id),
-          );
-          const existing = await decryptRows(
-            this.#crypto,
-            "message",
-            existingRows.filter((row): row is NonNullable<typeof row> => row !== undefined),
-            existingRows.flatMap((row) => (row === undefined ? [] : [row.id])),
-            (value) => messageSchema.parse(value),
-          );
-          const existingById = new Map(existing.map((message) => [message.id, message]));
           await this.#database.messages.bulkPut(
             parsed
               .filter((message) => {
