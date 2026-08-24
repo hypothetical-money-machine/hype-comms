@@ -73,9 +73,6 @@ export default defineConfig(({ command }) => {
       define: {
         __HYPE_COMMS_APPLICATION_ID__: JSON.stringify(buildFlavor.appId),
         __HYPE_COMMS_AGENT_WAKE_ENABLED__: JSON.stringify(agentWakeEnabled),
-        __HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED__: JSON.stringify(
-          agentWakePackageEvidenceEnabled,
-        ),
         __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
         __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__: JSON.stringify(buildFlavor.protocolScheme),
         __HYPE_COMMS_BUILD_FLAVOR__: JSON.stringify(buildFlavor.name),
@@ -86,6 +83,7 @@ export default defineConfig(({ command }) => {
         __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
         __HYPE_COMMS_PRODUCT_NAME__: JSON.stringify(buildFlavor.productName),
         __HYPE_COMMS_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
+        __HYPE_COMMS_UPDATES_ALLOWED__: JSON.stringify(!agentWakePackageEvidenceEnabled),
       },
       build: {
         outDir: path.join(desktopRoot, "dist/main"),

@@ -50,11 +50,34 @@ var agentWakeOperatorRequestPath = resolveAgentWakeOperatorRequestPath({
 });
 `);
 
+const guardedAgentWakeMain = (configurationEnabled, operatorEnabled = configurationEnabled) =>
+  Buffer.from(`
+async function initializeAgentWakeRuntime() {
+  const filePath = resolveAgentWakeConfigurationPath({
+    compiledIn: ${String(configurationEnabled)},
+    env: process.env
+  });
+  const operatorRequestPath = resolveAgentWakeOperatorRequestPath({
+    compiledIn: ${String(operatorEnabled)},
+    env: process.env
+  });
+}
+`);
+
 const agentWakeUpdaterMain = (evidenceBuild) =>
   Buffer.from(`
 updateController = new UpdateController({
   updater: createUpdateSource(),
   updatesAllowed: ${String(!evidenceBuild)},
+  isProductionBuild: true
+});
+`);
+
+const agentWakeUnfoldedUpdaterMain = (updatesAllowedExpression) =>
+  Buffer.from(`
+updateController = new UpdateController({
+  updater: createUpdateSource(),
+  updatesAllowed: ${updatesAllowedExpression},
   isProductionBuild: true
 });
 `);
@@ -113,6 +136,14 @@ test("binds packaged Agent Wake code to the explicit build switch", () => {
   );
 });
 
+test("finds Agent Wake build markers after path resolution moves behind startup handling", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  assert.doesNotThrow(() => verifyAgentWakeBuild(asarPath, true, () => guardedAgentWakeMain(true)));
+  assert.doesNotThrow(() =>
+    verifyAgentWakeBuild(asarPath, false, () => guardedAgentWakeMain(false)),
+  );
+});
+
 test("binds packaged updater isolation to an explicit Agent Wake evidence build", () => {
   const asarPath = "/tmp/hype-comms/resources/app.asar";
   assert.equal(resolveExpectedAgentWakePackageEvidence(undefined, true), false);
@@ -141,6 +172,22 @@ test("binds packaged updater isolation to an explicit Agent Wake evidence build"
     () => verifyAgentWakeUpdateIsolation(asarPath, false, () => Buffer.from("no marker")),
     /ambiguous or missing Agent Wake updater-isolation marker/u,
   );
+});
+
+test("recognizes semantically equivalent updater-isolation literals without optimizer folding", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  for (const [expectedEvidenceBuild, expression] of [
+    [false, "!false"],
+    [false, "!0"],
+    [true, "!true"],
+    [true, "!1"],
+  ]) {
+    assert.doesNotThrow(() =>
+      verifyAgentWakeUpdateIsolation(asarPath, expectedEvidenceBuild, () =>
+        agentWakeUnfoldedUpdaterMain(expression),
+      ),
+    );
+  }
 });
 
 test("requires development packages to omit updater configuration", async () => {

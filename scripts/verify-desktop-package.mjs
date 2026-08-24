@@ -13,11 +13,12 @@ import { resolveDesktopBuildFlavor } from "../apps/desktop/build-flavor.mjs";
 
 const expectedUpdateProvider = "generic";
 const agentWakeConfigurationCall =
-  /agentWakeConfigurationPath\s*=\s*resolveAgentWakeConfigurationPath\(\{\s*compiledIn:\s*(true|false),/gu;
+  /resolveAgentWakeConfigurationPath\(\{\s*compiledIn:\s*(true|false),/gu;
 const agentWakeOperatorCall =
-  /agentWakeOperatorRequestPath\s*=\s*resolveAgentWakeOperatorRequestPath\(\{\s*compiledIn:\s*(true|false),/gu;
-// Rolldown folds `!__HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED__` to this direct literal.
-const agentWakeUpdaterPolicy = /updatesAllowed:\s*(true|false),/gu;
+  /resolveAgentWakeOperatorRequestPath\(\{\s*compiledIn:\s*(true|false),/gu;
+// Vite substitutes a dedicated updates-allowed define directly. Accept the equivalent boolean
+// spellings Rolldown may retain or minify without depending on constant folding.
+const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
 const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
@@ -268,7 +269,10 @@ export function verifyAgentWakeUpdateIsolation(
   if (matches.length !== 1) {
     throw new Error(`${asarPath} has an ambiguous or missing Agent Wake updater-isolation marker`);
   }
-  if ((matches[0][1] === "true") === expectedEvidenceBuild) {
+  const negated = matches[0][1] === "!";
+  const literal = matches[0][2] === "true" || matches[0][2] === "1";
+  const updatesAllowed = negated ? !literal : literal;
+  if (updatesAllowed === expectedEvidenceBuild) {
     throw new Error(
       `${asarPath} Agent Wake updater isolation does not match HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=${expectedEvidenceBuild ? "1" : "0"}`,
     );

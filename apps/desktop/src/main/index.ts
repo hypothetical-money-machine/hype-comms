@@ -291,14 +291,6 @@ const deepLinkSignInQueue = new DeepLinkSignInQueue({
   onInvalidLink: showInvalidDeepLinkSignIn,
 });
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
-const agentWakeConfigurationPath = resolveAgentWakeConfigurationPath({
-  compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
-  env: process.env,
-});
-const agentWakeOperatorRequestPath = resolveAgentWakeOperatorRequestPath({
-  compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
-  env: process.env,
-});
 const macosNativeNotificationEvidenceConfiguration =
   resolveMacosNativeNotificationEvidenceConfiguration({
     compiledIn: __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__,
@@ -432,9 +424,23 @@ function createNotificationPresenter(): NotificationPresenter {
 }
 
 async function initializeAgentWakeRuntime(): Promise<void> {
-  const filePath = agentWakeConfigurationPath;
+  let filePath: string | null;
+  let operatorRequestPath: string | null;
+  try {
+    filePath = resolveAgentWakeConfigurationPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+    operatorRequestPath = resolveAgentWakeOperatorRequestPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+  } catch {
+    reportMainProcessError("Agent wake startup configuration is invalid");
+    return;
+  }
   if (filePath === null) {
-    if (agentWakeOperatorRequestPath !== null) {
+    if (operatorRequestPath !== null) {
       reportMainProcessError("Agent wake operator request has no configured enrollment");
     }
     return;
@@ -468,10 +474,10 @@ async function initializeAgentWakeRuntime(): Promise<void> {
       },
     });
     let startedStatus = runtime.initialStatus;
-    if (agentWakeOperatorRequestPath !== null) {
+    if (operatorRequestPath !== null) {
       try {
         const request = await loadAgentWakeOperatorRequest({
-          filePath: agentWakeOperatorRequestPath,
+          filePath: operatorRequestPath,
         });
         const response = await applyAgentWakeOperatorRequest({
           broker: runtime.broker,
@@ -2616,7 +2622,7 @@ if (!hasSingleInstanceLock) {
         updater: createUpdateSource(),
         // A signed Wake evidence artifact must remain byte-for-byte stable throughout its soak.
         // Ordinary production builds compile this to true and retain automatic updates.
-        updatesAllowed: !__HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED__,
+        updatesAllowed: __HYPE_COMMS_UPDATES_ALLOWED__,
         isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
