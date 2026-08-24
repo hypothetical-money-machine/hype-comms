@@ -36,11 +36,15 @@ import {
   compareConversations,
   compareMembers,
   compareTasks,
+  isUnreadMessage,
   MemoryWorkspaceCache,
+  newestLiveMessage,
   PersistentWorkspaceCache,
   applyRetractReservation,
   preferRetainedMessage,
+  retractedMessageIds,
   retractReservationMap,
+  rememberCreatedMessageMentions,
   tombstoneMessage,
   upsertRetractReservation,
   type CachedWorkspaceState,
@@ -132,7 +136,6 @@ const WORKSPACE_CONVERSATION_LIMIT = 5_000;
 
 // Live creates retain exact mention IDs until a retract arrives. Eviction falls back to the
 // message-body scan, but this map must not grow for the lifetime of a busy desktop session.
-const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
 const MAX_LOCAL_RETRACT_EFFECTS = 20_000;
 
 /**
@@ -351,17 +354,6 @@ function attachedConversationFiles(attachments: readonly Attachment[]): readonly
   );
 }
 
-function retractedMessageIds(
-  messages: readonly Message[],
-  reservations: readonly RetractReservation[],
-): ReadonlySet<string> {
-  const ids = new Set(reservations.map((reservation) => reservation.messageId));
-  for (const message of messages) {
-    if (message.deletedAt !== null) ids.add(message.id);
-  }
-  return ids;
-}
-
 function liveMessageIds(messages: readonly Message[]): ReadonlySet<string> {
   return new Set(
     messages.filter((message) => message.deletedAt === null).map((message) => message.id),
@@ -424,36 +416,6 @@ function countMessage(
   });
 }
 
-/** Whether this retained message still contributes to the server's unread totals. */
-function isUnreadMessage(
-  summary: ConversationSummary,
-  currentUserId: string,
-  message: Message,
-): boolean {
-  return (
-    message.authorId !== currentUserId &&
-    (summary.readCursor === null ||
-      compareSequence(
-        message.conversationSequence,
-        summary.readCursor.lastReadConversationSequence,
-      ) > 0)
-  );
-}
-
-function newestLiveMessage(messages: readonly Message[], conversationId: string): Message | null {
-  let newest: Message | null = null;
-  for (const message of messages) {
-    if (message.conversationId !== conversationId || message.deletedAt !== null) continue;
-    if (
-      newest === null ||
-      compareSequence(message.conversationSequence, newest.conversationSequence) > 0
-    ) {
-      newest = message;
-    }
-  }
-  return newest;
-}
-
 function newestLiveReply(messages: readonly Message[], threadRootId: string): Message | null {
   let newest: Message | null = null;
   for (const message of messages) {
@@ -501,19 +463,6 @@ function retractReplySummary(
         }
       : candidate,
   );
-}
-
-function rememberCreatedMessageMentions(
-  mentions: Map<string, readonly string[]>,
-  messageId: string,
-  mentionedUserIds: readonly string[],
-): void {
-  mentions.set(messageId, mentionedUserIds);
-  while (mentions.size > MAX_RECENT_MESSAGE_MENTIONS) {
-    const oldestMessageId = mentions.keys().next().value;
-    if (oldestMessageId === undefined) return;
-    mentions.delete(oldestMessageId);
-  }
 }
 
 function syncFailureMessage(
@@ -670,6 +619,7 @@ export class WorkspaceRuntime {
   /** Conversations whose aggregate thread counts need a full snapshot before they are reliable. */
   readonly #invalidatedThreadSummaryConversationIds = new Set<string>();
   #retractReservations: RetractReservation[] = [];
+  readonly #retractedMessageIds = new Set<string>();
   /** Exact mention IDs from live creates, retained only until a matching retract arrives. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
   /** Local DELETE responses already changed the renderer before their realtime echo arrives. */
@@ -764,6 +714,7 @@ export class WorkspaceRuntime {
       this.#threadCursors.clear();
       this.#invalidatedThreadSummaryConversationIds.clear();
       this.#retractReservations = [];
+      this.#retractedMessageIds.clear();
       this.#createdMessageMentions.clear();
       this.#setState({ ...INITIAL_STATE, busy: true });
     } else {
@@ -855,7 +806,7 @@ export class WorkspaceRuntime {
         if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
           return;
       }
-      this.#hydrateRetractReservations(cached.retractReservations);
+      this.#hydrateRetractReservations(cached.retractReservations, cached.messages);
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
@@ -957,6 +908,7 @@ export class WorkspaceRuntime {
     this.#cache = null;
     this.#syncCursor = null;
     this.#retractReservations = [];
+    this.#retractedMessageIds.clear();
     this.#createdMessageMentions.clear();
     this.#locallyProjectedRetracts.clear();
     this.#invalidatedThreadSummaryConversationIds.clear();
@@ -1330,10 +1282,7 @@ export class WorkspaceRuntime {
   }
 
   #isRetractedMessage(messageId: string): boolean {
-    return (
-      this.#retractReservations.some((reservation) => reservation.messageId === messageId) ||
-      this.#state.messages.some((message) => message.id === messageId && message.deletedAt !== null)
-    );
+    return this.#retractedMessageIds.has(messageId);
   }
 
   #captureProjection(cache: WorkspaceCache): ProjectionGuard {
@@ -1421,7 +1370,10 @@ export class WorkspaceRuntime {
         before = page.nextCursor;
       }
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
-      const retractedIds = retractedMessageIds(this.#state.messages, this.#retractReservations);
+      const retractedIds = retractedMessageIds(
+        this.#state.messages,
+        retractReservationMap(this.#retractReservations),
+      );
       this.#setState({
         conversationFiles: files.filter(
           (attachment) => attachment.messageId === null || !retractedIds.has(attachment.messageId),
@@ -1909,6 +1861,8 @@ export class WorkspaceRuntime {
     if (conversationId === null) throw new Error("Message is unavailable");
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    const cachedMentionedUserIds = await cache.getCreatedMessageMentions(messageId);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     const result = await this.#client.retractMessage(messageId);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
     await this.#serialize(async () => {
@@ -1922,7 +1876,7 @@ export class WorkspaceRuntime {
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const source = this.#retractedMessageSource(result.message.id, conversationId);
       const applyRetractEffects = source?.deletedAt === null || source === undefined;
-      this.#applyRetractedMessage(result.message, applyRetractEffects);
+      this.#applyRetractedMessage(result.message, applyRetractEffects, cachedMentionedUserIds);
       if (applyRetractEffects) this.#rememberLocallyProjectedRetract(result.message);
     });
   }
@@ -2291,7 +2245,9 @@ export class WorkspaceRuntime {
     this.#cache = null;
     this.#syncCursor = null;
     this.#retractReservations = [];
+    this.#retractedMessageIds.clear();
     this.#createdMessageMentions.clear();
+    this.#locallyProjectedRetracts.clear();
     this.#historyCursors.clear();
     this.#historyHydrations.clear();
     this.#threadCursors.clear();
@@ -2580,7 +2536,14 @@ export class WorkspaceRuntime {
     // A retract or newer event won while this request was hydrating. Reload the durable winner,
     // but never publish the request-local thread summaries, attachments, or cursors built from the
     // older snapshot.
-    if (!snapshotReplaced) return this.#reloadCache(generation, cache);
+    if (!snapshotReplaced) {
+      if (!(await this.#reloadCache(generation, cache))) return false;
+      this.#setState({
+        stale: this.#syncRecoveryPending || this.#resyncRecoveryPending,
+        error: null,
+      });
+      return true;
+    }
     const loaded = await cache.load();
     if (!isCurrent()) return false;
     // A realtime event can win after the snapshot replacement commits but before its durable
@@ -2590,9 +2553,44 @@ export class WorkspaceRuntime {
       loaded.syncCursor !== snapshot.syncCursor ||
       sourceLessRetractMetadataVersion !== this.#sourceLessRetractMetadataVersion
     ) {
-      return this.#reloadCache(generation, cache);
+      if (!(await this.#reloadCache(generation, cache))) return false;
+      this.#historyCursors.clear();
+      for (const [conversationId, cursor] of historyCursors) {
+        this.#historyCursors.set(conversationId, cursor);
+      }
+      this.#threadCursors.clear();
+      for (const [threadRootId, cursor] of threadCursors) {
+        this.#threadCursors.set(threadRootId, cursor);
+      }
+      const loadedSnapshot = this.#state.bootstrap;
+      const currentSelection = this.#state.selectedConversationId;
+      const selectedConversationId =
+        loadedSnapshot !== null &&
+        currentSelection !== null &&
+        loadedSnapshot.conversations.some((summary) => summary.conversation.id === currentSelection)
+          ? currentSelection
+          : loadedSnapshot === null
+            ? null
+            : firstConversation(loadedSnapshot);
+      const selectedThreadRootId =
+        threadsSupported && selectedConversationId === currentSelection
+          ? this.#state.selectedThreadRootId
+          : null;
+      this.#setState({
+        threadsSupported,
+        selectedConversationId,
+        focusedMessageId:
+          selectedConversationId === currentSelection ? this.#state.focusedMessageId : null,
+        selectedThreadRootId,
+        focusedThreadMessageId:
+          selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId,
+        ...(selectedThreadRootId === null ? { threadLoading: false, threadError: null } : {}),
+        stale: this.#syncRecoveryPending || this.#resyncRecoveryPending,
+        error: null,
+      });
+      return true;
     }
-    this.#hydrateRetractReservations(loaded.retractReservations);
+    this.#hydrateRetractReservations(loaded.retractReservations, loaded.messages);
     this.#locallyProjectedRetracts.clear();
     this.#membershipRepairPending =
       loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
@@ -2883,9 +2881,8 @@ export class WorkspaceRuntime {
     // also restarted with the repaired cursor.
     this.#setState({ stale: this.#membersDirty || this.#resyncRecoveryPending });
     if (sourceLessRetractApplied && refreshSourceLessRetracts) {
-      const refreshed = await this.#refreshSourceLessRetractMetadata(generation);
+      await this.#refreshSourceLessRetractMetadata(generation);
       if (generation !== this.#generation || cache !== this.#cache) return;
-      if (!refreshed) return;
     }
     if (flushOutbox) await this.#flushOutbox(generation);
   }
@@ -3223,10 +3220,12 @@ export class WorkspaceRuntime {
       if (!this.#sourceLessRetractMetadataPending) return true;
       const version = this.#sourceLessRetractMetadataVersion;
       let refreshed = false;
+      let requestFailed = false;
       try {
         refreshed = await this.#refreshWorkspaceMetadata(generation, true);
       } catch {
         // The retry state below gives a transient catalog failure a durable recovery path.
+        requestFailed = true;
       }
       if (generation !== this.#generation || cache !== this.#cache) return false;
       if (!this.#sourceLessRetractMetadataPending) return true;
@@ -3234,25 +3233,113 @@ export class WorkspaceRuntime {
         // A newer source-less retract may have landed while this catalog was in flight. Do not
         // treat a response that predates it as authoritative for the newer invalidation.
         if (version !== this.#sourceLessRetractMetadataVersion) continue;
+        let summariesRefreshed = false;
+        try {
+          summariesRefreshed = await this.#refreshInvalidatedThreadSummaries(generation, cache);
+        } catch {
+          requestFailed = true;
+        }
+        if (!summariesRefreshed) {
+          if (generation !== this.#generation || cache !== this.#cache) return false;
+          this.#setState(
+            requestFailed
+              ? { stale: true, error: SOURCE_LESS_RETRACT_METADATA_ERROR }
+              : { stale: true },
+          );
+          this.#scheduleSourceLessRetractMetadataRetry(generation);
+          return false;
+        }
+        if (version !== this.#sourceLessRetractMetadataVersion) continue;
         this.#sourceLessRetractMetadataPending = false;
         this.#sourceLessRetractMetadataAttempt = 0;
         this.#clearSourceLessRetractMetadataRetryTimer();
-        if (this.#state.error === SOURCE_LESS_RETRACT_METADATA_ERROR) {
-          this.#setState({
-            stale:
-              this.#membersDirty ||
-              this.#membershipRepairPending ||
-              this.#syncRecoveryPending ||
-              this.#resyncRecoveryPending,
-            error: null,
-          });
-        }
+        this.#setState({
+          stale:
+            this.#membersDirty ||
+            this.#membershipRepairPending ||
+            this.#syncRecoveryPending ||
+            this.#resyncRecoveryPending,
+          ...(this.#state.error === SOURCE_LESS_RETRACT_METADATA_ERROR ? { error: null } : {}),
+        });
         return true;
       }
-      this.#setState({ stale: true, error: SOURCE_LESS_RETRACT_METADATA_ERROR });
+      this.#setState(
+        requestFailed
+          ? { stale: true, error: SOURCE_LESS_RETRACT_METADATA_ERROR }
+          : { stale: true },
+      );
       this.#scheduleSourceLessRetractMetadataRetry(generation);
       return false;
     }
+  }
+
+  /**
+   * Metadata repairs restore unread totals, but a source-less retract cannot identify its thread
+   * root. Reload the affected first pages before accepting their server-derived thread summaries
+   * again. These requests run on the event queue, so a later realtime event cannot overtake them.
+   */
+  async #refreshInvalidatedThreadSummaries(
+    generation: number,
+    cache: WorkspaceCache,
+  ): Promise<boolean> {
+    const conversationIds = [...this.#invalidatedThreadSummaryConversationIds];
+    for (const conversationId of conversationIds) {
+      const projection = this.#captureProjection(cache);
+      if (
+        generation !== this.#generation ||
+        !this.#isProjectionCurrent(projection, conversationId) ||
+        !this.#invalidatedThreadSummaryConversationIds.has(conversationId)
+      ) {
+        return false;
+      }
+      const history = await this.#client.getConversationMessages({ conversationId, limit: 50 });
+      if (!this.#isProjectionCurrent(projection, conversationId)) return false;
+      const messageIds = history.messages.map((message) => message.id);
+      const hydrated =
+        messageIds.length === 0
+          ? { reactions: [] }
+          : await this.#client.listMessageReactions(messageIds);
+      if (!this.#isProjectionCurrent(projection, conversationId)) return false;
+      const persisted = await cache.upsertHistory(
+        conversationId,
+        history.messages,
+        hydrated.reactions,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return false;
+      const retainedMessages = this.#retainMessages(history.messages);
+      this.#historyCursors.set(conversationId, history.nextCursor);
+      this.#invalidatedThreadSummaryConversationIds.delete(conversationId);
+      this.#setState({
+        messages: mergeMessages(this.#state.messages, retainedMessages),
+        threadSummaries: history.threadsSupported
+          ? mergeThreadSummaries(
+              this.#withoutConversationThreadSummaries(conversationId),
+              history.threadSummaries,
+            )
+          : [],
+        threadsSupported: history.threadsSupported,
+        ...(history.threadsSupported
+          ? {}
+          : {
+              selectedThreadRootId: null,
+              focusedThreadMessageId: null,
+              threadLoading: false,
+              threadError: null,
+            }),
+        reactions: replaceMessageReactions(
+          this.#state.reactions,
+          messageIds,
+          retainReactionsForLiveMessages(hydrated.reactions, retainedMessages),
+        ),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          messageIds,
+          retainAttachmentsForLiveMessages(history.attachments ?? [], retainedMessages),
+        ),
+      });
+    }
+    return true;
   }
 
   #scheduleResync(generation: number, request: number, delayMs: number): void {
@@ -3615,6 +3702,11 @@ export class WorkspaceRuntime {
       event.type === "message.retracted"
         ? this.#retractedMessageSource(event.payload.messageId, event.conversationId)
         : undefined;
+    const cachedMentionedUserIds =
+      event.type === "message.retracted"
+        ? await cache.getCreatedMessageMentions(event.payload.messageId)
+        : undefined;
+    if (!this.#isProjectionCurrent(projection)) return;
     let applied: boolean;
     try {
       applied = await cache.applyEvent(event, projection.signal, retractSource);
@@ -3637,6 +3729,13 @@ export class WorkspaceRuntime {
       await this.#refreshMembers(generation);
       return;
     }
+    if (event.type === "message.retracted" && cachedMentionedUserIds !== undefined) {
+      rememberCreatedMessageMentions(
+        this.#createdMessageMentions,
+        event.payload.messageId,
+        cachedMentionedUserIds,
+      );
+    }
     // The event payload already carries everything the view needs, so the whole encrypted cache
     // does not have to be decrypted again for every message.
     this.#projectEvent(event);
@@ -3645,8 +3744,16 @@ export class WorkspaceRuntime {
     }
   }
 
-  #hydrateRetractReservations(reservations: readonly RetractReservation[]): void {
+  #hydrateRetractReservations(
+    reservations: readonly RetractReservation[],
+    messages: readonly Message[] = [],
+  ): void {
     this.#retractReservations = [...reservations];
+    this.#retractedMessageIds.clear();
+    for (const reservation of reservations) this.#retractedMessageIds.add(reservation.messageId);
+    for (const message of messages) {
+      if (message.deletedAt !== null) this.#retractedMessageIds.add(message.id);
+    }
   }
 
   #reserveRetractedMessage(event: Extract<WorkspaceEvent, { type: "message.retracted" }>): void {
@@ -3655,6 +3762,7 @@ export class WorkspaceRuntime {
       deletedAt: event.payload.deletedAt,
       entityVersion: event.entityVersion,
     });
+    this.#retractedMessageIds.add(event.payload.messageId);
   }
 
   #retractEffectKey(messageId: string, entityVersion: number): string {
@@ -3711,13 +3819,18 @@ export class WorkspaceRuntime {
     return this.#withoutConversationThreadSummaries(conversationId);
   }
 
-  #applyRetractedMessage(tombstone: Message, applyRetractEffects: boolean): void {
+  #applyRetractedMessage(
+    tombstone: Message,
+    applyRetractEffects: boolean,
+    cachedMentionedUserIds?: readonly string[],
+  ): void {
     if (tombstone.deletedAt !== null) {
       this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
         messageId: tombstone.id,
         deletedAt: tombstone.deletedAt,
         entityVersion: tombstone.version,
       });
+      this.#retractedMessageIds.add(tombstone.id);
     }
     const snapshot = this.#state.bootstrap;
     const messages = mergeMessages(this.#state.messages, [tombstone]);
@@ -3729,6 +3842,7 @@ export class WorkspaceRuntime {
       (candidate) => candidate.conversation.id === tombstone.conversationId,
     );
     const mentionedUserIds =
+      cachedMentionedUserIds ??
       this.#createdMessageMentions.get(tombstone.id) ??
       (snapshot === null || summary === undefined
         ? []
@@ -4070,6 +4184,7 @@ export class WorkspaceRuntime {
         deletedAt: retained.deletedAt,
         entityVersion: retained.version,
       });
+      this.#retractedMessageIds.add(retained.id);
     }
     const snapshot = this.#state.bootstrap;
     const newlyObserved = !this.#state.messages.some((existing) => existing.id === retained.id);
@@ -4169,13 +4284,15 @@ export class WorkspaceRuntime {
     const loaded = await cache.load();
     if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
       return false;
-    this.#hydrateRetractReservations(loaded.retractReservations);
+    this.#hydrateRetractReservations(loaded.retractReservations, loaded.messages);
     let threadSummaries: readonly MessageThreadSummary[] = this.#state.threadSummaries.filter(
       (summary) =>
         !this.#invalidatedThreadSummaryConversationIds.has(summary.latestReply.conversationId),
     );
     const currentMessages = new Map(this.#state.messages.map((message) => [message.id, message]));
-    const retractedIds = retractedMessageIds(loaded.messages, loaded.retractReservations);
+    const liveMessageIds = new Set(
+      loaded.messages.filter((message) => message.deletedAt === null).map((message) => message.id),
+    );
     for (const message of loaded.messages) {
       const previous = currentMessages.get(message.id);
       if (this.#invalidatedThreadSummaryConversationIds.has(message.conversationId)) {
@@ -4198,10 +4315,10 @@ export class WorkspaceRuntime {
       threadSummaries,
       reactions: loaded.reactions,
       attachments: this.#state.attachments.filter(
-        (attachment) => attachment.messageId !== null && !retractedIds.has(attachment.messageId),
+        (attachment) => attachment.messageId !== null && liveMessageIds.has(attachment.messageId),
       ),
       conversationFiles: this.#state.conversationFiles.filter(
-        (attachment) => attachment.messageId === null || !retractedIds.has(attachment.messageId),
+        (attachment) => attachment.messageId === null || liveMessageIds.has(attachment.messageId),
       ),
       tasks: loaded.tasks,
       outbox: loaded.outbox,

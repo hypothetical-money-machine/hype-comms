@@ -36,7 +36,9 @@ const CACHE_DATABASE_PREFIX = "hype-comms-cache-v1-";
 const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
 // Live creates retain exact mention IDs until a retract arrives. Eviction falls back to the
 // message-body scan, but this map must not grow for the lifetime of a busy desktop session.
-const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
+export const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
+/** Bounds tombstones retained solely to defeat an in-flight stale response after eviction. */
+export const MAX_RETRACT_RESERVATIONS = 20_000;
 const MAX_MESSAGE_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 /**
  * Mirrors `workspaceSnapshotSchema.members`, which is `z.array(userSchema).max(25)`. `load()`
@@ -139,6 +141,8 @@ export interface WorkspaceCache {
     signal?: AbortSignal,
     retractSource?: Message,
   ): Promise<boolean>;
+  /** Exact server-verified mention IDs retained for a live message until it is retracted. */
+  getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined>;
   advanceCursor(syncCursor: string): Promise<void>;
   /** Atomically persists a history page only while its conversation remains authorized. */
   upsertHistory(
@@ -383,7 +387,7 @@ function parseRetractReservations(value: unknown): RetractReservation[] {
   if (!Array.isArray(value)) {
     throw new Error("Invalid retract reservations");
   }
-  return value.map((item) => {
+  const reservations = value.map((item) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       throw new Error("Invalid retract reservation");
     }
@@ -404,6 +408,7 @@ function parseRetractReservations(value: unknown): RetractReservation[] {
       entityVersion: record.entityVersion,
     };
   });
+  return trimRetractReservations(reservations);
 }
 
 function parseMembershipRepairMarker(value: unknown): MembershipRepairMarker | null {
@@ -454,7 +459,7 @@ function compareMessages(left: Message, right: Message): number {
   return compareSequence(left.conversationSequence, right.conversationSequence);
 }
 
-function isUnreadMessage(
+export function isUnreadMessage(
   summary: ConversationSummary,
   currentUserId: string,
   message: Message,
@@ -469,7 +474,10 @@ function isUnreadMessage(
   );
 }
 
-function newestLiveMessage(messages: readonly Message[], conversationId: string): Message | null {
+export function newestLiveMessage(
+  messages: readonly Message[],
+  conversationId: string,
+): Message | null {
   let newest: Message | null = null;
   for (const message of messages) {
     if (message.conversationId !== conversationId || message.deletedAt !== null) continue;
@@ -530,7 +538,7 @@ function retainLiveMessageMentions(
   trimRecentMessageMentions(mentions);
 }
 
-function rememberCreatedMessageMentions(
+export function rememberCreatedMessageMentions(
   mentions: Map<string, readonly string[]>,
   messageId: string,
   mentionedUserIds: readonly string[],
@@ -762,10 +770,18 @@ export function upsertRetractReservation(
   const next = retractReservationMap(reservations);
   const current = next.get(reservation.messageId);
   if (current !== undefined && current.entityVersion > reservation.entityVersion) {
-    return [...next.values()];
+    return trimRetractReservations([...next.values()]);
   }
+  next.delete(reservation.messageId);
   next.set(reservation.messageId, reservation);
-  return [...next.values()];
+  return trimRetractReservations([...next.values()]);
+}
+
+function trimRetractReservations(
+  reservations: readonly RetractReservation[],
+): RetractReservation[] {
+  if (reservations.length <= MAX_RETRACT_RESERVATIONS) return [...reservations];
+  return reservations.slice(-MAX_RETRACT_RESERVATIONS);
 }
 
 /**
@@ -809,7 +825,7 @@ function sameRetractReservations(
   return true;
 }
 
-function retractedMessageIds(
+export function retractedMessageIds(
   messages: readonly Message[],
   reservations: ReadonlyMap<string, RetractReservation>,
 ): ReadonlySet<string> {
@@ -1328,13 +1344,33 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     });
   }
 
+  async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
+    return this.#createdMessageMentions.get(entityIdSchema.parse(messageId));
+  }
+
   async applyEvent(
     event: WorkspaceEvent,
     signal?: AbortSignal,
     retractSource?: Message,
   ): Promise<boolean> {
-    signal?.throwIfAborted();
     const parsed = workspaceEventSchema.parse(event);
+    for (;;) {
+      signal?.throwIfAborted();
+      const outcome = await this.#applyEventAttempt(parsed, signal, retractSource);
+      if (outcome !== "retry") return outcome;
+    }
+  }
+
+  /**
+   * Performs one optimistic event write. A retract reservation can change while encryption is in
+   * flight, so the public method retries that transaction race in a loop rather than recursing.
+   */
+  async #applyEventAttempt(
+    parsed: WorkspaceEvent,
+    signal?: AbortSignal,
+    retractSource?: Message,
+  ): Promise<boolean | "retry"> {
+    signal?.throwIfAborted();
     const metadata = await this.#database.metadata.get("state");
     const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
     if (parsed.type === "channel.membership_changed") {
@@ -1431,7 +1467,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           return "written";
         },
       );
-      if (outcome === "retry") return this.applyEvent(parsed, signal, retractSource);
+      if (outcome === "retry") return "retry";
       if (outcome === "stale") return false;
       if (created.deletedAt === null) {
         rememberCreatedMessageMentions(
@@ -1502,19 +1538,20 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       );
     } else if (parsed.type === "message.retracted") {
       const suppliedSource = matchingRetractSource(parsed, retractSource);
-      const [currentMessage, currentSummary, currentUser, conversationMessages] = await Promise.all(
-        [
-          this.#message(parsed.payload.messageId),
-          this.#conversation(parsed.conversationId),
-          this.#currentUser(),
-          this.#conversationMessages(parsed.conversationId),
-        ],
-      );
+      const [currentMessage, currentSummary, currentUser] = await Promise.all([
+        this.#message(parsed.payload.messageId),
+        this.#conversation(parsed.conversationId),
+        this.#currentUser(),
+      ]);
       const source =
         currentMessage ??
         (currentSummary?.lastMessage?.id === parsed.payload.messageId
           ? currentSummary.lastMessage
           : suppliedSource);
+      const conversationMessages =
+        source !== null && currentSummary?.lastMessage?.id === source.id
+          ? await this.#conversationMessages(parsed.conversationId)
+          : [];
       const tombstone = source === null ? null : tombstoneMessage(source, parsed);
       const messages =
         tombstone === null
@@ -1591,7 +1628,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           return "written";
         },
       );
-      if (outcome === "retry") return this.applyEvent(parsed, signal, retractSource);
+      if (outcome === "retry") return "retry";
       if (outcome === "stale") return false;
       this.#createdMessageMentions.delete(parsed.payload.messageId);
     } else {
@@ -2516,6 +2553,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         parsed.payload.action === "removed" && parsed.payload.memberId === this.#currentUserId,
     };
     return true;
+  }
+
+  async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
+    return this.#createdMessageMentions.get(entityIdSchema.parse(messageId));
   }
 
   async applyEvent(

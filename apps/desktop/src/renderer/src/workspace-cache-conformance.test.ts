@@ -20,8 +20,10 @@ import {
 
 import {
   clearPersistentWorkspaceCaches,
+  MAX_RETRACT_RESERVATIONS,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  upsertRetractReservation,
   type CachedWorkspaceState,
   type WorkspaceCache,
 } from "./workspace-cache";
@@ -621,6 +623,19 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       body: "Message 2",
       deletedAt: NOW,
     });
+  });
+
+  it("retains a created message's exact mention IDs until its retract arrives", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+
+    await cache.applyEvent(messageRetractedEvent);
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
   });
 
   it("reconciles a retracted summary to its newest cached live message", async () => {
@@ -1537,6 +1552,25 @@ describe("PersistentWorkspaceCache durability", () => {
       ALICE_ID,
       MORGAN_ID,
     ]);
+  });
+});
+
+describe("retract reservation retention", () => {
+  it("keeps only the newest bounded reservations", () => {
+    const existing = Array.from({ length: MAX_RETRACT_RESERVATIONS }, (_, index) => ({
+      messageId: `retracted-message-${index}`,
+      deletedAt: NOW,
+      entityVersion: 2,
+    }));
+    const reservations = upsertRetractReservation(existing, {
+      messageId: `retracted-message-${MAX_RETRACT_RESERVATIONS}`,
+      deletedAt: NOW,
+      entityVersion: 2,
+    });
+
+    expect(reservations).toHaveLength(MAX_RETRACT_RESERVATIONS);
+    expect(reservations[0]?.messageId).toBe("retracted-message-1");
+    expect(reservations.at(-1)?.messageId).toBe(`retracted-message-${MAX_RETRACT_RESERVATIONS}`);
   });
 });
 

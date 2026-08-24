@@ -644,6 +644,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
+  async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
+    void messageId;
+    return undefined;
+  }
+
   async applyEvent(
     event: WorkspaceEvent,
     signal?: AbortSignal,
@@ -2489,7 +2494,9 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     });
-    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
 
     files.resolve({ files: [attachment], nextCursor: null, hasMore: false });
     await loadingFiles;
@@ -3586,7 +3593,7 @@ describe("WorkspaceRuntime", () => {
     await settle(
       () =>
         runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
-        runtime.state.threadSummaries.length === 0,
+        runtime.state.threadSummaries[0]?.latestReply.id === latestThreadReply.id,
       "source-less realtime metadata refresh",
     );
 
@@ -3598,7 +3605,9 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     });
-    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
   });
 
   it("retries a failed source-less retract metadata refresh without another event", async () => {
@@ -3683,7 +3692,8 @@ describe("WorkspaceRuntime", () => {
         () =>
           runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
           runtime.state.bootstrap?.conversations[0]?.mentionCount === 0 &&
-          runtime.state.error === null,
+          runtime.state.error === null &&
+          !runtime.state.stale,
         "retried source-less retract metadata refresh",
       );
 
@@ -3696,6 +3706,81 @@ describe("WorkspaceRuntime", () => {
       random.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it("flushes the outbox after source-less catch-up metadata fails", async () => {
+    const hiddenMessage: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000ea",
+      clientMessageId: "20000000-0000-4000-8000-0000000000eb",
+      conversationSequence: "3",
+      body: "Message outside the first history page",
+    };
+    const beforeRetract = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+      lastMessage: ownMessage,
+      unreadCount: 1,
+      mentionCount: 0,
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
+    );
+    const finalCatchUp = deferred<SyncAttemptResult>();
+    api.syncResults.push(finalCatchUp.promise);
+    const cache = new MemoryWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+
+    const starting = runtime.start(session);
+    await settle(() => api.syncedFrom.length === 1, "outbox catch-up begins");
+    const queuedClientMessageId = "20000000-0000-4000-8000-0000000000ec";
+    await cache.enqueue(queuedOperation(queuedClientMessageId, "Send despite badge failure"));
+    api.sendResults.push({
+      status: "accepted",
+      response: {
+        message: {
+          ...ownMessage,
+          id: "20000000-0000-4000-8000-0000000000ed",
+          conversationSequence: "4",
+        },
+        attachments: [],
+        syncCursor: "12",
+      },
+    });
+    api.bootstrapFailures = 1;
+    finalCatchUp.resolve({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-0000000000ee",
+            type: "message.retracted",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: hiddenMessage.conversationSequence,
+            entityVersion: 2,
+            delivery: "at_least_once",
+            payload: { messageId: hiddenMessage.id, deletedAt: NOW },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    await starting;
+
+    expect(runtime.state.error).toBe(
+      "Could not refresh unread counts after a message was deleted.",
+    );
+    expect(api.sent.map((operation) => operation.message.clientMessageId)).toEqual([
+      queuedClientMessageId,
+    ]);
+    expect((await cache.load()).outbox).toEqual([]);
+    await runtime.stop();
   });
 
   it("keeps source-less metadata pending when a concurrent cache write wins", async () => {
@@ -3764,8 +3849,7 @@ describe("WorkspaceRuntime", () => {
       });
       replacement.resolve();
       await settle(
-        () =>
-          runtime.state.error === "Could not refresh unread counts after a message was deleted.",
+        () => runtime.state.stale && runtime.state.error === null,
         "stale source-less metadata replacement",
       );
 
@@ -3780,7 +3864,8 @@ describe("WorkspaceRuntime", () => {
         () =>
           runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
           runtime.state.bootstrap?.conversations[0]?.mentionCount === 0 &&
-          runtime.state.error === null,
+          runtime.state.error === null &&
+          !runtime.state.stale,
         "source-less metadata retry after a concurrent cache write",
       );
 
@@ -3870,9 +3955,7 @@ describe("WorkspaceRuntime", () => {
       payload: { messageId: hiddenMessage.id, deletedAt: NOW },
     });
     await settle(
-      () =>
-        runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
-        runtime.state.threadSummaries.length === 0,
+      () => runtime.state.bootstrap?.conversations[0]?.unreadCount === 0,
       "source-less retract metadata refresh while the snapshot reload waits",
     );
 
@@ -3883,7 +3966,9 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     });
-    expect(runtime.state.threadSummaries).toEqual([]);
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
+    ]);
     expect((await cache.load()).bootstrap?.conversations[0]).toMatchObject({
       unreadCount: 0,
       mentionCount: 0,
