@@ -34,8 +34,8 @@ import { mentionedMemberIds } from "./mentions";
 const CACHE_SCHEMA_VERSION = 1 as const;
 const CACHE_DATABASE_PREFIX = "hype-comms-cache-v1-";
 const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
-// Live creates retain exact mention IDs until a retract arrives. Eviction falls back to the
-// message-body scan, but this map must not grow for the lifetime of a busy desktop session.
+// Live creates retain exact mention IDs while a retract can still reach the message. The hard cap
+// keeps this auxiliary runtime-only map bounded during a busy desktop session.
 export const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
 /** Bounds tombstones retained solely to defeat an in-flight stale response after eviction. */
 export const MAX_RETRACT_RESERVATIONS = 20_000;
@@ -114,6 +114,7 @@ export interface WorkspaceCache {
     reactions?: readonly Reaction[],
     tasks?: readonly Task[],
     signal?: AbortSignal,
+    retractSourceMessageIds?: readonly string[],
   ): Promise<boolean>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v1/members`.
@@ -528,10 +529,16 @@ function matchingRetractSource(
 function retainLiveMessageMentions(
   mentions: Map<string, readonly string[]>,
   messages: readonly Message[],
+  conversations: readonly ConversationSummary[] = [],
+  retractSourceMessageIds: readonly string[] = [],
 ): void {
   const liveMessageIds = new Set(
     messages.filter((message) => message.deletedAt === null).map((message) => message.id),
   );
+  for (const summary of conversations) {
+    if (summary.lastMessage?.deletedAt === null) liveMessageIds.add(summary.lastMessage.id);
+  }
+  for (const messageId of retractSourceMessageIds) liveMessageIds.add(messageId);
   for (const messageId of mentions.keys()) {
     if (!liveMessageIds.has(messageId)) mentions.delete(messageId);
   }
@@ -1133,6 +1140,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
+    retractSourceMessageIds: readonly string[] = [],
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -1263,7 +1271,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       if (outcome === "retry") continue;
       if (outcome === "stale") return false;
       await this.#evictMessages();
-      retainLiveMessageMentions(this.#createdMessageMentions, parsedMessages);
+      retainLiveMessageMentions(
+        this.#createdMessageMentions,
+        parsedMessages,
+        parsedConversations,
+        retractSourceMessageIds,
+      );
       return true;
     }
   }
@@ -2443,6 +2456,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
+    retractSourceMessageIds: readonly string[] = [],
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -2496,7 +2510,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
     this.#repairMarker = null;
-    retainLiveMessageMentions(this.#createdMessageMentions, retainedMessages);
+    retainLiveMessageMentions(
+      this.#createdMessageMentions,
+      retainedMessages,
+      retainedConversations,
+      retractSourceMessageIds,
+    );
     return true;
   }
 

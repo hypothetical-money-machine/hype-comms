@@ -2978,6 +2978,85 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.attachments).toEqual([]);
     expect(runtime.state.conversationFiles).toEqual([]);
   });
+
+  it("retains exact mentions for a live message reachable only as lastMessage", async () => {
+    const liveMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-0000000000c4",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c5",
+      conversationSequence: "3",
+      body: "@morgan Please review this",
+    };
+    const beforeRefresh = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRefresh] }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000c6",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: liveMessage.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: liveMessage, mentionedUserIds: [USER_ID] },
+    });
+    await settle(() => api.acknowledged.includes("11"), "live mention projection");
+
+    const renamedUser = { ...user, username: "morgan-renamed" } as const satisfies User;
+    const refreshedSummary = {
+      ...beforeRefresh,
+      lastMessage: liveMessage,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    api.bootstrap = bootstrapAt("11", {
+      currentUser: {
+        user: renamedUser,
+        email: "morgan@example.com",
+        workspaceId: WORKSPACE_ID,
+        role: "owner",
+      },
+      members: [renamedUser, peer],
+      conversations: [refreshedSummary],
+    });
+    api.channelResults.push({ conversation: refreshedSummary, syncCursor: "11" });
+    await runtime.archiveChannel(CONVERSATION_ID);
+
+    expect(runtime.state.messages.some((message) => message.id === liveMessage.id)).toBe(false);
+    expect(runtime.state.bootstrap?.conversations[0]?.lastMessage?.id).toBe(liveMessage.id);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000c7",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: liveMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: liveMessage.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("12"), "last-message retract projection");
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: null,
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
   it("matches a fresh bootstrap after a live retract", async () => {
     const earlierReply: Message = {
       ...threadReply,

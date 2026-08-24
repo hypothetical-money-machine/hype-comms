@@ -630,7 +630,7 @@ export class WorkspaceRuntime {
   readonly #invalidatedThreadSummaryConversationIds = new Set<string>();
   #retractReservations: RetractReservation[] = [];
   readonly #retractedMessageIds = new Set<string>();
-  /** Exact mention IDs from live creates, retained while the corresponding message is retained. */
+  /** Exact mention IDs from live creates, retained while retraction can still reach the message. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
   /** Local DELETE responses already changed the renderer before their realtime echo arrives. */
   readonly #locallyProjectedRetracts = new Set<string>();
@@ -662,8 +662,16 @@ export class WorkspaceRuntime {
     for (const listener of this.#listeners) listener(this.#state);
   }
 
-  #pruneCreatedMessageMentions(messages: readonly Message[]): void {
+  #pruneCreatedMessageMentions(
+    messages: readonly Message[],
+    bootstrap: WorkspaceSnapshot | null,
+    threadSummaries: readonly MessageThreadSummary[],
+  ): void {
     const retainedMessageIds = new Set(messages.map((message) => message.id));
+    for (const summary of bootstrap?.conversations ?? []) {
+      if (summary.lastMessage !== null) retainedMessageIds.add(summary.lastMessage.id);
+    }
+    for (const summary of threadSummaries) retainedMessageIds.add(summary.latestReply.id);
     for (const messageId of this.#createdMessageMentions.keys()) {
       if (!retainedMessageIds.has(messageId)) this.#createdMessageMentions.delete(messageId);
     }
@@ -827,7 +835,11 @@ export class WorkspaceRuntime {
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
-      this.#pruneCreatedMessageMentions(cached.messages);
+      this.#pruneCreatedMessageMentions(
+        cached.messages,
+        cached.bootstrap,
+        this.#state.threadSummaries,
+      );
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -2545,6 +2557,7 @@ export class WorkspaceRuntime {
         refreshedReactions,
         tasks,
         signal,
+        threadSummaries.map((summary) => summary.latestReply.id),
       );
     } catch (error) {
       if (!isCurrent()) return false;
@@ -2643,7 +2656,7 @@ export class WorkspaceRuntime {
         : null;
     const focusedThreadMessageId =
       selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId;
-    this.#pruneCreatedMessageMentions(loaded.messages);
+    this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
@@ -3185,6 +3198,9 @@ export class WorkspaceRuntime {
       visibleMessageIds.has(reaction.messageId),
     );
     const tasks = loaded.tasks.filter((task) => visibleConversationIds.has(task.conversationId));
+    const retractSourceMessageIds = this.#state.threadSummaries
+      .filter((summary) => visibleConversationIds.has(summary.latestReply.conversationId))
+      .map((summary) => summary.latestReply.id);
     const signal = this.#projectionAbortController.signal;
     const replaced = await cache.replaceSnapshot(
       {
@@ -3199,6 +3215,7 @@ export class WorkspaceRuntime {
       reactions,
       tasks,
       signal,
+      retractSourceMessageIds,
     );
     if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
     if (!replaced) {
@@ -3593,13 +3610,14 @@ export class WorkspaceRuntime {
       if (!visibleMessageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
     this.#historyCursors.delete(conversationId);
-    this.#pruneCreatedMessageMentions(state.messages);
+    const threadSummaries = this.#state.threadSummaries.filter((summary) =>
+      visibleMessageIds.has(summary.threadRootId),
+    );
+    this.#pruneCreatedMessageMentions(state.messages, state.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: state.bootstrap,
       messages: state.messages,
-      threadSummaries: this.#state.threadSummaries.filter((summary) =>
-        visibleMessageIds.has(summary.threadRootId),
-      ),
+      threadSummaries,
       reactions: state.reactions,
       attachments: this.#state.attachments.filter(
         (attachment) =>
@@ -3659,13 +3677,14 @@ export class WorkspaceRuntime {
     for (const [rootId] of this.#threadCursors) {
       if (!messageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
-    this.#pruneCreatedMessageMentions(messages);
+    const threadSummaries = this.#state.threadSummaries.filter((summary) =>
+      messageIds.has(summary.threadRootId),
+    );
+    this.#pruneCreatedMessageMentions(messages, bootstrap, threadSummaries);
     this.#setState({
       bootstrap,
       messages,
-      threadSummaries: this.#state.threadSummaries.filter((summary) =>
-        messageIds.has(summary.threadRootId),
-      ),
+      threadSummaries,
       reactions: this.#state.reactions.filter((reaction) => messageIds.has(reaction.messageId)),
       attachments: this.#state.attachments.filter(
         (attachment) => attachment.messageId !== null && messageIds.has(attachment.messageId),
@@ -4330,7 +4349,7 @@ export class WorkspaceRuntime {
       currentMessages.set(message.id, message);
     }
     this.#syncCursor = loaded.syncCursor;
-    this.#pruneCreatedMessageMentions(loaded.messages);
+    this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,

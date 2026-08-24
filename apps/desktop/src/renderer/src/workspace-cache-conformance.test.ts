@@ -20,9 +20,11 @@ import {
 
 import {
   clearPersistentWorkspaceCaches,
+  MAX_RECENT_MESSAGE_MENTIONS,
   MAX_RETRACT_RESERVATIONS,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  rememberCreatedMessageMentions,
   upsertRetractReservation,
   type CachedWorkspaceState,
   type WorkspaceCache,
@@ -635,6 +637,100 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     ]);
 
     await cache.applyEvent(messageRetractedEvent);
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
+  });
+
+  it("retains exact mention IDs while a message is reachable only as lastMessage", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence2,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: messageCreatedEvent.workspaceSequence,
+      },
+      [],
+    );
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+    await cache.applyEvent(messageRetractedEvent);
+
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({ lastMessage: null, unreadCount: 0, mentionCount: 0 });
+  });
+
+  it("retains exact mention IDs for a caller-owned thread-summary source", async () => {
+    const cache = create();
+    const closedThreadReply = {
+      ...messageSequence2,
+      threadRootId: messageSequence1.id,
+    };
+    const created: WorkspaceEvent = {
+      ...messageCreatedEvent,
+      payload: { message: closedThreadReply, mentionedUserIds: [MORGAN_ID] },
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(created);
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence10,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: created.workspaceSequence,
+      },
+      [messageSequence1, messageSequence10],
+      [],
+      [],
+      undefined,
+      [closedThreadReply.id],
+    );
+
+    await expect(cache.getCreatedMessageMentions(closedThreadReply.id)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+    await cache.applyEvent(messageRetractedEvent, undefined, closedThreadReply);
+
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      lastMessage: { id: MESSAGE_SEQUENCE_10_ID, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
+  it("prunes exact mention IDs after a message becomes unreachable", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    await cache.replaceSnapshot(
+      { ...snapshot, syncCursor: messageCreatedEvent.workspaceSequence },
+      [],
+    );
+
     await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
   });
 
@@ -1552,6 +1648,19 @@ describe("PersistentWorkspaceCache durability", () => {
       ALICE_ID,
       MORGAN_ID,
     ]);
+  });
+});
+
+describe("created-message mention retention", () => {
+  it("keeps only the newest bounded exact mention metadata", () => {
+    const mentions = new Map<string, readonly string[]>();
+    for (let index = 0; index <= MAX_RECENT_MESSAGE_MENTIONS; index += 1) {
+      rememberCreatedMessageMentions(mentions, `message-${String(index)}`, [MORGAN_ID]);
+    }
+
+    expect(mentions.size).toBe(MAX_RECENT_MESSAGE_MENTIONS);
+    expect(mentions.has("message-0")).toBe(false);
+    expect(mentions.has(`message-${String(MAX_RECENT_MESSAGE_MENTIONS)}`)).toBe(true);
   });
 });
 
