@@ -45,6 +45,7 @@ export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
 export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
+export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()

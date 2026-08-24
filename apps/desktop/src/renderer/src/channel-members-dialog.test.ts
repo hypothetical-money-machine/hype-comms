@@ -175,6 +175,7 @@ describe("ChannelMembersDialog", () => {
         source: "workspace",
         currentUserId: OWNER_ID,
         workspaceMembers: [owner, agent, bot],
+        presenceByUser: { [AGENT_ID]: "online" },
         triggerRef: unusedTrigger,
         onClose: vi.fn(),
         onMessage,
@@ -184,6 +185,7 @@ describe("ChannelMembersDialog", () => {
     expect(screen.getByRole("heading", { name: "People" })).toBeTruthy();
     expect(screen.getByText("Owner (you)")).toBeTruthy();
     expect(screen.getByText("Hermes Agent")).toBeTruthy();
+    expect(screen.getByLabelText("Presence: online")).toBeTruthy();
     expect(screen.getByText("Release Bot")).toBeTruthy();
     expect(screen.queryByText("Loading members…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();

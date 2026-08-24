@@ -334,6 +334,7 @@ interface TicketRow extends QueryResultRow {
   participated_thread_notifications: boolean;
   message_retract_events: boolean;
   member_profiles: boolean;
+  ephemeral_activity: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -406,6 +407,7 @@ export interface WorkspacePrincipal {
   readonly participatedThreadNotifications?: boolean;
   readonly messageRetractEvents?: boolean;
   readonly memberProfiles?: boolean;
+  readonly ephemeralActivity?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -983,6 +985,33 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
+   * workspace-membership join makes each best-effort authorization reflect revocation immediately
+   * instead of waiting for the socket heartbeat to close the connection.
+   */
+  async canViewConversation(
+    workspaceId: string,
+    userId: string,
+    conversationId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM conversations AS conversation
+           JOIN workspace_memberships AS active_membership
+             ON active_membership.workspace_id = conversation.workspace_id
+            AND active_membership.user_id = $2
+            AND active_membership.status = 'active'
+          WHERE conversation.id = $3
+            AND conversation.workspace_id = $1
+            AND ${conversationVisibilitySql("conversation", "$2")}
+       ) AS visible`,
+      [workspaceId, userId, conversationId],
+    );
+    return result.rows[0]?.visible ?? false;
   }
 
   /**
@@ -3419,6 +3448,7 @@ export class WorkspaceRepository {
     participatedThreadNotifications = false,
     messageRetractEvents = false,
     memberProfiles = false,
+    ephemeralActivity = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -3432,8 +3462,9 @@ export class WorkspaceRepository {
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications, message_retract_events, member_profiles)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          participated_thread_notifications, message_retract_events, member_profiles,
+          ephemeral_activity)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -3449,6 +3480,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications,
         messageRetractEvents,
         memberProfiles,
+        ephemeralActivity,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -3476,7 +3508,8 @@ export class WorkspaceRepository {
                    ticket.announcement_channels,
                    ticket.participated_thread_notifications,
                    ticket.message_retract_events,
-                   ticket.member_profiles
+                   ticket.member_profiles,
+                   ticket.ephemeral_activity
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -3488,7 +3521,8 @@ export class WorkspaceRepository {
               ticket.announcement_channels,
               ticket.participated_thread_notifications,
               ticket.message_retract_events,
-              ticket.member_profiles
+              ticket.member_profiles,
+              ticket.ephemeral_activity
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -3542,6 +3576,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
+        ephemeralActivity: row.ephemeral_activity,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -3557,6 +3592,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
+        ephemeralActivity: row.ephemeral_activity,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");

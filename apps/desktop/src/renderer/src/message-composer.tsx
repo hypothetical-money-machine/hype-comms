@@ -59,6 +59,7 @@ export function MessageComposer({
   placeholder,
   submitLabel = "Send",
   variantClassName,
+  typingText = "",
   onDraftChange,
   onAttach,
   onRemoveAttachment,
@@ -79,6 +80,7 @@ export function MessageComposer({
   readonly placeholder?: string;
   readonly submitLabel?: string;
   readonly variantClassName?: string;
+  readonly typingText?: string;
   readonly onDraftChange: (value: string) => void;
   readonly onAttach?: () => Promise<void>;
   readonly onRemoveAttachment?: (attachmentId: string) => void;
@@ -249,6 +251,13 @@ export function MessageComposer({
       onSubmit={submit}
       aria-busy={isSubmitting || isAttaching}
     >
+      <p
+        className={typingText === "" ? "typing-indicator idle" : "typing-indicator active"}
+        aria-live="polite"
+        aria-hidden={typingText === "" ? true : undefined}
+      >
+        {typingText === "" ? "\u00a0" : typingText}
+      </p>
       {pendingAttachments.length > 0 && (
         <ul className="composer-attachments" aria-label="Attached files">
           {pendingAttachments.map((attachment) => (

@@ -1,6 +1,7 @@
 import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
+  PresenceState,
   User,
 } from "@hype-comms/contracts";
 import {
@@ -15,11 +16,13 @@ import {
 import { createPortal } from "react-dom";
 
 import { Avatar } from "./avatar";
+import { PresenceIndicator } from "./activity-indicators";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface PeopleDirectorySharedProps {
   readonly currentUserId: string;
   readonly workspaceMembers: readonly User[];
+  readonly presenceByUser?: Readonly<Record<string, PresenceState>>;
   readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onClose: () => void;
   readonly onMessage: (memberId: string) => void;
@@ -73,8 +76,16 @@ function canMessage(user: User): boolean {
 }
 
 export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
-  const { currentUserId, workspaceMembers, triggerRef, onClose, onMessage, source, onOpenChange } =
-    props;
+  const {
+    currentUserId,
+    workspaceMembers,
+    presenceByUser = {},
+    triggerRef,
+    onClose,
+    onMessage,
+    source,
+    onOpenChange,
+  } = props;
   const dialogRef = useRef<HTMLElement>(null);
   const [details, setDetails] = useState<ChannelMembersResponse | null>(null);
   const [selectedUserId, setSelectedUserId] = useState("");
@@ -254,7 +265,10 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
               const kind = kindLabel(entry.user.kind);
               return (
                 <li key={entry.user.id}>
-                  <Avatar user={entry.user} />
+                  <span className="member-avatar-presence">
+                    <Avatar user={entry.user} />
+                    <PresenceIndicator state={presenceByUser[entry.user.id] ?? "offline"} />
+                  </span>
                   <div className="channel-member-identity">
                     <strong>
                       {entry.user.displayName}
