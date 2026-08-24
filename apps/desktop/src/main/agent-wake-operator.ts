@@ -234,8 +234,9 @@ export async function applyAgentWakeOperatorRequest(options: {
       };
     }
 
+    let actionStatus: AgentWakeBrokerStatus | undefined;
     if (request.action === "provider-retry") {
-      await broker.resolveProviderRepair({
+      actionStatus = await broker.resolveProviderRepair({
         enrollmentId,
         action: "retry",
         actionId: request.requestId,
@@ -249,7 +250,7 @@ export async function applyAgentWakeOperatorRequest(options: {
       request.action === "confirm-duplicate" ||
       request.action === "confirm-coalesced"
     ) {
-      await broker.resolveProviderRepair({
+      actionStatus = await broker.resolveProviderRepair({
         enrollmentId,
         action: request.action,
         actionId: request.requestId,
@@ -260,7 +261,7 @@ export async function applyAgentWakeOperatorRequest(options: {
         providerReceiptId: request.providerReceiptId,
       });
     } else if (request.action === "source-reset-from-now") {
-      await broker.resetSourceFromNow({
+      actionStatus = await broker.resetSourceFromNow({
         enrollmentId,
         actionId: request.requestId,
         evidenceReference: request.evidenceReference,
@@ -268,6 +269,16 @@ export async function applyAgentWakeOperatorRequest(options: {
         expectedRepairOccurredAt: request.expectedRepairOccurredAt,
         expectedWakeId: request.expectedWakeId,
       });
+    }
+
+    if (actionStatus !== undefined && actionStatus.repair !== null) {
+      return {
+        ...responseBase(request),
+        ok: true,
+        errorCode: null,
+        status: actionStatus,
+        evidence: await broker.evidence(enrollmentId),
+      };
     }
 
     const status = await broker.resume({

@@ -22,6 +22,8 @@ import { agentWakeBackoffDelay, agentWakePositiveInteger } from "./agent-wake-va
 
 const DEFAULT_STARTUP_RETRY_BASE_MS = 1_000;
 const DEFAULT_STARTUP_RETRY_MAX_MS = 30_000;
+const DEFAULT_STARTUP_RETRY_LIMIT = 10;
+const MAX_STARTUP_RETRY_LIMIT = 100;
 
 const systemClock: AgentWakeClock = { now: Date.now };
 const systemScheduler: AgentWakeScheduler = {
@@ -47,6 +49,8 @@ export interface AgentWakeRuntimeOptions {
   readonly startupSignal?: AbortSignal;
   readonly startupRetryBaseMs?: number;
   readonly startupRetryMaxMs?: number;
+  /** Maximum scheduled retries after the initial startup attempt. */
+  readonly startupRetryLimit?: number;
   readonly onStartupRetry?: (notice: AgentWakeStartupRetryNotice) => void;
 }
 
@@ -67,7 +71,10 @@ export interface AgentWakeRuntimeSession {
 export class AgentWakeRuntimeError extends Error {
   constructor(
     readonly code:
-      "executable-integrity-invalid" | "persisted-enrollment-conflict" | "startup-disposed",
+      | "executable-integrity-invalid"
+      | "persisted-enrollment-conflict"
+      | "startup-disposed"
+      | "startup-retry-exhausted",
   ) {
     super(`Agent wake runtime failed: ${code}`);
     this.name = "AgentWakeRuntimeError";
@@ -211,6 +218,11 @@ export async function startAgentWakeRuntime(
     options.startupRetryMaxMs,
     DEFAULT_STARTUP_RETRY_MAX_MS,
   );
+  const retryLimit = agentWakePositiveInteger(
+    options.startupRetryLimit,
+    DEFAULT_STARTUP_RETRY_LIMIT,
+    MAX_STARTUP_RETRY_LIMIT,
+  );
   let retryAttempt = 0;
 
   while (true) {
@@ -256,6 +268,9 @@ export async function startAgentWakeRuntime(
       if (startupWasDisposed(options.startupSignal)) throw startupDisposed();
       const code = startupRetryCode(error);
       if (code === null) throw error;
+      if (retryAttempt >= retryLimit) {
+        throw new AgentWakeRuntimeError("startup-retry-exhausted");
+      }
       retryAttempt += 1;
       const delayMs = agentWakeBackoffDelay(retryBaseMs, retryMaxMs, retryAttempt);
       try {

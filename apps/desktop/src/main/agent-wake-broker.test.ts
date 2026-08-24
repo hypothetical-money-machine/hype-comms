@@ -74,16 +74,28 @@ function clone<T>(value: T): T {
 class MemoryWakeStore implements AgentWakeInboxStore {
   readonly states = new Map<string, StoredAgentWakeEnrollment>();
   readonly commits: StoredAgentWakeEnrollment[] = [];
+  readCount = 0;
   failTransactions = 0;
   failAfterCommitTransactions = 0;
   delayPausedTransactionResult = false;
   onCommit: ((state: StoredAgentWakeEnrollment) => void) | null = null;
   #nextReadBarrier: Promise<void> | null = null;
   #nextReadStarted: (() => void) | null = null;
+  #numberedReadBarrier: { readonly call: number; readonly barrier: Promise<void> } | null = null;
+  #numberedReadStarted: (() => void) | null = null;
   #resumePausedTransaction: (() => void) | null = null;
   #tail: Promise<void> = Promise.resolve();
 
   async read(enrollmentId: string): Promise<StoredAgentWakeEnrollment | null> {
+    this.readCount += 1;
+    const numberedBarrier = this.#numberedReadBarrier;
+    if (numberedBarrier?.call === this.readCount) {
+      this.#numberedReadBarrier = null;
+      const started = this.#numberedReadStarted;
+      this.#numberedReadStarted = null;
+      started?.();
+      await numberedBarrier.barrier;
+    }
     const barrier = this.#nextReadBarrier;
     if (barrier !== null) {
       this.#nextReadBarrier = null;
@@ -154,6 +166,16 @@ class MemoryWakeStore implements AgentWakeInboxStore {
     this.#nextReadBarrier = barrier;
     return new Promise<void>((resolve) => {
       this.#nextReadStarted = resolve;
+    });
+  }
+
+  pauseReadCallUntil(call: number, barrier: Promise<void>): Promise<void> {
+    if (this.#numberedReadBarrier !== null || call <= this.readCount) {
+      throw new Error("A numbered read is already paused or has passed");
+    }
+    this.#numberedReadBarrier = { call, barrier };
+    return new Promise<void>((resolve) => {
+      this.#numberedReadStarted = resolve;
     });
   }
 }
@@ -260,6 +282,20 @@ class ManualSource implements AgentWakeSource {
     const session = new ManualSourceSession();
     this.sessions.push(session);
     return session;
+  }
+}
+
+class PendingOpenSource extends ManualSource {
+  readonly opening = deferred<AgentWakeSourceSession>();
+  openSignal: AbortSignal | undefined;
+
+  override async open(
+    input: AgentWakeSourceAccess & { readonly after: string },
+    signal?: AbortSignal,
+  ): Promise<AgentWakeSourceSession> {
+    this.opens.push(clone(input));
+    this.openSignal = signal;
+    return this.opening.promise;
   }
 }
 
@@ -676,6 +712,33 @@ describe("AgentWakeBroker enrollment and source commit boundary", () => {
     expect(session.acknowledgements).toEqual([]);
     expect(harness.scheduler.pending).toEqual([]);
     expect(harness.targetCalls).toEqual([]);
+  });
+
+  it("retires instead of restarting the source task for a non-runnable durable state", async () => {
+    const harness = createHarness();
+    const session = await start(harness);
+    const releaseSecondRead = deferred<void>();
+    const secondReadStarted = harness.store.pauseReadCallUntil(
+      harness.store.readCount + 2,
+      releaseSecondRead.promise,
+    );
+    harness.store.failAfterCommitTransactions = 1;
+
+    session.emit({ ...checkpoint("11"), body: "must never cross" });
+    await eventually(() =>
+      expect(harness.store.states.get(ENROLLMENT_ID)?.repair?.code).toBe("source-record-invalid"),
+    );
+
+    try {
+      const reranSourceTwice = await Promise.race([
+        secondReadStarted.then(() => true),
+        new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+      ]);
+      expect(reranSourceTwice).toBe(false);
+    } finally {
+      releaseSecondRead.resolve();
+      await harness.broker.dispose().catch(() => undefined);
+    }
   });
 
   it("rejects a valid-looking but non-deterministic wake ID before enqueue", async () => {
@@ -1696,6 +1759,66 @@ describe("AgentWakeBroker lifecycle and data minimization", () => {
         provider: { adapterId: "agent-runtime-test", targetHandle: TARGET_HANDLE },
       }),
     ).rejects.toEqual(new AgentWakeBrokerError("broker-disposed"));
+  });
+
+  it("aborts and joins a source task while opening its CLI session", async () => {
+    const source = new PendingOpenSource();
+    const harness = createHarness({ source });
+    await enroll(harness);
+    await harness.broker.start(ENROLLMENT_ID);
+    await eventually(() => expect(source.opens).toHaveLength(1));
+
+    let disposeSettled = false;
+    const disposing = harness.broker.dispose();
+    void disposing.then(
+      () => (disposeSettled = true),
+      () => (disposeSettled = true),
+    );
+    const session = new ManualSourceSession();
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(source.openSignal?.aborted).toBe(true);
+      expect(disposeSettled).toBe(false);
+    } finally {
+      source.opening.resolve(session);
+      await disposing.catch(() => undefined);
+      await eventually(() => expect(session.stopped).toBe(true));
+    }
+  });
+
+  it("waits for every enrollment teardown before surfacing a durable stop failure", async () => {
+    const harness = createHarness();
+    await start(harness);
+    const secondEnrollmentId = "grok-bot-pilot-secondary";
+    await harness.broker.enrollNow({
+      enrollmentId: secondEnrollmentId,
+      expectedAgentUserId: AGENT_ID,
+      credentialHandle: CREDENTIAL_HANDLE,
+      provider: { adapterId: "agent-runtime-test", targetHandle: TARGET_HANDLE },
+    });
+    await harness.broker.start(secondEnrollmentId);
+    await eventually(() => expect(harness.source.sessions).toHaveLength(2));
+
+    const releaseSecondStop = deferred<void>();
+    harness.source.sessions[1]!.stopBarrier = releaseSecondStop.promise;
+    harness.store.failTransactions = 1;
+    let disposeSettled = false;
+    const disposing = harness.broker.dispose();
+    void disposing.then(
+      () => (disposeSettled = true),
+      () => (disposeSettled = true),
+    );
+    try {
+      await eventually(() => expect(harness.source.sessions[1]?.stopped).toBe(true));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(disposeSettled).toBe(false);
+    } finally {
+      releaseSecondStop.resolve();
+      await expect(disposing).rejects.toMatchObject({ code: "durable-store-failed" });
+      await eventually(() =>
+        expect(harness.store.states.get(secondEnrollmentId)?.runState).toBe("stopped"),
+      );
+    }
   });
 
   it("dispose retires source and provider children when its durable stop commit fails", async () => {

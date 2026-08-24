@@ -598,11 +598,12 @@ export class AgentWakeCliSourceAdapter implements AgentWakeEnrollmentAuthority, 
 
   async open(
     input: AgentWakeSourceAccess & { readonly after: string },
+    signal?: AbortSignal,
   ): Promise<AgentWakeSourceSession> {
     if (!sequenceSchema.safeParse(input.after).success) {
       throw sourceFailure("source-record-invalid", false);
     }
-    return this.#openSession(input, input.after);
+    return this.#openSession(input, input.after, signal);
   }
 
   async #binding(credentialHandle: string): Promise<NormalizedAgentWakeCliBinding> {

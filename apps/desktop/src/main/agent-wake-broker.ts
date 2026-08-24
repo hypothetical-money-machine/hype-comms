@@ -94,7 +94,10 @@ export interface AgentWakeSourceSession {
 export interface AgentWakeSource {
   /** Captures the future-only enrollment boundary before any subscription is opened. */
   captureHighWater(access: AgentWakeSourceAccess, signal?: AbortSignal): Promise<string>;
-  open(input: AgentWakeSourceAccess & { readonly after: string }): Promise<AgentWakeSourceSession>;
+  open(
+    input: AgentWakeSourceAccess & { readonly after: string },
+    signal?: AbortSignal,
+  ): Promise<AgentWakeSourceSession>;
 }
 
 export interface AgentWakeClock {
@@ -322,6 +325,7 @@ interface Runtime {
   sourceReady: boolean;
   deliveryBusy: boolean;
   deliveryKickPending: boolean;
+  sourceTask: Promise<void> | null;
   deliveryTask: Promise<void> | null;
   sourceSession: AgentWakeSourceSession | null;
   sourceAbort: AbortController | null;
@@ -631,6 +635,7 @@ export class AgentWakeBroker {
         sourceReady: false,
         deliveryBusy: false,
         deliveryKickPending: false,
+        sourceTask: null,
         deliveryTask: null,
         sourceSession: null,
         sourceAbort: null,
@@ -968,9 +973,13 @@ export class AgentWakeBroker {
     if (this.#disposed) return;
     this.#disposed = true;
     const enrollmentIds = [...this.#runtimes.keys()];
-    await Promise.all(
+    const results = await Promise.allSettled(
       enrollmentIds.map((id) => this.#withControl(id, () => this.#stopInternal(id))),
     );
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed !== undefined) throw failed.reason;
   }
 
   #assertActive(): void {
@@ -1028,9 +1037,10 @@ export class AgentWakeBroker {
   async #stopInternal(enrollmentId: string): Promise<AgentWakeBrokerStatus> {
     const runtime = this.#runtimes.get(enrollmentId);
     if (runtime !== undefined) {
+      const sourceTask = runtime.sourceTask;
       const deliveryTask = runtime.deliveryTask;
       await this.#retireRuntime(runtime);
-      await deliveryTask;
+      await Promise.all([sourceTask, deliveryTask]);
     }
     const state = await this.#transactRequired(enrollmentId, (current) => {
       const delivering = current.queue.find((item) => item.phase === "delivering");
@@ -1076,7 +1086,16 @@ export class AgentWakeBroker {
     ) {
       return;
     }
-    void this.#runSource(runtime);
+    const task = this.#runSource(runtime);
+    runtime.sourceTask = task;
+    void task.then(
+      () => {
+        if (runtime.sourceTask === task) runtime.sourceTask = null;
+      },
+      () => {
+        if (runtime.sourceTask === task) runtime.sourceTask = null;
+      },
+    );
   }
 
   async #runSource(runtime: Runtime): Promise<void> {
@@ -1084,7 +1103,10 @@ export class AgentWakeBroker {
     runtime.sourceBusy = true;
     try {
       const initial = await this.#readRequired(runtime.enrollmentId);
-      if (!this.#isRunnable(runtime, initial)) return;
+      if (!this.#isRunnable(runtime, initial)) {
+        await this.#retireRuntime(runtime);
+        return;
+      }
       if (initial.sourceRetry !== null && initial.sourceRetry.nextAttemptAt > this.#clock.now()) {
         this.#scheduleSource(runtime, initial.sourceRetry.nextAttemptAt - this.#clock.now());
         return;
@@ -1093,29 +1115,33 @@ export class AgentWakeBroker {
       const sourceController = new AbortController();
       runtime.sourceAbort = sourceController;
       let verifiedIdentity: AgentWakeIdentity;
+      let session: AgentWakeSourceSession;
       try {
         verifiedIdentity = await this.#authority.verify({
           credentialHandle: initial.credentialHandle,
           expectedAgentUserId: initial.identity.agentUserId,
           signal: sourceController.signal,
         });
+        if (!this.#isCurrent(runtime) || runtime.sourceQuiescing) return;
+        if (
+          verifiedIdentity.apiOrigin !== initial.identity.apiOrigin ||
+          verifiedIdentity.workspaceId !== initial.identity.workspaceId ||
+          verifiedIdentity.agentUserId !== initial.identity.agentUserId
+        ) {
+          throw new AgentWakeSourceFailure("source-scope-invalid", false);
+        }
+
+        session = await this.#source.open(
+          {
+            ...initial.identity,
+            credentialHandle: initial.credentialHandle,
+            after: initial.cursor,
+          },
+          sourceController.signal,
+        );
       } finally {
         if (runtime.sourceAbort === sourceController) runtime.sourceAbort = null;
       }
-      if (!this.#isCurrent(runtime) || runtime.sourceQuiescing) return;
-      if (
-        verifiedIdentity.apiOrigin !== initial.identity.apiOrigin ||
-        verifiedIdentity.workspaceId !== initial.identity.workspaceId ||
-        verifiedIdentity.agentUserId !== initial.identity.agentUserId
-      ) {
-        throw new AgentWakeSourceFailure("source-scope-invalid", false);
-      }
-
-      const session = await this.#source.open({
-        ...initial.identity,
-        credentialHandle: initial.credentialHandle,
-        after: initial.cursor,
-      });
       if (!this.#isCurrent(runtime) || runtime.sourceQuiescing) {
         await this.#stopSession(runtime.enrollmentId, session);
         return;
@@ -1291,6 +1317,10 @@ export class AgentWakeBroker {
         },
       };
     });
+    if (!this.#isRunnable(runtime, state)) {
+      await this.#retireRuntime(runtime);
+      return;
+    }
     if (state.sourceRetry !== null) {
       this.#notice(runtime.enrollmentId, code, null);
       this.#scheduleSource(runtime, state.sourceRetry.nextAttemptAt - this.#clock.now());

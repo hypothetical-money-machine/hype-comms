@@ -285,6 +285,46 @@ describe("agent wake runtime", () => {
     await runtime.dispose();
   });
 
+  it("enters a terminal startup state after the configured retry limit", async () => {
+    const userDataPath = await temporaryDirectory();
+    const adapter = new FakeAuthorityAndSource();
+    const scheduler = new ManualStartupScheduler();
+    const controller = new AbortController();
+    adapter.verify.mockRejectedValue(new AgentWakeSourceFailure("source-unavailable", true));
+
+    const starting = startAgentWakeRuntime({
+      configuration: configuration(),
+      userDataPath,
+      authorityAndSource: adapter,
+      target: unusedTarget,
+      scheduler,
+      startupSignal: controller.signal,
+      startupRetryLimit: 2,
+    });
+    const outcome = starting.then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    try {
+      await vi.waitFor(() => expect(scheduler.pending).toHaveLength(1));
+      scheduler.runNext();
+      await vi.waitFor(() => expect(scheduler.pending).toHaveLength(1));
+      scheduler.runNext();
+      await vi.waitFor(() => expect(adapter.verify).toHaveBeenCalledTimes(3));
+
+      const terminal = await Promise.race([
+        outcome,
+        new Promise<null>((resolve) => setImmediate(() => resolve(null))),
+      ]);
+      expect(terminal).toEqual(new AgentWakeRuntimeError("startup-retry-exhausted"));
+      expect(scheduler.pending).toEqual([]);
+    } finally {
+      controller.abort();
+      await starting.catch(() => undefined);
+    }
+  });
+
   it("retries transient startup store reads and commits before establishing enrollment", async () => {
     const userDataPath = await temporaryDirectory();
     const durableStore = new AgentWakeFileStore({ userDataPath });

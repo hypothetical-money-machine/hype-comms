@@ -5,7 +5,11 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentWakeBrokerEvidence, AgentWakeBrokerStatus } from "./agent-wake-broker";
+import {
+  AgentWakeBrokerError,
+  type AgentWakeBrokerEvidence,
+  type AgentWakeBrokerStatus,
+} from "./agent-wake-broker";
 import {
   AgentWakeOperatorError,
   applyAgentWakeOperatorRequest,
@@ -169,6 +173,48 @@ describe("agent wake operator request", () => {
       evidenceReference: "runtime-activity-42",
     });
     expect(response).toMatchObject({ ok: true, evidence: { type: "agent.wake.broker_evidence" } });
+  });
+
+  it("reports a provider retry as successful when it promotes a deferred source repair", async () => {
+    const fake = broker();
+    const sourceRepairStatus: AgentWakeBrokerStatus = {
+      ...status(),
+      phase: "blocked-repair",
+      queueDepth: 1,
+      activeWakeId: WAKE_ID,
+      repair: {
+        code: "source-cursor-expired",
+        wakeId: null,
+        occurredAt: REPAIR_OCCURRED_AT + 1,
+        deferredSourceRepair: null,
+      },
+    };
+    fake.resolveProviderRepair.mockResolvedValueOnce(sourceRepairStatus);
+    fake.resume.mockRejectedValueOnce(new AgentWakeBrokerError("repair-action-invalid"));
+
+    const response = await applyAgentWakeOperatorRequest({
+      broker: fake,
+      enrollmentId: ENROLLMENT_ID,
+      request: {
+        version: 1,
+        requestId: REQUEST_ID,
+        action: "provider-retry",
+        evidenceReference: "provider-proved-not-accepted",
+        expectedRepairCode: "provider-outcome-ambiguous",
+        expectedRepairOccurredAt: REPAIR_OCCURRED_AT,
+        expectedWakeId: WAKE_ID,
+      },
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      errorCode: null,
+      status: {
+        phase: "blocked-repair",
+        repair: { code: "source-cursor-expired" },
+      },
+    });
+    expect(fake.resume).not.toHaveBeenCalled();
   });
 
   it("writes a private, body-free response atomically", async () => {
