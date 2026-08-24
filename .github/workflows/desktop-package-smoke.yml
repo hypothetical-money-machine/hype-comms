@@ -179,6 +179,7 @@ jobs:
         if: matrix.platform == 'Linux'
         env:
           HYPE_COMMS_BUILD_FLAVOR: production
+          HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
         shell: sh
         run: npm run package:desktop:linux
 
@@ -186,6 +187,7 @@ jobs:
         if: matrix.platform == 'Linux'
         env:
           HYPE_COMMS_BUILD_FLAVOR: production
+          HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
         shell: sh
         run: npm run verify:desktop-package
 
@@ -199,6 +201,7 @@ jobs:
     timeout-minutes: 60
     env:
       HYPE_COMMS_BUILD_FLAVOR: production
+      HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"
       HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: ${{ inputs.native_notification_evidence && '1' || '0' }}
       HYPE_COMMS_AGENT_WAKE_ENABLED: ${{ inputs.agent_wake_package_evidence && '1' || '0' }}

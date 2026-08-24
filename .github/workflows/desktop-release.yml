@@ -17,6 +17,7 @@ permissions:
 
 env:
   HYPE_COMMS_BUILD_FLAVOR: production
+  HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
 
 jobs:
   validate:
