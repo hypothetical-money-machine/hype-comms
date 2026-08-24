@@ -141,10 +141,16 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         const frame = pendingActivity;
         pendingActivity = null;
         activityProcessing = true;
-        void handleActivity(frame).finally(() => {
-          activityProcessing = false;
-          drainActivity();
-        });
+        void handleActivity(frame)
+          .catch((error: unknown) => {
+            // A failed authorization read drops one lossy hint; it must not become an unhandled
+            // rejection that terminates the process.
+            request.log.warn({ err: error }, "Dropped an ephemeral activity frame");
+          })
+          .finally(() => {
+            activityProcessing = false;
+            drainActivity();
+          });
       };
 
       const sendConnected = (): void => {

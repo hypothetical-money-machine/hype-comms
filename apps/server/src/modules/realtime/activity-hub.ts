@@ -317,10 +317,15 @@ export class EphemeralActivityHub {
       devices.push(connection);
       recipients.set(connection.principal.userId, devices);
     }
+    // A failed authorization read fails closed for that recipient only. Broadcasts run from the
+    // maintenance timer and disconnect paths that cannot surface a rejection, so this method must
+    // never reject.
     const decisions = await Promise.all(
       [...recipients].map(async ([recipientUserId, devices]) => ({
         devices,
-        visible: await this.canViewConversation(workspaceId, recipientUserId, conversationId),
+        visible: await this.canViewConversation(workspaceId, recipientUserId, conversationId).catch(
+          () => false,
+        ),
       })),
     );
     const frame = {

@@ -109,6 +109,23 @@ describe("EphemeralActivityHub", () => {
     hub.close();
   });
 
+  it("fails closed for a recipient whose authorization read fails instead of rejecting", async () => {
+    const hub = new EphemeralActivityHub(async (_workspace, userId) => {
+      if (userId === danId) throw new Error("database unavailable");
+      return true;
+    });
+    const alex = connection("alex", human(alexId, "alex"));
+    const dan = connection("dan", human(danId, "dan"));
+    hub.register(alex.value);
+    hub.register(dan.value);
+
+    await expect(hub.setTyping("alex", conversationId, true)).resolves.toBeUndefined();
+
+    expect(typing(dan.frames, alexId)).toEqual([]);
+    expect(typing(alex.frames, alexId).at(-1)).toMatchObject({ conversationId, typing: true });
+    hub.close();
+  });
+
   it("does not register or send unknown frames to a client without the capability", async () => {
     const hub = new EphemeralActivityHub(async () => true);
     const legacy = connection("legacy", human(danId, "legacy", false));
