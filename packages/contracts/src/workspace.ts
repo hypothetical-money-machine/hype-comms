@@ -46,6 +46,7 @@ export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread
 export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
 export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
+export const GROUP_DIRECT_MESSAGES_CAPABILITY = "group-direct-messages-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -65,6 +66,52 @@ export const clientCapabilitiesHeaderSchema = z
 export const CONVERSATION_PAGE_DEFAULT_LIMIT = 50;
 export const CONVERSATION_PAGE_MAX_LIMIT = 100;
 
+function validateConversationParticipants(
+  conversation: z.infer<typeof conversationSchema>,
+  participantIds: readonly string[],
+  context: z.RefinementCtx,
+  path: readonly (string | number)[],
+): void {
+  if (new Set(participantIds).size !== participantIds.length) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "Conversation participant IDs must be unique",
+    });
+  }
+  if (
+    conversation.kind === "direct_message" &&
+    (participantIds.length < 1 || participantIds.length > 2)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A direct conversation must contain one or two participants",
+    });
+  }
+  if (
+    conversation.kind === "group_direct_message" &&
+    (participantIds.length < 3 || participantIds.length > 25)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A group conversation must contain between three and 25 participants",
+    });
+  }
+  if (
+    conversation.kind === "group_direct_message" &&
+    conversation.createdBy !== null &&
+    !participantIds.includes(conversation.createdBy)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "A group conversation creator must be one of its participants",
+    });
+  }
+}
+
 export const conversationSummarySchema = z
   .object({
     conversation: conversationSchema,
@@ -77,7 +124,19 @@ export const conversationSummarySchema = z
     mentionCount: z.number().int().nonnegative(),
     readCursor: readCursorSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((summary, context) => {
+    validateConversationParticipants(summary.conversation, summary.participantIds, context, [
+      "participantIds",
+    ]);
+    if (summary.conversation.kind === "group_direct_message" && summary.membershipRole === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["membershipRole"],
+        message: "A visible group conversation must include the current member's role",
+      });
+    }
+  });
 
 export const workspaceBootstrapResponseSchema = z
   .object({
@@ -195,6 +254,34 @@ export const listConversationsResponseSchema = z
   })
   .strict();
 
+export const publicChannelDirectoryEntrySchema = z
+  .object({
+    conversation: conversationSchema,
+    joined: z.boolean(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.conversation.kind !== "channel" ||
+      entry.conversation.access !== "workspace" ||
+      entry.conversation.isArchived
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["conversation"],
+        message: "A public channel directory entry must be an active workspace channel",
+      });
+    }
+  });
+
+export const listPublicChannelsResponseSchema = z
+  .object({
+    channels: z.array(publicChannelDirectoryEntrySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
+    nextCursor: paginationCursorSchema.nullable(),
+    hasMore: z.boolean(),
+  })
+  .strict();
+
 export const createChannelRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(100),
@@ -263,6 +350,22 @@ export const directConversationRequestSchema = z
   .object({
     memberId: entityIdSchema,
   })
+  .strict();
+
+export const groupDirectConversationRequestSchema = z
+  .object({
+    memberIds: z
+      .array(entityIdSchema)
+      .min(2)
+      .max(24)
+      .refine((ids) => new Set(ids).size === ids.length, "Group members must be unique"),
+  })
+  .strict();
+
+export const joinPublicChannelRequestSchema = z.undefined();
+
+export const groupDirectConversationOperationSchema = groupDirectConversationRequestSchema
+  .extend({ idempotencyKey: idempotencyKeySchema })
   .strict();
 
 export const conversationMutationResponseSchema = z
@@ -594,6 +697,10 @@ export const conversationUpdatedEventSchema = workspaceEventBaseSchema
   })
   .superRefine((event, context) => {
     const conversation = event.payload.conversation;
+    validateConversationParticipants(conversation, event.payload.participantIds, context, [
+      "payload",
+      "participantIds",
+    ]);
     if (conversation.id !== event.conversationId) {
       context.addIssue({
         code: "custom",
@@ -863,6 +970,8 @@ export type CommunicationPath = z.infer<typeof communicationPathSchema>;
 export type CommunicationPathsResponse = z.infer<typeof communicationPathsResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
+export type PublicChannelDirectoryEntry = z.infer<typeof publicChannelDirectoryEntrySchema>;
+export type ListPublicChannelsResponse = z.infer<typeof listPublicChannelsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
 export type CreateChannelOperation = z.infer<typeof createChannelOperationSchema>;
 export type ChannelMember = z.infer<typeof channelMemberSchema>;
@@ -875,6 +984,10 @@ export type ChannelMembershipMutationResponse = z.infer<
 >;
 export type ArchiveChannelRequest = z.infer<typeof archiveChannelRequestSchema>;
 export type DirectConversationRequest = z.infer<typeof directConversationRequestSchema>;
+export type GroupDirectConversationRequest = z.infer<typeof groupDirectConversationRequestSchema>;
+export type GroupDirectConversationOperation = z.infer<
+  typeof groupDirectConversationOperationSchema
+>;
 export type ConversationMutationResponse = z.infer<typeof conversationMutationResponseSchema>;
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
 export type MessageThreadRequest = z.infer<typeof messageThreadRequestSchema>;

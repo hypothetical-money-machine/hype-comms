@@ -130,6 +130,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
           }
           return principal;
         };
+  if (
+    options.identity !== undefined &&
+    options.workspace !== undefined &&
+    options.identity.service.defaultAgentAgencyEnabled
+  ) {
+    await options.workspace.repository.enableDefaultAgentAgency();
+  }
   await app.register(
     async (v1) => {
       await v1.register(realtimeRoutes, {
@@ -161,6 +168,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           cookieSecure: options.cookieSecure ?? true,
           selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
           agentProvisioningEnabled: options.identity.agentProvisioningEnabled ?? true,
+          defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
         await v1.register(authKitRoutes, {
           identityService: options.identity.service,
@@ -184,6 +192,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             ? {}
             : { botService: options.identity.botService }),
           repository: options.workspace.repository,
+          defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
       }
     },

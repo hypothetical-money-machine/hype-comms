@@ -401,6 +401,36 @@ describeWithPostgres("AgentEnrollmentModule", () => {
     ).toBe(1);
   });
 
+  it("reauthorizes an agent requester before replaying an idempotent response", async () => {
+    const inviter = await identityService.createAgent(ownerId, {
+      username: "replay-inviter",
+      displayName: "Replay Inviter",
+    });
+    const issued = await identityService.createAgentToken(ownerId, inviter.user.id, {
+      label: "Replay inviter agency",
+      scopes: [...DEFAULT_AGENCY_AGENT_SCOPES],
+    });
+    const authenticated = await identityService.authenticateAgentContext(issued.token);
+    if (authenticated === null) throw new Error("Replay inviter token did not authenticate");
+    const actor: AgentEnrollmentActor = {
+      userId: inviter.user.id,
+      workspaceId,
+      kind: "agent",
+      role: "member",
+      agentTokenId: authenticated.agentTokenId,
+      scopes: authenticated.currentUser.scopes,
+    };
+    const candidate = candidateInput("replay-child");
+    const first = await enrollment.request(actor, candidate.request, "replay-request");
+    expect(first.requestedBy).toBe(inviter.user.id);
+
+    await identityService.revokeAgentToken(ownerId, inviter.user.id, issued.agentToken.id);
+
+    await expect(
+      enrollment.request(actor, candidate.request, "replay-request"),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+  });
+
   it("rechecks username availability and workspace capacity at redemption", async () => {
     await enrollment.setPolicy(ownerActor(), "automatic");
     const collision = candidateInput("late-collision");
@@ -1175,6 +1205,88 @@ describeWithPostgres("AgentEnrollmentModule", () => {
     expect(count.rows[0]?.count).toBe(100);
   });
 
+  it("accepts no body when cancelling an enrollment and rejects a JSON body", async () => {
+    const app = await buildApp({
+      cookieSecure: false,
+      identity: {
+        service: identityService,
+        agentEnrollment: enrollment,
+        agentProvisioningEnabled: true,
+      },
+    });
+    apps.push(app);
+    const candidate = candidateInput("bodyless-cancel-child");
+    const requested = await app.inject({
+      method: "POST",
+      url: "/v1/agent-enrollments",
+      headers: {
+        cookie: `hype_comms_session=${ownerSessionToken}`,
+        "idempotency-key": "bodyless-cancel-request",
+      },
+      payload: candidate.request,
+    });
+    const enrollmentId = agentEnrollmentResponseSchema.parse(requested.json()).enrollment.id;
+
+    const withBody = await app.inject({
+      method: "POST",
+      url: `/v1/agent-enrollments/${enrollmentId}/cancel`,
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+      payload: { unexpected: true },
+    });
+    const withoutBody = await app.inject({
+      method: "POST",
+      url: `/v1/agent-enrollments/${enrollmentId}/cancel`,
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+    });
+
+    expect(withBody.statusCode).toBe(400);
+    expect(withoutBody.statusCode).toBe(200);
+  });
+
+  it("accepts no body when redeeming an enrollment and rejects a JSON body", async () => {
+    const app = await buildApp({
+      cookieSecure: false,
+      identity: {
+        service: identityService,
+        agentEnrollment: enrollment,
+        agentProvisioningEnabled: true,
+      },
+    });
+    apps.push(app);
+    const candidate = candidateInput("bodyless-redeem-child");
+    const requested = await app.inject({
+      method: "POST",
+      url: "/v1/agent-enrollments",
+      headers: {
+        cookie: `hype_comms_session=${ownerSessionToken}`,
+        "idempotency-key": "bodyless-redeem-request",
+      },
+      payload: candidate.request,
+    });
+    const enrollmentId = agentEnrollmentResponseSchema.parse(requested.json()).enrollment.id;
+    await app.inject({
+      method: "POST",
+      url: `/v1/agent-enrollments/${enrollmentId}/review`,
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+      payload: { decision: "approve" },
+    });
+
+    const withBody = await app.inject({
+      method: "POST",
+      url: `/v1/agent-enrollments/${enrollmentId}/redeem`,
+      headers: { authorization: `Enrollment ${candidate.token}` },
+      payload: { unexpected: true },
+    });
+    const withoutBody = await app.inject({
+      method: "POST",
+      url: `/v1/agent-enrollments/${enrollmentId}/redeem`,
+      headers: { authorization: `Enrollment ${candidate.token}` },
+    });
+
+    expect(withBody.statusCode).toBe(400);
+    expect(withoutBody.statusCode).toBe(200);
+  });
+
   it("exposes private redemption over Authorization and honors the rollback gate", async () => {
     const app = await buildApp({
       cookieSecure: false,
@@ -1361,6 +1473,27 @@ describeWithPostgres("AgentEnrollmentModule", () => {
       });
       expect(grandchildRequest.body).not.toContain(grandchild.token);
 
+      const publicChannels = await app.inject({
+        method: "GET",
+        url: "/v1/channels?limit=50",
+        headers: authorization,
+      });
+      expect(publicChannels.statusCode).toBe(200);
+      expect(publicChannels.json()).toMatchObject({
+        channels: [
+          expect.objectContaining({
+            conversation: expect.objectContaining({ id: generalId }),
+            joined: false,
+          }),
+        ],
+      });
+      const joinedGeneral = await app.inject({
+        method: "PUT",
+        url: `/v1/channels/${generalId}/membership`,
+        headers: authorization,
+      });
+      expect(joinedGeneral.statusCode).toBe(200);
+
       const bootstrap = await app.inject({
         method: "GET",
         url: "/v1/bootstrap",
@@ -1383,12 +1516,44 @@ describeWithPostgres("AgentEnrollmentModule", () => {
       ).not.toContain(restrictedId);
 
       const bytes = Buffer.from("headless evidence", "utf8");
+      const deniedUpload = await app.inject({
+        method: "POST",
+        url: "/v1/files/uploads",
+        headers: { ...authorization, "idempotency-key": randomUUID() },
+        payload: {
+          conversationId: generalId,
+          fileName: "agent-write-denied.txt",
+          contentType: "text/plain",
+          sizeBytes: bytes.byteLength,
+          contentSha256: createHash("sha256").update(bytes).digest("hex"),
+        },
+      });
+      expect(deniedUpload.statusCode).toBe(403);
       const { attachment, contentSha256 } = await uploadReadyFile(
-        authorization,
+        { cookie: `hype_comms_session=${ownerSessionToken}` },
         generalId,
         "evidence.txt",
         bytes,
       );
+      const ownerEvidenceMessageId = randomUUID();
+      const ownerEvidenceMessage = await app.inject({
+        method: "POST",
+        url: `/v1/conversations/${generalId}/messages`,
+        headers: {
+          cookie: `hype_comms_session=${ownerSessionToken}`,
+          "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+          "idempotency-key": ownerEvidenceMessageId,
+        },
+        payload: {
+          threadRootId: null,
+          body: "Headless evidence is ready",
+          bodyFormat: "hype_comms_markdown_v1",
+          clientMessageId: ownerEvidenceMessageId,
+          mentionedUserIds: [],
+          attachmentIds: [attachment.id],
+        },
+      });
+      expect(ownerEvidenceMessage.statusCode).toBe(201);
 
       const childMessageId = randomUUID();
       const childMessage = await app.inject({
@@ -1404,12 +1569,12 @@ describeWithPostgres("AgentEnrollmentModule", () => {
           bodyFormat: "hype_comms_markdown_v1",
           clientMessageId: childMessageId,
           mentionedUserIds: [ownerId],
-          attachmentIds: [attachment.id],
+          attachmentIds: [],
         },
       });
       expect(childMessage.statusCode).toBe(201);
       const sent = sendMessageResponseSchema.parse(childMessage.json());
-      expect(sent.attachments.map((file) => file.id)).toEqual([attachment.id]);
+      expect(sent.attachments).toEqual([]);
       expect(
         (
           await pool.query<{ mentioned_user_id: string }>(

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
 import type { ChannelMode } from "@hype-comms/contracts";
-import { DirectMessageIcon } from "./conversation-indicators";
+import { DirectMessageIcon, GroupDirectMessageIcon } from "./conversation-indicators";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 export interface SwitcherConversation {
@@ -163,7 +163,7 @@ export function ConversationSwitcher({
                   aria-label="Jump to a conversation"
                   value={query}
                   autoComplete="off"
-                  placeholder="Type a channel or person’s name"
+                  placeholder="Type a conversation name"
                   onChange={(event) => {
                     setQuery(event.target.value);
                     setSelectedIndex(0);
@@ -198,6 +198,8 @@ export function ConversationSwitcher({
                           >
                             {conversation.channelMode === "announcement" ? "📣" : "#"}
                           </span>
+                        ) : conversation.kind === "group_direct_message" ? (
+                          <GroupDirectMessageIcon className="quick-switcher-icon" />
                         ) : (
                           <DirectMessageIcon className="quick-switcher-icon" />
                         )}
@@ -211,7 +213,9 @@ export function ConversationSwitcher({
                               ? conversation.channelMode === "announcement"
                                 ? "Announcement channel"
                                 : "Channel"
-                              : "Direct message"}
+                              : conversation.kind === "group_direct_message"
+                                ? "Group conversation"
+                                : "Direct message"}
                         </small>
                         {conversation.id === selectedConversationId && (
                           <span className="quick-switcher-current">Current</span>

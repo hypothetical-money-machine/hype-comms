@@ -4,6 +4,7 @@ import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
   EPHEMERAL_ACTIVITY_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -48,9 +49,11 @@ const currentUser: CurrentUser = {
 };
 
 class FakeIdentityService {
+  readonly defaultAgentAgencyEnabled: boolean | undefined;
   readonly authenticateContext: ReturnType<typeof vi.fn>;
 
-  constructor(role: "owner" | "member" = "owner") {
+  constructor(role: "owner" | "member" = "owner", defaultAgentAgencyEnabled?: boolean) {
+    this.defaultAgentAgencyEnabled = defaultAgentAgencyEnabled;
     this.authenticateContext = vi.fn(async () => ({
       currentUser: { ...currentUser, role },
       sessionId,
@@ -96,6 +99,9 @@ class FakeBotService {
 }
 
 class FakeWorkspaceRepository {
+  readonly requireGroupDirectMessagesForConversations = vi.fn(async () => undefined);
+  readonly requireGroupDirectMessagesForMessages = vi.fn(async () => undefined);
+  readonly requireGroupDirectMessagesForAttachments = vi.fn(async () => undefined);
   readonly bootstrap = vi.fn(async () => ({
     currentUser,
     workspace: {
@@ -448,6 +454,50 @@ describe("event capability routes", () => {
     expect(capable.json().conversations[0].conversation.channelMode).toBe("announcement");
   });
 
+  it("fails closed if a repository violates the no-group projection contract", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const bootstrap = await repository.bootstrap();
+    const base = bootstrap.conversations[0]!;
+    repository.bootstrap.mockResolvedValue({
+      ...bootstrap,
+      conversations: [
+        {
+          ...base,
+          conversation: {
+            ...base.conversation,
+            kind: "group_direct_message",
+            name: null,
+            slug: null,
+            topic: null,
+            access: null,
+            channelMode: null,
+          },
+          participantIds: [userId, messageId, reactionId],
+          membershipRole: "owner",
+        },
+      ],
+    });
+    const app = await reactionApp(repository);
+    const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
+    const capableHeaders = {
+      ...legacyHeaders,
+      "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+    };
+
+    for (const url of ["/v1/bootstrap", "/v1/conversations?limit=50"]) {
+      const legacy = await app.inject({ method: "GET", url, headers: legacyHeaders });
+      const capable = await app.inject({ method: "GET", url, headers: capableHeaders });
+
+      expect(legacy.statusCode).toBe(409);
+      expect(capable.statusCode).toBe(200);
+      expect(legacy.json().error).toMatchObject({ code: "CONFLICT" });
+      expect(capable.json().conversations[0]).toMatchObject({
+        conversation: { kind: "group_direct_message" },
+        participantIds: [userId, messageId, reactionId],
+      });
+    }
+  });
+
   it("projects titles only to member-profile-capable clients on every user response surface", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
@@ -553,7 +603,7 @@ describe("event capability routes", () => {
       "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
         `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ` +
-        EPHEMERAL_ACTIVITY_CAPABILITY,
+        `${EPHEMERAL_ACTIVITY_CAPABILITY}, ${GROUP_DIRECT_MESSAGES_CAPABILITY}`,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -569,24 +619,31 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
-      true,
-      true,
-      true,
-      false,
-      true,
-      true,
-      false,
+      {
+        reactionEvents: true,
+        readStateEvents: true,
+        taskEvents: true,
+        announcementChannels: false,
+        participatedThreadNotifications: true,
+        messageRetractEvents: true,
+        memberProfiles: false,
+        ephemeralActivity: true,
+        groupDirectMessages: true,
+      },
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
-      true,
-      true,
-      true,
-      false,
-      true,
-      true,
-      false,
-      true,
+      {
+        reactionEvents: true,
+        readStateEvents: true,
+        taskEvents: true,
+        announcementChannels: false,
+        participatedThreadNotifications: true,
+        messageRetractEvents: true,
+        memberProfiles: false,
+        ephemeralActivity: true,
+        groupDirectMessages: true,
+      },
     );
   });
 
@@ -611,13 +668,17 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
+      {
+        reactionEvents: false,
+        readStateEvents: false,
+        taskEvents: false,
+        announcementChannels: false,
+        participatedThreadNotifications: false,
+        messageRetractEvents: false,
+        memberProfiles: false,
+        ephemeralActivity: false,
+        groupDirectMessages: false,
+      },
     );
     expect(malformed.statusCode).toBe(400);
     expect(repository.issueRealtimeTicket).not.toHaveBeenCalled();
@@ -1222,6 +1283,7 @@ describe("channel mutation routes", () => {
       messageId,
       false,
       "req-1",
+      true,
     );
     expect(malformed.statusCode).toBe(400);
     expect(repository.createChannel).toHaveBeenNthCalledWith(
@@ -1231,8 +1293,99 @@ describe("channel mutation routes", () => {
       undefined,
       false,
       "req-2",
+      true,
     );
     expect(repository.createChannel).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("default agent agency rollout gate", () => {
+  it("authenticates public-channel discovery before revealing the rollout state", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await buildApp({
+      identity: { service: new FakeIdentityService("owner", false).asService() },
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+
+    const anonymous = await app.inject({ method: "GET", url: "/v1/channels" });
+    const invalidCredential = await app.inject({
+      method: "GET",
+      url: "/v1/channels",
+      headers: { authorization: "Bearer invalid" },
+    });
+    const authenticated = await app.inject({
+      method: "GET",
+      url: "/v1/channels",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(anonymous.statusCode).toBe(401);
+    expect(invalidCredential.statusCode).toBe(401);
+    expect(authenticated.statusCode).toBe(503);
+  });
+
+  it("authenticates public-channel self-join before revealing the rollout state", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await buildApp({
+      identity: { service: new FakeIdentityService("owner", false).asService() },
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const url = `/v1/channels/${conversationId}/membership`;
+
+    const anonymous = await app.inject({ method: "PUT", url });
+    const invalidCredential = await app.inject({
+      method: "PUT",
+      url,
+      headers: { authorization: "Bearer invalid" },
+    });
+    const authenticated = await app.inject({
+      method: "PUT",
+      url,
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(anonymous.statusCode).toBe(401);
+    expect(invalidCredential.statusCode).toBe(401);
+    expect(authenticated.statusCode).toBe(503);
+  });
+
+  it("authenticates group-conversation creation before revealing the rollout state", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await buildApp({
+      identity: { service: new FakeIdentityService("owner", false).asService() },
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const request = {
+      method: "POST" as const,
+      url: "/v1/group-direct-conversations",
+      payload: { memberIds: [messageId, replyId] },
+    };
+
+    const anonymous = await app.inject(request);
+    const invalidCredential = await app.inject({
+      ...request,
+      headers: { authorization: "Bearer invalid" },
+    });
+    const authenticated = await app.inject({
+      ...request,
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(anonymous.statusCode).toBe(401);
+    expect(invalidCredential.statusCode).toBe(401);
+    expect(authenticated.statusCode).toBe(503);
   });
 });
 

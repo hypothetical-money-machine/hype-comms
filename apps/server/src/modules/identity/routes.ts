@@ -1,6 +1,8 @@
 import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   AGENT_ENROLLMENT_AUTHORIZATION_SCHEME,
   agentEnrollmentPolicyResponseSchema,
+  agentEnrollmentNoBodyRequestSchema,
   agentEnrollmentResponseSchema,
   agentTokenSecretSchema,
   authKitLogoutUrlHeaderName,
@@ -84,6 +86,8 @@ interface IdentityRoutesOptions {
    * parse. Production enables this only after that release is no longer a rollback target.
    */
   readonly agentProvisioningEnabled?: boolean;
+  /** Blocks every operation that could expose the new scope or conversation shapes to old nodes. */
+  readonly defaultAgentAgencyEnabled?: boolean;
 }
 
 function enrollmentActor(identity: AuthenticatedRequestIdentity): AgentEnrollmentActor {
@@ -93,7 +97,7 @@ function enrollmentActor(identity: AuthenticatedRequestIdentity): AgentEnrollmen
     kind: identity.credentialType === "agent" ? "agent" : "human",
     role: identity.currentUser.role,
     agentTokenId: identity.credentialType === "agent" ? identity.agentTokenId : null,
-    scopes: identity.credentialType === "agent" ? identity.currentUser.scopes : [],
+    scopes: identity.credentialType === "agent" ? identity.authorizationScopes : [],
   };
 }
 
@@ -113,7 +117,11 @@ function requiredEnrollmentIdempotencyKey(value: string | string[] | undefined):
 
 function includesRollbackUnsafeAgentScope(scopes: readonly AgentScope[]): boolean {
   return scopes.some(
-    (scope) => scope === "direct-conversations:write" || scope === "agents:invite",
+    (scope) =>
+      scope === "direct-conversations:write" ||
+      scope === "channels:join" ||
+      scope === "agents:invite" ||
+      scope === "attachments:write",
   );
 }
 
@@ -192,6 +200,16 @@ export function supportsMemberProfiles(value: string | string[] | undefined): bo
   const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
   return parsed.data.includes(MEMBER_PROFILES_CAPABILITY);
+}
+
+function supportsAgentEffectiveScopes(value: string | string[] | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  }
+  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  return parsed.data.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
 }
 
 function withoutTitle<T extends { readonly title?: unknown }>(user: T): Omit<T, "title"> {
@@ -305,6 +323,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     cookieSecure,
     selfServiceMagicLink = true,
     agentProvisioningEnabled = true,
+    defaultAgentAgencyEnabled = true,
   },
 ) => {
   const profileUpdateThrottle = new FixedWindowAttemptThrottle({
@@ -320,7 +339,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   };
 
   const requireEnrollmentIssuanceEnabled = (): void => {
-    if (!agentProvisioningEnabled) {
+    if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
       throw new ApiError(
         503,
         "SERVICE_UNAVAILABLE",
@@ -370,7 +389,12 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     return identity.credentialType === "session"
       ? desktopCurrentUserResponse(identity.currentUser, memberProfiles)
       : (() => {
-          const principal = currentPrincipalSchema.parse(identity.currentUser);
+          const principal = currentPrincipalSchema.parse({
+            ...identity.currentUser,
+            ...(supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"])
+              ? { effectiveScopes: identity.authorizationScopes }
+              : {}),
+          });
           return memberProfiles ? principal : { ...principal, user: withoutTitle(principal.user) };
         })();
   });
@@ -544,6 +568,9 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app.post("/agent-enrollments/:id/cancel", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, service);
     requireAgentScope(identity, "agents:invite");
+    if (!agentEnrollmentNoBodyRequestSchema.safeParse(request.body).success) {
+      throw new ApiError(400, "BAD_REQUEST", "Enrollment cancellation does not accept a body");
+    }
     const { id } = enrollmentParameters(request.params);
     return agentEnrollmentResponseSchema.parse({
       enrollment: await requireEnrollmentModule().cancel(enrollmentActor(identity), id),
@@ -554,6 +581,9 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     requireEnrollmentIssuanceEnabled();
     const { id } = enrollmentParameters(request.params);
     const credential = requiredEnrollmentCredential(request);
+    if (!agentEnrollmentNoBodyRequestSchema.safeParse(request.body).success) {
+      throw new ApiError(400, "BAD_REQUEST", "Enrollment redemption does not accept a body");
+    }
     void reply.header("cache-control", "no-store");
     return redeemAgentEnrollmentResponseSchema.parse(
       await requireEnrollmentModule().redeem(id, credential),
@@ -572,7 +602,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
 
   app.post("/agents", async (request, reply) => {
     const identity = await requireHumanIdentity(request, service);
-    if (!agentProvisioningEnabled) {
+    if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
       throw new ApiError(
         503,
         "SERVICE_UNAVAILABLE",
@@ -615,7 +645,11 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     );
     if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
     return listAgentTokensResponseSchema.parse({
-      tokens: await service.listAgentTokens(identity.currentUser.user.id, agentId.data),
+      tokens: await service.listAgentTokens(
+        identity.currentUser.user.id,
+        agentId.data,
+        supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
+      ),
     });
   });
 
@@ -629,6 +663,13 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
     const input = createAgentTokenRequestSchema.safeParse(request.body);
     if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent token");
+    if (!defaultAgentAgencyEnabled) {
+      throw new ApiError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Agent token creation is disabled during the server rollback window",
+      );
+    }
     if (!agentProvisioningEnabled && includesRollbackUnsafeAgentScope(input.data.scopes)) {
       requireEnrollmentIssuanceEnabled();
     }
@@ -636,7 +677,12 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
       .code(201)
       .send(
         createAgentTokenResponseSchema.parse(
-          await service.createAgentToken(identity.currentUser.user.id, agentId.data, input.data),
+          await service.createAgentToken(
+            identity.currentUser.user.id,
+            agentId.data,
+            input.data,
+            supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
+          ),
         ),
       );
   });

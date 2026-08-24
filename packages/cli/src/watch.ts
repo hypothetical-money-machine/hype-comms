@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   ATTACHMENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
@@ -45,6 +46,7 @@ const WATCH_CAPABILITIES = [
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
 ].join(",");
 
 class ResyncRequiredError extends CliError {
@@ -256,6 +258,7 @@ export async function watchCommand(
   const bootstrap = await client.request({
     path: "/v1/bootstrap",
     responseSchema: workspaceBootstrapResponseSchema,
+    headers: { "x-hype-comms-capabilities": WATCH_CAPABILITIES },
   });
   let cursor = afterOption ?? bootstrap.syncCursor;
   let stopped = false;

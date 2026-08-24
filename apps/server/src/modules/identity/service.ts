@@ -46,12 +46,14 @@ export type RefreshedSession = RedeemedSession;
 export interface AuthenticatedIdentity {
   readonly currentUser: CurrentPrincipal;
   readonly principalKind: "human" | "agent";
+  readonly authorizationScopes?: readonly AgentScope[];
   readonly sessionId?: EntityId;
   readonly agentTokenId?: EntityId;
 }
 
 export interface AuthenticatedAgentIdentity extends AuthenticatedIdentity {
   readonly currentUser: AgentCurrentPrincipal;
+  readonly authorizationScopes: readonly AgentScope[];
   readonly principalKind: "agent";
   readonly agentTokenId: EntityId;
   readonly sessionId?: never;
@@ -59,6 +61,7 @@ export interface AuthenticatedAgentIdentity extends AuthenticatedIdentity {
 
 export interface AuthenticatedHumanIdentity extends AuthenticatedIdentity {
   readonly currentUser: CurrentUser;
+  readonly authorizationScopes?: never;
   readonly sessionId: EntityId;
   readonly agentTokenId?: never;
   readonly principalKind: "human";
@@ -106,7 +109,9 @@ const AGENT_SCOPE_ORDER: readonly AgentScope[] = [
   "conversations:write",
   "read-cursors:write",
   "direct-conversations:write",
+  "channels:join",
   "agents:invite",
+  "attachments:write",
 ];
 
 function usernameBase(email: Email): string {
@@ -133,6 +138,7 @@ export class IdentityService {
   readonly #clock: () => Date;
   readonly #publicAppUrl: string;
   readonly #securityEvents: IdentitySecurityEvents | undefined;
+  readonly #defaultAgentAgencyEnabled: boolean;
 
   constructor(
     repository: IdentityRepository,
@@ -141,6 +147,7 @@ export class IdentityService {
     clock: () => Date,
     publicAppUrl: string,
     securityEvents?: IdentitySecurityEvents,
+    defaultAgentAgencyEnabled = true,
   ) {
     this.#repository = repository;
     this.#emailSender = emailSender;
@@ -148,6 +155,11 @@ export class IdentityService {
     this.#clock = clock;
     this.#publicAppUrl = publicAppUrl;
     this.#securityEvents = securityEvents;
+    this.#defaultAgentAgencyEnabled = defaultAgentAgencyEnabled;
+  }
+
+  get defaultAgentAgencyEnabled(): boolean {
+    return this.#defaultAgentAgencyEnabled;
   }
 
   async requestMagicLink(
@@ -243,7 +255,10 @@ export class IdentityService {
     );
     if (authenticated === null) return null;
     return {
+      // Compatibility grants are authorization-only. Keeping the principal's stored scope list
+      // unchanged lets existing strict clients continue parsing /auth/me and bootstrap responses.
       currentUser: authenticated.principal,
+      authorizationScopes: authenticated.authorizationScopes,
       principalKind: "agent",
       agentTokenId: authenticated.tokenId,
     };
@@ -422,18 +437,23 @@ export class IdentityService {
     });
   }
 
-  async listAgentTokens(actorUserId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
+  async listAgentTokens(
+    actorUserId: EntityId,
+    agentUserId: EntityId,
+    includeEffectiveScopes = false,
+  ): Promise<AgentToken[]> {
     const owner = await this.#requireOwner(actorUserId, this.#repository);
     if ((await this.#repository.findAgent(owner.workspaceId, agentUserId)) === null) {
       throw new ApiError(404, "NOT_FOUND", "Agent not found");
     }
-    return this.#repository.listAgentTokens(owner.workspaceId, agentUserId);
+    return this.#repository.listAgentTokens(owner.workspaceId, agentUserId, includeEffectiveScopes);
   }
 
   async createAgentToken(
     actorUserId: EntityId,
     agentUserId: EntityId,
     input: { readonly label: string; readonly scopes: readonly AgentScope[] },
+    includeEffectiveScopes = false,
   ): Promise<{ readonly token: string; readonly agentToken: AgentToken }> {
     return this.#repository.transaction(async (repository) => {
       const owner = await this.#requireLockedOwner(
@@ -450,16 +470,19 @@ export class IdentityService {
       const uniqueScopes = new Set(input.scopes);
       const scopes = AGENT_SCOPE_ORDER.filter((scope) => uniqueScopes.has(scope));
       const issued = issueAgentToken();
-      const agentToken = await repository.insertAgentToken({
-        id: randomUUID(),
-        workspaceId: owner.workspaceId,
-        agentUserId,
-        tokenHash: issued.hash,
-        label: input.label,
-        scopes,
-        createdBy: actorUserId,
-        createdAt: iso(this.#clock()),
-      });
+      const agentToken = await repository.insertAgentToken(
+        {
+          id: randomUUID(),
+          workspaceId: owner.workspaceId,
+          agentUserId,
+          tokenHash: issued.hash,
+          label: input.label,
+          scopes,
+          createdBy: actorUserId,
+          createdAt: iso(this.#clock()),
+        },
+        includeEffectiveScopes,
+      );
       return { token: agentTokenSecretSchema.parse(issued.token), agentToken };
     });
   }

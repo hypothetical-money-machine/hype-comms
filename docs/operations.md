@@ -63,11 +63,14 @@ Before promoting a server change:
 2. Confirm the new image carries the main commit SHA label, record its registry digest, and pin that
    digest in a GitOps commit that changes only Hype Comms. A commit-shaped tag alone is overwriteable.
 3. Before any restart, confirm `HYPE_COMMS_ATTACHMENT_DIR` resolves inside the mounted durable
-   volume and reconcile every ready database attachment with its stored byte count and SHA-256. If
-   the current pod uses the production fallback path, inventory and checksum-copy any files into
-   the durable root first; changing the variable does not migrate container-layer files. Stop until
-   a matched, encrypted, off-node database-plus-file backup has passed the paired restore and
-   reconciliation gate under [Backup and restore gate](#backup-and-restore-gate).
+   volume and reconcile every ready database attachment with its stored byte count and SHA-256. The
+   repository's Compose deployment fixes that path at `/var/lib/hype-comms/attachments` and mounts
+   the `attachment-data` named volume there while keeping the server root filesystem read-only. If
+   another deployment uses the production fallback path without a durable mount, inventory and
+   checksum-copy any files into the durable root first; changing the variable does not migrate
+   container-layer files. Stop until a matched, encrypted, off-node database-plus-file backup has
+   passed the paired restore and reconciliation gate under
+   [Backup and restore gate](#backup-and-restore-gate).
 4. Confirm migrations are backward-compatible with the currently deployed server and immediately
    previous desktop version.
 5. Watch Argo CD health, `/readyz`, 5xx rate, PostgreSQL pool waiters, and realtime reconnects.
@@ -84,19 +87,17 @@ the new persisted user kind. Deploy this migration with `HYPE_COMMS_AGENT_PROVIS
 supported rollback window, set the variable to `true` and redeploy before provisioning the first
 agent. Do not re-enable rollback to the previous image after an agent has been created.
 
-Default agency adds two more persisted scope values, so it uses the same expand/enable boundary:
-apply the additive migration, deploy compatible server and CLI code, and keep enrollment policy
-`required` until the previous image is no longer a rollback target. Record the primary setting with
-`hype-comms-cli --profile OWNER agent-enrollment-policy set required --json`. If the junkyard should
-auto-approve, set it only through that workspace's owner profile with
-`hype-comms-cli --profile JUNKYARD_OWNER agent-enrollment-policy set automatic --json`; no workspace
-name selects policy. Stop rollout by restoring `required`, cancelling open enrollments, and
-revoking or disabling activated credentials. Do not reverse the migration.
+Default agency has its own one-way expand/enable boundary. First deploy the additive migrations and
+compatible server and CLI with `HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED=false` (the production
+default). Existing agents and any agents or public channels written by a remaining old node receive
+explicit compatibility seats, while stored legacy scope arrays remain readable by that old code.
+After every old server and realtime worker has stopped, remove the old image as a rollback target,
+set `HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED=true`, and redeploy every node. Only then may clients
+create new agents or credentials, list or join public channels, or create group conversations. Do
+not return the flag to false or roll back to the old image after enabling it; forward-fix instead.
 
-Use the [default agent agency runbook](default-agent-agency.md) for the zero-copy
-offer/request/review/redeem sequence, file commands, one-time Atlas replacement profile and old-token
-revocation, security invariants, audit evidence, and definition of done. The owner `agents` and
-`agent-tokens` commands are break-glass routes, not routine child provisioning.
+Use the [default agent agency runbook](default-agent-agency.md) for conversation access, file
+commands, owner controls, rollout invariants, and the definition of done.
 
 ## Backup and restore gate
 

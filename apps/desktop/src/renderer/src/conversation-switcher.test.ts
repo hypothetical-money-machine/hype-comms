@@ -10,6 +10,12 @@ const conversations: readonly SwitcherConversation[] = [
   { id: "general", name: "# General", kind: "channel", isArchived: false },
   { id: "design", name: "# Design", kind: "channel", isArchived: false },
   { id: "claire", name: "Claire", kind: "direct_message", isArchived: false },
+  {
+    id: "group",
+    name: "Claire, Woots",
+    kind: "group_direct_message",
+    isArchived: false,
+  },
   { id: "old", name: "# Old launch", kind: "channel", isArchived: true },
 ];
 
@@ -111,11 +117,22 @@ describe("ConversationSwitcher", () => {
       target: { value: "Claire" },
     });
 
-    const result = screen.getByRole("button", { name: /Claire/ });
+    const result = screen.getByRole("button", { name: "Claire Direct message" });
     expect(result.textContent).not.toContain("●");
     expect(result.querySelector(".direct-message-avatar")).toBeTruthy();
     const name = result.querySelector(".quick-switcher-name");
     expect(name?.textContent).toBe("Claire");
     expect(name?.getAttribute("title")).toBe("Claire");
+  });
+
+  it("identifies group conversations in search results", () => {
+    renderSwitcher();
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Jump to a conversation" }), {
+      target: { value: "Woots" },
+    });
+
+    const result = screen.getByRole("button", { name: /Claire, Woots.*Group conversation/u });
+    expect(result.querySelector(".group-direct-message-avatar")).toBeTruthy();
   });
 });

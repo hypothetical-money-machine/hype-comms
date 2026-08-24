@@ -49,9 +49,12 @@ Commands:
   workspace bootstrap
   workspace members
   conversations list [--after CURSOR] [--limit N] [--all]
+  channels list [--after CURSOR] [--limit N]
+  channels join CHANNEL
   channels create NAME [--slug SLUG] [--topic TOPIC]
   channels archive CHANNEL
   dms create MEMBER
+  dms create-group MEMBER MEMBER [MEMBER...] [--idempotency-key KEY]
   messages history CONVERSATION [--before CURSOR] [--limit N]
   messages send CONVERSATION [BODY] [--file PATH] [--mention MEMBER]...
                 [--client-message-id UUID] [--thread-root-id UUID]

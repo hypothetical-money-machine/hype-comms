@@ -33,7 +33,7 @@ import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
-const later = "2026-08-24T12:00:00.000Z";
+const later = "2099-08-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
 const observerId = "10000000-0000-4000-8000-000000000003";
@@ -389,13 +389,9 @@ describeWithPostgres("WorkspaceRepository", () => {
       readCursor: expect.objectContaining({ lastReadMessageId: rendered.message.id }),
     });
 
-    const memberSync = await repository.sync(
-      member,
-      committedAfterRender.syncCursor,
-      100,
-      false,
-      true,
-    );
+    const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100, {
+      readStateEvents: true,
+    });
     const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
     expect(readEvent).toMatchObject({
       workspaceSequence: advanced.syncCursor,
@@ -505,17 +501,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(
-      observer,
-      afterCreate,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const capable = await repository.sync(observer, afterCreate, 100, {
+      messageRetractEvents: true,
+    });
     const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
     expect(retractEvents).toEqual(
       expect.arrayContaining([
@@ -543,17 +531,9 @@ describeWithPostgres("WorkspaceRepository", () => {
       retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
     ).toBe(false);
 
-    const dmCapable = await repository.sync(
-      member,
-      dm.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const dmCapable = await repository.sync(member, dm.syncCursor, 100, {
+      messageRetractEvents: true,
+    });
     expect(
       dmCapable.events.filter(
         (event) =>
@@ -613,6 +593,30 @@ describeWithPostgres("WorkspaceRepository", () => {
     });
   });
 
+  it("keeps live replies reachable without disclosing a retracted thread root body", async () => {
+    const secret = `confidential thread root ${randomUUID()}`;
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "live reply stays reachable"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+    const retracted = await repository.retractMessage(owner, root.message.id);
+
+    const thread = await repository.thread(member, root.message.id, undefined, 50);
+
+    expect(thread.root).toMatchObject({
+      id: root.message.id,
+      body: "Message retracted",
+      deletedAt: retracted.message.deletedAt,
+    });
+    expect(thread.replies).toEqual([reply.message]);
+    expect(JSON.stringify(thread)).not.toContain(secret);
+  });
+
   it("does not replay retracted message or reaction content through sync or delivery retry", async () => {
     const clientMessageId = randomUUID();
     const secret = `sync secret ${randomUUID()}`;
@@ -631,7 +635,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       message: replayError.message,
     }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Message not found" });
 
-    const sync = await repository.sync(observer, "0", 100, true, false, false, false, false, true);
+    const sync = await repository.sync(observer, "0", 100, { messageRetractEvents: true });
     expect(sync.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -801,7 +805,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     const announcementId = created.conversation.conversation.id;
     expect(created.conversation.conversation.channelMode).toBe("announcement");
     const legacySync = await repository.sync(member, "0", 100);
-    const capableSync = await repository.sync(member, "0", 100, false, false, false, true);
+    const capableSync = await repository.sync(member, "0", 100, {
+      announcementChannels: true,
+    });
     const legacyCreated = legacySync.events.find(
       (event) => event.type === "channel.created" && event.conversationId === announcementId,
     );
@@ -1311,16 +1317,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     const [ownerEvent, memberEvent, observerEvent] = await Promise.all(
       [owner, member, observer].map(async (recipient) =>
         eventFor(
-          await repository.sync(
-            recipient,
-            firstReply.syncCursor,
-            100,
-            false,
-            false,
-            false,
-            false,
-            true,
-          ),
+          await repository.sync(recipient, firstReply.syncCursor, 100, {
+            participatedThreadNotifications: true,
+          }),
           secondReply.message.id,
         ),
       ),
@@ -1336,7 +1335,9 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     // A later participant cannot retroactively become eligible for an earlier reply.
     const earlierForObserver = eventFor(
-      await repository.sync(observer, root.syncCursor, 100, false, false, false, false, true),
+      await repository.sync(observer, root.syncCursor, 100, {
+        participatedThreadNotifications: true,
+      }),
       firstReply.message.id,
     );
     expect(earlierForObserver?.payload).not.toHaveProperty("recipientNotificationReason");
@@ -1386,16 +1387,9 @@ describeWithPostgres("WorkspaceRepository", () => {
         [replyEventId, workspaceId, memberId],
       ),
     ).rejects.toMatchObject({ code: "23503" });
-    const removedMemberSync = await repository.sync(
-      member,
-      removed.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const removedMemberSync = await repository.sync(member, removed.syncCursor, 100, {
+      participatedThreadNotifications: true,
+    });
     expect(
       removedMemberSync.events.some(
         (event) =>
@@ -1545,7 +1539,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacySync.events).toEqual([]);
     expect(legacySync.nextCursor).toBe(legacySync.highWaterCursor);
 
-    const sync = await repository.sync(observer, sent.syncCursor, 100, true);
+    const sync = await repository.sync(observer, sent.syncCursor, 100, {
+      reactionEvents: true,
+    });
     const reactionEvents = sync.events.filter(
       (event) => event.type === "reaction.added" || event.type === "reaction.removed",
     );
@@ -1624,17 +1620,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(
-      observer,
-      sent.syncCursor,
-      100,
-      false,
-      false,
-      false,
-      false,
-      false,
-      true,
-    );
+    const capable = await repository.sync(observer, sent.syncCursor, 100, {
+      messageRetractEvents: true,
+    });
     expect(capable.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -2016,9 +2004,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(assigned.tasks).toContainEqual(
       expect.objectContaining({ id: createdA.task.id, assigneeId: memberId }),
     );
-    const legacySync = await repository.sync(owner, "0", 100, false, false, false);
+    const legacySync = await repository.sync(owner, "0", 100);
     expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(false);
-    const taskSync = await repository.sync(owner, "0", 100, false, false, true);
+    const taskSync = await repository.sync(owner, "0", 100, { taskEvents: true });
     expect(taskSync.events).toContainEqual(
       expect.objectContaining({
         type: "task.updated",
@@ -2145,7 +2133,9 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.listConversationTasks(member, conversationId, undefined, 10),
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
-    const memberSync = await repository.sync(member, created.syncCursor, 100, false, false, true);
+    const memberSync = await repository.sync(member, created.syncCursor, 100, {
+      taskEvents: true,
+    });
     expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
   });
 
@@ -2507,20 +2497,21 @@ describeWithPostgres("WorkspaceRepository", () => {
       messageRetractEvents: false,
       memberProfiles: false,
       ephemeralActivity: false,
+      groupDirectMessages: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(
-      owner,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    );
+    const capable = await repository.issueRealtimeTicket(owner, {
+      reactionEvents: true,
+      readStateEvents: true,
+      taskEvents: true,
+      announcementChannels: true,
+      participatedThreadNotifications: true,
+      messageRetractEvents: true,
+      memberProfiles: true,
+      ephemeralActivity: true,
+      groupDirectMessages: true,
+    });
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -2534,6 +2525,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       messageRetractEvents: true,
       memberProfiles: true,
       ephemeralActivity: true,
+      groupDirectMessages: true,
     });
   });
 
