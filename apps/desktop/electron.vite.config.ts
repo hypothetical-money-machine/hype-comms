@@ -67,6 +67,11 @@ export default defineConfig(({ command }) => {
       : "a credential-free HTTPS origin without a path";
     throw new Error(`HYPE_COMMS_API_ORIGIN must be ${requirement}`);
   }
+  if (buildFlavor.isProduction && apiOrigin.endsWith(".invalid")) {
+    throw new Error(
+      "Production packages require HYPE_COMMS_API_ORIGIN to name the deployed API, not a .invalid placeholder",
+    );
+  }
 
   return {
     main: {

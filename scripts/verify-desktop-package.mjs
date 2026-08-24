@@ -19,6 +19,7 @@ const agentWakeOperatorCall =
 // Vite substitutes a dedicated updates-allowed define directly. Accept the equivalent boolean
 // spellings Rolldown may retain or minify without depending on constant folding.
 const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
+const compiledApiOriginMarker = /\b(?:const|var) COMPILED_API_ORIGIN = ("(?:[^"\\]|\\.)*");/gu;
 const requiredAsarEntries = [
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
@@ -223,6 +224,66 @@ export function verifyPackageMetadata(asarPath, flavor, extractFileImplementatio
   }
 }
 
+export function resolveExpectedProductionApiOrigin(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      "HYPE_COMMS_API_ORIGIN must name the deployed HTTPS API when verifying a production package",
+    );
+  }
+
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("HYPE_COMMS_API_ORIGIN must be a valid URL");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.hostname.endsWith(".invalid")
+  ) {
+    throw new Error(
+      "HYPE_COMMS_API_ORIGIN must be a deployed HTTPS origin without credentials, a path, or a .invalid hostname",
+    );
+  }
+  return url.origin;
+}
+
+export function verifyPackagedApiOrigin(
+  asarPath,
+  expectedApiOrigin,
+  extractFileImplementation = extractFile,
+) {
+  const mainPath = path.join("dist", "main", "index.js");
+  let source;
+  try {
+    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
+  } catch (error) {
+    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
+  }
+
+  const matches = [...source.matchAll(compiledApiOriginMarker)];
+  if (matches.length !== 1) {
+    throw new Error(`${asarPath} has an ambiguous or missing compiled API origin marker`);
+  }
+
+  let compiledApiOrigin;
+  try {
+    compiledApiOrigin = JSON.parse(matches[0][1]);
+  } catch (error) {
+    throw new Error(`${asarPath} has an invalid compiled API origin marker`, { cause: error });
+  }
+  if (compiledApiOrigin !== expectedApiOrigin) {
+    throw new Error(
+      `${asarPath} API origin must be ${expectedApiOrigin}; found ${String(compiledApiOrigin)}`,
+    );
+  }
+}
+
 export { resolveExpectedAgentWakeBuild, resolveExpectedAgentWakePackageEvidence };
 
 export function verifyAgentWakeBuild(
@@ -283,6 +344,9 @@ export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
 ) {
+  const expectedApiOrigin = flavor.isProduction
+    ? resolveExpectedProductionApiOrigin(process.env.HYPE_COMMS_API_ORIGIN)
+    : null;
   const expectedAgentWakeBuild = resolveExpectedAgentWakeBuild(
     process.env.HYPE_COMMS_AGENT_WAKE_ENABLED,
   );
@@ -300,6 +364,9 @@ export async function verifyDesktopPackages(
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
     verifyPackageMetadata(asarPath, flavor);
+    if (expectedApiOrigin !== null) {
+      verifyPackagedApiOrigin(asarPath, expectedApiOrigin);
+    }
     verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
     verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
@@ -315,8 +382,9 @@ export async function verifyDesktopPackages(
     }
   }
 
+  const apiOriginCheck = expectedApiOrigin === null ? "" : "the API origin, ";
   console.log(
-    `Verified Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
+    `Verified ${apiOriginCheck}Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
   );
 }
 
