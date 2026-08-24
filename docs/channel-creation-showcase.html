@@ -270,10 +270,19 @@
       .workspace-header {
         display: flex;
         min-height: 72px;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
+        gap: 10px;
         padding: 16px 18px;
         border-bottom: 1px solid #252b3d;
+      }
+
+      .workspace-header-actions {
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
       }
 
       .eyebrow {
@@ -397,42 +406,6 @@
         border-radius: 999px;
         background: #50c69e;
         box-shadow: 0 0 0 2px rgba(80, 198, 158, 0.13);
-      }
-
-      .member-list {
-        padding: 10px;
-        border-top: 1px solid #252b3d;
-      }
-
-      .member-list .nav-heading {
-        margin-top: 0;
-      }
-
-      .member {
-        display: flex;
-        width: 100%;
-        align-items: center;
-        gap: 9px;
-        padding: 7px 8px;
-        border: 0;
-        border-radius: 7px;
-        background: transparent;
-        color: #aeb7cf;
-        cursor: pointer;
-        font-size: 11px;
-        text-align: left;
-      }
-
-      .member:hover {
-        background: #1a2031;
-        color: #ffffff;
-      }
-
-      .member .avatar {
-        width: 26px;
-        height: 26px;
-        border-radius: 8px;
-        font-size: 9px;
       }
 
       .channel.just-created {
@@ -1141,7 +1114,10 @@
                     <p class="eyebrow">Workspace</p>
                     <strong>Hype Comms</strong>
                   </div>
-                  <button class="quiet-button" type="button">Sign out</button>
+                  <div class="workspace-header-actions">
+                    <button class="quiet-button" type="button">People</button>
+                    <button class="quiet-button" type="button">Sign out</button>
+                  </div>
                 </header>
                 <nav class="channel-nav" aria-label="Popover demo channels">
                   <div class="nav-heading">
@@ -1175,12 +1151,6 @@
                     </button>
                   </div>
                 </nav>
-                <section class="member-list" aria-label="Members">
-                  <p class="nav-heading">Members</p>
-                  <button class="member" type="button">
-                    <span class="avatar">D</span><span>Dan Buck</span>
-                  </button>
-                </section>
               </aside>
               <section class="conversation-pane">
                 <header class="conversation-header">
@@ -1280,7 +1250,10 @@
                     <p class="eyebrow">Workspace</p>
                     <strong>Hype Comms</strong>
                   </div>
-                  <button class="quiet-button" type="button">Sign out</button>
+                  <div class="workspace-header-actions">
+                    <button class="quiet-button" type="button">People</button>
+                    <button class="quiet-button" type="button">Sign out</button>
+                  </div>
                 </header>
                 <nav class="channel-nav" aria-label="Modal demo channels">
                   <div class="nav-heading">
@@ -1313,12 +1286,6 @@
                     </button>
                   </div>
                 </nav>
-                <section class="member-list" aria-label="Members">
-                  <p class="nav-heading">Members</p>
-                  <button class="member" type="button">
-                    <span class="avatar">D</span><span>Dan Buck</span>
-                  </button>
-                </section>
               </aside>
               <section class="conversation-pane">
                 <header class="conversation-header">
@@ -1467,7 +1434,10 @@
                     <p class="eyebrow">Workspace</p>
                     <strong>Hype Comms</strong>
                   </div>
-                  <button class="quiet-button" type="button">Sign out</button>
+                  <div class="workspace-header-actions">
+                    <button class="quiet-button" type="button">People</button>
+                    <button class="quiet-button" type="button">Sign out</button>
+                  </div>
                 </header>
                 <nav class="channel-nav" aria-label="Inline demo channels">
                   <div class="nav-heading">
@@ -1529,12 +1499,6 @@
                     </button>
                   </div>
                 </nav>
-                <section class="member-list" aria-label="Members">
-                  <p class="nav-heading">Members</p>
-                  <button class="member" type="button">
-                    <span class="avatar">D</span><span>Dan Buck</span>
-                  </button>
-                </section>
               </aside>
               <section class="conversation-pane">
                 <header class="conversation-header">
