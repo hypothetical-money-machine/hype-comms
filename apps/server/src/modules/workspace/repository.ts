@@ -334,6 +334,7 @@ interface TicketRow extends QueryResultRow {
   participated_thread_notifications: boolean;
   message_retract_events: boolean;
   member_profiles: boolean;
+  ephemeral_activity: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -406,6 +407,7 @@ export interface WorkspacePrincipal {
   readonly participatedThreadNotifications?: boolean;
   readonly messageRetractEvents?: boolean;
   readonly memberProfiles?: boolean;
+  readonly ephemeralActivity?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -983,6 +985,33 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
+   * workspace-membership join makes each best-effort authorization reflect revocation immediately
+   * instead of waiting for the socket heartbeat to close the connection.
+   */
+  async canViewConversation(
+    workspaceId: string,
+    userId: string,
+    conversationId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM conversations AS conversation
+           JOIN workspace_memberships AS active_membership
+             ON active_membership.workspace_id = conversation.workspace_id
+            AND active_membership.user_id = $2
+            AND active_membership.status = 'active'
+          WHERE conversation.id = $3
+            AND conversation.workspace_id = $1
+            AND ${conversationVisibilitySql("conversation", "$2")}
+       ) AS visible`,
+      [workspaceId, userId, conversationId],
+    );
+    return result.rows[0]?.visible ?? false;
   }
 
   /**
@@ -1607,7 +1636,10 @@ export class WorkspaceRepository {
         [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       const root = rootResult.rows[0];
-      if (root === undefined) throw new ApiError(404, "NOT_FOUND", "Thread not found");
+      if (root === undefined || root.deleted_at !== null) {
+        // Missing, unauthorized, and retracted roots deliberately share one response.
+        throw new ApiError(404, "NOT_FOUND", "Thread not found");
+      }
 
       const beforeSequence = decodeHistoryCursor(before);
       const result = await client.query<MessageRow>(
@@ -1965,7 +1997,11 @@ export class WorkspaceRepository {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
-  ): Promise<{ readonly attachment: Attachment; readonly bytes: Buffer }> {
+  ): Promise<{
+    readonly attachment: Attachment;
+    readonly bytes: Buffer;
+    readonly contentSha256: string;
+  }> {
     const store = this.#attachmentStore();
     const client = await this.pool.connect();
     try {
@@ -1996,9 +2032,15 @@ export class WorkspaceRepository {
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
+      const contentSha256 = row.content_sha256.toString("hex");
+      if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {
+        throw new ApiError(500, "INTERNAL_ERROR", "Stored file failed its integrity check");
+      }
       return {
         attachment: mapAttachment(row),
-        bytes: await store.read(identity.currentUser.workspaceId, attachmentId),
+        bytes,
+        contentSha256,
       };
     } finally {
       client.release();
@@ -2026,6 +2068,7 @@ export class WorkspaceRepository {
           WHERE message.id = ANY($1::uuid[])
             AND message.workspace_id = $2
             AND conversation.workspace_id = $2
+            AND message.deleted_at IS NULL
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
@@ -2836,6 +2879,10 @@ export class WorkspaceRepository {
       );
       const replay = existing.rows[0];
       if (replay !== undefined) {
+        if (replay.deleted_at !== null) {
+          // Retraction wins over delivery idempotency: a retry must not rehydrate retained content.
+          throw new ApiError(404, "NOT_FOUND", "Message not found");
+        }
         if (!sameBuffer(replay.request_fingerprint, fingerprint)) {
           throw new ApiError(
             409,
@@ -3328,6 +3375,26 @@ export class WorkspaceRepository {
                     $8::boolean
                     OR event.event_type <> 'message.retracted'
                   )
+                  AND (
+                    event.event_type <> 'message.created'
+                    OR EXISTS (
+                      SELECT 1
+                        FROM messages AS created_message
+                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                         AND created_message.workspace_id = event.workspace_id
+                         AND created_message.deleted_at IS NULL
+                    )
+                  )
+                  AND (
+                    event.event_type NOT IN ('reaction.added', 'reaction.removed')
+                    OR EXISTS (
+                      SELECT 1
+                        FROM messages AS reaction_message
+                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                         AND reaction_message.workspace_id = event.workspace_id
+                         AND reaction_message.deleted_at IS NULL
+                    )
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -3381,6 +3448,7 @@ export class WorkspaceRepository {
     participatedThreadNotifications = false,
     messageRetractEvents = false,
     memberProfiles = false,
+    ephemeralActivity = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -3394,8 +3462,9 @@ export class WorkspaceRepository {
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications, message_retract_events, member_profiles)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          participated_thread_notifications, message_retract_events, member_profiles,
+          ephemeral_activity)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -3411,6 +3480,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications,
         messageRetractEvents,
         memberProfiles,
+        ephemeralActivity,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -3438,7 +3508,8 @@ export class WorkspaceRepository {
                    ticket.announcement_channels,
                    ticket.participated_thread_notifications,
                    ticket.message_retract_events,
-                   ticket.member_profiles
+                   ticket.member_profiles,
+                   ticket.ephemeral_activity
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -3450,7 +3521,8 @@ export class WorkspaceRepository {
               ticket.announcement_channels,
               ticket.participated_thread_notifications,
               ticket.message_retract_events,
-              ticket.member_profiles
+              ticket.member_profiles,
+              ticket.ephemeral_activity
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -3504,6 +3576,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
+        ephemeralActivity: row.ephemeral_activity,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -3519,6 +3592,7 @@ export class WorkspaceRepository {
         participatedThreadNotifications: row.participated_thread_notifications,
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
+        ephemeralActivity: row.ephemeral_activity,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");

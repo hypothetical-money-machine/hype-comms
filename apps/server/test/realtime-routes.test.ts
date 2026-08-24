@@ -18,6 +18,7 @@ import type { NotificationPresenter } from "../../desktop/src/main/notification-
 import { WorkspaceRealtime } from "../../desktop/src/main/workspace-realtime.js";
 import { buildApp } from "../src/app.js";
 import { ApiError } from "../src/errors.js";
+import type { EphemeralActivityHub } from "../src/modules/realtime/activity-hub.js";
 import type {
   RealtimePrincipal,
   RealtimePrincipalRevalidation,
@@ -922,5 +923,62 @@ describe("realtime socket teardown", () => {
 
     expect(hub.subscribed).toEqual([workspaceId]);
     expect(hub.unsubscribeCalls).toBe(1);
+  });
+});
+
+describe("realtime ephemeral activity", () => {
+  it("keeps draining activity frames after a typing authorization check rejects", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId,
+      agentTokenId: null,
+      ephemeralActivity: true,
+    };
+    const setTypingConversations: string[] = [];
+    let failNextTyping = true;
+    const activityHub = {
+      register(): void {},
+      setPresence(): void {},
+      async setTyping(_connectionId: string, conversationId: string): Promise<void> {
+        setTypingConversations.push(conversationId);
+        if (failNextTyping) {
+          failNextTyping = false;
+          throw new Error("database unavailable");
+        }
+      },
+      disconnect(): void {},
+      close(): void {},
+    };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+        activityHub: activityHub as unknown as EphemeralActivityHub,
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    await once(socket, "message");
+
+    const typingFrame = (conversationId: string): string =>
+      JSON.stringify({ version: 1, type: "activity.typing.set", conversationId, typing: true });
+    socket.send(typingFrame("10000000-0000-4000-8000-000000000010"));
+    await vi.waitFor(() => expect(setTypingConversations).toHaveLength(1));
+    socket.send(typingFrame("10000000-0000-4000-8000-000000000011"));
+    await vi.waitFor(() => expect(setTypingConversations).toHaveLength(2));
+
+    expect(setTypingConversations).toEqual([
+      "10000000-0000-4000-8000-000000000010",
+      "10000000-0000-4000-8000-000000000011",
+    ]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 });

@@ -7,7 +7,7 @@ KUSTOMIZE_VERSION="v5.4.3"
 KUSTOMIZE_SHA256="3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
 KUSTOMIZE_URL="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
 
-# Test-only overrides are positional; the promotion step uses the repository-pinned defaults.
+# Test-only overrides are positional; ordinary invocations use the repository-pinned defaults.
 KUSTOMIZE_URL="${1:-$KUSTOMIZE_URL}"
 KUSTOMIZE_SHA256="${2:-$KUSTOMIZE_SHA256}"
 KUSTOMIZE_INSTALL_DIR="${3:-/usr/local/bin}"

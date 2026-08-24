@@ -42,7 +42,6 @@ const DENSITY_TOKENS = [
   "density-search-margin",
   "density-search-padding",
   "density-sidebar-nav-padding",
-  "density-member-list-padding",
   "density-nav-heading-min-height",
   "density-nav-heading-margin",
   "density-row-padding",
@@ -68,7 +67,6 @@ const TOKEN_CONSUMERS: Readonly<Record<string, string>> = {
   ".workspace-header": "var(--density-workspace-header-padding)",
   ".sidebar nav": "var(--density-sidebar-nav-padding)",
   ".nav-heading": "var(--density-nav-heading-margin)",
-  ".member-list": "var(--density-member-list-padding)",
   ".conversation-header": "var(--density-conversation-header-padding)",
   ".message-list": "var(--density-message-list-padding)",
   ".message": "var(--density-message-padding-block)",
@@ -87,9 +85,6 @@ describe("compact density tokens", () => {
   const compact = customProperties(firstRuleBody(styles, "html[data-compact]"));
 
   it("keeps the comfortable defaults on :root and only tightens them under data-compact", () => {
-    expect(comfortable["conversation-nav-min-height"]).toBe("96px");
-    expect(compact["conversation-nav-min-height"]).toBe("72px");
-
     for (const token of DENSITY_TOKENS) {
       const comfortableValue = comfortable[token];
       const compactValue = compact[token];
@@ -114,9 +109,7 @@ describe("compact density tokens", () => {
       expect(firstRuleBody(styles, selector)).toContain(token);
     }
 
-    expect(styles).toMatch(
-      /\.conversation,\s*\.member-list button\s*\{[^}]*padding:\s*var\(--density-row-padding\)/u,
-    );
+    expect(styles).toMatch(/\.conversation\s*\{[^}]*padding:\s*var\(--density-row-padding\)/u);
     expect(styles).toMatch(
       /\.workspace-search-button,\s*\.quick-switcher-trigger\s*\{[^}]*padding:\s*var\(--density-search-padding\)/u,
     );

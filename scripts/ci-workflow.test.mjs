@@ -38,15 +38,18 @@ test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", asy
   );
   const postgresJob = workflowJob(ciWorkflow, "check");
 
+  assert.match(ciWorkflow, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/mu);
+  assert.match(ciWorkflow, /^permissions:\n {2}contents: read$/mu);
   assert.match(postgresJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
   assert.match(postgresJob, /^ {4}services:\n {6}postgres:\n {8}image: postgres:16$/mu);
   assert.match(postgresJob, /^ {10}POSTGRES_DB: hype_comms_test$/mu);
   assert.match(postgresJob, /^ {10}POSTGRES_USER: hype_comms$/mu);
   assert.match(postgresJob, /^ {10}- 55432:5432$/mu);
   assert.match(postgresJob, /HYPE_COMMS_TEST_DATABASE_URL: postgresql:\/\//u);
+  assert.match(postgresJob, /npm ci --no-audit --prefer-offline/u);
   assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
   assert.doesNotMatch(
     postgresJob,
-    /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|initdb|pg_ctl/u,
+    /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|initdb|pg_ctl|secrets\.|^ {4}environment:/mu,
   );
 });

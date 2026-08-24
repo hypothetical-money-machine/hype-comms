@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,7 +20,7 @@ import {
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
-import type { ApiError } from "../src/errors.js";
+import { ApiError } from "../src/errors.js";
 import type {
   AuthenticatedAgentIdentity,
   AuthenticatedIdentity,
@@ -159,6 +159,16 @@ function taskInput(title: string, overrides: Partial<CreateTaskRequest> = {}): C
     sourceMessageId: null,
     ...overrides,
   };
+}
+
+async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> {
+  try {
+    await operation;
+  } catch (error) {
+    if (error instanceof ApiError) return error;
+    throw error;
+  }
+  throw new Error("Expected the operation to reject");
 }
 
 describeWithPostgres("WorkspaceRepository", () => {
@@ -656,6 +666,68 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
     expect(stored.rows[0]).toMatchObject({ body: secret, deleted_at: expect.anything() });
     expect(stored.rows[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("makes a retracted thread root indistinguishable from a nonexistent root", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "confidential thread root"),
+      mentionedUserIds: [],
+    });
+    await repository.retractMessage(owner, root.message.id);
+
+    const [retracted, nonexistent] = await Promise.all([
+      rejectedApiError(repository.thread(member, root.message.id, undefined, 50)),
+      rejectedApiError(repository.thread(member, randomUUID(), undefined, 50)),
+    ]);
+
+    expect({
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Thread not found" });
+    expect({
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    }).toEqual({
+      statusCode: nonexistent.statusCode,
+      code: nonexistent.code,
+      message: nonexistent.message,
+    });
+  });
+
+  it("does not replay retracted message or reaction content through sync or delivery retry", async () => {
+    const clientMessageId = randomUUID();
+    const secret = `sync secret ${randomUUID()}`;
+    const input = {
+      ...message(clientMessageId, secret),
+      mentionedUserIds: [],
+    };
+    const sent = await repository.sendMessage(owner, generalId, input);
+    const reaction = await repository.addReaction(member, sent.message.id, "🎉");
+    const retracted = await repository.retractMessage(owner, sent.message.id);
+
+    const replayError = await rejectedApiError(repository.sendMessage(owner, generalId, input));
+    expect({
+      statusCode: replayError.statusCode,
+      code: replayError.code,
+      message: replayError.message,
+    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Message not found" });
+
+    const sync = await repository.sync(observer, "0", 100, true, false, false, false, false, true);
+    expect(sync.events).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        payload: {
+          messageId: sent.message.id,
+          deletedAt: retracted.message.deletedAt,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(sync)).not.toContain(secret);
+    expect(JSON.stringify(sync)).not.toContain(reaction.reaction.id);
   });
 
   it("rejects retracting another member's message and an author retract after five minutes", async () => {
@@ -1581,6 +1653,35 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("makes reactions on a retracted message unavailable like reactions on a missing message", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "reaction target to retract"),
+      mentionedUserIds: [],
+    });
+    await repository.addReaction(member, sent.message.id, "🎉");
+    await repository.retractMessage(owner, sent.message.id);
+
+    const [retracted, nonexistent] = await Promise.all([
+      rejectedApiError(repository.listMessageReactions(observer, [sent.message.id])),
+      rejectedApiError(repository.listMessageReactions(observer, [randomUUID()])),
+    ]);
+    const retractedShape = {
+      statusCode: retracted.statusCode,
+      code: retracted.code,
+      message: retracted.message,
+    };
+    expect(retractedShape).toEqual({
+      statusCode: 404,
+      code: "NOT_FOUND",
+      message: "One or more messages were not found",
+    });
+    expect(retractedShape).toEqual({
+      statusCode: nonexistent.statusCode,
+      code: nonexistent.code,
+      message: nonexistent.message,
+    });
+  });
+
   it("hides message.retracted from clients that did not negotiate the capability", async () => {
     const sent = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "retract capability target"),
@@ -2488,11 +2589,13 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: false,
       messageRetractEvents: false,
       memberProfiles: false,
+      ephemeralActivity: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
     const capable = await repository.issueRealtimeTicket(
       owner,
+      true,
       true,
       true,
       true,
@@ -2513,6 +2616,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: true,
       messageRetractEvents: true,
       memberProfiles: true,
+      ephemeralActivity: true,
     });
   });
 
@@ -2790,6 +2894,19 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     const downloaded = await repository.readFileContent(member, attachmentId);
     expect(downloaded.bytes.toString()).toBe("channel notes");
+  });
+
+  it("refuses to serve stored attachment bytes that no longer match authoritative metadata", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    await writeFile(path.join(attachmentRoot, workspaceId, attachmentId), "tampered data", {
+      mode: 0o600,
+    });
+
+    await expect(repository.readFileContent(owner, attachmentId)).rejects.toMatchObject({
+      statusCode: 500,
+      code: "INTERNAL_ERROR",
+      message: "Stored file failed its integrity check",
+    } satisfies Partial<ApiError>);
   });
 
   it("hides attachment metadata and bytes after the parent message is retracted", async () => {

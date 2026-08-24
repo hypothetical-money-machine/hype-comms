@@ -1,14 +1,21 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  clientPresenceActivityFrameSchema,
+  clientTypingActivityFrameSchema,
+  ephemeralActivityFrameSchema,
   productRealtimeEventSchema,
   realtimeEventEnvelopeSchema,
+  type ClientEphemeralActivityFrame,
   type ProductRealtimeEvent,
+  type PresenceState,
   type RealtimeAcknowledgement,
   type RealtimeConnectionState,
   type RealtimeSessionScope,
   type RealtimeTicketResponse,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
+  type ScopedTypingActivityUpdate,
 } from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
 
@@ -21,6 +28,9 @@ const INVALID_EVENT_CLOSE_CODE = 1002;
 const INVALID_EVENT_CLOSE_REASON = "Invalid realtime event";
 const REPLAY_OVERFLOW_CLOSE_CODE = 1009;
 const REPLAY_OVERFLOW_CLOSE_REASON = "Realtime replay buffer exceeded";
+const ACTIVITY_BACKPRESSURE_BYTES = 64 * 1_024;
+export const TYPING_SEND_INTERVAL_MS = 2_000;
+export const TYPING_LOCAL_TTL_MS = 5_000;
 const KNOWN_PRODUCT_REALTIME_EVENT_TYPES = new Set([
   "member.updated",
   "channel.created",
@@ -84,6 +94,14 @@ interface ReconnectTimer {
   readonly handle: ReturnType<typeof setTimeout>;
 }
 
+interface LocalTypingState {
+  lastInputAt: number;
+  lastAttemptAt: number;
+  sent: boolean;
+  sendTimer: ReturnType<typeof setTimeout> | null;
+  expiryTimer: ReturnType<typeof setTimeout> | null;
+}
+
 interface PendingAuthoritativeRecovery {
   readonly scope: WorkspaceRealtimeScope;
   readonly cursor: string;
@@ -109,6 +127,7 @@ export class WorkspaceRealtime {
   readonly #transport: Pick<WorkspaceTransport, "ticket">;
   readonly #onEvent: (frame: ScopedProductRealtimeEvent) => boolean;
   readonly #onWindowlessEvent: (event: ProductRealtimeEvent) => void;
+  readonly #onActivity: (frame: ScopedEphemeralActivityFrame) => boolean;
   readonly #onState: (state: RealtimeConnectionState) => void;
   readonly #onDrop: (reason: RealtimeDropReason) => void;
   readonly #createSocket: SocketFactory;
@@ -125,6 +144,8 @@ export class WorkspaceRealtime {
   #windowless = false;
   #incompatible = false;
   #pendingAuthoritativeRecovery: PendingAuthoritativeRecovery | null = null;
+  #presence: Exclude<PresenceState, "offline"> = "online";
+  readonly #typing = new Map<string, LocalTypingState>();
 
   constructor(options: {
     readonly apiOrigin: string;
@@ -134,6 +155,8 @@ export class WorkspaceRealtime {
     readonly onEvent: (frame: ScopedProductRealtimeEvent) => boolean;
     /** Observes an event without attempting renderer delivery or durable acknowledgement. */
     readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
+    /** Best-effort delivery; false drops the activity without affecting durable transport. */
+    readonly onActivity?: (frame: ScopedEphemeralActivityFrame) => boolean;
     readonly onState: (state: RealtimeConnectionState) => void;
     readonly onDrop?: (reason: RealtimeDropReason) => void;
     /** Test seam. Production always uses the `ws` implementation. */
@@ -144,6 +167,7 @@ export class WorkspaceRealtime {
     this.#transport = options.transport;
     this.#onEvent = options.onEvent;
     this.#onWindowlessEvent = options.onWindowlessEvent ?? (() => undefined);
+    this.#onActivity = options.onActivity ?? (() => false);
     this.#onState = options.onState;
     this.#onDrop =
       options.onDrop ??
@@ -292,6 +316,69 @@ export class WorkspaceRealtime {
     if (BigInt(input) > BigInt(this.#cursor)) this.#cursor = input;
   }
 
+  setPresence(state: Exclude<PresenceState, "offline">): void {
+    this.#presence = state;
+    const connection = this.#connection;
+    if (connection !== null) {
+      this.#sendActivity(
+        connection,
+        clientPresenceActivityFrameSchema.parse({
+          version: 1,
+          type: "activity.presence.set",
+          state,
+        }),
+        true,
+      );
+    }
+  }
+
+  /** Records recent input, then sends at most one typing refresh per throttle window. */
+  setTyping(input: ScopedTypingActivityUpdate): void {
+    if (this.#scope === null || !sameRealtimeScope(this.#scope, input.scope)) {
+      this.#onDrop("stale-control");
+      return;
+    }
+    const { conversationId, typing } = input;
+    const current = this.#typing.get(conversationId);
+    if (!typing) {
+      this.#stopTyping(conversationId, current);
+      return;
+    }
+
+    const now = Date.now();
+    const state =
+      current ??
+      ({
+        lastInputAt: now,
+        lastAttemptAt: Number.NEGATIVE_INFINITY,
+        sent: false,
+        sendTimer: null,
+        expiryTimer: null,
+      } satisfies LocalTypingState);
+    state.lastInputAt = now;
+    if (state.expiryTimer !== null) clearTimeout(state.expiryTimer);
+    state.expiryTimer = setTimeout(() => {
+      const latest = this.#typing.get(conversationId);
+      if (latest !== state) return;
+      this.#stopTyping(conversationId, state);
+    }, TYPING_LOCAL_TTL_MS);
+    state.expiryTimer.unref();
+    this.#typing.set(conversationId, state);
+
+    const waitMs = Math.max(0, state.lastAttemptAt + TYPING_SEND_INTERVAL_MS - now);
+    if (waitMs === 0) {
+      this.#attemptTyping(conversationId, state);
+      return;
+    }
+    if (state.sendTimer !== null) return;
+    state.sendTimer = setTimeout(() => {
+      state.sendTimer = null;
+      if (this.#typing.get(conversationId) !== state) return;
+      this.#attemptTyping(conversationId, state);
+    }, waitMs);
+    state.sendTimer.unref();
+  }
+
   stop(candidate?: RealtimeSessionScope): void {
     if (
       candidate !== undefined &&
@@ -322,6 +409,7 @@ export class WorkspaceRealtime {
     if (clearRecovery) this.#pendingAuthoritativeRecovery = null;
     this.#ticketEpoch = null;
     this.#clearReconnectTimer();
+    this.#clearTyping();
 
     const connection = this.#connection;
     this.#connection = null;
@@ -413,6 +501,15 @@ export class WorkspaceRealtime {
     socket.once("open", () => {
       if (!this.#isActiveConnection(connection)) return;
       this.#delayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.#sendActivity(
+        connection,
+        clientPresenceActivityFrameSchema.parse({
+          version: 1,
+          type: "activity.presence.set",
+          state: this.#presence,
+        }),
+        true,
+      );
     });
     socket.on("message", (data: RawData) => {
       this.#handleMessage(connection, data);
@@ -447,6 +544,26 @@ export class WorkspaceRealtime {
       input = JSON.parse(serialized);
     } catch {
       this.#rejectInvalidEvent(connection);
+      return;
+    }
+
+    const activity = ephemeralActivityFrameSchema.safeParse(input);
+    if (activity.success) {
+      if (activity.data.workspaceId !== connection.scope.workspaceId) {
+        this.#failIncompatible(connection, "wrong-workspace");
+        return;
+      }
+      if (connection.connectionId === null) {
+        this.#rejectInvalidEvent(connection);
+        return;
+      }
+      if (this.#windowless || !this.#rendererDeliveryReady) return;
+      try {
+        this.#onActivity({ scope: connection.scope, activity: activity.data });
+      } catch {
+        // Activity is lossy by contract. Renderer failures cannot poison durable replay health.
+        reportMainProcessError("Workspace activity delivery failed");
+      }
       return;
     }
 
@@ -510,6 +627,11 @@ export class WorkspaceRealtime {
         return;
       }
       if (!this.#isActiveConnection(connection)) return;
+      for (const [conversationId, state] of this.#typing) {
+        if (Date.now() - state.lastInputAt < TYPING_LOCAL_TTL_MS) {
+          this.#attemptTyping(conversationId, state);
+        }
+      }
     } else if (connection.connectionId === null && event.type !== "system.resync_required") {
       if (
         connection.pendingReplay.length >= WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT ||
@@ -730,6 +852,62 @@ export class WorkspaceRealtime {
     if (this.#timer === null) return;
     clearTimeout(this.#timer.handle);
     this.#timer = null;
+  }
+
+  #attemptTyping(conversationId: string, state: LocalTypingState): void {
+    state.lastAttemptAt = Date.now();
+    state.sent = this.#sendTyping(conversationId, true) || state.sent;
+  }
+
+  #stopTyping(conversationId: string, state: LocalTypingState | undefined): void {
+    if (state === undefined) return;
+    if (state.expiryTimer !== null) clearTimeout(state.expiryTimer);
+    if (state.sendTimer !== null) clearTimeout(state.sendTimer);
+    this.#typing.delete(conversationId);
+    if (state.sent) this.#sendTyping(conversationId, false);
+  }
+
+  #sendTyping(conversationId: string, typing: boolean): boolean {
+    const connection = this.#connection;
+    if (connection === null) return false;
+    return this.#sendActivity(
+      connection,
+      clientTypingActivityFrameSchema.parse({
+        version: 1,
+        type: "activity.typing.set",
+        conversationId,
+        typing,
+      }),
+    );
+  }
+
+  #sendActivity(
+    connection: ActiveConnection,
+    frame: ClientEphemeralActivityFrame,
+    beforeHandshake = false,
+  ): boolean {
+    if (
+      !this.#isActiveConnection(connection) ||
+      connection.socket.readyState !== WebSocket.OPEN ||
+      (!beforeHandshake && connection.connectionId === null) ||
+      connection.socket.bufferedAmount > ACTIVITY_BACKPRESSURE_BYTES
+    ) {
+      return false;
+    }
+    try {
+      connection.socket.send(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  #clearTyping(): void {
+    for (const state of this.#typing.values()) {
+      if (state.expiryTimer !== null) clearTimeout(state.expiryTimer);
+      if (state.sendTimer !== null) clearTimeout(state.sendTimer);
+    }
+    this.#typing.clear();
   }
 
   #closeSocket(socket: WebSocket, code?: number, reason?: string): void {

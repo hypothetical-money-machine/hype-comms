@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -29,6 +29,26 @@ describe("attachment file rules", () => {
 });
 
 describe("LocalAttachmentStore", () => {
+  it("prepares a private writable root and rejects a non-directory root", async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachment-root-"));
+    const root = path.join(parent, "nested", "attachments");
+    try {
+      await new LocalAttachmentStore(root).prepare();
+      const metadata = await stat(root);
+      expect(metadata.isDirectory()).toBe(true);
+      if (process.platform !== "win32") expect(metadata.mode & 0o777).toBe(0o700);
+      await expect(readdir(root)).resolves.toEqual([]);
+
+      const fileRoot = path.join(parent, "not-a-directory");
+      await writeFile(fileRoot, "blocked");
+      await expect(new LocalAttachmentStore(fileRoot).prepare()).rejects.toThrow(
+        "Attachment storage is unavailable",
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("writes, reads, and removes one object", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
     const store = new LocalAttachmentStore(root);

@@ -496,6 +496,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             {
                 "HYPE_COMMS_API_ORIGIN": ORIGIN,
                 "HYPE_COMMS_TOKEN": "unit-test-token",
+                "HYPE_COMMS_PROFILE": "",
+                "HYPE_COMMS_CONFIG_DIR": self.temp.name,
                 "HYPE_COMMS_ALLOWED_USERS": USER_ID,
                 "HYPE_COMMS_ALLOW_ALL_USERS": "false",
                 "HYPE_COMMS_CLI_PATH": "hype-comms-cli",
@@ -574,6 +576,29 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await adapter.disconnect()
         self.assertTrue(watch.terminated)
         self.assertEqual(adapter.release_count, 1)
+
+    async def test_connect_can_use_private_cli_profile_without_token_environment(self) -> None:
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs() + [ProcessSpec(("watch", "--json", "--after", "100"), watch)]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "HYPE_COMMS_TOKEN": "",
+                "HYPE_COMMS_PROFILE": "atlas-child",
+            },
+        ):
+            adapter = self.new_adapter(factory)
+            self.assertTrue(await adapter.connect())
+            for call in factory.calls:
+                child_env = call["kwargs"]["env"]
+                self.assertNotIn("HYPE_COMMS_TOKEN", child_env)
+                self.assertEqual(child_env["HYPE_COMMS_PROFILE"], "atlas-child")
+                self.assertEqual(child_env["HYPE_COMMS_CONFIG_DIR"], self.temp.name)
+                self.assertEqual(child_env["HYPE_COMMS_API_ORIGIN"], ORIGIN)
+
+            await adapter.disconnect()
 
     async def test_dm_mentions_and_self_suppression_checkpoint_without_channel_leakage(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -2351,6 +2376,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter_module.register(context)
 
         self.assertEqual(context.kwargs["name"], "hype_comms")
+        self.assertEqual(context.kwargs["required_env"], ["HYPE_COMMS_API_ORIGIN"])
         self.assertEqual(context.kwargs["allowed_users_env"], "HYPE_COMMS_ALLOWED_USERS")
         self.assertEqual(context.kwargs["allow_all_env"], "HYPE_COMMS_ALLOW_ALL_USERS")
         self.assertEqual(context.kwargs["max_message_length"], 4000)
