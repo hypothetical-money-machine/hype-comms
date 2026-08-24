@@ -1918,6 +1918,18 @@ function registerIpcHandlers(): void {
   });
 }
 
+const DEVELOPMENT_RENDERER_LOAD_RETRIES = 30;
+const DEVELOPMENT_RENDERER_LOAD_RETRY_DELAY_MS = 1_000;
+
+function isDevelopmentRendererConnectionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("ERR_CONNECTION_REFUSED") ||
+      error.message.includes("ERR_CONNECTION_RESET") ||
+      error.message.includes("ERR_ADDRESS_UNREACHABLE"))
+  );
+}
+
 async function loadRenderer(window: BrowserWindow): Promise<void> {
   if (!app.isPackaged) {
     const developmentUrl = normalizeDevelopmentServerUrl(process.env.ELECTRON_RENDERER_URL ?? "");
@@ -1926,7 +1938,23 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
     }
 
     trustedDevelopmentRendererUrl = developmentUrl;
-    await window.loadURL(developmentUrl);
+    for (let attempt = 0; attempt <= DEVELOPMENT_RENDERER_LOAD_RETRIES; attempt += 1) {
+      try {
+        await window.loadURL(developmentUrl);
+        return;
+      } catch (error) {
+        if (
+          attempt < DEVELOPMENT_RENDERER_LOAD_RETRIES &&
+          isDevelopmentRendererConnectionError(error)
+        ) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, DEVELOPMENT_RENDERER_LOAD_RETRY_DELAY_MS),
+          );
+          continue;
+        }
+        throw error;
+      }
+    }
     return;
   }
 
@@ -2129,6 +2157,12 @@ async function showUpdateCheckDialog(
 
 /** Native prompt seam injected into DeepLinkSignInQueue; it intentionally receives no token. */
 async function confirmDeepLinkSignIn(): Promise<boolean> {
+  if (headlessDesktopConfiguration !== null) {
+    // A hidden automation renderer has no person to prompt; the caller opted into headless mode
+    // from an isolated, unpackaged development profile and supplied the auth callback explicitly.
+    return true;
+  }
+
   const options = {
     type: "question" as const,
     buttons: ["Cancel", "Sign in"],
