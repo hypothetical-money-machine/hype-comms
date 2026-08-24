@@ -67,18 +67,22 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            # Only trusted main pushes and manual builds use persistent hosts. Every other event,
-            # including pull requests and merge groups, fails closed onto disposable runners.
-            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
-            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+            # Routine smoke uses disposable hosted runners. Manual dispatch retains native host
+            # coverage without exposing persistent release hosts to pull-request code.
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "1"
           - platform: Windows
-            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
-            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
           - platform: Linux
-            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
-            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
@@ -94,6 +98,17 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+
+      # Hosted Windows dependency installation is several minutes slower than the Unix lanes.
+      # Cache downloads there, but rebuild node_modules and the application from source.
+      - name: Restore Windows desktop dependency downloads
+        if: matrix.platform == 'Windows' && !matrix.self_hosted
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            desktop-downloads-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Verify native Linux ARM64 runner
         if: matrix.platform == 'Linux' && matrix.self_hosted
@@ -116,21 +131,21 @@ jobs:
       - name: Install dependencies
         if: matrix.platform != 'Windows'
         shell: sh
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
       # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
       - name: Install dependencies on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Package DEV desktop application
         if: matrix.platform != 'Windows'
         env:
           # electron-builder skips all macOS signing in PR jobs before reading identity: "-"
-          # unless this is enabled. Hosted PR and merge-group jobs receive no signing secrets, and
-          # identity discovery remains disabled for every DEV smoke build.
+          # unless this is enabled. Hosted jobs receive no signing secrets, and identity discovery
+          # remains disabled for every DEV smoke build.
           CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && !matrix.self_hosted && 'true' || 'false' }}
         shell: sh
         run: npm run package:desktop
@@ -189,7 +204,7 @@ jobs:
 
       - name: Install dependencies
         shell: sh
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Configure macOS signing and notarization
         shell: bash
