@@ -1705,24 +1705,23 @@ export class WorkspaceRepository {
         const queryTruncated = result.rows.length > limit;
         const messages = result.rows.slice(0, limit).reverse().map(mapAgentContextMessage);
         const location = await this.#contextLocation(client, identity, conversation);
-        const newest = messages.at(-1);
+        // Trimming only ever drops from the front, so the newest message is the anchor for the
+        // whole pass and everything derived from it is computed once here.
+        const anchor = messages.at(-1);
         let canonicalThreadRoot: AgentContextMessage | null = null;
         if (
           location.kind === "channel" &&
-          newest?.threadRootId !== null &&
-          newest?.threadRootId !== undefined
+          anchor?.threadRootId !== null &&
+          anchor?.threadRootId !== undefined
         ) {
           canonicalThreadRoot = await this.#contextMessageById(
             client,
             identity.currentUser.user.id,
             conversation.id,
-            newest.threadRootId,
+            anchor.threadRootId,
           );
         }
 
-        // Trimming only ever drops from the front, so everything derived from the newest message
-        // is invariant across passes and is computed once here.
-        const anchor = messages.at(-1);
         const anchorMessageId = anchor?.id ?? null;
         const replyTarget =
           anchor === undefined

@@ -296,7 +296,7 @@ function utf8ByteLength(value: string): number {
  * The canonical compact, physical-one-line JSON encoding of a context pack.
  *
  * `JSON.stringify` escapes ASCII newlines but emits these Unicode line separators literally, so
- * they are escaped too \u2014 otherwise a message body could manufacture a physical boundary line in a
+ * they are escaped too, otherwise a message body could manufacture a physical boundary line in a
  * rendered pack. This is the one definition of that representation; every renderer and every size
  * check derives from it so a pack pruned to fit is a pack that renders.
  */
@@ -311,7 +311,7 @@ export function toInjectionSafeCompactJson(value: unknown): string {
     .replaceAll("\u2029", "\\u2029");
 }
 
-/** Byte length of {@link toInjectionSafeCompactJson}'s output \u2014 the size a pack is pruned against. */
+/** Byte length of {@link toInjectionSafeCompactJson}'s output: the size a pack is pruned to. */
 export function injectionSafeCompactJsonByteLength(value: unknown): number {
   return utf8ByteLength(toInjectionSafeCompactJson(value));
 }
