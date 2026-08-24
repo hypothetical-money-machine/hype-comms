@@ -530,6 +530,13 @@ export const agentContextPackSchema = z
         message: "Empty context packs must not carry a separate thread root",
       });
     }
+    if (empty && (value.truncatedBefore || value.nextCursor !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["truncatedBefore"],
+        message: "Empty context packs must not carry pagination metadata",
+      });
+    }
     if (value.truncatedBefore !== (value.nextCursor !== null)) {
       context.addIssue({
         code: "custom",

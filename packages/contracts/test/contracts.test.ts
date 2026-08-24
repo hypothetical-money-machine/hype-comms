@@ -899,6 +899,34 @@ describe("transport contracts", () => {
     expect(() => agentContextHistoryQuerySchema.parse({ contextPack: "false" })).toThrow();
   });
 
+  it("rejects pagination metadata on an empty context pack", () => {
+    const emptyPack = {
+      version: 1,
+      conversation: {
+        id: CONVERSATION_ID,
+        kind: "channel",
+        slug: "general",
+        selector: "#general",
+      },
+      anchorMessageId: null,
+      messages: [],
+      threadRoot: null,
+      replyTarget: null,
+      readThroughMessageId: null,
+      truncatedBefore: false,
+      nextCursor: null,
+    } as const;
+
+    expect(agentContextHistoryResponseSchema.safeParse({ contextPack: emptyPack }).success).toBe(
+      true,
+    );
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: { ...emptyPack, truncatedBefore: true, nextCursor: "cursor" },
+      }).success,
+    ).toBe(false);
+  });
+
   it("validates canonical chronological channel context packs", () => {
     const author = {
       id: USER_ID,
