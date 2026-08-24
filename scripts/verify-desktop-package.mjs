@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import { extractFile, listPackage } from "@electron/asar";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
+import {
+  resolveAgentWakePackageEvidence as resolveExpectedAgentWakePackageEvidence,
+  resolveAgentWakeRollout as resolveExpectedAgentWakeBuild,
+} from "../apps/desktop/agent-wake-rollout.mjs";
 import { resolveDesktopBuildFlavor } from "../apps/desktop/build-flavor.mjs";
 
 const expectedUpdateProvider = "generic";
@@ -218,26 +222,7 @@ export function verifyPackageMetadata(asarPath, flavor, extractFileImplementatio
   }
 }
 
-export function resolveExpectedAgentWakeBuild(value) {
-  const normalized = value?.trim() ?? "";
-  if (normalized === "" || normalized === "0") return false;
-  if (normalized === "1") return true;
-  throw new Error("HYPE_COMMS_AGENT_WAKE_ENABLED must be 0 or 1");
-}
-
-export function resolveExpectedAgentWakePackageEvidence(value, agentWakeEnabled) {
-  const normalized = value?.trim() ?? "";
-  if (normalized === "" || normalized === "0") return false;
-  if (normalized !== "1") {
-    throw new Error("HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED must be 0 or 1");
-  }
-  if (!agentWakeEnabled) {
-    throw new Error(
-      "HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED requires HYPE_COMMS_AGENT_WAKE_ENABLED=1",
-    );
-  }
-  return true;
-}
+export { resolveExpectedAgentWakeBuild, resolveExpectedAgentWakePackageEvidence };
 
 export function verifyAgentWakeBuild(
   asarPath,

@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "electron-vite";
 import type { Plugin } from "vite";
 
+import { resolveAgentWakePackageEvidence, resolveAgentWakeRollout } from "./agent-wake-rollout.mjs";
 import { resolveDesktopBuildFlavor } from "./build-flavor.mjs";
 import {
   DEFAULT_DEVELOPMENT_API_ORIGIN,
@@ -13,8 +14,6 @@ import {
   normalizeProductionApiOrigin,
 } from "./src/shared/api-origin";
 import {
-  resolveAgentWakePackageEvidence,
-  resolveAgentWakeRollout,
   resolveMacosNativeNotificationEvidence,
   resolveNativeNotificationRollout,
 } from "./src/shared/native-notification-rollout";
