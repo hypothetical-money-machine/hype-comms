@@ -68,6 +68,8 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceRealtimeStop: "workspace:realtime-stop",
   workspaceRealtimeAcknowledge: "workspace:realtime-acknowledge",
   workspaceEvent: "workspace:event",
+  workspaceActivityTypingSet: "workspace:activity-typing-set",
+  workspaceActivity: "workspace:activity",
   realtimeStateGet: "realtime:state-get",
   realtimeStateChanged: "realtime:state-changed",
   notificationContext: "notification:context",
