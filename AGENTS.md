@@ -63,6 +63,7 @@ This checkout is a plain Git repository with an `origin` remote on GitHub.
 
 - Inspect work with `git status` and `git log`.
 - Update from the remote with `git fetch`, then rebase or merge as appropriate.
+- Put worktrees in `./.worktrees/<harness>/<branch>`.
 - Branch for work you intend to publish; `main` is the default branch and changes land through
   pull requests.
 - Before publishing, inspect `git diff` and run the relevant checks. Keep commits focused and use

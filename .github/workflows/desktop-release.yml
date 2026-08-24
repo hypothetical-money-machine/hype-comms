@@ -235,14 +235,14 @@ jobs:
       - name: Install dependencies
         if: matrix.platform != 'Windows'
         shell: sh
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
       # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
       - name: Install dependencies on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Configure Windows Authenticode signing
         if: matrix.platform == 'Windows'

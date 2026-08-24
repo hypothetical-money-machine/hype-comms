@@ -1607,7 +1607,10 @@ export class WorkspaceRepository {
         [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       const root = rootResult.rows[0];
-      if (root === undefined) throw new ApiError(404, "NOT_FOUND", "Thread not found");
+      if (root === undefined || root.deleted_at !== null) {
+        // Missing, unauthorized, and retracted roots deliberately share one response.
+        throw new ApiError(404, "NOT_FOUND", "Thread not found");
+      }
 
       const beforeSequence = decodeHistoryCursor(before);
       const result = await client.query<MessageRow>(
@@ -1965,7 +1968,11 @@ export class WorkspaceRepository {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
-  ): Promise<{ readonly attachment: Attachment; readonly bytes: Buffer }> {
+  ): Promise<{
+    readonly attachment: Attachment;
+    readonly bytes: Buffer;
+    readonly contentSha256: string;
+  }> {
     const store = this.#attachmentStore();
     const client = await this.pool.connect();
     try {
@@ -1996,9 +2003,15 @@ export class WorkspaceRepository {
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
+      const contentSha256 = row.content_sha256.toString("hex");
+      if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {
+        throw new ApiError(500, "INTERNAL_ERROR", "Stored file failed its integrity check");
+      }
       return {
         attachment: mapAttachment(row),
-        bytes: await store.read(identity.currentUser.workspaceId, attachmentId),
+        bytes,
+        contentSha256,
       };
     } finally {
       client.release();
@@ -2026,6 +2039,7 @@ export class WorkspaceRepository {
           WHERE message.id = ANY($1::uuid[])
             AND message.workspace_id = $2
             AND conversation.workspace_id = $2
+            AND message.deleted_at IS NULL
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
@@ -2836,6 +2850,10 @@ export class WorkspaceRepository {
       );
       const replay = existing.rows[0];
       if (replay !== undefined) {
+        if (replay.deleted_at !== null) {
+          // Retraction wins over delivery idempotency: a retry must not rehydrate retained content.
+          throw new ApiError(404, "NOT_FOUND", "Message not found");
+        }
         if (!sameBuffer(replay.request_fingerprint, fingerprint)) {
           throw new ApiError(
             409,
@@ -3327,6 +3345,26 @@ export class WorkspaceRepository {
                   AND (
                     $8::boolean
                     OR event.event_type <> 'message.retracted'
+                  )
+                  AND (
+                    event.event_type <> 'message.created'
+                    OR EXISTS (
+                      SELECT 1
+                        FROM messages AS created_message
+                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                         AND created_message.workspace_id = event.workspace_id
+                         AND created_message.deleted_at IS NULL
+                    )
+                  )
+                  AND (
+                    event.event_type NOT IN ('reaction.added', 'reaction.removed')
+                    OR EXISTS (
+                      SELECT 1
+                        FROM messages AS reaction_message
+                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                         AND reaction_message.workspace_id = event.workspace_id
+                         AND reaction_message.deleted_at IS NULL
+                    )
                   )
                 ) AS visible
            FROM sync_events AS event

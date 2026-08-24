@@ -1,5 +1,7 @@
 import { agentTokensCommand, agentsCommand, invitationsCommand } from "./commands/admin.js";
 import { authCommand } from "./commands/auth.js";
+import { agentEnrollmentPolicyCommand, agentEnrollmentsCommand } from "./commands/enrollments.js";
+import { filesCommand } from "./commands/files.js";
 import { profilesCommand } from "./commands/profiles.js";
 import { health, readiness } from "./commands/system.js";
 import {
@@ -55,6 +57,23 @@ Commands:
   messages history CONVERSATION [--before CURSOR] [--limit N]
   messages send CONVERSATION [BODY] [--file PATH] [--mention MEMBER]...
                 [--client-message-id UUID] [--thread-root-id UUID]
+  files list CONVERSATION [--before CURSOR] [--limit N]
+  files for-message MESSAGE_ID
+  files get ATTACHMENT_ID --output PATH
+  agent-enrollments offer USERNAME --display-name NAME --label LABEL
+                    [--restricted-channel-id UUID]...
+  agent-enrollments offer --resume
+  agent-enrollments request USERNAME --display-name NAME --label LABEL
+                    --credential-verifier VERIFIER [--restricted-channel-id UUID]...
+                    [--idempotency-key KEY]
+  agent-enrollments status ENROLLMENT_ID
+  agent-enrollments cancel ENROLLMENT_ID
+  agent-enrollments list
+  agent-enrollments approve ENROLLMENT_ID
+  agent-enrollments reject ENROLLMENT_ID
+  agent-enrollments redeem ENROLLMENT_ID
+  agent-enrollment-policy show
+  agent-enrollment-policy set <required|automatic>
   read-cursors advance CONVERSATION MESSAGE_ID
   sync --after CURSOR [--limit N]
   watch --json [--after CURSOR]
@@ -125,6 +144,18 @@ export async function runCli(argv: readonly string[], runtime: Runtime): Promise
   }
   if (command === "messages") {
     await messagesCommand(context, subcommand, rest);
+    return;
+  }
+  if (command === "files") {
+    await filesCommand(context, subcommand, rest);
+    return;
+  }
+  if (command === "agent-enrollments") {
+    await agentEnrollmentsCommand(context, subcommand, rest);
+    return;
+  }
+  if (command === "agent-enrollment-policy") {
+    await agentEnrollmentPolicyCommand(context, subcommand, rest);
     return;
   }
   if (command === "read-cursors") {
