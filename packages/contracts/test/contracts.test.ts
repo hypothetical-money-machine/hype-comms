@@ -899,6 +899,19 @@ describe("transport contracts", () => {
       },
     } as const;
     expect(agentContextHistoryResponseSchema.parse(astralResponse)).toEqual(astralResponse);
+    const edgeStringResponse = {
+      contextPack: {
+        ...response.contextPack,
+        messages: [
+          {
+            ...reply,
+            createdAt: "0000-02-29T23:59:59.123456789Z",
+            body: "\ud800",
+          },
+        ],
+      },
+    } as const;
+    expect(agentContextHistoryResponseSchema.parse(edgeStringResponse)).toEqual(edgeStringResponse);
     expect(() =>
       agentContextHistoryResponseSchema.parse({
         ...response,
@@ -960,6 +973,33 @@ describe("transport contracts", () => {
     } as const;
 
     expect(agentContextHistoryResponseSchema.parse({ contextPack })).toEqual({ contextPack });
+    const sentinelPeerPack = {
+      ...contextPack,
+      conversation: {
+        ...contextPack.conversation,
+        peer: {
+          ...contextPack.conversation.peer,
+          id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        },
+      },
+    } as const;
+    expect(agentContextHistoryResponseSchema.parse({ contextPack: sentinelPeerPack })).toEqual({
+      contextPack: sentinelPeerPack,
+    });
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: {
+          ...sentinelPeerPack,
+          conversation: {
+            ...sentinelPeerPack.conversation,
+            peer: {
+              ...sentinelPeerPack.conversation.peer,
+              id: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
     const oversizedMessages = Array.from({ length: AGENT_CONTEXT_PACK_MAX_LIMIT }, (_, index) => ({
       ...message,
       id: `10000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`,

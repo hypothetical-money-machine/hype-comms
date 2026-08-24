@@ -19,7 +19,6 @@ import shutil
 import tempfile
 import time
 import unicodedata
-import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,6 +116,19 @@ SUPPORTED_EVENT_TYPES = frozenset(
 )
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DECIMAL_CURSOR = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_ENTITY_ID = re.compile(
+    r"^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-"
+    r"[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}|"
+    r"00000000-0000-0000-0000-000000000000|"
+    r"ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+)
+_ISO_DATE_TIME = re.compile(
+    r"^(?:(?:[0-9]{2}[2468][048]|[0-9]{2}[13579][26]|[0-9]{2}0[48]|"
+    r"[02468][048]00|[13579][26]00)-02-29|[0-9]{4}-(?:(?:0[13578]|1[02])-"
+    r"(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|"
+    r"02-(?:0[1-9]|1[0-9]|2[0-8])))T(?:[01][0-9]|2[0-3]):[0-5][0-9]"
+    r"(?::[0-5][0-9](?:\.[0-9]+)?)?Z$"
+)
 # ECMAScript WhiteSpace and LineTerminator code points, matching the trim
 # projection used by the shared Zod schemas. In particular, Python's broader
 # default strip set must not remove U+001C or U+0085.
@@ -300,12 +312,7 @@ def _ecmascript_trim(value: str) -> str:
 
 
 def _is_entity_id(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        return str(uuid.UUID(value)) == value.lower()
-    except (ValueError, AttributeError):
-        return False
+    return isinstance(value, str) and _ENTITY_ID.fullmatch(value) is not None
 
 
 def _is_sequence(value: object) -> bool:
@@ -327,13 +334,25 @@ def _compare_decimal_strings(left: str, right: str) -> int:
 
 
 def _is_iso_datetime(value: object) -> bool:
-    if not isinstance(value, str) or not value.endswith("Z"):
+    return isinstance(value, str) and _ISO_DATE_TIME.fullmatch(value) is not None
+
+
+def _valid_channel_slug(value: object) -> bool:
+    """Match the shared Unicode channel-slug refinements."""
+
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 100
+        or value != unicodedata.normalize("NFKC", value)
+        or value != value.lower()
+    ):
         return False
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None
+    for segment in value.split("-"):
+        if not segment or unicodedata.category(segment[0])[0] not in {"L", "N"}:
+            return False
+        if any(unicodedata.category(character)[0] not in {"L", "M", "N"} for character in segment):
+            return False
+    return True
 
 
 def _valid_context_author(value: object) -> bool:
@@ -387,6 +406,7 @@ def _valid_context_message(value: object) -> bool:
         and _is_sequence(value.get("conversationSequence"))
         and _is_iso_datetime(value.get("createdAt"))
         and "\x00" not in body
+        and bool(_ecmascript_trim(body))
         and body_length <= MAX_MESSAGE_LENGTH
         and _valid_context_author(value.get("author"))
         and isinstance(value.get("mentionedYou"), bool)
@@ -401,7 +421,7 @@ def _utf16_length(value: str) -> int:
     every comparison against MAX_MESSAGE_LENGTH counts the same units the server counts.
     """
 
-    return len(value.encode("utf-16-le")) // 2
+    return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
 
 
 def _invalid_context_pack() -> CliFailure:
@@ -420,6 +440,15 @@ def _injection_safe_context_json(pack: Mapping[str, Any]) -> str:
     """Match the shared contract's compact, physical-one-line JSON encoding."""
 
     encoded = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))
+    # JSON.stringify emits ordinary non-ASCII text but escapes isolated UTF-16
+    # surrogates. Python retains those code points with ensure_ascii=False, so
+    # normalize just that impossible-to-encode subset to the wire form.
+    encoded = "".join(
+        f"\\u{ord(character):04x}"
+        if 0xD800 <= ord(character) <= 0xDFFF
+        else character
+        for character in encoded
+    )
     # JSON escapes ASCII newlines, but permits these Unicode line separators
     # literally. Escape them too so no message body can manufacture a physical
     # boundary line while retaining readable non-ASCII conversation text.
@@ -470,8 +499,7 @@ def _validate_context_pack(
         slug = location.get("slug")
         if (
             not _is_entity_id(location.get("id"))
-            or not isinstance(slug, str)
-            or not 1 <= len(slug) <= 100
+            or not _valid_channel_slug(slug)
             or location.get("selector") != f"#{slug}"
         ):
             raise invalid

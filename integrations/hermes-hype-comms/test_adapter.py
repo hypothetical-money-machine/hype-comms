@@ -1315,6 +1315,83 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
 
+    async def test_context_validation_rejects_shared_contract_violations(self) -> None:
+        invalid_cases: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+        dm_trigger = message_event("101", DM_ID, USER_ID)
+        invalid_peer = context_pack_result(message_id_for("101"))
+        invalid_peer["contextPack"]["conversation"]["peer"]["id"] = (
+            "10000000-0000-4000-7000-000000000001"
+        )
+        invalid_cases.append(("UUID variant", dm_trigger, invalid_peer))
+        invalid_sentinel_case = context_pack_result(message_id_for("101"))
+        invalid_sentinel_case["contextPack"]["conversation"]["peer"]["id"] = (
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
+        )
+        invalid_cases.append(("UUID sentinel case", dm_trigger, invalid_sentinel_case))
+
+        channel_trigger = message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+        invalid_slug = context_pack_result(message_id_for("101"))
+        invalid_slug["contextPack"]["conversation"].update(
+            {"slug": "bad slug", "selector": "#bad slug"}
+        )
+        invalid_cases.append(("channel slug", channel_trigger, invalid_slug))
+
+        invalid_datetime = context_pack_result(message_id_for("101"))
+        invalid_datetime["contextPack"]["messages"][0]["createdAt"] = (
+            "2026-01-01 00:00:00Z"
+        )
+        invalid_cases.append(("ISO datetime", channel_trigger, invalid_datetime))
+
+        invalid_body = context_pack_result(message_id_for("101"))
+        invalid_body["contextPack"]["messages"][0]["body"] = " \t\n"
+        invalid_cases.append(("blank body", channel_trigger, invalid_body))
+
+        for name, trigger, response in invalid_cases:
+            with self.subTest(name=name):
+                factory = FakeProcessFactory(
+                    [
+                        ProcessSpec(
+                            context_args(
+                                response["contextPack"]["conversation"]["id"],
+                                message_id_for("101"),
+                            ),
+                            json_process(response),
+                        )
+                    ],
+                    auto_context=False,
+                )
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+
+                with self.assertRaises(adapter_module.CliFailure) as caught:
+                    await adapter._accept_event(trigger)
+
+                self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
+                self.assertEqual(adapter.handled_events, [])
+
+    async def test_context_validation_accepts_contract_edge_strings(self) -> None:
+        anchor_id = message_id_for("101")
+        trigger = message_event("101", DM_ID, USER_ID, body="\ud800")
+        response = context_pack_result(anchor_id)
+        response["contextPack"]["messages"][0]["createdAt"] = (
+            "0000-02-29T23:59:59.123456789Z"
+        )
+        response["contextPack"]["conversation"]["peer"]["id"] = (
+            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        )
+        factory = FakeProcessFactory(
+            [ProcessSpec(context_args(DM_ID, anchor_id), json_process(response))],
+            auto_context=False,
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(trigger)
+
+        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertIn('"body":"\\ud800"', adapter.handled_events[0].text)
+
     async def test_context_pack_rejects_oversized_sequence_as_typed_failure(self) -> None:
         anchor_id = message_id_for("101")
         trigger = message_event("101", DM_ID, USER_ID)
@@ -1403,7 +1480,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                         "id": message_id_for(str(sequence)),
                         "conversationSequence": str(sequence),
                         "createdAt": "2026-07-26T11:59:00.000Z",
-                        "body": "\u2028" * body_length,
+                        "body": "x" + "\u2028" * body_length,
                         "author": dict(HUMAN_USER),
                         "mentionedYou": False,
                         "threadRootId": None,
@@ -1489,10 +1566,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         missing_author_kind = json.loads(json.dumps(valid))
         del missing_author_kind["contextPack"]["messages"][0]["author"]["kind"]
         malformed_results.append(missing_author_kind)
-        lone_surrogate = json.loads(json.dumps(valid))
-        lone_surrogate["contextPack"]["messages"][0]["body"] = "\ud800"
-        malformed_results.append(lone_surrogate)
-
         for malformed in malformed_results:
             with self.subTest(malformed=malformed):
                 factory = FakeProcessFactory(
