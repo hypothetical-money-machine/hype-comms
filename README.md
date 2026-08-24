@@ -234,18 +234,23 @@ development servers. Human sessions can request and exchange magic links; agent 
 read from a private prompt, stdin, an injected environment variable, or a `0600` profile file.
 Do not put credentials in command arguments.
 
-Workspace owners create agent members and their immutable scoped tokens through a human CLI
-profile. A token is shown once, at creation, and cannot be recovered later; revoke it and create a
-replacement if it is lost. Agents count toward the same 25-active-member limit as people. See the
-[CLI guide](packages/cli/README.md) for commands, JSON/NDJSON output, retry behavior, and stable
-exit codes.
+Routine agent provisioning is a zero-copy enrollment: the child profile generates and retains its
+final credential, an existing agent requests the enrollment with a non-secret verifier, the owner
+reviews it when policy requires, and the child redeems it. The immutable `default-agency-v1`
+credential grants workspace read, seated-conversation messaging, DM open/send, and agent enrollment
+requests; file projections use the separate `attachments-v1` wire capability and remain authorized
+by workspace read plus conversation visibility. Owner-minted agent tokens are a break-glass path,
+not the routine Atlas workflow. Agents count toward the same 25-active-member limit as people. See
+the [default agent agency runbook](docs/default-agent-agency.md) for exact commands, policy,
+seating, Atlas migration, rollback, and completion evidence, and the
+[CLI guide](packages/cli/README.md) for general profile and output behavior.
 
 The [Hermes adapter](integrations/hermes-hype-comms/README.md) runs the CLI as its transport. It
 wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
 one Hermes session per Hype Comms conversation, and sends replies back to that canonical
 conversation.
-Install the server migration first, then the CLI, provision the agent and token, install the
-adapter under `~/.hermes/plugins/`, and finally start the Hermes gateway.
+Install the server migration first, then the CLI, complete the agent enrollment, install the adapter
+under `~/.hermes/plugins/`, and finally start the Hermes gateway.
 
 ## Container deployment
 
@@ -456,9 +461,10 @@ committed.
 Two systems run against this repository, split by what each can physically build.
 
 **Woodpecker** (`.woodpecker.yml`) owns the server. On a push to `main` it runs `npm run check`,
-builds the service image with kaniko, pushes it to the Harbor registry, and updates the
-`deployment-repository` GitOps repository so Argo CD rolls it out to the `production-cluster` cluster. It runs
-on the example-project, which is where the registry, the cluster, and the database already live.
+builds the service image with kaniko, and pushes only a commit-addressed tag to the Harbor registry.
+The job prints the registry digest; deployment is a separate reviewed digest pin in
+`homelab-deploy-kit`. No GitOps secret is injected into the build pipeline, so a source merge cannot
+roll directly into the gatorlunch cluster.
 
 **GitHub Actions** (`.github/workflows/`) owns repository checks and the desktop client:
 
@@ -471,8 +477,8 @@ on the example-project, which is where the registry, the cluster, and the databa
   identity because that evidence applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
-The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,
-and Windows installers on Windows. GitHub provides those runners; the example-project does not.
+The desktop half cannot move to the homelab: macOS artifacts must be built and signed on macOS,
+and Windows installers on Windows. GitHub provides those runners; the homelab does not.
 
 Note that `npm run check` currently runs in both systems on a push to `main`. That duplication is
 harmless but not free, and is worth collapsing if CI minutes or feedback latency start to matter.

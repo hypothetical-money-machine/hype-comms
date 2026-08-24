@@ -49,6 +49,8 @@ on:
       - .github/dependabot.yml
       - .github/workflows/desktop-release.yml
       - .github/workflows/desktop-package-smoke.yml
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: desktop-package-${{ github.workflow }}-${{ github.ref }}
@@ -65,18 +67,18 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            # Pull requests, including forks, stay on disposable hosted runners. Trusted main and
-            # manual builds retain native coverage without exposing persistent hosts to PR code.
-            runner: ${{ github.event_name == 'pull_request' && '["macos-15"]' || '["self-hosted", "macOS", "ARM64", "notarize"]' }}
-            self_hosted: ${{ github.event_name != 'pull_request' }}
+            # Only trusted main pushes and manual builds use persistent hosts. Every other event,
+            # including pull requests and merge groups, fails closed onto disposable runners.
+            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
+            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "1"
           - platform: Windows
-            runner: ${{ github.event_name == 'pull_request' && '["windows-11-arm"]' || '["self-hosted", "Windows", "ARM64", "windows-release"]' }}
-            self_hosted: ${{ github.event_name != 'pull_request' }}
+            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
+            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
           - platform: Linux
-            runner: ${{ github.event_name == 'pull_request' && '["ubuntu-24.04-arm"]' || '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' }}
-            self_hosted: ${{ github.event_name != 'pull_request' }}
+            runner: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
+            self_hosted: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
@@ -127,9 +129,9 @@ jobs:
         if: matrix.platform != 'Windows'
         env:
           # electron-builder skips all macOS signing in PR jobs before reading identity: "-"
-          # unless this is enabled. Hosted PR jobs receive no signing secrets, and identity
-          # discovery remains disabled for every DEV smoke build.
-          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && github.event_name == 'pull_request' && 'true' || 'false' }}
+          # unless this is enabled. Hosted PR and merge-group jobs receive no signing secrets, and
+          # identity discovery remains disabled for every DEV smoke build.
+          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && !matrix.self_hosted && 'true' || 'false' }}
         shell: sh
         run: npm run package:desktop
 

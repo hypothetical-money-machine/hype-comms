@@ -66,17 +66,17 @@ did.
 ### Current pilot delivery
 
 ```text
-main -> Woodpecker check -> Kaniko -> registry.example.invalid
-                                      |
-                                      v
-deployment-repository promotion -> Argo CD -> production-cluster cluster
+main -> Woodpecker check -> Kaniko -> registry.fastnfree.dev/homelab/hype-comms:<commit SHA>
+                                                |
+reviewed homelab-deploy-kit digest pin -----------+-> Argo CD -> gatorlunch cluster
 
 v* tag -> GitHub Actions native runners -> updates.hypemm.com (S3-compatible storage)
 ```
 
-The server image and GitOps promotion are implemented by `.woodpecker.yml`. Runtime manifests,
-ingress, PostgreSQL, secret injection, backup policy, and rollback controls live in the separate
-`hype-comms/deployment-repository` repository; they must be verified there and cannot
+The server image build is implemented by `.woodpecker.yml`; it receives no GitOps secret and does
+not promote deployments. Runtime manifests, ingress, PostgreSQL, secret injection, backup policy,
+and rollback controls live in the separate `hypothetical-money-machine/homelab-deploy-kit`
+repository; they must be verified there and cannot
 be inferred from this checkout. Desktop releases use native self-hosted runners and a public
 S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
 and the controls that still need external evidence.
@@ -138,19 +138,20 @@ at the current 25-member scale.
 
 | Aggregate              | Current rules                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data.                                                                                                                                                                                                                                                                                                                    |
+| Workspace              | One provisioned row. Name/slug are admin configuration, not user-created data. Agent enrollment policy is an explicit persisted `required` or `automatic` value, defaults to `required`, and is never inferred from the name or slug.                                                                                                                                                            |
 | User and membership    | A user is `human`, `bot`, or `agent`. Human email is normalized for comparison and unique; bots and agents have no email and cannot create device sessions. A membership is `owner` or `member` and `invited`, `active`, or `revoked`; bots and agents are always members. Capacity counts every active principal transactionally. Usernames are stable, unique lowercase mention handles; display names may change.                                                          |
 | Invitation and session | Invitations are email-bound, owner-created, single-workspace, and expire after seven days. Magic-link challenges are single-use and expire after 15 minutes. Optional AuthKit uses a ten-minute encrypted provider transaction and a five-minute desktop-PKCE handoff; verified provider identity still passes local invite admission. Both methods create the same rotating, revocable local device session, and only credential hashes plus the upstream session ID needed for revocation are retained. |
 | Bot credential         | Owner-issued service credential with one or both `tasks:read` and `tasks:write` scopes, a required expiry, last-used time, and optional revocation time. The 256-bit token is shown once and only its SHA-256 hash is stored. Rotation atomically revokes every prior credential for that bot.                                                                                                        |
 | Bot channel grant      | Explicit bot-to-channel authorization. A grant is required even when the channel access mode is `workspace`; it never grants a DM. Visibility is the intersection of an active bot membership, credential scope, and channel grant.                                                                                                                                                              |
-| Agent credential       | Owner-issued, non-expiring bearer credential with immutable `workspace:read`, `messages:write`, `conversations:write`, and/or `read-cursors:write` scopes. The prefixed 256-bit token is shown once and only its SHA-256 hash is stored. Disabling an agent revokes its active membership and every token.                                                                                           |
+| Agent credential       | Non-expiring bearer credential with immutable scopes. Legacy owner-issued credentials may select `workspace:read`, `messages:write`, `conversations:write`, `read-cursors:write`, `direct-conversations:write`, and/or `agents:invite`. Enrollment instead fixes `default-agency-v1` to exactly `workspace:read`, `messages:write`, `direct-conversations:write`, and `agents:invite`. Only a SHA-256 credential hash is stored; disabling an agent revokes its active membership and every token. |
+| Agent enrollment       | A child generates its final 256-bit credential locally and offers only its SHA-256 verifier. Its private profile retains the immutable pending offer for exact output recovery until authenticated redemption clears the marker. An authorized inviter binds that verifier to an immutable identity, label, and restricted-channel seat set. Policy produces `pending_approval` or `ready_to_redeem`; redemption rechecks requester authority, seats, expiry, capacity, username and credential uniqueness, then atomically creates the agent/token. Every transition is audited without plaintext credentials. |
 | Conversation           | `channel` has a unique normalized slug and an access mode: `workspace` is readable by every active human or agent member, while `members` is readable only by active human or agent conversation memberships. Bots use explicit grants for either mode. Members-only channels have `owner` and `member` roles and must retain an owner. `direct_message` has a unique sorted human-or-agent pair. Archived channels remain readable but reject writes. |
 | Message                | Immutable record (editing and deletion are deferred) with a 1–4,000 character UTF-8 body, monotonically assigned per-conversation sequence, stable `clientMessageId`, author, and optional thread root. A reply points directly to a top-level message in the same conversation; replies to replies are rejected.                                                                                 |
 | Mention                | Create-message input includes explicit mentioned user IDs and plain-text `@username` tokens. The server verifies active membership and matching stable handles, then stores a join row; raw text parsing is never used for notification authorization. Maximum 50 distinct mentions per message.                                                                                                  |
 | Reaction               | Unicode emoji normalized to NFC; one row per message/member/emoji, at most 20 per member and 250 total per message. Add and remove are idempotent. Custom emoji are unsupported.                                                                                                                                                                                                                  |
 | Read cursor            | One per member/conversation, represented externally by a message ID and internally by its conversation sequence. Updates only move forward. Counts exclude the reader's own messages; mention counts are tracked separately. Read events are visible only to that member, so there are no read receipts.                                                                                          |
 | Task                   | Belongs to one channel or self-DM and has a conversation-local number, optimistic version, title, optional description/assignee/due date/source message, priority, fixed `todo`/`in_progress`/`done` status, canonical integer rank within a status column, and latest-mutation actor. Completing sets `completedAt`; reopening clears it. Assignees and linked messages must be able to access the same conversation. |
-| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable S3 key, size/hash, and `pending`, `ready`, or `failed` scan status. It is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments.                                                                            |
+| Attachment             | Maximum 25 MiB, sanitized display filename, detected MIME type, immutable object key, size/hash, and `pending`, `ready`, or `failed` scan status. The pilot keeps object bytes on its attachment PVC; private S3 plus a scan worker belongs to the hosted target. An attachment is staged without a message, then associated exactly once when a message is created. Executables are rejected. A message may reference at most ten ready attachments. `attachments-v1` negotiates wire projections only; `workspace:read` plus conversation visibility authorizes agent reads. |
 | Sync event             | Immutable versioned envelope with a workspace-global sequence, audience, optional conversation, actor, entity payload, and occurrence time. Events are retained for 90 days.                                                                                                                                                                                                                      |
 
 Domain mutations, their idempotency result, and corresponding sync events commit in one
@@ -208,9 +209,13 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v1/invitations`, `POST /v1/invitations`, `DELETE /v1/invitations/:id`   | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
 | `GET/POST /v1/agents`, `DELETE /v1/agents/:id`                                | Owner-only list/create/disable for non-email agent members; active agents share workspace capacity with people and bots.                  |
 | `GET/POST /v1/agents/:id/tokens`, `DELETE .../:tokenId`                       | Owner-only list/create/revoke for one-time agent tokens; metadata never returns plaintext or token hashes.                                |
+| `GET/PATCH /v1/agent-enrollment-policy`                                      | Owner-only read/update of the explicit `required` or `automatic` workspace policy; new workspaces default to `required`.                  |
+| `POST /v1/agent-enrollments`, `GET /v1/agent-enrollments[/:id]`               | An owner or agent with `agents:invite` requests and reads its enrollments; owners can read the workspace queue. Requests are idempotent and carry a child-generated verifier, immutable identity, label, and restricted-channel seats. |
+| `POST /v1/agent-enrollments/:id/review`, `POST .../:id/cancel`                 | An owner approves/rejects; an owner or original requester cancels an open enrollment. State transitions are bounded and audited.          |
+| `POST /v1/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
 | `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
 | `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
-| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it.                                                                            |
+| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it; agents require narrow `direct-conversations:write` or legacy `conversations:write`. |
 | `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
 | `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
 | `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
@@ -224,6 +229,8 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version. Bot callers require `tasks:write`.                       |
 | `POST /v1/files/uploads`, `POST /v1/files/:id/complete`                       | Create a 15-minute quarantine upload and confirm its hash/size so scanning can begin.                                                     |
 | `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
+| `GET /v1/conversations/:id/files`, `POST /v1/attachments/query`               | List ready files in one visible conversation or for bounded visible message IDs; agents require `workspace:read`. `attachments-v1` affects shape, not authority. |
+| `GET /v1/files/:id/content`                                                   | Stream one ready, visible attachment with bounded length and a SHA-256 response header for non-desktop clients; agents require `workspace:read`. |
 | `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
 | `GET /v1/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
 | `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the human device session or agent token for a WSS connection; never return the access credential. |
@@ -558,11 +565,25 @@ after provider-secret loss. AuthKit validity alone never grants workspace access
 Agent bearer credentials are accepted only by agent-capable identity and workspace routes. Every
 request checks the token hash, token revocation, active agent membership, and the route's immutable
 scope. An agent may read the same workspace-visible and explicitly joined conversations as a human
-member, create DMs or channels with `conversations:write`, send with `messages:write`, and advance
-its cursor with `read-cursors:write`; it can never administer owners, invitations, agents, or
-tokens. Supplying both a human cookie and agent bearer credential to an identity route is rejected
-as ambiguous. Agent tokens never cross the renderer boundary or appear in argv, URLs, logs, or
-realtime tickets.
+member, open DMs with `direct-conversations:write` (or the broader legacy
+`conversations:write`), send and explicitly identify mentions with `messages:write`, and advance its
+cursor with `read-cursors:write`. `agents:invite` permits only an enrollment request and the
+requester's own status/cancellation; policy, review, legacy agent creation, and token administration
+remain owner-only. The enrolled `default-agency-v1` profile contains exactly `workspace:read`,
+`messages:write`, `direct-conversations:write`, and `agents:invite`. Supplying both a human cookie and
+agent bearer credential to an identity route is rejected as ambiguous. Agent tokens never cross the
+renderer boundary or appear in argv, URLs, logs, or realtime tickets.
+
+Enrollment is a claim protocol, not token delivery. The child stores the final credential locally
+before exposing its SHA-256 verifier; the inviter and owner see only the verifier-bound request, and
+the server activates that exact hash only after policy and authorization rechecks. Required review
+is the workspace default. `automatic` is an explicit owner setting intended for controlled spaces
+such as the junkyard and is never derived from a name. Workspace-access channels are visible by
+membership. An agent inviter may delegate a valid, non-archived members-only channel only while it
+has active membership there; a workspace-owner requester may grant any valid restricted channel in
+the workspace. That authority is rechecked at redemption. `attachments-v1` only requests attachment
+wire projections. File list/content routes still require `workspace:read` and repository-level
+conversation visibility.
 
 For a rolling desktop upgrade, public member-directory and `member.updated` projections encode an
 agent as the previous release's `human` discriminator. Those shapes are mention/DM targets and do
@@ -618,6 +639,12 @@ deletes active data and objects within 30 days; encrypted backups age out within
   expand/backfill/contract. A release may roll back application tasks without rolling back a
   destructive migration; destructive cleanup waits until the previous client/server version
   is outside the compatibility window.
+- Default agency follows expand/enable: apply the additive enrollment tables, policy column, and
+  scope constraint; deploy a server and CLI that parse the new scopes; leave policy `required`;
+  then enroll or migrate the first `default-agency-v1` identity only after the old server has left
+  the rollback window. A functional rollback sets policy to `required`, cancels open enrollments,
+  and revokes or disables activated credentials; it does not reverse the migration or restore a
+  server that cannot parse the new scopes.
 - Migration `0005_message_search.sql` populates a stored search vector and builds its GIN index in
   one transaction. Apply it during a maintenance window for an existing populated deployment;
   replace it with a staged online backfill/index build before message history reaches production
@@ -641,7 +668,9 @@ deletes active data and objects within 30 days; encrypted backups age out within
   restore checks run monthly; a documented restore plus attachment-access rehearsal is
   required before hosted production and quarterly thereafter. CloudTrail/audit records cover deploys,
   secret/key access, owner invitations/revocations, membership changes, and session
-  revocations without recording chat content.
+  revocations without recording chat content. Application audit also retains agent-enrollment
+  transitions, requester credential ID, requested seats, review, policy timestamps, and activated
+  identity/token IDs without credential material.
 - Production has a runbook for auth/email failure, database saturation, event lag, malware
   backlog, compromised session/signing key, rollback, restore, and workspace shutdown.
   Dependency and base-image updates are reviewed weekly; critical security releases bypass
@@ -697,14 +726,14 @@ downgrade.
 
 | Layer                      | Required cases and gate                                                                                                                                                                                                                                                                                                                                                                |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, task ordering/version conflicts, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, and error redaction. Runs on every pull request.                                                                                     |
-| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, and attachment state transitions. Runs on every pull request.                                                                          |
+| Contract/unit              | Strict schemas reject unknown/oversized data; domain tests cover capacity, DM uniqueness, task ordering/version conflicts, thread depth, mention verification, reaction uniqueness, forward-only reads, file states, event audiences, cursor serialization, error redaction, the exact `default-agency-v1` scope set, enrollment states, and child-verifier claim handling. Runs on every pull request. |
+| PostgreSQL/API integration | Run real migrations on supported PostgreSQL, then test invite/auth rotation and reuse, every route's positive and negative ACLs, transactional event writes, permanent send idempotency/body conflict, pagination boundaries, search isolation, attachment state transitions, required/automatic enrollment policy, idempotent request/review/redeem, expiry/capacity/username races, requester and seat rechecks, and secret-free audit. Runs on every pull request. |
 | Sync/resilience            | Inject duplicate, missing, delayed, and out-of-order events; disconnect before/after commit; restart client/server; expire cursors/tokens; suspend/resume; corrupt cache ciphertext; revoke membership mid-session; and recover with outbox intact and one canonical message. Runs in CI with deterministic fault hooks.                                                               |
 | Desktop security           | Assert BrowserWindow flags, CSP, navigation/window denial, IPC sender/schema/size checks, absence of tokens/Node globals in renderer, safeStorage failure fallback, encrypted IndexedDB sensitive fields, external URL validation, and cache wipe. Runs on every pull request.                                                                                                         |
-| Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, and notification focus/permission/click routing. Runs before a hosted release.                                                                        |
+| Feature integration        | Three-user scenarios cover channel/DM/task isolation, Kanban convergence and reassignment, threads, Unicode reactions/mentions, two-device unread convergence, 100k-message search, EICAR/rejected/abandoned uploads, URL expiry, notification focus/permission/click routing, zero-copy child enrollment, seated channel write, DM open/send, verified agent mention, agent-invite without administration, and `attachments-v1` file retrieval without a desktop. Runs before a hosted release. |
 | Native E2E                 | Baseline install/launch/logout/relaunch, deep links, OS keyring, tray/window lifecycle, offline restart, and uninstall run on every shipped platform's full [supported host matrix](#supported-host-matrix) row; a release never scopes this down. Optional-feature evidence—including notifications granted/denied—is scoped to the platforms in the change's declared scope, and an unproven platform ships that feature off rather than untested. Package smoke runs on relevant changes; the full release matrix runs for releases. |
 | Update/release             | Upgrade from the immediately previous signed version, verify retained cache/outbox, reject altered manifest/artifact/wrong architecture/expired URL, pause rollout, and enforce minimum versions. Verify macOS notarization, Windows Authenticode, and Linux checksum/GPG signature on clean hosts. Blocks publishing.                                                                 |
-| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members.                                               |
+| Load/operations            | With 25 connected members and 100,000 messages, sustain a 10 message/second burst while reconnecting clients and searching; meet latency/error SLOs. Exercise rolling deploy, migration lock/rollback compatibility, enrollment stop/revoke rollback, explicit primary/junkyard policy evidence, Atlas replacement cutover and old-token revocation, scan backlog alarm, PITR restore, object authorization, and RPO/RTO. Blocks opening a hosted deployment to members. |
 
 No release may waive authorization, idempotency/data-loss, artifact-signature, or restore
 tests. Flaky tests are treated as failed gates until fixed or replaced with an equivalent
