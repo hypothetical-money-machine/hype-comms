@@ -111,6 +111,32 @@ describe("AgentWakeFileStore", () => {
     expect(source).not.toContain("prompt");
   });
 
+  it("migrates a pre-dual-repair record to an explicit empty deferred source repair", async () => {
+    const userDataPath = await temporaryDirectory();
+    const directory = path.join(userDataPath, "agent-wake");
+    const file = storedFile(userDataPath);
+    const queued = state().queue[0]!;
+    const legacyState = {
+      ...state(),
+      queue: [{ ...queued, phase: "blocked", attempts: 1 }],
+      repair: {
+        code: "provider-outcome-ambiguous",
+        wakeId: queued.wake.wakeId,
+        occurredAt: queued.enqueuedAt,
+      },
+    };
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(file, `${JSON.stringify(legacyState)}\n`, { mode: 0o600 });
+
+    const store = new AgentWakeFileStore({ userDataPath });
+    await expect(store.read(ENROLLMENT_ID)).resolves.toMatchObject({
+      repair: {
+        code: "provider-outcome-ambiguous",
+        deferredSourceRepair: null,
+      },
+    });
+  });
+
   it("serializes transactions for an enrollment while allowing durable revision updates", async () => {
     const userDataPath = await temporaryDirectory();
     let releaseFirstSync: (() => void) | undefined;
@@ -153,6 +179,10 @@ describe("AgentWakeFileStore", () => {
     for (const invalid of [
       { ...state(2), token: "secret" },
       { ...state(2), enrollmentId: "another-enrollment" },
+      {
+        ...state(2),
+        identity: { ...state(2).identity, apiOrigin: "http://internal.example.test" },
+      },
       {
         ...state(2),
         queue: [

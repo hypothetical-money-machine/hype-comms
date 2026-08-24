@@ -5,12 +5,11 @@ import path from "node:path";
 import {
   agentWakeIdSchema,
   agentWakeSignalSchema,
-  encodeAgentWakeKeyInput,
   entityIdSchema,
-  getAgentWakeKeyInput,
   isoDateTimeSchema,
   sequenceSchema,
 } from "@hype-comms/contracts";
+import { deriveAgentWakeId } from "@hype-comms/contracts/wake-node";
 import { z } from "zod";
 
 import type {
@@ -18,6 +17,7 @@ import type {
   AgentWakeStoreMutation,
   StoredAgentWakeEnrollment,
 } from "./agent-wake-broker";
+import { agentWakeApiOriginSchema } from "./agent-wake-validation";
 import {
   atomicWrite,
   readPrivateBoundedUtf8File,
@@ -55,26 +55,14 @@ const repairCodeSchema = z.enum([
   "source-scope-invalid",
   "source-server-reset",
 ]);
-
-const apiOriginSchema = z
-  .string()
-  .min(1)
-  .max(2_048)
-  .superRefine((value, context) => {
-    try {
-      const url = new URL(value);
-      if (
-        (url.protocol !== "https:" && url.protocol !== "http:") ||
-        url.username !== "" ||
-        url.password !== "" ||
-        url.origin !== value
-      ) {
-        context.addIssue({ code: "custom", message: "Expected a credential-free HTTP origin" });
-      }
-    } catch {
-      context.addIssue({ code: "custom", message: "Expected a valid API origin" });
-    }
-  });
+const sourceRepairCodeSchema = z.enum([
+  "source-authentication-required",
+  "source-client-replay-overflow",
+  "source-cursor-expired",
+  "source-record-invalid",
+  "source-scope-invalid",
+  "source-server-reset",
+]);
 
 const storedItemSchema = z
   .object({
@@ -162,7 +150,7 @@ const storedAgentWakeEnrollmentSchema = z
     enrollmentId: opaqueHandleSchema,
     identity: z
       .object({
-        apiOrigin: apiOriginSchema,
+        apiOrigin: agentWakeApiOriginSchema,
         workspaceId: entityIdSchema,
         agentUserId: entityIdSchema,
       })
@@ -181,6 +169,15 @@ const storedAgentWakeEnrollmentSchema = z
         code: repairCodeSchema,
         wakeId: agentWakeIdSchema.nullable(),
         occurredAt: safeIntegerSchema,
+        deferredSourceRepair: z
+          .object({
+            code: sourceRepairCodeSchema,
+            wakeId: agentWakeIdSchema.nullable(),
+            occurredAt: safeIntegerSchema,
+          })
+          .strict()
+          .nullable()
+          .default(null),
       })
       .strict()
       .nullable(),
@@ -207,9 +204,7 @@ const storedAgentWakeEnrollmentSchema = z
           message: "Stored wake is outside the enrollment scope",
         });
       }
-      const expectedWakeId = createHash("sha256")
-        .update(encodeAgentWakeKeyInput(getAgentWakeKeyInput(item.wake)), "utf8")
-        .digest("hex");
+      const expectedWakeId = deriveAgentWakeId(item.wake);
       if (item.wake.wakeId !== expectedWakeId) {
         context.addIssue({
           code: "custom",
@@ -256,17 +251,11 @@ const storedAgentWakeEnrollmentSchema = z
         });
       }
       seenWakeIds.add(completion.wakeId);
-      const expectedWakeId = createHash("sha256")
-        .update(
-          encodeAgentWakeKeyInput({
-            version: 1,
-            workspaceId: state.identity.workspaceId,
-            agentUserId: state.identity.agentUserId,
-            messageId: completion.messageId,
-          }),
-          "utf8",
-        )
-        .digest("hex");
+      const expectedWakeId = deriveAgentWakeId({
+        workspaceId: state.identity.workspaceId,
+        agentUserId: state.identity.agentUserId,
+        messageId: completion.messageId,
+      });
       if (completion.wakeId !== expectedWakeId) {
         context.addIssue({
           code: "custom",
@@ -350,6 +339,17 @@ const storedAgentWakeEnrollmentSchema = z
         code: "custom",
         path: ["sourceRetry"],
         message: "A repair state cannot also be retrying its source",
+      });
+    }
+    if (
+      state.repair !== null &&
+      state.repair.deferredSourceRepair !== null &&
+      !state.repair.code.startsWith("provider-")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["repair", "deferredSourceRepair"],
+        message: "Only a provider repair may defer a source repair",
       });
     }
     const blockedItems = state.queue.filter((item) => item.phase === "blocked");

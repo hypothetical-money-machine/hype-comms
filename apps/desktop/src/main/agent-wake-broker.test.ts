@@ -691,7 +691,7 @@ describe("AgentWakeBroker enrollment and source commit boundary", () => {
     expect(harness.targetCalls).toEqual([]);
   });
 
-  it("gives provider ambiguity precedence when an invalid source interrupts delivery", async () => {
+  it("retains the source repair when provider ambiguity interrupts its resolution", async () => {
     const delivery = deferred<AgentWakeTargetResult>();
     const harness = createHarness({ target: () => delivery.promise });
     const session = await start(harness);
@@ -705,11 +705,71 @@ describe("AgentWakeBroker enrollment and source commit boundary", () => {
       expect(harness.store.states.get(ENROLLMENT_ID)?.repair).toMatchObject({
         code: "provider-outcome-ambiguous",
         wakeId: existing.wakeId,
+        deferredSourceRepair: {
+          code: "source-record-invalid",
+          wakeId: existing.wakeId,
+        },
       }),
     );
     expect(harness.store.states.get(ENROLLMENT_ID)?.queue[0]?.phase).toBe("blocked");
     expect(harness.scheduler.pending).toEqual([]);
     delivery.resolve({ status: "accepted", providerReceiptId: "ignored-after-source-repair" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const providerResolved = await harness.broker.resolveProviderRepair({
+      enrollmentId: ENROLLMENT_ID,
+      action: "retry",
+      actionId: "a".repeat(64),
+      evidenceReference: "provider-proved-not-accepted-after-source-repair",
+      expectedRepairCode: "provider-outcome-ambiguous",
+      expectedRepairOccurredAt: START_TIME,
+      expectedWakeId: existing.wakeId,
+    });
+    expect(providerResolved).toMatchObject({
+      phase: "blocked-repair",
+      repair: {
+        code: "source-record-invalid",
+        wakeId: existing.wakeId,
+        deferredSourceRepair: null,
+      },
+    });
+    expect(harness.store.states.get(ENROLLMENT_ID)?.queue[0]?.phase).toBe("queued");
+  });
+
+  it("merges a source failure queued behind an existing provider repair", async () => {
+    const harness = createHarness({
+      target: async () => {
+        throw new Error("provider outcome unknown");
+      },
+    });
+    const session = await start(harness);
+    const signal = makeSignal("11");
+    harness.store.onCommit = (state) => {
+      if (
+        state.repair?.code === "provider-outcome-ambiguous" &&
+        state.repair.deferredSourceRepair === null
+      ) {
+        harness.store.onCommit = null;
+        session.fail(new AgentWakeSourceFailure("source-authentication-required", false));
+      }
+    };
+
+    session.emit(signal);
+
+    await eventually(() =>
+      expect(harness.store.states.get(ENROLLMENT_ID)?.repair).toMatchObject({
+        code: "provider-outcome-ambiguous",
+        wakeId: signal.wakeId,
+        deferredSourceRepair: {
+          code: "source-authentication-required",
+          wakeId: null,
+        },
+      }),
+    );
+    expect(harness.store.states.get(ENROLLMENT_ID)?.queue[0]).toMatchObject({
+      phase: "blocked",
+      wake: { wakeId: signal.wakeId },
+    });
   });
 
   it("records exact provider ambiguity when source authorization fails during delivery", async () => {
@@ -1574,6 +1634,29 @@ describe("AgentWakeBroker retries, repair, and crash recovery", () => {
     });
     expect(harness.targetCalls[0]?.signal.aborted).toBe(true);
     expect(session.stopped).toBe(true);
+  });
+
+  it("retires a claimed delivery before stop can let it invoke the provider", async () => {
+    const harness = createHarness();
+    const session = await start(harness);
+    let stopping: Promise<AgentWakeBrokerStatus> | null = null;
+    harness.store.onCommit = (state) => {
+      if (stopping === null && state.queue[0]?.phase === "delivering") {
+        stopping = harness.broker.stop(ENROLLMENT_ID);
+      }
+    };
+
+    session.emit(makeSignal("11"));
+    await eventually(() => expect(stopping).not.toBeNull());
+    const stopped = await stopping;
+
+    expect(harness.targetCalls).toEqual([]);
+    expect(stopped).toMatchObject({
+      phase: "stopped",
+      repair: null,
+      queueDepth: 1,
+    });
+    expect(harness.store.states.get(ENROLLMENT_ID)?.queue[0]?.phase).toBe("queued");
   });
 });
 

@@ -1,12 +1,9 @@
-import { createHash } from "node:crypto";
-
 import {
   agentWakeStreamRecordSchema,
-  encodeAgentWakeKeyInput,
-  getAgentWakeKeyInput,
   type AgentWakeSignal,
   type AgentWakeStreamRecord,
 } from "@hype-comms/contracts";
+import { deriveAgentWakeId } from "@hype-comms/contracts/wake-node";
 
 const DEFAULT_MAX_QUEUE_DEPTH = 100;
 const DEFAULT_PROVIDER_RETRY_BASE_MS = 1_000;
@@ -198,6 +195,12 @@ export interface StoredAgentWakeRepair {
   readonly code: AgentWakeRepairCode;
   readonly wakeId: string | null;
   readonly occurredAt: number;
+  /** Preserves an independently actionable source failure while provider receipt is reconciled. */
+  readonly deferredSourceRepair: {
+    readonly code: AgentWakeSourceRepairCode;
+    readonly wakeId: string | null;
+    readonly occurredAt: number;
+  } | null;
 }
 
 export interface StoredAgentWakeSourceRetry {
@@ -388,15 +391,9 @@ function nextRevision(state: StoredAgentWakeEnrollment): number {
   return state.revision + 1;
 }
 
-function wakeIdFor(signal: AgentWakeSignal): string {
-  return createHash("sha256")
-    .update(encodeAgentWakeKeyInput(getAgentWakeKeyInput(signal)), "utf8")
-    .digest("hex");
-}
-
 function sourceRepairCode(
   record: Extract<AgentWakeStreamRecord, { type: "agent.wake.repair_required" }>,
-): AgentWakeRepairCode {
+): AgentWakeSourceRepairCode {
   switch (record.reason) {
     case "client_replay_overflow":
       return "source-client-replay-overflow";
@@ -405,6 +402,17 @@ function sourceRepairCode(
     case "server_reset":
       return "source-server-reset";
   }
+}
+
+function isSourceRepairCode(code: AgentWakeRepairCode): code is AgentWakeSourceRepairCode {
+  return code.startsWith("source-");
+}
+
+function repairAfterProviderResolution(
+  repair: StoredAgentWakeRepair,
+): StoredAgentWakeRepair | null {
+  const deferred = repair.deferredSourceRepair;
+  return deferred === null ? null : { ...deferred, deferredSourceRepair: null };
 }
 
 function completionStatus(
@@ -636,6 +644,7 @@ export class AgentWakeBroker {
               code: "provider-outcome-ambiguous",
               wakeId: delivering.wake.wakeId,
               occurredAt: this.#clock.now(),
+              deferredSourceRepair: null,
             },
           };
         }
@@ -860,7 +869,7 @@ export class AgentWakeBroker {
             operatorActions: [...current.operatorActions, operatorAction].slice(
               -this.#maxCompletionRecords,
             ),
-            repair: null,
+            repair: repairAfterProviderResolution(repair),
           };
         }
         const disposition = input.action.replace("confirm-", "") as AgentWakeCompletionDisposition;
@@ -888,7 +897,7 @@ export class AgentWakeBroker {
           operatorActions: [...current.operatorActions, operatorAction].slice(
             -this.#maxCompletionRecords,
           ),
-          repair: null,
+          repair: repairAfterProviderResolution(repair),
         };
       });
       return projectStatus(state);
@@ -1052,46 +1061,39 @@ export class AgentWakeBroker {
 
   async #stopInternal(enrollmentId: string): Promise<AgentWakeBrokerStatus> {
     const runtime = this.#runtimes.get(enrollmentId);
-    const retireAndAwaitDelivery = async (): Promise<void> => {
-      if (runtime === undefined) return;
+    if (runtime !== undefined) {
       const deliveryTask = runtime.deliveryTask;
       await this.#retireRuntime(runtime);
       await deliveryTask;
-    };
-    let state: StoredAgentWakeEnrollment;
-    try {
-      state = await this.#transactRequired(enrollmentId, (current) => {
-        const delivering = current.queue.find((item) => item.phase === "delivering");
-        if (delivering === undefined) {
-          return {
-            ...current,
-            revision: nextRevision(current),
-            runState: "stopped",
-            sourceRetry: null,
-          };
-        }
+    }
+    const state = await this.#transactRequired(enrollmentId, (current) => {
+      const delivering = current.queue.find((item) => item.phase === "delivering");
+      if (delivering === undefined) {
         return {
           ...current,
           revision: nextRevision(current),
           runState: "stopped",
           sourceRetry: null,
-          queue: current.queue.map((item) =>
-            item.wake.wakeId === delivering.wake.wakeId
-              ? { ...item, phase: "blocked" as const }
-              : item,
-          ),
-          repair: {
-            code: "provider-outcome-ambiguous",
-            wakeId: delivering.wake.wakeId,
-            occurredAt: this.#clock.now(),
-          },
         };
-      });
-    } catch (error) {
-      await retireAndAwaitDelivery();
-      throw error;
-    }
-    await retireAndAwaitDelivery();
+      }
+      return {
+        ...current,
+        revision: nextRevision(current),
+        runState: "stopped",
+        sourceRetry: null,
+        queue: current.queue.map((item) =>
+          item.wake.wakeId === delivering.wake.wakeId
+            ? { ...item, phase: "blocked" as const }
+            : item,
+        ),
+        repair: {
+          code: "provider-outcome-ambiguous",
+          wakeId: delivering.wake.wakeId,
+          occurredAt: this.#clock.now(),
+          deferredSourceRepair: null,
+        },
+      };
+    });
     if (state.repair?.code === "provider-outcome-ambiguous") {
       this.#notice(enrollmentId, state.repair.code, state.repair.wakeId);
     }
@@ -1235,10 +1237,7 @@ export class AgentWakeBroker {
       await this.#enterRepair(runtime, "source-record-invalid", null);
       return "repair";
     }
-    if (
-      record.type === "agent.wake" &&
-      (record.wakeId !== wakeIdFor(record) || record.workspaceSequence !== cursor)
-    ) {
+    if (record.type === "agent.wake" && record.wakeId !== deriveAgentWakeId(record)) {
       await this.#enterRepair(runtime, "source-record-invalid", record.wakeId);
       return "repair";
     }
@@ -1340,6 +1339,8 @@ export class AgentWakeBroker {
   }
 
   #kickDelivery(runtime: Runtime): void {
+    // `sourceReady` is an authorization-epoch gate, not merely source liveness. A persisted wake
+    // may invoke its target only after this start/resume has produced an in-scope source record.
     if (
       !this.#isCurrent(runtime) ||
       !runtime.sourceReady ||
@@ -1703,10 +1704,35 @@ export class AgentWakeBroker {
     wakeId: string | null,
   ): Promise<void> {
     const state = await this.#transactRequired(runtime.enrollmentId, (current) => {
+      if (current.repair !== null) {
+        if (
+          isSourceRepairCode(code) &&
+          current.repair.code.startsWith("provider-") &&
+          current.repair.deferredSourceRepair === null
+        ) {
+          return {
+            ...current,
+            revision: nextRevision(current),
+            repair: {
+              ...current.repair,
+              deferredSourceRepair: { code, wakeId, occurredAt: this.#clock.now() },
+            },
+          };
+        }
+        return current;
+      }
       const delivering = current.queue.find((item) => item.phase === "delivering");
-      const providerOutcomeUnknown = !code.startsWith("provider-") && delivering !== undefined;
+      const occurredAt = this.#clock.now();
+      const overlappingRepair =
+        delivering !== undefined && isSourceRepairCode(code)
+          ? {
+              providerWakeId: delivering.wake.wakeId,
+              sourceRepair: { code, wakeId, occurredAt },
+            }
+          : null;
+      const providerOutcomeUnknown = overlappingRepair !== null;
       const repairCode = providerOutcomeUnknown ? "provider-outcome-ambiguous" : code;
-      const repairWakeId = providerOutcomeUnknown ? delivering.wake.wakeId : wakeId;
+      const repairWakeId = overlappingRepair?.providerWakeId ?? wakeId;
       const blockedWakeId = repairCode.startsWith("provider-") ? repairWakeId : null;
       return {
         ...current,
@@ -1719,7 +1745,12 @@ export class AgentWakeBroker {
             : current.queue.map((item) =>
                 item.wake.wakeId === blockedWakeId ? { ...item, phase: "blocked" as const } : item,
               ),
-        repair: { code: repairCode, wakeId: repairWakeId, occurredAt: this.#clock.now() },
+        repair: {
+          code: repairCode,
+          wakeId: repairWakeId,
+          occurredAt,
+          deferredSourceRepair: overlappingRepair?.sourceRepair ?? null,
+        },
       };
     });
     if (state.repair !== null) {
