@@ -491,6 +491,7 @@ class FakeBlockingCommandProcess:
         self._done = asyncio.Event()
         self.killed = False
         self.wait_count = 0
+        self.reaped = asyncio.Event()
 
     async def communicate(self, input: Optional[bytes] = None) -> tuple[bytes, bytes]:
         del input
@@ -506,6 +507,35 @@ class FakeBlockingCommandProcess:
     async def wait(self) -> int:
         self.wait_count += 1
         await self._done.wait()
+        self.reaped.set()
+        return int(self.returncode or 0)
+
+
+class FakeDelayedReapCommandProcess:
+    """CLI child whose reap completion is independently test-controlled."""
+
+    def __init__(self) -> None:
+        self.returncode: Optional[int] = None
+        self.started = asyncio.Event()
+        self.wait_started = asyncio.Event()
+        self.allow_reap = asyncio.Event()
+        self.reaped = asyncio.Event()
+        self.killed = False
+
+    async def communicate(self, input: Optional[bytes] = None) -> tuple[bytes, bytes]:
+        del input
+        self.started.set()
+        await asyncio.Future()
+        return b"{}", b""
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        self.wait_started.set()
+        await self.allow_reap.wait()
+        self.reaped.set()
         return int(self.returncode or 0)
 
 
@@ -2103,6 +2133,101 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._cursor, "101")
         self.assertEqual(adapter._pending_read_cursors, {})
 
+    async def test_successful_read_cursor_handoff_persists_each_transition_once(self) -> None:
+        anchor_id = message_id_for("101")
+        factory = FakeProcessFactory([read_cursor_spec(DM_ID, anchor_id)])
+        durable_state_seen_by_server: list[dict[str, Any]] = []
+        adapter: Any
+
+        async def observing_factory(cli: str, *args: str, **kwargs: Any) -> Any:
+            if args[:2] == ("read-cursors", "advance"):
+                durable_state_seen_by_server.append(
+                    json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
+                )
+            return await factory(cli, *args, **kwargs)
+
+        adapter = self.new_adapter(observing_factory)
+        self.prepare_adapter(adapter)
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
+
+        def capture_cursor_replace(source: Any, destination: Any) -> None:
+            if Path(destination) == adapter._cursor_path:
+                writes.append(json.loads(Path(source).read_text(encoding="utf-8")))
+            real_replace(source, destination)
+
+        with patch.object(adapter_module.os, "replace", side_effect=capture_cursor_replace):
+            await adapter._accept_event(message_event("101", DM_ID, USER_ID))
+
+        pending = {
+            "version": 2,
+            "cursor": "101",
+            "pendingReadCursors": {
+                DM_ID: {
+                    "messageId": anchor_id,
+                    "conversationSequence": "101",
+                }
+            },
+        }
+        cleared = {"version": 2, "cursor": "101", "pendingReadCursors": {}}
+        self.assertEqual(writes, [pending, cleared])
+        self.assertEqual(durable_state_seen_by_server, [pending])
+
+    async def test_retryable_read_cursor_failure_persists_pending_transition_once(self) -> None:
+        anchor_id = message_id_for("101")
+        transient = FakeProcess(
+            stderr=json.dumps(
+                {
+                    "error": {
+                        "code": "UPSTREAM_UNAVAILABLE",
+                        "message": "try again",
+                        "httpStatus": 503,
+                    }
+                }
+            ).encode("utf-8"),
+            returncode=5,
+        )
+        factory = FakeProcessFactory([read_cursor_spec(DM_ID, anchor_id, transient)])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter._backoff_base = 60.0
+        adapter._backoff_max = 60.0
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
+
+        def capture_cursor_replace(source: Any, destination: Any) -> None:
+            if Path(destination) == adapter._cursor_path:
+                writes.append(json.loads(Path(source).read_text(encoding="utf-8")))
+            real_replace(source, destination)
+
+        try:
+            with patch.object(adapter_module.os, "replace", side_effect=capture_cursor_replace):
+                await adapter._accept_event(message_event("101", DM_ID, USER_ID))
+
+            pending = {
+                "version": 2,
+                "cursor": "101",
+                "pendingReadCursors": {
+                    DM_ID: {
+                        "messageId": anchor_id,
+                        "conversationSequence": "101",
+                    }
+                },
+            }
+            self.assertEqual(writes, [pending])
+            self.assertEqual(
+                json.loads(adapter._cursor_path.read_text(encoding="utf-8")),
+                pending,
+            )
+        finally:
+            await adapter.disconnect()
+
     async def test_unrelated_read_cursors_advance_independently(self) -> None:
         first_message_id = message_id_for("101")
         second_message_id = message_id_for("102")
@@ -2734,6 +2859,76 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             anchor_id,
         )
 
+    async def test_repeated_cancellation_waits_for_cli_child_reaping(self) -> None:
+        child = FakeDelayedReapCommandProcess()
+
+        async def process_factory(_cli: str, *_args: str, **_kwargs: Any) -> Any:
+            return child
+
+        command = asyncio.create_task(
+            adapter_module._run_cli_json(
+                "hype-comms-cli",
+                ["read-cursors", "advance", DM_ID, message_id_for("101"), "--json"],
+                origin=ORIGIN,
+                token="unit-test-token",
+                process_factory=process_factory,
+            )
+        )
+        try:
+            await asyncio.wait_for(child.started.wait(), timeout=0.5)
+            command.cancel()
+            await asyncio.wait_for(child.wait_started.wait(), timeout=0.5)
+            command.cancel()
+            await asyncio.sleep(0)
+
+            self.assertTrue(child.killed)
+            self.assertFalse(command.done())
+            self.assertFalse(child.reaped.is_set())
+
+            child.allow_reap.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await command
+        finally:
+            child.allow_reap.set()
+            await asyncio.gather(command, return_exceptions=True)
+
+        self.assertTrue(child.reaped.is_set())
+
+    async def test_cancellation_during_timeout_cleanup_waits_for_child_reaping(self) -> None:
+        child = FakeDelayedReapCommandProcess()
+
+        async def process_factory(_cli: str, *_args: str, **_kwargs: Any) -> Any:
+            return child
+
+        command = asyncio.create_task(
+            adapter_module._run_cli_json(
+                "hype-comms-cli",
+                ["read-cursors", "advance", DM_ID, message_id_for("101"), "--json"],
+                origin=ORIGIN,
+                token="unit-test-token",
+                timeout=0.001,
+                process_factory=process_factory,
+            )
+        )
+        try:
+            await asyncio.wait_for(child.started.wait(), timeout=0.5)
+            await asyncio.wait_for(child.wait_started.wait(), timeout=0.5)
+            command.cancel()
+            await asyncio.sleep(0)
+
+            self.assertTrue(child.killed)
+            self.assertFalse(command.done())
+            self.assertFalse(child.reaped.is_set())
+
+            child.allow_reap.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await command
+        finally:
+            child.allow_reap.set()
+            await asyncio.gather(command, return_exceptions=True)
+
+        self.assertTrue(child.reaped.is_set())
+
     async def test_disconnect_reaps_an_inflight_read_cursor_retry_child(self) -> None:
         anchor_id = message_id_for("101")
         transient = FakeProcess(
@@ -2779,6 +2974,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(adapter._read_cursor_retry_task)
         self.assertTrue(blocking_child.killed)
         self.assertEqual(blocking_child.wait_count, 1)
+        self.assertTrue(blocking_child.reaped.is_set())
         self.assertEqual(adapter._pending_read_cursors[DM_ID].message_id, anchor_id)
         persisted = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -2790,7 +2986,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         anchor_id = message_id_for("101")
-        adapter = self.new_adapter(FakeProcessFactory([]))
+        blocking_child = FakeBlockingCommandProcess()
+        factory = FakeProcessFactory(
+            [read_cursor_spec(DM_ID, anchor_id, blocking_child)]
+        )
+        adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
         adapter._agent_scopes = frozenset(
             ["workspace:read", "messages:write", "read-cursors:write"]
@@ -2802,19 +3002,17 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             conversation_sequence="101",
         )
         adapter._mark_connected()
-        retry_sleeping = asyncio.Event()
 
-        async def sleep_until_cancelled(
+        async def no_delay(
             _attempt: int,
         ) -> None:
-            retry_sleeping.set()
-            await asyncio.Future()
+            await asyncio.sleep(0)
 
-        adapter._wait_for_read_cursor_retry = sleep_until_cancelled
+        adapter._wait_for_read_cursor_retry = no_delay
         adapter._schedule_read_cursor_retry()
         retry_task = adapter._read_cursor_retry_task
         self.assertIsNotNone(retry_task)
-        await asyncio.wait_for(retry_sleeping.wait(), timeout=0.5)
+        await asyncio.wait_for(blocking_child.started.wait(), timeout=0.5)
         failure = adapter_module.CliFailure(
             6,
             "INVALID_WATCH_CONTRACT",
@@ -2829,6 +3027,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         assert retry_task is not None
         self.assertTrue(retry_task.cancelled())
         self.assertIsNone(adapter._read_cursor_retry_task)
+        self.assertTrue(blocking_child.killed)
+        self.assertTrue(blocking_child.reaped.is_set())
         self.assertTrue(adapter._stop_event.is_set())
         self.assertFalse(adapter._running)
         self.assertEqual(
@@ -2910,15 +3110,30 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
 
-        with self.assertLogs(adapter_module.logger.name, level="WARNING") as captured:
-            await adapter._accept_event(message_event("101", DM_ID, USER_ID))
-            await adapter._accept_event(message_event("102", DM_ID, USER_ID))
+        def capture_cursor_replace(source: Any, destination: Any) -> None:
+            if Path(destination) == adapter._cursor_path:
+                writes.append(json.loads(Path(source).read_text(encoding="utf-8")))
+            real_replace(source, destination)
+
+        with patch.object(adapter_module.os, "replace", side_effect=capture_cursor_replace):
+            with self.assertLogs(adapter_module.logger.name, level="WARNING") as captured:
+                await adapter._accept_event(message_event("101", DM_ID, USER_ID))
+                await adapter._accept_event(message_event("102", DM_ID, USER_ID))
 
         warnings = [line for line in captured.output if "read-cursors:write" in line]
         self.assertEqual(len(warnings), 1)
         self.assertEqual(len(adapter.handled_events), 2)
         self.assertEqual(adapter._pending_read_cursors, {})
+        self.assertEqual(
+            writes,
+            [
+                {"version": 2, "cursor": "101", "pendingReadCursors": {}},
+                {"version": 2, "cursor": "102", "pendingReadCursors": {}},
+            ],
+        )
         self.assertEqual(
             [call for call in factory.calls if call["args"][:2] == ("read-cursors", "advance")],
             [],

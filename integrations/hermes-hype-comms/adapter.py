@@ -834,6 +834,35 @@ def _child_environment(origin: str, token: str) -> Dict[str, str]:
     return child_env
 
 
+async def _kill_and_reap(process: Any) -> bool:
+    """Terminate a CLI child and confirm wait completion despite cancellation."""
+
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    cancelled_during_reap = False
+    waiter = asyncio.create_task(process.wait())
+    while not waiter.done():
+        try:
+            await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            if waiter.done():
+                break
+            # Teardown owns the child until wait completes. Record additional
+            # cancellation and propagate it only after the process is reaped.
+            cancelled_during_reap = True
+        except Exception:
+            break
+    try:
+        waiter.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+    return cancelled_during_reap
+
+
 async def _run_cli_json(
     cli: str,
     args: List[str],
@@ -869,24 +898,11 @@ async def _run_cli_json(
         # A disconnect can cancel the independent read-cursor retry while its
         # CLI child is still running. Reap that child before propagating the
         # cancellation so teardown never leaves an orphaned subprocess.
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await process.wait()
-        except Exception:
-            pass
+        await _kill_and_reap(process)
         raise
     except asyncio.TimeoutError as exc:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await process.wait()
-        except Exception:
-            pass
+        if await _kill_and_reap(process):
+            raise asyncio.CancelledError from None
         raise CliFailure(
             5,
             "CLI_TIMEOUT",
@@ -2834,7 +2850,11 @@ class HypeCommsAdapter(BasePlatformAdapter):
         elif event_type == "message.created":
             await self._dispatch_message(event)
 
-        self._persist_cursor(cursor)
+        # A successful model handoff checkpoints this event together with its
+        # read target before the server mutation. Avoid rewriting that exact
+        # durable state after either the immediate advance or a retained retry.
+        if self._cursor != cursor:
+            self._persist_cursor(cursor)
         return "accepted"
 
     async def _send_once(
