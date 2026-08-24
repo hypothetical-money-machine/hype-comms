@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENT_CONTENT_SHA256_HEADER,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -325,6 +328,24 @@ class FakeWorkspaceRepository {
     members: [currentUser.user],
     paths: [],
   }));
+  readonly readFileContent = vi.fn(async () => {
+    const bytes = Buffer.from("payload", "utf8");
+    return {
+      attachment: {
+        id: messageId,
+        messageId: replyId,
+        uploadedBy: userId,
+        fileName: "evidence.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        status: "ready" as const,
+        downloadUrl: null,
+        createdAt: now,
+      },
+      bytes,
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+  });
 
   asRepository(): WorkspaceRepository {
     return this as unknown as WorkspaceRepository;
@@ -380,6 +401,27 @@ async function appWithRole(
 }
 
 describe("event capability routes", () => {
+  it("serves authoritative length and SHA-256 headers with attachment bytes", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/files/${messageId}/content`,
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe("payload");
+    expect(response.headers["content-length"]).toBe("7");
+    expect(response.headers[ATTACHMENT_CONTENT_SHA256_HEADER]).toBe(
+      createHash("sha256").update("payload").digest("hex"),
+    );
+    expect(repository.readFileContent).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+    );
+  });
+
   it("projects announcement bootstrap fields only for capable clients", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);

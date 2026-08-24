@@ -11,7 +11,9 @@ import { describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
+import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
+import { SignInThrottle } from "../src/throttle.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -39,8 +41,8 @@ async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void>
 }
 
 /** Materializes the migration directory minus one file, so its own effect can be observed. */
-async function withoutMigration(
-  excludedFilename: string,
+async function withoutMigrations(
+  excludedFilenames: readonly string[],
   fn: (migrationsDirectory: URL) => Promise<void>,
 ): Promise<void> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-partial-migrations-"));
@@ -49,7 +51,7 @@ async function withoutMigration(
     const filenames = await readdir(source);
     await Promise.all(
       filenames
-        .filter((filename) => filename.endsWith(".sql") && filename !== excludedFilename)
+        .filter((filename) => filename.endsWith(".sql") && !excludedFilenames.includes(filename))
         .map(async (filename) => {
           await writeFile(
             path.join(directory, filename),
@@ -63,8 +65,15 @@ async function withoutMigration(
   }
 }
 
+async function withoutMigration(
+  excludedFilename: string,
+  fn: (migrationsDirectory: URL) => Promise<void>,
+): Promise<void> {
+  await withoutMigrations([excludedFilename], fn);
+}
+
 async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  await withoutMigration("0013_agents.sql", fn);
+  await withoutMigrations(["0013_agents.sql", "0023_default_agent_agency.sql"], fn);
 }
 
 async function withoutTokenLineageMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
@@ -107,7 +116,8 @@ describeWithPostgres("runMigrations", () => {
           "0020_message_attachments.sql",
           "0021_message_retract.sql",
           "0022_member_title.sql",
-          "0023_channel_webhooks.sql",
+          "0023_default_agent_agency.sql",
+          "0024_channel_webhooks.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -139,7 +149,8 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0020_message_attachments.sql" },
         { filename: "0021_message_retract.sql" },
         { filename: "0022_member_title.sql" },
-        { filename: "0023_channel_webhooks.sql" },
+        { filename: "0023_default_agent_agency.sql" },
+        { filename: "0024_channel_webhooks.sql" },
       ]);
 
       const userId = randomUUID();
@@ -1047,6 +1058,106 @@ describeWithPostgres("runMigrations", () => {
             [existingTicketId],
           ),
         ).resolves.toMatchObject({ rows: [{ agent_token_id: null }] });
+      });
+    });
+  });
+
+  it("preserves and authenticates pre-0023 agents with their exact legacy scopes", async () => {
+    await withFreshSchema(async (pool) => {
+      await withoutMigration("0023_default_agent_agency.sql", async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+
+        const ownerId = randomUUID();
+        const workspaceId = randomUUID();
+        const agentId = randomUUID();
+        const tokenId = randomUUID();
+        const legacyToken = `hype_comms_agent_${"l".repeat(43)}`;
+        const legacyTokenHash = hashToken(legacyToken);
+        const createdAt = "2026-08-22T12:00:00.000Z";
+        const legacyScopes = [
+          "workspace:read",
+          "messages:write",
+          "conversations:write",
+          "read-cursors:write",
+        ] as const;
+
+        await pool.query(
+          `INSERT INTO users (id, email, kind, username, display_name, created_at, updated_at)
+           VALUES
+             ($1, 'legacy-owner@example.test', 'human', 'legacy-owner', 'Legacy owner', $3, $3),
+             ($2, NULL, 'agent', 'legacy_agent', 'Legacy agent', $3, $3)`,
+          [ownerId, agentId, createdAt],
+        );
+        await pool.query(
+          `INSERT INTO workspaces (id, name, slug, created_by, created_at, updated_at)
+           VALUES ($1, 'Legacy agents', 'legacy-agents', $2, $3, $3)`,
+          [workspaceId, ownerId, createdAt],
+        );
+        await pool.query(
+          `INSERT INTO workspace_memberships
+             (workspace_id, user_id, role, status, created_at, updated_at)
+           VALUES
+             ($1, $2, 'owner', 'active', $4, $4),
+             ($1, $3, 'member', 'active', $4, $4)`,
+          [workspaceId, ownerId, agentId, createdAt],
+        );
+        await pool.query(
+          `INSERT INTO agents
+             (user_id, workspace_id, created_by, created_at)
+           VALUES ($1, $2, $3, $4)`,
+          [agentId, workspaceId, ownerId, createdAt],
+        );
+        await pool.query(
+          `INSERT INTO agent_tokens
+             (id, workspace_id, agent_user_id, token_hash, label, scopes,
+              created_by, created_at, last_used_at)
+           VALUES ($1, $2, $3, $4, 'Legacy runtime', $5::text[], $6, $7, $7)`,
+          [tokenId, workspaceId, agentId, legacyTokenHash, [...legacyScopes], ownerId, createdAt],
+        );
+
+        const repository = new IdentityRepository(pool);
+        const agentBefore = await repository.findAgent(workspaceId, agentId);
+        const tokensBefore = await repository.listAgentTokens(workspaceId, agentId);
+        expect(agentBefore).not.toBeNull();
+        expect(tokensBefore).toEqual([
+          expect.objectContaining({
+            id: tokenId,
+            agentUserId: agentId,
+            scopes: [...legacyScopes],
+            revokedAt: null,
+          }),
+        ]);
+
+        await expect(runMigrations(pool)).resolves.toEqual({
+          applied: ["0023_default_agent_agency.sql"],
+        });
+
+        await expect(repository.findAgent(workspaceId, agentId)).resolves.toEqual(agentBefore);
+        await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual(
+          tokensBefore,
+        );
+
+        const service = new IdentityService(
+          repository,
+          { async sendMagicLink() {} },
+          new SignInThrottle(),
+          () => new Date(createdAt),
+          "http://127.0.0.1:3000",
+        );
+        await expect(service.authenticateAgentContext(legacyToken)).resolves.toMatchObject({
+          principalKind: "agent",
+          agentTokenId: tokenId,
+          currentUser: {
+            type: "agent",
+            user: { id: agentId, kind: "agent", username: "legacy_agent" },
+            workspaceId,
+            role: "member",
+            scopes: [...legacyScopes],
+          },
+        });
+        await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual(
+          tokensBefore,
+        );
       });
     });
   });

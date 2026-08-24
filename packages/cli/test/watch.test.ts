@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
 import {
+  ATTACHMENTS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
@@ -144,6 +145,7 @@ describe("watch", () => {
       if (url.pathname === "/v1/realtime/tickets") {
         expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
           [
+            ATTACHMENTS_CAPABILITY,
             REACTION_EVENTS_CAPABILITY,
             READ_STATE_EVENTS_CAPABILITY,
             PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,

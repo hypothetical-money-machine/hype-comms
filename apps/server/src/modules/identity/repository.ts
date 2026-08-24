@@ -33,7 +33,7 @@ import {
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
 
-import { withTransaction } from "../../db/pool.js";
+import { withTransaction, type TransactionOptions } from "../../db/pool.js";
 import { ApiError } from "../../errors.js";
 import { insertSyncEvent } from "../workspace/sync-events.js";
 
@@ -421,12 +421,17 @@ export class IdentityRepository {
     this.#transactionPool = isPool(database) ? database : null;
   }
 
-  async transaction<T>(fn: (repository: IdentityRepository) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    fn: (repository: IdentityRepository) => Promise<T>,
+    options: TransactionOptions = {},
+  ): Promise<T> {
     if (this.#transactionPool === null) {
       throw new Error("Nested identity transactions are not supported");
     }
-    return withTransaction(this.#transactionPool, async (client) =>
-      fn(new IdentityRepository(client)),
+    return withTransaction(
+      this.#transactionPool,
+      async (client) => fn(new IdentityRepository(client)),
+      options,
     );
   }
 
