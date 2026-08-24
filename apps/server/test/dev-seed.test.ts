@@ -109,5 +109,25 @@ describeWithPostgres("development demo seed", () => {
       magic_links: "4",
       announcement_channels_available: false,
     });
+
+    const titlesAfterSecond = await pool.query<{ username: string; title: string | null }>(
+      "SELECT username, title FROM users ORDER BY username",
+    );
+    expect(titlesAfterSecond.rows).toEqual([
+      { username: "claire", title: "Product Engineer" },
+      { username: "woots", title: "Design Lead" },
+    ]);
+
+    // Re-seeding an existing database where titles are missing restores fixture titles
+    await pool.query("UPDATE users SET title = NULL");
+    await seedDevelopmentDemo(pool, config);
+
+    const titlesAfterReset = await pool.query<{ username: string; title: string | null }>(
+      "SELECT username, title FROM users ORDER BY username",
+    );
+    expect(titlesAfterReset.rows).toEqual([
+      { username: "claire", title: "Product Engineer" },
+      { username: "woots", title: "Design Lead" },
+    ]);
   });
 });

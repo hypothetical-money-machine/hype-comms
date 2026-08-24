@@ -825,6 +825,35 @@ function sameRetractReservations(
   return true;
 }
 
+function sameMessageRow(left: MessageRow | undefined, right: MessageRow | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.id === right.id &&
+    left.clientMessageId === right.clientMessageId &&
+    left.conversationId === right.conversationId &&
+    left.conversationSequence === right.conversationSequence &&
+    left.createdAt === right.createdAt &&
+    left.value.ciphertext === right.value.ciphertext &&
+    left.value.nonce === right.value.nonce &&
+    left.value.keyVersion === right.value.keyVersion &&
+    left.value.schemaVersion === right.value.schemaVersion &&
+    left.value.version === right.value.version
+  );
+}
+
+function sameMessageRows(
+  left: readonly (MessageRow | undefined)[],
+  right: readonly (MessageRow | undefined)[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (!sameMessageRow(left[i], right[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function retractedMessageIds(
   messages: readonly Message[],
   reservations: ReadonlyMap<string, RetractReservation>,
@@ -1838,12 +1867,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           this.#database.conversations,
           async () => {
             signal?.throwIfAborted();
-            const [metadata, conversation] = await Promise.all([
+            const [metadata, conversation, currentRows] = await Promise.all([
               this.#database.metadata.get("state"),
               this.#database.conversations.get(expectedConversationId),
+              this.#database.messages.bulkGet(parsed.map((message) => message.id)),
             ]);
             const currentReservations = parseRetractReservations(metadata?.retractReservations);
             if (!sameRetractReservations(baseReservations, currentReservations)) return "retry";
+            if (!sameMessageRows(existingRows, currentRows)) return "retry";
             if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
               throw new Error("Membership repair must complete before mutating the cache");
             }

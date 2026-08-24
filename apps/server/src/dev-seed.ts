@@ -243,6 +243,19 @@ async function ensureDemoMember(
     role,
     status: "active",
   });
+
+  const current = user;
+  if (current.title !== fixture.title) {
+    const updated = await repository.transaction(async (txRepo) => {
+      return txRepo.updateMemberTitle(workspaceId, current.id, fixture.title);
+    });
+    user = {
+      ...current,
+      title: updated.title,
+      updatedAt: updated.updatedAt,
+    };
+  }
+
   return user;
 }
 
