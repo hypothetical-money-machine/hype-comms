@@ -13,10 +13,15 @@ import {
 
 const MAX_OBSERVATION_BYTES = 64 * 1_024;
 const MAX_AUTHORITY_SUBJECT_BYTES = 64 * 1_024 * 1_024;
+const MAX_COLLECTOR_LOCK_BYTES = 1_024;
 const MAX_RECORDS = 20_000;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const JOURNAL_FILE_PATTERN = /^(?<index>[0-9]{5})\.ndjson$/u;
+const COLLECTOR_LOCK_NONCE_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const COLLECTOR_LOCK_FILE_PATTERN =
+  /^\.collector-lock-(?<nonce>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/u;
 const CONSTANT_RUN_FIELDS = [
   "runId",
   "gitCommit",
@@ -81,6 +86,17 @@ function ownedPrivately(metadata, expectedMode) {
 
 function isErrorCode(error, code) {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+export function classifyAgentWakeCollectorLockOwner(pid, signalProcess = process.kill) {
+  try {
+    signalProcess(pid, 0);
+    // A live PID may be the original collector or an unrelated process that reused the PID. Both
+    // are deliberately non-reclaimable because the collector cannot distinguish them safely.
+    return "live_or_reused";
+  } catch (error) {
+    return isErrorCode(error, "ESRCH") ? "gone" : "ambiguous";
+  }
 }
 
 export function isSafeAgentWakeEvidenceAncestor(metadata) {
@@ -326,26 +342,132 @@ async function invalidatePublishedManifest(paths) {
   }
 }
 
-async function acquireCollectorLock(runDirectory) {
-  const lockPath = path.join(runDirectory, ".collector.lock");
+function parseCollectorLock(content, expectedNonce) {
+  const text = decodeUtf8(content, "collector-lock-unavailable");
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    fail("collector-lock-unavailable");
+  }
+  if (
+    text !== `${JSON.stringify(value)}\n` ||
+    !hasExactKeys(value, ["nonce", "pid", "version"]) ||
+    value.version !== 1 ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid <= 0 ||
+    value.pid > 2_147_483_647 ||
+    typeof value.nonce !== "string" ||
+    !COLLECTOR_LOCK_NONCE_PATTERN.test(value.nonce) ||
+    value.nonce !== expectedNonce
+  ) {
+    fail("collector-lock-unavailable");
+  }
+  return value;
+}
+
+async function readCollectorLock(lockPath, expectedNonce) {
+  const content = await readPrivateStableFile(
+    lockPath,
+    MAX_COLLECTOR_LOCK_BYTES,
+    "collector-lock-unavailable",
+  );
+  return { content, record: parseCollectorLock(content, expectedNonce) };
+}
+
+async function removeCollectorLockIfOwned(runDirectory, lockPath, expectedNonce, expectedContent) {
+  let current;
+  try {
+    current = await readCollectorLock(lockPath, expectedNonce);
+  } catch {
+    return false;
+  }
+  if (!current.content.equals(expectedContent)) return false;
+  try {
+    await unlink(lockPath);
+    await syncDirectory(runDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function publishCollectorLock(runDirectory, nonce, content) {
+  const lockPath = path.join(runDirectory, `.collector-lock-${nonce}.json`);
+  const temporaryPath = path.join(runDirectory, `.collector-lock-stage-${nonce}`);
   let handle;
+  let linked = false;
   try {
     handle = await open(
-      lockPath,
+      temporaryPath,
       constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
       PRIVATE_FILE_MODE,
     );
-    await handle.writeFile(`${JSON.stringify({ pid: process.pid })}\n`);
+    await handle.writeFile(content);
     await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await link(temporaryPath, lockPath);
+    linked = true;
+    await unlink(temporaryPath);
     await syncDirectory(runDirectory);
-  } catch {
+    return lockPath;
+  } catch (error) {
+    if (linked) await removeCollectorLockIfOwned(runDirectory, lockPath, nonce, content);
+    if (error instanceof AgentWakeEvidenceCollectorError) throw error;
+    fail("collector-lock-unavailable");
+  } finally {
     await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+async function reclaimStaleCollectorLock(runDirectory, lockPath, nonce) {
+  const before = await readCollectorLock(lockPath, nonce);
+  const firstLivenessCheck = classifyAgentWakeCollectorLockOwner(before.record.pid);
+  const secondLivenessCheck = classifyAgentWakeCollectorLockOwner(before.record.pid);
+  if (firstLivenessCheck !== "gone" || secondLivenessCheck !== "gone") {
     fail("collector-lock-unavailable");
   }
+  // A UUID lock pathname is never reused, so removing this exact stale contender cannot unlink a
+  // later owner's lock. The two liveness checks remain conservative about PID reuse.
+  if (!(await removeCollectorLockIfOwned(runDirectory, lockPath, nonce, before.content))) {
+    fail("collector-lock-unavailable");
+  }
+}
+
+async function acquireCollectorLock(runDirectory) {
+  const nonce = randomUUID();
+  const content = Buffer.from(
+    `${JSON.stringify({ version: 1, pid: process.pid, nonce })}\n`,
+    "utf8",
+  );
+  const lockPath = await publishCollectorLock(runDirectory, nonce, content);
+  try {
+    const names = await readdir(runDirectory);
+    if (names.includes(".collector.lock")) fail("collector-lock-unavailable");
+    for (const name of names.sort()) {
+      const match = COLLECTOR_LOCK_FILE_PATTERN.exec(name);
+      if (match === null) {
+        if (name.startsWith(".collector-lock-") && !name.startsWith(".collector-lock-stage-")) {
+          fail("collector-lock-unavailable");
+        }
+        continue;
+      }
+      const contenderNonce = match.groups?.nonce;
+      if (contenderNonce === undefined || contenderNonce === nonce) continue;
+      await reclaimStaleCollectorLock(runDirectory, path.join(runDirectory, name), contenderNonce);
+    }
+  } catch (error) {
+    if (!(await removeCollectorLockIfOwned(runDirectory, lockPath, nonce, content))) {
+      fail("collector-lock-unavailable");
+    }
+    throw error;
+  }
   return async () => {
-    await handle.close().catch(() => undefined);
-    await unlink(lockPath).catch(() => undefined);
-    await syncDirectory(runDirectory).catch(() => undefined);
+    if (!(await removeCollectorLockIfOwned(runDirectory, lockPath, nonce, content))) {
+      fail("collector-lock-release-failed");
+    }
   };
 }
 

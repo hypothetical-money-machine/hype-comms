@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   AgentWakeEvidenceCollectorError,
+  classifyAgentWakeCollectorLockOwner,
   collectAgentWakeEvidenceObservation,
   initializeAgentWakeEvidenceRun,
   isSafeAgentWakeEvidenceAncestor,
@@ -119,6 +120,21 @@ function expectCollectorCode(code) {
   return (error) => error instanceof AgentWakeEvidenceCollectorError && error.code === code;
 }
 
+function definitelyUnusedPid() {
+  for (const pid of [2_147_483_647, 2_147_483_646, 2_147_483_645]) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return pid;
+    }
+  }
+  throw new Error("Could not identify an unused PID for the collector lock test");
+}
+
+function collectorLockPath(runDirectory, nonce) {
+  return path.join(runDirectory, `.collector-lock-${nonce}.json`);
+}
+
 test("collects one strict record and a subject-bound private authority pointer", async (t) => {
   const setup = await fixture(t);
   await setup.writeObservation(securityRecord());
@@ -182,6 +198,122 @@ test("is idempotent for the same observation and refuses conflicting case reuse"
     }),
     expectCollectorCode("case-id-conflict"),
   );
+});
+
+test("reclaims a collector lock after its recorded process has exited", async (t) => {
+  const setup = await fixture(t);
+  await setup.writeObservation(securityRecord());
+  const nonce = "10000000-0000-4000-8000-000000000001";
+  const lockPath = collectorLockPath(setup.runDirectory, nonce);
+  await privateJson(lockPath, { version: 1, pid: definitelyUnusedPid(), nonce });
+
+  const result = await collectAgentWakeEvidenceObservation({
+    runDirectory: setup.runDirectory,
+    observationPath: setup.observationPath,
+  });
+
+  assert.equal(result.recordCount, 1);
+  await assert.rejects(readFile(lockPath), (error) => error?.code === "ENOENT");
+});
+
+test("fails closed when a collector lock PID is live or may have been reused", async (t) => {
+  const setup = await fixture(t);
+  await setup.writeObservation(securityRecord());
+  const nonce = "20000000-0000-4000-8000-000000000002";
+  const lockName = `.collector-lock-${nonce}.json`;
+  const lockPath = collectorLockPath(setup.runDirectory, nonce);
+  await privateJson(lockPath, { version: 1, pid: process.pid, nonce });
+
+  await assert.rejects(
+    collectAgentWakeEvidenceObservation({
+      runDirectory: setup.runDirectory,
+      observationPath: setup.observationPath,
+    }),
+    expectCollectorCode("collector-lock-unavailable"),
+  );
+  assert.deepEqual(await readdirNames(setup.runDirectory), [lockName, "artifacts", "records"]);
+});
+
+test("concurrent collector processes never overlap journal mutation or strand locks", async (t) => {
+  const setup = await fixture(t);
+  await setup.writeObservation(securityRecord());
+  const observationPaths = Array.from({ length: 8 }, () => setup.observationPath);
+
+  const attempts = await Promise.allSettled(
+    observationPaths.map((observationPath) =>
+      execFileAsync(process.execPath, [
+        collectorScript,
+        "collect",
+        "--run-directory",
+        setup.runDirectory,
+        "--observation",
+        observationPath,
+      ]),
+    ),
+  );
+  for (const attempt of attempts) {
+    if (attempt.status === "rejected") {
+      assert.match(String(attempt.reason?.stderr), /collector-lock-unavailable/u);
+    } else {
+      assert.equal(JSON.parse(attempt.value.stdout).ok, true);
+    }
+  }
+
+  // Contention is deliberately retryable at the operation boundary. Serial retries must recover
+  // every case without corruption, regardless of which contender (if any) won the first round.
+  for (const observationPath of observationPaths) {
+    await collectAgentWakeEvidenceObservation({
+      runDirectory: setup.runDirectory,
+      observationPath,
+    });
+  }
+  const names = await readdirNames(setup.runDirectory);
+  assert.equal(
+    names.some((name) => name.startsWith(".collector-lock-")),
+    false,
+  );
+  const snapshot = await snapshotAgentWakeEvidenceRun({
+    runDirectory: setup.runDirectory,
+    validateComplete: false,
+  });
+  assert.equal(snapshot.recordCount, 1);
+});
+
+test("distinguishes a dead collector PID from ambiguous liveness", () => {
+  assert.equal(
+    classifyAgentWakeCollectorLockOwner(123, () => undefined),
+    "live_or_reused",
+  );
+  assert.equal(
+    classifyAgentWakeCollectorLockOwner(123, () => {
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    }),
+    "gone",
+  );
+  assert.equal(
+    classifyAgentWakeCollectorLockOwner(123, () => {
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+    }),
+    "ambiguous",
+  );
+});
+
+test("retains a malformed collector lock for explicit recovery", async (t) => {
+  const setup = await fixture(t);
+  await setup.writeObservation(securityRecord());
+  const nonce = "30000000-0000-4000-8000-000000000003";
+  const lockPath = collectorLockPath(setup.runDirectory, nonce);
+  const malformed = Buffer.from('{"pid":', "utf8");
+  await writeFile(lockPath, malformed, { mode: 0o600 });
+
+  await assert.rejects(
+    collectAgentWakeEvidenceObservation({
+      runDirectory: setup.runDirectory,
+      observationPath: setup.observationPath,
+    }),
+    expectCollectorCode("collector-lock-unavailable"),
+  );
+  assert.deepEqual(await readFile(lockPath), malformed);
 });
 
 test("rejects a non-schema field before creating a journal entry", async (t) => {
@@ -446,5 +578,5 @@ test("initialization rejects a non-canonical absolute path spelling", async (t) 
 
 async function readdirNames(directoryPath) {
   const { readdir } = await import("node:fs/promises");
-  return (await readdir(directoryPath)).filter((name) => !name.startsWith(".tmp-"));
+  return (await readdir(directoryPath)).filter((name) => !name.startsWith(".tmp-")).sort();
 }
