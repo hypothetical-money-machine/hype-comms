@@ -47,6 +47,7 @@ export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread
 export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
 export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
 export const AGENT_CONTEXT_PACK_CAPABILITY = "agent-context-pack-v1";
+export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()

@@ -36,7 +36,6 @@ import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
-const later = "2026-08-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
 const observerId = "10000000-0000-4000-8000-000000000003";
@@ -234,8 +233,8 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.query(
       `INSERT INTO device_sessions
          (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, $4, $4, $5)`,
-      [ownerSessionId, ownerId, Buffer.alloc(32, 7), now, later],
+       VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+      [ownerSessionId, ownerId, Buffer.alloc(32, 7), now],
     );
   });
 
@@ -2905,11 +2904,13 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: false,
       messageRetractEvents: false,
       memberProfiles: false,
+      ephemeralActivity: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
     const capable = await repository.issueRealtimeTicket(
       owner,
+      true,
       true,
       true,
       true,
@@ -2930,6 +2931,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       participatedThreadNotifications: true,
       messageRetractEvents: true,
       memberProfiles: true,
+      ephemeralActivity: true,
     });
   });
 
@@ -2966,8 +2968,8 @@ describeWithPostgres("WorkspaceRepository", () => {
       await client.query(
         `INSERT INTO device_sessions
            (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-         VALUES ($1, $2, $3, $4, $4, $5)`,
-        [member.sessionId, memberId, Buffer.alloc(32, 8), now, later],
+         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+        [member.sessionId, memberId, Buffer.alloc(32, 8), now],
       );
       await client.query(
         `DELETE FROM workspace_memberships

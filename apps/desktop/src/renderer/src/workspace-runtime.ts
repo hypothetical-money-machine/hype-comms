@@ -17,10 +17,12 @@ import {
   type NotificationAction,
   type NotificationContext,
   type ProductRealtimeEvent,
+  type PresenceState,
   type Reaction,
   type ReactionEmoji,
   type RealtimeSessionScope,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
   type SyncAttemptResult,
   type Task,
   type TaskPriority,
@@ -79,6 +81,9 @@ export interface WorkspaceRuntimeState {
   readonly threadLoading: boolean;
   readonly threadError: string | null;
   readonly connection: RealtimeConnectionState;
+  /** Ephemeral only: absent members are offline, and neither map is written to the cache. */
+  readonly presenceByUser: Readonly<Record<string, PresenceState>>;
+  readonly typingByConversation: Readonly<Record<string, readonly string[]>>;
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly cacheFallbackReason: CacheFallbackReason | null;
   readonly stale: boolean;
@@ -165,6 +170,8 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   threadLoading: false,
   threadError: null,
   connection: "offline",
+  presenceByUser: {},
+  typingByConversation: {},
   cacheMode: null,
   cacheFallbackReason: null,
   stale: true,
@@ -626,6 +633,9 @@ export class WorkspaceRuntime {
   readonly #locallyProjectedRetracts = new Set<string>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
+  #unsubscribeActivity: (() => void) | null = null;
+  readonly #presenceExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(client: DesktopApi, options: WorkspaceRuntimeOptions = {}) {
     this.#client = client;
@@ -698,6 +708,7 @@ export class WorkspaceRuntime {
     this.#realtimeEpoch += 1;
     this.#startupReplicaCatchUpPending = false;
     this.#startupRealtimePending = false;
+    this.#clearActivity(true);
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
@@ -722,6 +733,7 @@ export class WorkspaceRuntime {
     }
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
+    this.#unsubscribeActivity?.();
     this.#eventQueue = Promise.resolve();
     this.#realtimeScope = null;
     // A session restart can reuse the same privileged main process. Stop any socket created by
@@ -776,8 +788,19 @@ export class WorkspaceRuntime {
     });
     this.#unsubscribeConnection = this.#client.onRealtimeStateChanged((connection) => {
       if (generation !== this.#generation || this.#realtimeScope === null) return;
+      if (connection !== "live") this.#clearActivity(true);
       this.#setState({ connection });
     });
+    this.#unsubscribeActivity =
+      this.#client.onWorkspaceActivity?.((frame: ScopedEphemeralActivityFrame) => {
+        if (
+          !this.#isActiveRealtimeScope(frame.scope, generation) ||
+          frame.activity.workspaceId !== frame.scope.workspaceId
+        ) {
+          return;
+        }
+        this.#applyActivity(frame, generation);
+      }) ?? null;
 
     // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
     // and that reset has to know which member's database it is allowed to delete.
@@ -899,8 +922,11 @@ export class WorkspaceRuntime {
     this.#startupRealtimePending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
+    this.#unsubscribeActivity?.();
     this.#unsubscribeEvent = null;
     this.#unsubscribeConnection = null;
+    this.#unsubscribeActivity = null;
+    this.#clearActivity(false);
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
     if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
@@ -929,6 +955,85 @@ export class WorkspaceRuntime {
       this.#realtimeScope !== null &&
       sameRealtimeScope(candidate, this.#realtimeScope)
     );
+  }
+
+  /** Best-effort renderer command; main owns throttling, coalescing, and local expiry. */
+  setTyping(conversationId: string, typing: boolean): void {
+    const scope = this.#realtimeScope;
+    if (scope === null || this.#client.setWorkspaceTyping === undefined) return;
+    void this.#client.setWorkspaceTyping({ scope, conversationId, typing }).catch(() => undefined);
+  }
+
+  #applyActivity(frame: ScopedEphemeralActivityFrame, generation: number): void {
+    const activity = frame.activity;
+    if (activity.type === "activity.presence") {
+      const existing = this.#presenceExpiryTimers.get(activity.userId);
+      if (existing !== undefined) clearTimeout(existing);
+      const presenceByUser = { ...this.#state.presenceByUser };
+      if (activity.state === "offline") {
+        delete presenceByUser[activity.userId];
+        this.#presenceExpiryTimers.delete(activity.userId);
+      } else {
+        presenceByUser[activity.userId] = activity.state;
+        const timer = setTimeout(() => {
+          if (
+            generation !== this.#generation ||
+            this.#presenceExpiryTimers.get(activity.userId) !== timer
+          ) {
+            return;
+          }
+          this.#presenceExpiryTimers.delete(activity.userId);
+          const next = { ...this.#state.presenceByUser };
+          delete next[activity.userId];
+          this.#setState({ presenceByUser: next });
+        }, 45_000);
+        this.#presenceExpiryTimers.set(activity.userId, timer);
+      }
+      this.#setState({ presenceByUser });
+      return;
+    }
+
+    const key = `${activity.conversationId}:${activity.userId}`;
+    const existing = this.#typingExpiryTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+    this.#setTypingMember(activity.conversationId, activity.userId, activity.typing);
+    if (!activity.typing) {
+      this.#typingExpiryTimers.delete(key);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (generation !== this.#generation || this.#typingExpiryTimers.get(key) !== timer) {
+        return;
+      }
+      this.#typingExpiryTimers.delete(key);
+      this.#setTypingMember(activity.conversationId, activity.userId, false);
+    }, 8_000);
+    this.#typingExpiryTimers.set(key, timer);
+  }
+
+  #setTypingMember(conversationId: string, userId: string, typing: boolean): void {
+    const current = this.#state.typingByConversation[conversationId] ?? [];
+    const members = new Set(current);
+    if (typing) members.add(userId);
+    else members.delete(userId);
+    const typingByConversation = { ...this.#state.typingByConversation };
+    if (members.size === 0) delete typingByConversation[conversationId];
+    else typingByConversation[conversationId] = [...members].sort();
+    this.#setState({ typingByConversation });
+  }
+
+  #clearActivity(publish: boolean): void {
+    for (const timer of this.#presenceExpiryTimers.values()) clearTimeout(timer);
+    for (const timer of this.#typingExpiryTimers.values()) clearTimeout(timer);
+    this.#presenceExpiryTimers.clear();
+    this.#typingExpiryTimers.clear();
+    if (
+      publish &&
+      (Object.keys(this.#state.presenceByUser).length > 0 ||
+        Object.keys(this.#state.typingByConversation).length > 0)
+    ) {
+      this.#setState({ presenceByUser: {}, typingByConversation: {} });
+    }
   }
 
   async #acknowledgeCurrentScope(cursor: string, generation: number): Promise<void> {
@@ -2231,6 +2336,7 @@ export class WorkspaceRuntime {
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
     this.#clearReadTargets();
+    this.#clearActivity(false);
     const scope = this.#scope;
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
