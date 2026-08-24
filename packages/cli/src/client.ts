@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+
+import { ATTACHMENT_CONTENT_SHA256_HEADER } from "@hype-comms/contracts";
 import type { z } from "zod";
 
 import type { ResolvedProfile, StoredCredential } from "./config.js";
@@ -25,6 +28,20 @@ export interface ApiRequestOptions<TRequest, TResponse> {
 
 export interface ApiResult<T> {
   readonly data: T;
+  readonly response: Response;
+}
+
+export interface DownloadRequestOptions {
+  readonly path: string;
+  readonly maxBytes: number;
+  readonly includeCredential?: boolean;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+export interface DownloadResult {
+  readonly bytes: Uint8Array;
+  readonly sizeBytes: number;
+  readonly contentSha256: string;
   readonly response: Response;
 }
 
@@ -319,6 +336,142 @@ export class ApiClient {
       throw contractError("The server returned an unexpected response");
     }
     return response;
+  }
+
+  /**
+   * Fetch authenticated attachment bytes without treating them as JSON. The server-provided
+   * length and digest are part of the response contract: callers never publish bytes that do not
+   * exactly match both pieces of metadata.
+   */
+  async download(options: DownloadRequestOptions): Promise<DownloadResult> {
+    if (!options.path.startsWith("/") || options.path.startsWith("//")) {
+      throw new Error("API paths must be absolute origin-relative paths");
+    }
+    if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
+      throw new Error("Download limits must be positive safe integers");
+    }
+
+    const headers: Record<string, string> = {
+      accept: "application/octet-stream",
+      ...this.#authorizationHeaders(options.includeCredential),
+      ...options.headers,
+      "accept-encoding": "identity",
+    };
+    let response: Response;
+    try {
+      response = await this.#fetch(new URL(options.path, this.#origin), {
+        method: "GET",
+        headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(this.#timeoutMs),
+      });
+    } catch (error) {
+      throw networkError(error);
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      const requestId = response.headers.get("x-request-id");
+      throw new CliError({
+        exitCode: EXIT_CONTRACT,
+        code: "REDIRECT_REJECTED",
+        message: "The server attempted to redirect the request",
+        httpStatus: response.status,
+        ...(requestId === null ? {} : { requestId }),
+        retryable: false,
+      });
+    }
+    if (!response.ok) {
+      throw apiResponseError(response, await parseErrorBody(response));
+    }
+    const contentEncoding = response.headers.get("content-encoding");
+    if (contentEncoding !== null && contentEncoding.toLowerCase() !== "identity") {
+      await cancelResponse(response);
+      throw contractError("The attachment response used an unsupported content encoding");
+    }
+
+    const lengthHeader = response.headers.get("content-length");
+    if (lengthHeader === null || !/^(?:0|[1-9]\d*)$/u.test(lengthHeader)) {
+      await cancelResponse(response);
+      throw contractError("The attachment response did not include a valid Content-Length");
+    }
+    const expectedSize = Number(lengthHeader);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize > options.maxBytes) {
+      await cancelResponse(response);
+      throw contractError("The attachment response exceeded the supported size limit");
+    }
+    const expectedSha256 = response.headers.get(ATTACHMENT_CONTENT_SHA256_HEADER);
+    if (expectedSha256 === null || !/^[a-f0-9]{64}$/u.test(expectedSha256)) {
+      await cancelResponse(response);
+      throw contractError("The attachment response did not include a valid SHA-256 digest");
+    }
+    if (response.body === null) {
+      if (expectedSize !== 0) {
+        throw contractError("The attachment response length did not match its metadata");
+      }
+      const emptyDigest = createHash("sha256").digest("hex");
+      if (emptyDigest !== expectedSha256) {
+        throw contractError("The attachment response digest did not match its metadata");
+      }
+      return {
+        bytes: new Uint8Array(),
+        sizeBytes: 0,
+        contentSha256: emptyDigest,
+        response,
+      };
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    const digest = createHash("sha256");
+    let sizeBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (
+          sizeBytes + value.byteLength > expectedSize ||
+          sizeBytes + value.byteLength > options.maxBytes
+        ) {
+          try {
+            await reader.cancel();
+          } catch {
+            // A metadata violation is already definitive; cancellation failure must not mask it.
+          }
+          throw contractError("The attachment response length did not match its metadata");
+        }
+        chunks.push(value);
+        digest.update(value);
+        sizeBytes += value.byteLength;
+      }
+    } catch (error) {
+      if (error instanceof CliError) throw error;
+      throw networkError(error);
+    } finally {
+      reader.releaseLock();
+    }
+    if (sizeBytes !== expectedSize) {
+      throw contractError("The attachment response length did not match its metadata");
+    }
+    const contentSha256 = digest.digest("hex");
+    if (contentSha256 !== expectedSha256) {
+      throw contractError("The attachment response digest did not match its metadata");
+    }
+
+    const bytes = new Uint8Array(sizeBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { bytes, sizeBytes, contentSha256, response };
+  }
+}
+
+async function cancelResponse(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The response has already violated the contract; cancellation is best-effort cleanup.
   }
 }
 

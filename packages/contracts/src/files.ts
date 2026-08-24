@@ -10,6 +10,7 @@ const filesPaginationCursorSchema = z
   .regex(/^[A-Za-z0-9_-]+$/);
 
 export const ATTACHMENTS_CAPABILITY = "attachments-v1";
+export const ATTACHMENT_CONTENT_SHA256_HEADER = "x-content-sha256";
 export const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 export const ATTACHMENTS_PER_MESSAGE_MAX = 10;
 export const CONVERSATION_FILES_DEFAULT_LIMIT = 50;

@@ -139,25 +139,33 @@ Keep the directory intact: Hermes needs `plugin.yaml`, `__init__.py`, and
 
 ## Configure
 
-Put configuration in Hermes's protected environment or secret store. If using
-`~/.hermes/.env`, ensure it is readable only by the account running Hermes.
+Use a saved private CLI profile for unattended agents. This keeps the plaintext
+credential out of Hermes's environment and child-process arguments:
 
 ```dotenv
 HYPE_COMMS_API_ORIGIN=https://chat.example.invalid
-HYPE_COMMS_TOKEN=<agent-token>
+HYPE_COMMS_PROFILE=atlas-child
+HYPE_COMMS_CONFIG_DIR=/absolute/private/path/to/hype-comms
 HYPE_COMMS_ALLOWED_USERS=<user-uuid>,<user-uuid>
 ```
+
+`HYPE_COMMS_TOKEN=<agent-token>` remains an explicit, non-persisted override for
+break-glass and local development. If using `~/.hermes/.env`, ensure it is
+readable only by the account running Hermes.
 
 Required:
 
 - `HYPE_COMMS_API_ORIGIN`: HTTPS, or loopback HTTP for local development. It must
   be an origin only and must not contain credentials, a path, query, or
   fragment.
-- `HYPE_COMMS_TOKEN`: a non-expiring, explicitly revocable Hype Comms agent token
-  with `workspace:read` and `messages:write`. Add `read-cursors:write` if Hermes
-  should advance the agent's server-side read position after successful model
-  handoff. Context delivery works without that optional scope; the adapter
-  emits one warning and performs no read-cursor mutation.
+- One credential source:
+  - `HYPE_COMMS_PROFILE`: a saved CLI profile containing a non-expiring,
+    explicitly revocable Hype Comms agent credential with `workspace:read` and
+    `messages:write`; or
+  - `HYPE_COMMS_TOKEN`: the same credential supplied as an environment override.
+    Add `read-cursors:write` if Hermes should advance the agent's server-side read
+    position after successful model handoff. Context delivery works without that
+    optional scope; the adapter emits one warning and performs no read-cursor mutation.
 - One access decision:
   - `HYPE_COMMS_ALLOWED_USERS`: comma-separated Hype Comms user UUIDs; or
   - `HYPE_COMMS_ALLOW_ALL_USERS=true`: an explicit workspace-wide opt-in.
@@ -168,6 +176,8 @@ Optional:
   `deliver=hype_comms` without another target.
 - `HYPE_COMMS_CLI_PATH`: executable name or absolute path. Default:
   `hype-comms-cli`.
+- `HYPE_COMMS_CONFIG_DIR`: absolute private CLI profile directory. It is needed
+  only when the service account does not use the CLI's default config location.
 - `HYPE_COMMS_HERMES_STATE_DIR`: private cursor-state root. Default:
   `$HERMES_HOME/state/hype-comms` (or `~/.hermes/state/hype-comms`).
 - `HYPE_COMMS_CONTEXT_LIMIT`: number of canonical tail messages in each wake
@@ -187,9 +197,11 @@ The context limit and both switches are read once, when the adapter is
 constructed, so a change takes effect on `hermes gateway restart`.
 
 The environment credential overrides any saved CLI profile and is never
-persisted by the adapter. Do not put the token on a command line. Hype Comms
-stores only a hash and reveals a token once; a lost token cannot be recovered.
-Revoke it and create a replacement from an owner's human CLI profile.
+persisted by the adapter. In profile mode the adapter passes only the selected
+profile name to `hype-comms-cli`; it does not read the credential or copy it into
+the Hermes process environment. Do not put a token on a command line. Hype
+Comms stores only a hash, so a lost token cannot be recovered; revoke it and
+enroll a replacement.
 
 The environment-enablement hook turns on `gateway.platforms.hype_comms` when the
 required values are present. An equivalent explicit platform entry is:

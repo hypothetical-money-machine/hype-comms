@@ -4,6 +4,7 @@ import {
   AGENT_CONTEXT_PACK_CAPABILITY,
   AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
   AGENT_CONTEXT_PACK_MAX_LIMIT,
+  ATTACHMENTS_CAPABILITY,
   advanceReadCursorRequestSchema,
   advanceReadCursorResponseSchema,
   agentContextHistoryQuerySchema,
@@ -250,6 +251,7 @@ export async function messagesCommand(
       path: `/v1/conversations/${id}/messages`,
       query: { before, limit: integerOption(parsed, "limit", 50, 100) },
       responseSchema: messageHistoryResponseSchema,
+      headers: { "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY },
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -300,7 +302,10 @@ export async function messagesCommand(
       body,
       requestSchema: sendConversationMessageRequestSchema,
       responseSchema: sendMessageResponseSchema,
-      headers: { "idempotency-key": clientMessageId.data },
+      headers: {
+        "idempotency-key": clientMessageId.data,
+        "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+      },
       clientMessageId: clientMessageId.data,
     });
     writeResult(context.runtime.io, response, context.options.json);

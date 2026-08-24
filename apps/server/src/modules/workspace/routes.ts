@@ -1,6 +1,7 @@
 import {
   AGENT_CONTEXT_PACK_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENT_CONTENT_SHA256_HEADER,
   ATTACHMENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
@@ -48,7 +49,11 @@ import type { FastifyPluginAsync } from "fastify";
 import { ApiError } from "../../errors.js";
 import { requireTaskIdentity } from "../bots/request-auth.js";
 import type { BotService } from "../bots/service.js";
-import { requireAgentScope, requireAuthenticatedIdentity } from "../identity/request-auth.js";
+import {
+  requireAgentScope,
+  requireAnyAgentScope,
+  requireAuthenticatedIdentity,
+} from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "./repository.js";
 
@@ -337,10 +342,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    // Only a `conversations:write` credential may open a DM. A read-only agent token may still
-    // look one up, so `workspace:read` alone reaches the read path below.
+    // Keep broad legacy credentials working while newly enrolled agents receive only the narrow
+    // permission needed to open a 1:1 conversation. A read-only agent token may still look one up,
+    // so `workspace:read` alone reaches the read path below.
     const canCreate =
       identity.credentialType === "session" ||
+      identity.currentUser.scopes.includes("direct-conversations:write") ||
       identity.currentUser.scopes.includes("conversations:write");
     const missingWriteScope = new ApiError(
       403,
@@ -635,6 +642,8 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const file = await repository.readFileContent(identity, id);
     return reply
       .header("content-type", file.attachment.contentType)
+      .header("content-length", file.attachment.sizeBytes.toString())
+      .header(ATTACHMENT_CONTENT_SHA256_HEADER, file.contentSha256)
       .header(
         "content-disposition",
         `attachment; filename*=UTF-8''${encodeURIComponent(file.attachment.fileName)}`,
@@ -644,6 +653,10 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   });
 
   await app.register(async (files) => {
+    // This encapsulated raw-byte lane must also override Fastify's built-in text/plain and JSON
+    // parsers. A wildcard alone loses to those exact parsers and turns valid text attachments
+    // into strings before the handler can verify their byte length and digest.
+    files.removeAllContentTypeParsers();
     files.addContentTypeParser(
       "*",
       { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 },

@@ -1,0 +1,38 @@
+name: Feature or enhancement
+description: Propose a change to Hype Comms.
+title: "[Feature]: "
+labels:
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the problem and the outcome you need, rather than only the implementation.
+      placeholder: Tell us what is difficult or missing today.
+    validations:
+      required: true
+  - type: textarea
+    id: users
+    attributes:
+      label: Who would this affect?
+      description: Identify the people, teams, or workflows that would benefit.
+      placeholder: For example, workspace owners or CLI users.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this fit the current project scope?
+      description: Hype Comms is a small project the maintainers build for their own daily use. See [ROADMAP.md](../../ROADMAP.md) for the current scope and direction.
+      options:
+        - Yes, it fits the current scope
+        - Maybe, but it would expand the current scope
+        - No, it is outside the current scope
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add examples, alternatives considered, or other useful context.
