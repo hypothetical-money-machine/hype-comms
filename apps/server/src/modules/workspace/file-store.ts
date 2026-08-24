@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { ATTACHMENT_MAX_BYTES } from "@hype-comms/contracts";
@@ -90,6 +90,28 @@ export interface AttachmentStore {
 
 export class LocalAttachmentStore implements AttachmentStore {
   constructor(private readonly root: string) {}
+
+  /** Fail startup before migrations or readiness if the configured root is unusable. */
+  async prepare(): Promise<void> {
+    try {
+      await mkdir(this.root, { recursive: true, mode: 0o700 });
+      const metadata = await stat(this.root);
+      if (!metadata.isDirectory()) throw new Error("Configured attachment root is not a directory");
+      const probePath = path.join(this.root, `.hype-comms-storage-probe-${randomUUID()}`);
+      const stagingPath = `${probePath}.part`;
+      const probeBytes = Buffer.from("hype-comms-storage-probe", "utf8");
+      try {
+        await writeFile(stagingPath, probeBytes, { flag: "wx", mode: 0o600 });
+        await rename(stagingPath, probePath);
+        const stored = await readFile(probePath);
+        if (!stored.equals(probeBytes)) throw new Error("Attachment storage probe changed bytes");
+      } finally {
+        await Promise.all([rm(stagingPath, { force: true }), rm(probePath, { force: true })]);
+      }
+    } catch (error) {
+      throw new Error(`Attachment storage is unavailable at ${this.root}`, { cause: error });
+    }
+  }
 
   #objectPath(workspaceId: string, attachmentId: string): string {
     if (!UUID_PATTERN.test(workspaceId) || !UUID_PATTERN.test(attachmentId)) {

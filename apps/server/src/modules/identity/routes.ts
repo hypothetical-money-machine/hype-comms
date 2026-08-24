@@ -1,4 +1,8 @@
 import {
+  AGENT_ENROLLMENT_AUTHORIZATION_SCHEME,
+  agentEnrollmentPolicyResponseSchema,
+  agentEnrollmentResponseSchema,
+  agentTokenSecretSchema,
   authKitLogoutUrlHeaderName,
   authKitLogoutUrlSchema,
   createAgentRequestSchema,
@@ -11,18 +15,25 @@ import {
   currentUserSchema,
   deviceSessionSchema,
   entityIdSchema,
+  idempotencyKeySchema,
   invitationSchema,
   listAgentsResponseSchema,
   listAgentTokensResponseSchema,
+  listAgentEnrollmentsResponseSchema,
   listInvitationsResponseSchema,
   magicLinkLandingQuerySchema,
   magicLinkRequestedSchema,
   MEMBER_PROFILES_CAPABILITY,
   requestMagicLinkSchema,
+  requestAgentEnrollmentSchema,
+  redeemAgentEnrollmentResponseSchema,
+  reviewAgentEnrollmentRequestSchema,
   sessionTokenSchema,
   updateProfileRequestSchema,
   updateProfileResponseSchema,
+  updateAgentEnrollmentPolicyRequestSchema,
   verifyMagicLinkSchema,
+  type AgentScope,
   type CurrentUser,
   type SessionToken,
 } from "@hype-comms/contracts";
@@ -32,9 +43,12 @@ import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
 import {
   rejectAmbiguousCredentials,
+  requireAgentScope,
   requireAuthenticatedIdentity,
   requireHumanIdentity,
+  type AuthenticatedRequestIdentity,
 } from "./request-auth.js";
+import type { AgentEnrollmentActor, AgentEnrollmentModule } from "./agent-enrollment.js";
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
@@ -55,6 +69,7 @@ const PROFILE_UPDATE_WINDOW_MS = 15 * 60 * 1_000;
 
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
+  readonly agentEnrollment?: AgentEnrollmentModule;
   readonly authKitService?: AuthKitService;
   readonly cookieSecure: boolean;
   /**
@@ -69,6 +84,54 @@ interface IdentityRoutesOptions {
    * parse. Production enables this only after that release is no longer a rollback target.
    */
   readonly agentProvisioningEnabled?: boolean;
+}
+
+function enrollmentActor(identity: AuthenticatedRequestIdentity): AgentEnrollmentActor {
+  return {
+    userId: identity.currentUser.user.id,
+    workspaceId: identity.currentUser.workspaceId,
+    kind: identity.credentialType === "agent" ? "agent" : "human",
+    role: identity.currentUser.role,
+    agentTokenId: identity.credentialType === "agent" ? identity.agentTokenId : null,
+    scopes: identity.credentialType === "agent" ? identity.currentUser.scopes : [],
+  };
+}
+
+function enrollmentParameters(value: unknown): { readonly id: string } {
+  const parsed = entityIdSchema.safeParse(
+    typeof value === "object" && value !== null && "id" in value ? value.id : undefined,
+  );
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment id");
+  return { id: parsed.data };
+}
+
+function requiredEnrollmentIdempotencyKey(value: string | string[] | undefined): string {
+  const parsed = idempotencyKeySchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key is required");
+  return parsed.data;
+}
+
+function includesRollbackUnsafeAgentScope(scopes: readonly AgentScope[]): boolean {
+  return scopes.some(
+    (scope) => scope === "direct-conversations:write" || scope === "agents:invite",
+  );
+}
+
+function requiredEnrollmentCredential(request: FastifyRequest) {
+  if (cookieValue(request) !== undefined) {
+    throw new ApiError(400, "BAD_REQUEST", "Enrollment redemption accepts only its credential");
+  }
+  const authorization = request.headers.authorization;
+  const match = /^Enrollment[ \t]+([^ \t]+)$/.exec(authorization ?? "");
+  const credential = agentTokenSecretSchema.safeParse(match?.[1]);
+  if (!credential.success) {
+    throw new ApiError(
+      401,
+      "UNAUTHORIZED",
+      `${AGENT_ENROLLMENT_AUTHORIZATION_SCHEME} credential is invalid`,
+    );
+  }
+  return credential.data;
 }
 
 function sessionCookie(
@@ -237,6 +300,7 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   app,
   {
     service,
+    agentEnrollment,
     authKitService,
     cookieSecure,
     selfServiceMagicLink = true,
@@ -247,6 +311,23 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     maxAttempts: PROFILE_UPDATE_LIMIT,
     windowMs: PROFILE_UPDATE_WINDOW_MS,
   });
+
+  const requireEnrollmentModule = (): AgentEnrollmentModule => {
+    if (agentEnrollment === undefined) {
+      throw new ApiError(503, "SERVICE_UNAVAILABLE", "Agent enrollment is unavailable");
+    }
+    return agentEnrollment;
+  };
+
+  const requireEnrollmentIssuanceEnabled = (): void => {
+    if (!agentProvisioningEnabled) {
+      throw new ApiError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Agent provisioning is disabled during the server rollback window",
+      );
+    }
+  };
 
   app.post("/auth/magic-link", async (request, reply) => {
     if (!selfServiceMagicLink) {
@@ -395,6 +476,90 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     return reply.code(204).send();
   });
 
+  app.get("/agent-enrollment-policy", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    return agentEnrollmentPolicyResponseSchema.parse({
+      policy: await requireEnrollmentModule().getPolicy(enrollmentActor(identity)),
+    });
+  });
+
+  app.patch("/agent-enrollment-policy", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    requireEnrollmentIssuanceEnabled();
+    const input = updateAgentEnrollmentPolicyRequestSchema.safeParse(request.body);
+    if (!input.success) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment policy");
+    }
+    return agentEnrollmentPolicyResponseSchema.parse({
+      policy: await requireEnrollmentModule().setPolicy(enrollmentActor(identity), input.data.mode),
+    });
+  });
+
+  app.post("/agent-enrollments", async (request, reply) => {
+    const identity = await requireAuthenticatedIdentity(request, service);
+    requireAgentScope(identity, "agents:invite");
+    requireEnrollmentIssuanceEnabled();
+    const input = requestAgentEnrollmentSchema.safeParse(request.body);
+    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment");
+    const enrollment = await requireEnrollmentModule().request(
+      enrollmentActor(identity),
+      input.data,
+      requiredEnrollmentIdempotencyKey(request.headers["idempotency-key"]),
+    );
+    return reply.code(201).send(agentEnrollmentResponseSchema.parse({ enrollment }));
+  });
+
+  app.get("/agent-enrollments", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, service);
+    requireAgentScope(identity, "agents:invite");
+    return listAgentEnrollmentsResponseSchema.parse({
+      enrollments: await requireEnrollmentModule().list(enrollmentActor(identity)),
+    });
+  });
+
+  app.get("/agent-enrollments/:id", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, service);
+    requireAgentScope(identity, "agents:invite");
+    const { id } = enrollmentParameters(request.params);
+    return agentEnrollmentResponseSchema.parse({
+      enrollment: await requireEnrollmentModule().get(enrollmentActor(identity), id),
+    });
+  });
+
+  app.post("/agent-enrollments/:id/review", async (request) => {
+    const identity = await requireHumanIdentity(request, service);
+    requireEnrollmentIssuanceEnabled();
+    const { id } = enrollmentParameters(request.params);
+    const input = reviewAgentEnrollmentRequestSchema.safeParse(request.body);
+    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid enrollment review");
+    return agentEnrollmentResponseSchema.parse({
+      enrollment: await requireEnrollmentModule().review(
+        enrollmentActor(identity),
+        id,
+        input.data.decision,
+      ),
+    });
+  });
+
+  app.post("/agent-enrollments/:id/cancel", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, service);
+    requireAgentScope(identity, "agents:invite");
+    const { id } = enrollmentParameters(request.params);
+    return agentEnrollmentResponseSchema.parse({
+      enrollment: await requireEnrollmentModule().cancel(enrollmentActor(identity), id),
+    });
+  });
+
+  app.post("/agent-enrollments/:id/redeem", async (request, reply) => {
+    requireEnrollmentIssuanceEnabled();
+    const { id } = enrollmentParameters(request.params);
+    const credential = requiredEnrollmentCredential(request);
+    void reply.header("cache-control", "no-store");
+    return redeemAgentEnrollmentResponseSchema.parse(
+      await requireEnrollmentModule().redeem(id, credential),
+    );
+  });
+
   app.get("/agents", async (request) => {
     const identity = await requireHumanIdentity(request, service);
     const response = listAgentsResponseSchema.parse({
@@ -464,6 +629,9 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
     const input = createAgentTokenRequestSchema.safeParse(request.body);
     if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent token");
+    if (!agentProvisioningEnabled && includesRollbackUnsafeAgentScope(input.data.scopes)) {
+      requireEnrollmentIssuanceEnabled();
+    }
     return reply
       .code(201)
       .send(

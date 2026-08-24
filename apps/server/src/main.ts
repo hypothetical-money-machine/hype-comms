@@ -23,6 +23,7 @@ import { AuthKitService } from "./modules/identity/authkit-service.js";
 import { createWorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { IdentityRepository } from "./modules/identity/repository.js";
 import { IdentityService } from "./modules/identity/service.js";
+import { AgentEnrollmentModule } from "./modules/identity/agent-enrollment.js";
 import { installGracefulShutdown } from "./shutdown.js";
 import { SignInThrottle } from "./throttle.js";
 import { RealtimeEventHub } from "./modules/realtime/hub.js";
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   let identity:
     | {
         readonly service: IdentityService;
+        readonly agentEnrollment: AgentEnrollmentModule;
         readonly botService: BotService;
         readonly selfServiceMagicLink: boolean;
         readonly agentProvisioningEnabled: boolean;
@@ -52,6 +54,11 @@ async function main(): Promise<void> {
 
   try {
     if (config.database !== undefined) {
+      const attachmentStore = new LocalAttachmentStore(config.attachmentDir);
+      // Storage is part of the database-backed message contract. Check that the configured root
+      // supports the real write/read/rename pattern before applying a migration. GitOps separately
+      // proves that this path is backed by the intended durable volume.
+      await attachmentStore.prepare();
       const databasePool = createPool(config.database);
       pool = databasePool;
       metricsRegistry =
@@ -101,6 +108,7 @@ async function main(): Promise<void> {
             });
       identity = {
         service,
+        agentEnrollment: new AgentEnrollmentModule(databasePool),
         botService: new BotService(databasePool),
         selfServiceMagicLink: config.emailDelivery !== "manual",
         agentProvisioningEnabled: config.agentProvisioningEnabled,
@@ -110,7 +118,7 @@ async function main(): Promise<void> {
       };
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
-        attachmentStore: new LocalAttachmentStore(config.attachmentDir),
+        attachmentStore,
         onAnnouncementAudit: (record) => {
           process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
         },

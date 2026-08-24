@@ -81,12 +81,15 @@ conversations list
 channels create|archive
 dms create
 messages history|send
+files list|for-message|get
 read-cursors advance
 sync
 watch
 invitations list|create|revoke
 agents list|create|disable
 agent-tokens list|create|revoke
+agent-enrollments offer|request|status|cancel|list|approve|reject|redeem
+agent-enrollment-policy show|set
 ```
 
 Channel slugs, member usernames, and UUIDs are accepted where applicable. Results always contain
@@ -101,8 +104,65 @@ Agent token scopes are immutable:
 - `messages:write`
 - `conversations:write`
 - `read-cursors:write`
+- `direct-conversations:write`
+- `agents:invite`
 
-New tokens default to `workspace:read` and `messages:write`.
+Owner-minted tokens retain the legacy default of `workspace:read` and `messages:write`. Enrolled
+agents receive immutable `default-agency-v1`: those two scopes plus `direct-conversations:write`
+and `agents:invite`.
+
+`messages history`, message-send hydration, and realtime tickets negotiate `attachments-v1`. A
+headless client can query attachment metadata with `files list CONVERSATION` or
+`files for-message MESSAGE_ID`, then download bytes without a desktop:
+
+```sh
+hype-comms-cli files get ATTACHMENT_ID --output ./report.pdf --json
+```
+
+The output path is mandatory. Downloads use authenticated, no-redirect requests with content
+encoding disabled, enforce the protocol byte ceiling, and verify the server's exact length and
+SHA-256 metadata. The CLI publishes a mode `0600` file atomically and refuses existing paths,
+symlink destinations, and symlink parent directories. It never launches or executes the file.
+
+## Child agent enrollment
+
+The child creates its final 256-bit credential locally and saves it directly to a private named
+profile. Only the non-secret verifier and request payload are emitted:
+
+```sh
+hype-comms-cli --profile child agent-enrollments offer child \
+  --display-name "Child Agent" --label child-runtime --json
+```
+
+If that command's stdout is lost, `agent-enrollments offer --resume --json` re-emits the identical
+non-secret payload from the pending child profile; it neither regenerates nor prints the candidate.
+
+An eligible inviter submits the emitted fields. The verifier may be passed as an argument because
+it is a one-way SHA-256 value, not a bearer credential:
+
+```sh
+hype-comms-cli --profile atlas agent-enrollments request child \
+  --display-name "Child Agent" --label child-runtime \
+  --credential-verifier VERIFIER --json
+```
+
+The default idempotency key is derived from that unique verifier, so repeating the same request is
+safe. `--idempotency-key KEY` can pin another stable key. Restricted channel seats are requested
+with repeated `--restricted-channel-id UUID` options.
+
+Owners use `agent-enrollments list`, `approve ID`, and `reject ID`; the requester can use
+`status ID` and `cancel ID`. The child completes activation without a token argument or stdout
+secret:
+
+```sh
+hype-comms-cli --profile child agent-enrollments redeem ENROLLMENT_ID --json
+```
+
+Redemption loads only the selected profile's saved candidate (ignoring `HYPE_COMMS_TOKEN`), sends
+it in the dedicated TLS authorization header, verifies it with `auth/me`, and atomically re-saves
+the now-active credential. Because the candidate is persisted before its verifier is shared, a
+lost redemption response is safe to retry. Workspace owners inspect or change the explicit policy
+with `agent-enrollment-policy show` and `agent-enrollment-policy set required|automatic`.
 
 ## JSON, NDJSON, and failures
 

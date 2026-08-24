@@ -49,6 +49,8 @@ on:
       - .github/dependabot.yml
       - .github/workflows/desktop-release.yml
       - .github/workflows/desktop-package-smoke.yml
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: desktop-package-${{ github.workflow }}-${{ github.ref }}
@@ -60,23 +62,27 @@ permissions:
 jobs:
   package:
     name: Package on ${{ matrix.platform }}
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macOS
-            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            # Routine smoke uses disposable hosted runners. Manual dispatch retains native host
+            # coverage without exposing persistent release hosts to pull-request code.
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "1"
           - platform: Windows
-            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
           - platform: Linux
-            # Smoke packages do not need release credentials. Run the Linux lane on the native
-            # ARM64 runner so package tooling is exercised on the architecture it targets.
-            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
+            runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
+            self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
@@ -93,8 +99,19 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      # Hosted Windows dependency installation is several minutes slower than the Unix lanes.
+      # Cache downloads there, but rebuild node_modules and the application from source.
+      - name: Restore Windows desktop dependency downloads
+        if: matrix.platform == 'Windows' && !matrix.self_hosted
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            desktop-downloads-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Verify native Linux ARM64 runner
-        if: matrix.platform == 'Linux'
+        if: matrix.platform == 'Linux' && matrix.self_hosted
         shell: sh
         run: |
           test "$(uname -m)" = "aarch64"
@@ -103,7 +120,7 @@ jobs:
       # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
       # Its PowerShell execution policy also rejects the generated scripts used by Actions.
       - name: Expose MinGit sh on Windows
-        if: matrix.platform == 'Windows'
+        if: matrix.platform == 'Windows' && matrix.self_hosted
         shell: cmd
         run: |
           if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
@@ -114,21 +131,22 @@ jobs:
       - name: Install dependencies
         if: matrix.platform != 'Windows'
         shell: sh
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
       # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
       - name: Install dependencies on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Package DEV desktop application
         if: matrix.platform != 'Windows'
         env:
           # electron-builder skips all macOS signing in PR jobs before reading identity: "-"
-          # unless this is enabled. Fork PRs never reach this job, and identity discovery is off.
-          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && 'true' || 'false' }}
+          # unless this is enabled. Hosted jobs receive no signing secrets, and identity discovery
+          # remains disabled for every DEV smoke build.
+          CSC_FOR_PULL_REQUEST: ${{ matrix.platform == 'macOS' && !matrix.self_hosted && 'true' || 'false' }}
         shell: sh
         run: npm run package:desktop
 
@@ -168,6 +186,7 @@ jobs:
     name: Capture signed macOS native notification evidence
     if: github.event_name == 'workflow_dispatch' && inputs.native_notification_evidence
     runs-on: [self-hosted, macOS, ARM64, notarize]
+    environment: release
     timeout-minutes: 60
     env:
       HYPE_COMMS_BUILD_FLAVOR: production
@@ -185,7 +204,7 @@ jobs:
 
       - name: Install dependencies
         shell: sh
-        run: npm ci
+        run: npm ci --no-audit --prefer-offline
 
       - name: Configure macOS signing and notarization
         shell: bash

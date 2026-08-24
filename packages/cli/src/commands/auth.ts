@@ -210,6 +210,7 @@ export async function authCommand(
         }).requestEmpty({ method: "DELETE", path: "/v1/auth/session" });
       }
       delete stored.credential;
+      delete stored.enrollmentOffer;
       await saveProfileStore(directory, store);
       return { profile: name, signedOut: true };
     });
