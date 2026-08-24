@@ -84,6 +84,31 @@ test("waits for the versioned ready record and ignores normal launcher output", 
   assert.match(output[1], /"event":"ready"/u);
 });
 
+test("keeps draining launcher output after the ready record", async () => {
+  const child = launcher();
+  const manifestPath = path.resolve("/tmp/hype-comms-headless-session.json");
+  const output = [];
+  const ready = waitForHeadlessDemoReady(child, {
+    expectedManifestPath: manifestPath,
+    timeoutMs: 100,
+    writeOutput: (chunk) => output.push(chunk),
+  });
+
+  child.stdout.write(
+    `${JSON.stringify({
+      version: HEADLESS_DEMO_MANIFEST_VERSION,
+      event: "ready",
+      manifestPath,
+      clients: [],
+    })}\n`,
+  );
+  assert.deepEqual(await ready, { manifestPath });
+
+  child.stdout.write('{"level":30,"msg":"request completed"}\n');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(output.at(-1), '{"level":30,"msg":"request completed"}\n');
+});
+
 test("launches, attaches through the ready manifest, runs the smoke, and always stops the launcher", async () => {
   const projectRoot = path.resolve("/repo/hype-comms");
   const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);

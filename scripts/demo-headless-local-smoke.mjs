@@ -150,7 +150,13 @@ export function waitForHeadlessDemoReady(
     const fail = (error) => settle(reject, error);
     const processLine = (line) => {
       const manifestPath = manifestPathFromReadyRecord(line, expectedManifestPath);
-      if (manifestPath !== null) settle(resolve, { manifestPath });
+      if (manifestPath === null) return;
+      settled = true;
+      cleanup();
+      // Keep draining launcher stdout after readiness. The demo API logs every request, and an
+      // undrained pipe eventually fills and blocks the demo children mid-smoke.
+      launcher.stdout.on("data", writeOutput);
+      resolve({ manifestPath });
     };
     const processBuffer = () => {
       let newlineIndex = buffer.indexOf("\n");
