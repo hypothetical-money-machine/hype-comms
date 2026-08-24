@@ -3141,7 +3141,8 @@ describe("WorkspaceRuntime", () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", {
         conversations: [
-          {\n            ...channel(CONVERSATION_ID, "general"),
+          {
+            ...channel(CONVERSATION_ID, "general"),
             lastMessage: ownThreadReply,
           },
         ],
@@ -3264,7 +3265,6 @@ describe("WorkspaceRuntime", () => {
       mentionCount: 0,
       lastMessage: { id: OWN_MESSAGE_ID },
     });
->>>>>>> origin/main
   });
 
   it("removes a deleted thread root's summary while retaining its live replies", async () => {
@@ -3458,7 +3458,6 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     });
->>>>>>> origin/main
   });
 
   it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
