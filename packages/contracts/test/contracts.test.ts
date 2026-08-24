@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MESSAGE_RETRACT_WINDOW_MS,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -23,9 +26,11 @@ import {
   currentAgentPrincipalSchema,
   currentPrincipalSchema,
   createChannelOperationSchema,
+  createFileUploadRequestSchema,
   createTaskOperationSchema,
   currentUserSchema,
   displayNameSchema,
+  entityVersionSchema,
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
@@ -41,12 +46,14 @@ import {
   moveTaskOperationSchema,
   reactionEmojiSchema,
   reactionSchema,
+  retractMessageResponseSchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
   syncQuerySchema,
   systemConnectedEventSchema,
   taskListQuerySchema,
+  taskNumberSchema,
   taskRecordSchema,
   taskSchema,
   themeAccentColorSchema,
@@ -245,7 +252,7 @@ describe("entity contracts", () => {
         createdAt: NOW,
         updatedAt: NOW,
       }),
-    ).toMatchObject({ id: USER_ID, kind: "human" });
+    ).toMatchObject({ id: USER_ID, kind: "human", title: null });
 
     expect(
       userSchema.parse({
@@ -258,6 +265,29 @@ describe("entity contracts", () => {
         updatedAt: NOW,
       }),
     ).toMatchObject({ kind: "bot" });
+
+    expect(
+      userSchema.parse({
+        id: USER_ID,
+        username: "morgan",
+        displayName: "Morgan",
+        avatarUrl: null,
+        title: "  Chief Mischief Officer  ",
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toMatchObject({ title: "Chief Mischief Officer" });
+    expect(() =>
+      userSchema.parse({
+        id: USER_ID,
+        username: "morgan",
+        displayName: "Morgan",
+        avatarUrl: null,
+        title: "line\u0000break",
+        createdAt: NOW,
+        updatedAt: NOW,
+      }),
+    ).toThrow();
 
     expect(
       conversationSchema.parse({
@@ -326,6 +356,35 @@ describe("entity contracts", () => {
         updatedAt: NOW,
       }),
     ).toMatchObject({ body: "Hello" });
+    expect(MESSAGE_RETRACT_WINDOW_MS).toBe(5 * 60 * 1_000);
+    const retracted = {
+      id: MESSAGE_ID,
+      conversationId: CONVERSATION_ID,
+      conversationSequence: "42",
+      version: 2,
+      clientMessageId: MESSAGE_ID,
+      authorId: USER_ID,
+      threadRootId: null,
+      body: "still stored",
+      bodyFormat: "hype_comms_markdown_v1" as const,
+      editedAt: null,
+      deletedAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    expect(messageSchema.parse(retracted)).toMatchObject({
+      body: "still stored",
+      deletedAt: NOW,
+    });
+    expect(
+      retractMessageResponseSchema.parse({ message: retracted, syncCursor: "44" }),
+    ).toMatchObject({ message: { deletedAt: NOW, body: "still stored" }, syncCursor: "44" });
+    expect(() =>
+      retractMessageResponseSchema.parse({
+        message: { ...retracted, deletedAt: null },
+        syncCursor: "44",
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown fields so wire-shape changes are deliberate", () => {
@@ -441,7 +500,7 @@ describe("agent contracts", () => {
   it("keeps human principals unchanged and gives agents a distinct scoped arm", () => {
     expect(currentPrincipalSchema.parse(BOOTSTRAP.currentUser)).toEqual({
       ...BOOTSTRAP.currentUser,
-      user: { ...BOOTSTRAP.currentUser.user, kind: "human" },
+      user: { ...BOOTSTRAP.currentUser.user, kind: "human", title: null },
     });
     expect(
       currentAgentPrincipalSchema.parse({
@@ -622,6 +681,35 @@ describe("transport contracts", () => {
       }),
     ).toThrow();
     expect(() => chatSessionStateSchema.parse({ status: "signed-in" })).toThrow();
+
+    const offline = {
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: "Could not reach the chat server. Your session is preserved.",
+      lastAuthenticatedSession: {
+        method: "email",
+        name: "Morgan",
+        email: "MORGAN@example.com",
+        userId: USER_ID,
+        workspaceId: WORKSPACE_ID,
+      },
+    } as const;
+    expect(chatSessionStateSchema.parse(offline)).toEqual({
+      ...offline,
+      lastAuthenticatedSession: {
+        ...offline.lastAuthenticatedSession,
+        email: "morgan@example.com",
+      },
+    });
+    expect(() =>
+      chatSessionStateSchema.parse({
+        ...offline,
+        lastAuthenticatedSession: {
+          ...offline.lastAuthenticatedSession,
+          credentialFingerprint: "must-never-cross-ipc",
+        },
+      }),
+    ).toThrow();
   });
 
   it("keeps update state bounded and free of updater diagnostics", () => {
@@ -724,11 +812,18 @@ describe("transport contracts", () => {
         threadsSupported: true,
         nextCursor: null,
       }),
-    ).toEqual({ messages: [], threadSummaries: [], threadsSupported: true, nextCursor: null });
+    ).toEqual({
+      messages: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: null,
+    });
     expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
       messages: [],
       threadSummaries: [],
       threadsSupported: false,
+      attachments: [],
       nextCursor: null,
     });
     expect(() =>
@@ -779,6 +874,7 @@ describe("transport contracts", () => {
       messages: [root, reply],
       threadSummaries: [],
       threadsSupported: false,
+      attachments: [],
       nextCursor: null,
     });
     expect(
@@ -999,6 +1095,41 @@ describe("transport contracts", () => {
     expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
   });
 
+  it("validates message.retracted as a body-free tombstone", () => {
+    const event = {
+      version: 1,
+      id: "10000000-0000-4000-8000-000000000016",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "44",
+      conversationSequence: "42",
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: {
+        messageId: MESSAGE_ID,
+        deletedAt: NOW,
+      },
+    } as const;
+
+    expect(workspaceEventSchema.parse(event)).toEqual(event);
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, body: "" },
+      }),
+    ).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, conversationSequence: null })).toThrow();
+    expect(() => workspaceEventSchema.parse({ ...event, type: "message.deleted" })).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...event,
+        payload: { messageId: MESSAGE_ID },
+      }),
+    ).toThrow();
+  });
+
   it("keeps member.updated a bare invalidation signal that cannot express removal", () => {
     const member = {
       id: USER_ID,
@@ -1006,6 +1137,7 @@ describe("transport contracts", () => {
       username: "hermes",
       displayName: "Hermes",
       avatarUrl: null,
+      title: null,
       createdAt: NOW,
       updatedAt: NOW,
     };
@@ -1133,7 +1265,7 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}`,
       ),
     ).toEqual([
       REACTION_EVENTS_CAPABILITY,
@@ -1141,6 +1273,8 @@ describe("transport contracts", () => {
       TASK_EVENTS_CAPABILITY,
       THREADS_CAPABILITY,
       PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+      ATTACHMENTS_CAPABILITY,
+      MESSAGE_RETRACT_EVENTS_CAPABILITY,
     ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
@@ -1165,6 +1299,14 @@ describe("transport contracts", () => {
         updatedAt: NOW,
       }),
     ).toThrow();
+  });
+
+  it("bounds decimal bigint values while accepting the PostgreSQL maximum", () => {
+    const maximum = "9223372036854775807";
+    expect(taskNumberSchema.parse(maximum)).toBe(maximum);
+    expect(() => taskNumberSchema.parse("9223372036854775808")).toThrow();
+    expect(entityVersionSchema.parse(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(() => entityVersionSchema.parse(Number.MAX_SAFE_INTEGER + 1)).toThrow();
   });
 
   it("requires a UUID clientMessageId for idempotent sends", () => {
@@ -1237,6 +1379,29 @@ describe("transport contracts", () => {
       createChannelOperationSchema.parse({ ...operation, idempotencyKey: "bad key" }),
     ).toThrow();
     expect(() => createChannelOperationSchema.parse({ ...operation, unexpected: true })).toThrow();
+  });
+
+  it("accepts a staged file upload and rejects executables at the name/type boundary", () => {
+    const request = createFileUploadRequestSchema.parse({
+      conversationId: CONVERSATION_ID,
+      fileName: "clip.webm",
+      contentType: "video/webm",
+      sizeBytes: 2048,
+      contentSha256: "a".repeat(64),
+    });
+    expect(request.fileName).toBe("clip.webm");
+    expect(() =>
+      createFileUploadRequestSchema.parse({
+        ...request,
+        fileName: "nested/clip.webm",
+      }),
+    ).toThrow();
+    expect(() =>
+      createFileUploadRequestSchema.parse({
+        ...request,
+        sizeBytes: 26 * 1024 * 1024,
+      }),
+    ).toThrow();
   });
 
   it("paginates conversation listing instead of capping it above what the server can return", () => {

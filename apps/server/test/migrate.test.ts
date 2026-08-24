@@ -104,6 +104,9 @@ describeWithPostgres("runMigrations", () => {
           "0017_workos_authkit.sql",
           "0018_hype_comms_technical_rebrand.sql",
           "0019_desktop_auth_variants.sql",
+          "0020_message_attachments.sql",
+          "0021_message_retract.sql",
+          "0022_member_title.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -132,6 +135,9 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0017_workos_authkit.sql" },
         { filename: "0018_hype_comms_technical_rebrand.sql" },
         { filename: "0019_desktop_auth_variants.sql" },
+        { filename: "0020_message_attachments.sql" },
+        { filename: "0021_message_retract.sql" },
+        { filename: "0022_member_title.sql" },
       ]);
 
       const userId = randomUUID();
@@ -284,6 +290,77 @@ describeWithPostgres("runMigrations", () => {
           [selfReplyId, workspaceId, conversationId, randomUUID(), Buffer.alloc(32), userId],
         ),
       ).rejects.toMatchObject({ code: "23514" });
+
+      await expect(
+        pool.query(`UPDATE messages SET deleted_at = clock_timestamp() WHERE id = $1`, [
+          threadRootId,
+        ]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query<{ body: string }>("SELECT body FROM messages WHERE id = $1", [threadRootId]),
+      ).resolves.toMatchObject({ rows: [{ body: "Root" }] });
+      await expect(
+        pool.query(`UPDATE messages SET edited_at = clock_timestamp() WHERE id = $1`, [
+          threadRootId,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(`UPDATE messages SET body = '' WHERE id = $1`, [threadRootId]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO sync_events (
+             id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
+             event_type, actor_user_id, entity_version, payload
+           ) VALUES ($1, $2, 1, $3, 1, 'message.retracted', $4, 1, $5::jsonb)`,
+          [
+            randomUUID(),
+            workspaceId,
+            conversationId,
+            userId,
+            JSON.stringify({
+              messageId: threadRootId,
+              deletedAt: "2026-08-20T17:00:00.000Z",
+            }),
+          ],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query(
+          `INSERT INTO sync_events (
+             id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
+             event_type, actor_user_id, entity_version, payload
+           ) VALUES ($1, $2, 2, $3, 1, 'message.edited', $4, 1, '{}'::jsonb)`,
+          [randomUUID(), workspaceId, conversationId, userId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'realtime_tickets'
+              AND column_name = 'message_retract_events'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "message_retract_events" }] });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'users'
+              AND column_name = 'title'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "title" }] });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'realtime_tickets'
+              AND column_name = 'member_profiles'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "member_profiles" }] });
     });
   });
 

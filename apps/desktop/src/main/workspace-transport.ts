@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -7,9 +12,16 @@ import {
   THREADS_CAPABILITY,
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
+  attachmentSchema,
+  completeFileUploadResponseSchema,
+  conversationFilesQuerySchema,
+  conversationFilesResponseSchema,
+  createFileUploadResponseSchema,
+  listMessageAttachmentsResponseSchema,
   apiErrorEnvelopeSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
@@ -17,6 +29,7 @@ import {
   listMembersResponseSchema,
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
+  retractMessageResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
   messageSearchResponseSchema,
@@ -31,9 +44,14 @@ import {
   taskMutationResponseSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type Attachment,
+  type ConversationFilesQuery,
+  type ConversationFilesResponse,
+  type ListMessageAttachmentsResponse,
   type ArchiveChannelRequest,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type CommunicationPathsResponse,
   type ConversationMutationResponse,
   type CreateTaskOperation,
   type CreateChannelOperation,
@@ -44,6 +62,7 @@ import {
   type ListMessageReactionsResponse,
   type MessageHistoryResponse,
   type MessageByIdResponse,
+  type RetractMessageResponse,
   type MessageThreadRequest,
   type MessageThreadResponse,
   type MessageSearchQuery,
@@ -72,6 +91,8 @@ const CLIENT_CAPABILITIES = [
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -153,7 +174,7 @@ export class WorkspaceTransport {
 
   async #payload(response: Response): Promise<unknown> {
     if (response.ok) return response.json();
-    if (response.status === 401) this.session.markSignedOut();
+    if (response.status === 401) await this.session.markSignedOut();
     let message = `Workspace request failed (${response.status})`;
     try {
       const parsed = apiErrorEnvelopeSchema.safeParse(await response.json());
@@ -195,6 +216,13 @@ export class WorkspaceTransport {
   async members(): Promise<ListMembersResponse> {
     const response = await this.session.fetch(this.#url("/v1/members").href, { method: "GET" });
     return listMembersResponseSchema.parse(await this.#payload(response));
+  }
+
+  async communicationPaths(): Promise<CommunicationPathsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/admin/communication-paths").href, {
+      method: "GET",
+    });
+    return communicationPathsResponseSchema.parse(await this.#payload(response));
   }
 
   async conversations(
@@ -329,6 +357,14 @@ export class WorkspaceTransport {
     return messageByIdResponseSchema.parse(await this.#payload(response));
   }
 
+  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/messages/${encodeURIComponent(messageId)}`).href,
+      { method: "DELETE" },
+    );
+    return retractMessageResponseSchema.parse(await this.#payload(response));
+  }
+
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
     const response = await this.session.fetch(this.#url("/v1/reactions/query").href, {
       method: "POST",
@@ -437,6 +473,7 @@ export class WorkspaceTransport {
           headers: {
             "content-type": "application/json",
             "idempotency-key": input.idempotencyKey,
+            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
           },
           body: JSON.stringify(input.message),
         },
@@ -448,7 +485,7 @@ export class WorkspaceTransport {
         });
       }
       if (response.status === 401) {
-        this.session.markSignedOut();
+        await this.session.markSignedOut();
         return { status: "authentication_required" };
       }
       if (response.status === 429) {
@@ -519,7 +556,7 @@ export class WorkspaceTransport {
       return accepted.data;
     }
     if (response.status === 401) {
-      this.session.markSignedOut();
+      await this.session.markSignedOut();
       return { status: "authentication_required" };
     }
     if (response.status === 410) {
@@ -536,6 +573,117 @@ export class WorkspaceTransport {
       status: "permanent",
       reason: SYNC_PERMANENT_REASONS.get(response.status) ?? "validation",
     };
+  }
+
+  async conversationFiles(
+    conversationId: string,
+    input: Partial<ConversationFilesQuery> = {},
+  ): Promise<ConversationFilesResponse> {
+    const query = conversationFilesQuerySchema.parse(input);
+    const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/files`);
+    if (query.before !== undefined) url.searchParams.set("before", query.before);
+    url.searchParams.set("limit", String(query.limit));
+    const response = await this.session.fetch(url.href, {
+      method: "GET",
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
+    });
+    return conversationFilesResponseSchema.parse(await this.#payload(response));
+  }
+
+  async attachments(messageIds: readonly string[]): Promise<ListMessageAttachmentsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/attachments/query").href, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
+      },
+      body: JSON.stringify({ messageIds }),
+    });
+    return listMessageAttachmentsResponseSchema.parse(await this.#payload(response));
+  }
+
+  async uploadLocalFile(conversationId: string, filePath: string): Promise<Attachment> {
+    const bytes = await readFile(filePath);
+    const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
+    const contentType = contentTypeForFileName(fileName);
+    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
+    const created = createFileUploadResponseSchema.parse(
+      await this.#payload(
+        await this.#fetchIdempotentMutation(this.#url("/v1/files/uploads").href, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": crypto.randomUUID(),
+          },
+          body: JSON.stringify({
+            conversationId,
+            fileName,
+            contentType,
+            sizeBytes: bytes.byteLength,
+            contentSha256,
+          }),
+        }),
+      ),
+    );
+    const uploaded = await this.session.fetch(
+      this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/content`).href,
+      {
+        method: "PUT",
+        headers: { "content-type": contentType },
+        body: bytes,
+      },
+    );
+    if (!uploaded.ok) {
+      throw new WorkspaceRequestError(
+        `Workspace request failed (${uploaded.status})`,
+        uploaded.status,
+        retryAfter(uploaded),
+      );
+    }
+    const completed = completeFileUploadResponseSchema.parse(
+      await this.#payload(
+        await this.#fetchIdempotentMutation(
+          this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/complete`).href,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": crypto.randomUUID(),
+            },
+            body: JSON.stringify({
+              sizeBytes: bytes.byteLength,
+              contentSha256,
+            }),
+          },
+        ),
+      ),
+    );
+    return attachmentSchema.parse(completed.attachment);
+  }
+
+  async downloadFile(attachmentId: string): Promise<{
+    readonly fileName: string;
+    readonly contentType: string;
+    readonly bytes: Buffer;
+  }> {
+    const response = await this.session.fetch(
+      this.#url(`/v1/files/${encodeURIComponent(attachmentId)}/content`).href,
+      { method: "GET" },
+    );
+    if (!response.ok) {
+      throw new WorkspaceRequestError(
+        `Workspace request failed (${response.status})`,
+        response.status,
+        retryAfter(response),
+      );
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    const fileName = fileNameFromDisposition(
+      response.headers.get("content-disposition"),
+      "download",
+    );
+    return { fileName, contentType, bytes };
   }
 
   async ticket(): Promise<RealtimeTicketResponse> {
@@ -556,4 +704,59 @@ export class WorkspaceRequestError extends Error {
     super(message);
     this.name = "WorkspaceRequestError";
   }
+}
+
+function contentTypeForFileName(fileName: string): string {
+  const extension = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined;
+  switch (extension) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    case "txt":
+    case "md":
+    case "log":
+      return "text/plain";
+    case "json":
+      return "application/json";
+    case "csv":
+      return "text/csv";
+    case "mp4":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "m4a":
+      return "audio/mp4";
+    case "mp3":
+      return "audio/mpeg";
+    case "wav":
+      return "audio/wav";
+    case "zip":
+      return "application/zip";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function fileNameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) {
+    return fallback;
+  }
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (encoded?.[1] !== undefined) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch {
+      // Fall through to the quoted filename or the caller-supplied fallback.
+    }
+  }
+  const quoted = /filename="([^"]+)"/i.exec(header);
+  return quoted?.[1] ?? fallback;
 }

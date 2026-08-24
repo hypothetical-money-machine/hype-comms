@@ -25,10 +25,10 @@ import {
   cacheDecryptBatchResponseSchema,
   cacheEncryptBatchRequestSchema,
   cacheEncryptBatchResponseSchema,
-  cacheScopeSchema,
   channelMemberTargetSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  communicationPathsResponseSchema,
   compactModePreferenceSchema,
   conversationMutationResponseSchema,
   createChannelOperationSchema,
@@ -39,11 +39,18 @@ import {
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMembersResponseSchema,
+  attachmentSchema,
+  conversationFilesQuerySchema,
+  conversationFilesResponseSchema,
+  listMessageAttachmentsRequestSchema,
+  listMessageAttachmentsResponseSchema,
   listMessageReactionsRequestSchema,
   listMessageReactionsResponseSchema,
+  openAttachmentResponseSchema,
   magicLinkDeliveryStateSchema,
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
+  retractMessageResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
   messageReactionTargetSchema,
@@ -87,7 +94,7 @@ import {
   type AiChannelState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
-  type CacheScope,
+  type ConversationFilesQuery,
   type CreateChannelOperation,
   type CreateTaskOperation,
   type DirectConversationRequest,
@@ -348,6 +355,8 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
     getSessionState: async () =>
       chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
+    retrySession: async () =>
+      chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionRetry)),
     getAuthCapabilities: async () =>
       authCapabilitiesSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionAuthCapabilities),
@@ -472,12 +481,9 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       );
       return response.activated;
     },
-    initializeCacheCrypto: async (scope: CacheScope) =>
+    initializeCacheCrypto: async () =>
       cacheCryptoStatusSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.cacheCryptoInitialize,
-          cacheScopeSchema.parse(scope),
-        ),
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoInitialize),
       ),
     encryptCacheRecords: async (input: CacheEncryptBatchRequest) =>
       cacheEncryptBatchResponseSchema.parse(
@@ -504,6 +510,10 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       listMembersResponseSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMembersList),
       ),
+    getCommunicationPaths: async () =>
+      communicationPathsResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths),
+      ),
     listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
       listConversationsResponseSchema.parse(
         await ipcRenderer.invoke(
@@ -523,6 +533,13 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       messageByIdResponseSchema.parse(
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.workspaceMessageGet,
+          entityIdSchema.parse(messageId),
+        ),
+      ),
+    retractMessage: async (messageId: string) =>
+      retractMessageResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceMessageRetract,
           entityIdSchema.parse(messageId),
         ),
       ),
@@ -559,6 +576,36 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.workspaceMessageSearch,
           messageSearchQuerySchema.parse(input),
+        ),
+      ),
+    listConversationFiles: async (
+      conversationId: string,
+      input: Partial<ConversationFilesQuery> = {},
+    ) =>
+      conversationFilesResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceConversationFilesList, {
+          conversationId,
+          query: conversationFilesQuerySchema.parse(input),
+        }),
+      ),
+    listMessageAttachments: async (messageIds: readonly string[]) => {
+      const request = listMessageAttachmentsRequestSchema.parse({ messageIds });
+      return listMessageAttachmentsResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAttachmentsList, request),
+      );
+    },
+    chooseAndUploadConversationFile: async (conversationId: string) => {
+      const result: unknown = await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceFileUpload,
+        entityIdSchema.parse(conversationId),
+      );
+      return result === null ? null : attachmentSchema.parse(result);
+    },
+    openConversationFile: async (attachmentId: string) =>
+      openAttachmentResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceFileOpen,
+          entityIdSchema.parse(attachmentId),
         ),
       ),
     listConversationTasks: async (conversationId: string, input: Partial<TaskListQuery> = {}) =>

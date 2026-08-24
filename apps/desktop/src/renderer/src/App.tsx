@@ -1,20 +1,23 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
-import type {
-  AuthCapabilities,
-  ChannelAccess,
-  ChannelMode,
-  ChatSessionState,
-  Message,
-  NotificationContext,
-  Reaction,
-  ReactionEmoji,
-  Task,
-  UpdateState,
-  User,
+import {
+  ATTACHMENTS_PER_MESSAGE_MAX,
+  type Attachment,
+  type AuthenticatedSessionContext,
+  type AuthCapabilities,
+  type ChannelAccess,
+  type ChannelMode,
+  type ChatSessionState,
+  type Message,
+  type NotificationContext,
+  type Reaction,
+  type ReactionEmoji,
+  type Task,
+  type UpdateState,
+  type User,
 } from "@hype-comms/contracts";
 
-import type { DesktopApi } from "../../shared/desktop-api";
+import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
 import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
@@ -23,6 +26,7 @@ import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { CommunicationPathsView } from "./communication-paths-view";
 import { ConversationHealth } from "./conversation-health";
 import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
 import {
@@ -31,16 +35,19 @@ import {
   ConversationEmptyState,
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
+import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
 import { MessageComposer } from "./message-composer";
+import { mentionedMemberIds } from "./mentions";
 import { isMessageContinuation } from "./message-grouping";
 import {
   isReadTrackingEligible,
   isTimelineAtBottom,
   lastReadEligibleMessageId,
 } from "./message-read-tracking";
+import { canRetractOwnMessage, retractWindowRemainingMs } from "./message-retract";
 import { MessageReactions } from "./message-reactions";
 import { createNotificationActivityView } from "./notification-activity";
 import {
@@ -52,7 +59,9 @@ import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
+import { listUnreadConversations, unreadBadgeTotals } from "./unread-conversations";
 import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
+import { UnreadsIcon, UnreadsView } from "./unreads-view";
 import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
@@ -66,6 +75,7 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
+type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin";
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -84,26 +94,23 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== "" ? error.message : fallback;
 }
 
+export function recoverableAuthenticatedSession(
+  session: ChatSessionState,
+): AuthenticatedSessionContext | null {
+  if (session.status === "signed-in") {
+    const { method, name, email, userId, workspaceId } = session;
+    return { method, name, email, userId, workspaceId };
+  }
+  return session.status === "session-unavailable"
+    ? (session.lastAuthenticatedSession ?? null)
+    : null;
+}
+
 function messageTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
-}
-
-function mentionedMemberIds(
-  body: string,
-  members: readonly User[],
-  participantIds: readonly string[],
-): readonly string[] {
-  const visibleMemberIds = new Set(participantIds);
-  return members
-    .filter((member) => {
-      if (!visibleMemberIds.has(member.id)) return false;
-      const escaped = member.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`(^|[^\\p{L}\\p{N}_])@${escaped}($|[^\\p{L}\\p{N}_])`, "iu").test(body);
-    })
-    .map((member) => member.id);
 }
 
 export function visibleTimelineMessages(
@@ -113,6 +120,7 @@ export function visibleTimelineMessages(
 ): readonly Message[] {
   return messages.filter(
     (message) =>
+      message.deletedAt === null &&
       message.conversationId === conversationId &&
       (!threadsSupported || message.threadRootId === null),
   );
@@ -184,7 +192,7 @@ export function UpdateControl({ client }: { readonly client: UpdateClient }) {
   );
 }
 
-function SignIn({
+export function SignIn({
   client,
   theme,
   sessionMessage,
@@ -230,6 +238,20 @@ function SignIn({
       await client.startAuthKitSignIn();
       setStatus("Finish signing in in the browser. You can return here when it completes.");
     } catch (error) {
+      if (error instanceof Error && error.message.includes(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE)) {
+        let nextCapabilities = { ...capabilities, authKit: false };
+        try {
+          if (client.getAuthCapabilities !== undefined) {
+            nextCapabilities = {
+              ...(await client.getAuthCapabilities()),
+              authKit: false,
+            };
+          }
+        } catch {
+          // Keep AuthKit hidden if its availability cannot be confirmed after a rejected start.
+        }
+        setCapabilities(nextCapabilities);
+      }
       setStatus(errorMessage(error, "Could not start WorkOS sign-in"));
     } finally {
       setAuthKitStarting(false);
@@ -319,6 +341,24 @@ function AiChannelIcon() {
   );
 }
 
+function CommunicationPathsIcon() {
+  return (
+    <svg className="communication-paths-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="5" cy="5" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="15" cy="5" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="5" cy="15" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="15" cy="15" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M7.4 5h5.2M5 7.4v5.2M15 7.4v5.2M7.4 15h5.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
 const PARTICIPANT_COLOR_COUNT = 8;
 
 export function participantColorIndex(userId: string): number {
@@ -334,11 +374,14 @@ export function MessageRow({
   message,
   members,
   reactions,
+  attachments = [],
   currentUserId,
   reactionsDisabled,
   onAddReaction,
   onRemoveReaction,
+  onOpenAttachment,
   onCreateTask,
+  onRetract,
   highlighted,
   continuation,
   onOpenThread,
@@ -350,11 +393,14 @@ export function MessageRow({
   readonly message: Message;
   readonly members: readonly User[];
   readonly reactions: readonly Reaction[];
+  readonly attachments?: readonly Attachment[];
   readonly currentUserId: string;
   readonly reactionsDisabled: boolean;
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
+  readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
   readonly onCreateTask?: () => Promise<void>;
+  readonly onRetract?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
   readonly onOpenThread?: () => void;
@@ -365,6 +411,18 @@ export function MessageRow({
 }) {
   const author = members.find((member) => member.id === message.authorId);
   const participantId = message.authorId ?? "former-member";
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [retracting, setRetracting] = useState(false);
+  const [retractError, setRetractError] = useState("");
+  const retractVisible =
+    onRetract !== undefined && canRetractOwnMessage(message, currentUserId, nowMs);
+  useEffect(() => {
+    if (!retractVisible) return;
+    const remaining = retractWindowRemainingMs(message.createdAt, nowMs);
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining);
+    return () => window.clearTimeout(timer);
+  }, [message.createdAt, nowMs, retractVisible]);
   const threadActionLabel =
     replyCount === 0
       ? "Reply in thread"
@@ -393,8 +451,24 @@ export function MessageRow({
         <MessageBody
           body={message.body}
           channels={channelReferences}
+          members={members}
           onOpenChannel={onOpenChannel}
         />
+        {attachments.length > 0 && (
+          <ul className="message-attachments" aria-label="Attachments">
+            {attachments.map((attachment) => (
+              <li key={attachment.id}>
+                <button
+                  type="button"
+                  className="message-attachment"
+                  onClick={() => void onOpenAttachment?.(attachment.id)}
+                >
+                  <span>{attachment.fileName}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <MessageReactions
           reactions={reactions}
           members={members}
@@ -420,17 +494,51 @@ export function MessageRow({
             )
           }
           trailingActions={
-            onCreateTask === undefined ? undefined : (
-              <button
-                className="message-task-action"
-                type="button"
-                onClick={() => void onCreateTask()}
-              >
-                + Task
-              </button>
+            onCreateTask === undefined && !retractVisible ? undefined : (
+              <>
+                {onCreateTask === undefined ? undefined : (
+                  <button
+                    className="message-task-action"
+                    type="button"
+                    onClick={() => void onCreateTask()}
+                  >
+                    + Task
+                  </button>
+                )}
+                {retractVisible ? (
+                  <button
+                    className="message-retract-action"
+                    type="button"
+                    disabled={retracting}
+                    aria-label="Retract message"
+                    title="Retract this message. It disappears for everyone. Available for five minutes."
+                    onClick={() => {
+                      if (onRetract === undefined || retracting) return;
+                      setRetracting(true);
+                      setRetractError("");
+                      void onRetract()
+                        .catch((caught: unknown) => {
+                          setRetractError(
+                            caught instanceof Error && caught.message !== ""
+                              ? caught.message
+                              : "Could not retract the message",
+                          );
+                        })
+                        .finally(() => setRetracting(false));
+                    }}
+                  >
+                    Retract
+                  </button>
+                ) : null}
+              </>
             )
           }
         />
+        {retractError !== "" && (
+          <p className="retract-error" role="alert">
+            {retractError}
+          </p>
+        )}
       </div>
     </article>
   );
@@ -439,6 +547,7 @@ export function MessageRow({
 export function PendingMessageRow({
   item,
   currentUser,
+  members = [],
   continuation,
   editing,
   onEdit,
@@ -450,6 +559,7 @@ export function PendingMessageRow({
 }: {
   readonly item: OutboxItem;
   readonly currentUser: User;
+  readonly members?: readonly User[];
   readonly continuation: boolean;
   readonly editing: boolean;
   readonly onEdit: () => void;
@@ -479,6 +589,7 @@ export function PendingMessageRow({
         <MessageBody
           body={item.operation.message.body}
           channels={channelReferences}
+          members={members}
           onOpenChannel={onOpenChannel}
           suffix={
             continuation ? <span className="pending-status"> · {pendingStatus}</span> : undefined
@@ -532,8 +643,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
-  const [paneView, setPaneView] = useState<"chat" | "tasks">("chat");
-  const [destination, setDestination] = useState<"workspace" | "ai">("workspace");
+  const [paneView, setPaneView] = useState<"chat" | "tasks" | "files">("chat");
+  const [pendingAttachments, setPendingAttachments] = useState<
+    Readonly<Record<string, readonly Attachment[]>>
+  >({});
+  const [destination, setDestination] = useState<WorkspaceDestination>("workspace");
   const [aiChannelVisited, setAiChannelVisited] = useState(false);
   const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
   const notificationBindingGeneration = useRef(0);
@@ -600,6 +714,23 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     runtime.closeThread();
   }, [runtime]);
 
+  const openUnreads = useCallback((): void => {
+    setDestination("unreads");
+    setPaneView("chat");
+    setPeopleSource(null);
+    setShowPreferences(false);
+    runtime.closeThread();
+    chrome.collapse();
+  }, [chrome, runtime]);
+
+  const openCommunicationPaths = useCallback((): void => {
+    setDestination("admin");
+    setPaneView("chat");
+    setPeopleSource(null);
+    setShowPreferences(false);
+    runtime.closeThread();
+  }, [runtime]);
+
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
@@ -622,8 +753,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const startWorkspaceSession = useCallback(
     async (
-      next: SignedInSession,
+      next: AuthenticatedSessionContext,
       options: {
+        readonly offline?: boolean;
         readonly resetLocalCache?: boolean;
       } = {},
     ): Promise<void> => {
@@ -639,8 +771,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           await runtime.resetLocalCache();
           if (bindingGeneration !== notificationBindingGeneration.current) return;
         }
-        await runtime.start(next);
+        await runtime.start(next, options.offline === true ? { offline: true } : {});
         if (bindingGeneration !== notificationBindingGeneration.current) return;
+
+        if (options.offline === true) return;
 
         // WorkspaceRuntime reports bootstrap failures in its state instead of rejecting start(),
         // so an inactive result is expected on the first attempt and Retry binds again here.
@@ -664,6 +798,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         void startWorkspaceSession(next);
         return;
       }
+      if (next.status === "session-unavailable" && next.lastAuthenticatedSession !== undefined) {
+        void startWorkspaceSession(next.lastAuthenticatedSession, { offline: true });
+        return;
+      }
 
       notificationBindingGeneration.current += 1;
       notificationSession?.invalidate();
@@ -678,6 +816,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setComposerError("");
         setThreadComposerError("");
         void runtime.stop();
+      } else {
+        void runtime.stop();
       }
     },
     [notificationSession, resetDrafts, runtime, startWorkspaceSession],
@@ -685,11 +825,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const retrySession = useCallback(async (): Promise<void> => {
     try {
-      applySession(await client.getSessionState());
+      // Main publishes the result through the existing session-changed subscription. Ignoring the
+      // matching return value prevents a retry from starting the workspace runtime twice.
+      await client.retrySession();
     } catch {
       // Main reports an unreachable server as a preserved session, so there is nothing to add.
     }
-  }, [applySession, client]);
+  }, [client]);
 
   useEffect(() => {
     let active = true;
@@ -712,7 +854,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
   // and sync failures for the entire life of a session.
   const workspaceNotice =
-    runtimeState.error ?? cacheFallbackNotice(runtimeState.cacheFallbackReason);
+    session?.status === "session-unavailable"
+      ? session.message
+      : (runtimeState.error ?? cacheFallbackNotice(runtimeState.cacheFallbackReason));
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
@@ -726,7 +870,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     selectedIsPersonal === true;
   const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
-    (message) => message.conversationId === runtimeState.selectedConversationId,
+    (message) =>
+      message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
   );
   const messages = visibleTimelineMessages(
     runtimeState.messages,
@@ -747,6 +892,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     }
     return grouped;
   }, [runtimeState.reactions]);
+  const attachmentsByMessage = useMemo(() => {
+    const grouped = new Map<string, Attachment[]>();
+    for (const attachment of runtimeState.attachments) {
+      if (attachment.messageId === null) continue;
+      const values = grouped.get(attachment.messageId) ?? [];
+      values.push(attachment);
+      grouped.set(attachment.messageId, values);
+    }
+    return grouped;
+  }, [runtimeState.attachments]);
   const pending = runtimeState.outbox.filter(
     (item) =>
       item.operation.conversationId === runtimeState.selectedConversationId &&
@@ -835,6 +990,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : runtime.loadConversationTasks(conversationId);
     void request.catch(() => undefined);
   }, [paneView, runtime, runtimeState.selectedConversationId, selectedIsPersonal, tasksAvailable]);
+
+  useEffect(() => {
+    const conversationId = runtimeState.selectedConversationId;
+    if (paneView !== "files" || conversationId === null) return;
+    void runtime.loadConversationFiles(conversationId).catch(() => undefined);
+  }, [paneView, runtime, runtimeState.selectedConversationId]);
 
   useBackgroundUnreadSignal(
     bootstrap?.conversations ?? null,
@@ -1064,14 +1225,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   useEffect(() => {
     if (notificationSession === null || notificationContext?.status !== "active") return;
     const view =
-      destination === "ai"
+      destination !== "workspace"
         ? ({ pane: "none" } as const)
         : createNotificationActivityView({
-            pane: paneView,
+            pane: paneView === "tasks" ? "tasks" : "chat",
             conversationId: runtimeState.selectedConversationId,
-            timelineAtLiveTail,
+            timelineAtLiveTail: paneView === "chat" && timelineAtLiveTail,
             threadRootId: selectedThreadRootId,
-            threadAtLiveTail,
+            threadAtLiveTail: paneView === "chat" && threadAtLiveTail,
           });
     void notificationSession.report(view).catch(() => undefined);
   }, [
@@ -1333,10 +1494,57 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     selectedThreadRootId,
   ]);
 
+  const composerAttachments =
+    runtimeState.selectedConversationId === null
+      ? []
+      : (pendingAttachments[runtimeState.selectedConversationId] ?? []);
+  const threadComposerKey =
+    runtimeState.selectedConversationId === null || selectedThreadRootId === null
+      ? null
+      : `${runtimeState.selectedConversationId}:${selectedThreadRootId}`;
+  const threadComposerAttachments =
+    threadComposerKey === null ? [] : (pendingAttachments[threadComposerKey] ?? []);
+
+  const replacePendingAttachments = (
+    key: string,
+    updater: (current: readonly Attachment[]) => readonly Attachment[],
+  ): void => {
+    setPendingAttachments((current) => ({
+      ...current,
+      [key]: updater(current[key] ?? []),
+    }));
+  };
+
+  const attachToComposer = async (key: string): Promise<void> => {
+    const conversationId = runtimeState.selectedConversationId;
+    if (conversationId === null) return;
+    const current = pendingAttachments[key] ?? [];
+    if (current.length >= ATTACHMENTS_PER_MESSAGE_MAX) {
+      setComposerError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
+      return;
+    }
+    try {
+      const attachment = await runtime.attachFile(conversationId);
+      if (attachment === null) return;
+      replacePendingAttachments(key, (pending) =>
+        pending.some((existing) => existing.id === attachment.id)
+          ? pending
+          : [...pending, attachment].slice(0, ATTACHMENTS_PER_MESSAGE_MAX),
+      );
+      setComposerError("");
+      setThreadComposerError("");
+    } catch (error) {
+      const message = errorMessage(error, "Could not attach the file");
+      if (key === conversationId) setComposerError(message);
+      else setThreadComposerError(message);
+    }
+  };
+
   const send = async (): Promise<void> => {
     const submittedDraft = draft;
-    const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
+    const attachments = conversationId === null ? [] : (pendingAttachments[conversationId] ?? []);
+    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
     if (body === "" || conversationId === null || bootstrap === null) return;
     const mentionedUserIds = mentionedMemberIds(
       body,
@@ -1345,12 +1553,19 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     );
     try {
       if (editingClientMessageId === null) {
-        await runtime.sendMessage(conversationId, body, mentionedUserIds);
+        await runtime.sendMessage(
+          conversationId,
+          body,
+          mentionedUserIds,
+          null,
+          attachments.map((attachment) => attachment.id),
+        );
       } else {
         await runtime.replaceFailedMessage(editingClientMessageId, body, mentionedUserIds);
         setEditingClientMessageId(null);
       }
       clearDraft(submittedDraft);
+      replacePendingAttachments(conversationId, () => []);
       setComposerError("");
     } catch (error) {
       setComposerError(errorMessage(error, "Could not queue the message"));
@@ -1382,9 +1597,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const sendThreadReply = async (): Promise<void> => {
     const submittedDraft = threadDraft;
-    const body = submittedDraft.trim();
     const conversationId = runtimeState.selectedConversationId;
     const threadRootId = runtimeState.selectedThreadRootId;
+    const key =
+      conversationId === null || threadRootId === null ? null : `${conversationId}:${threadRootId}`;
+    const attachments = key === null ? [] : (pendingAttachments[key] ?? []);
+    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
     if (body === "" || conversationId === null || threadRootId === null || bootstrap === null) {
       return;
     }
@@ -1395,7 +1613,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     );
     try {
       if (threadEditingClientMessageId === null) {
-        await runtime.sendMessage(conversationId, body, mentionedUserIds, threadRootId);
+        await runtime.sendMessage(
+          conversationId,
+          body,
+          mentionedUserIds,
+          threadRootId,
+          attachments.map((attachment) => attachment.id),
+        );
       } else {
         await runtime.replaceFailedMessage(threadEditingClientMessageId, body, mentionedUserIds);
         setThreadEditingClientMessageId(null);
@@ -1406,10 +1630,17 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         delete next[threadRootId];
         return next;
       });
+      if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
     } catch (error) {
       setThreadComposerError(errorMessage(error, "Could not queue the reply"));
     }
+  };
+
+  const openAttachmentSource = (attachment: Attachment): void => {
+    setDestination("workspace");
+    setPaneView("chat");
+    runtime.openAttachmentSource(attachment);
   };
 
   const createChannel = useCallback(
@@ -1486,7 +1717,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   if (session.status === "signed-out") {
     return <SignIn client={client} theme={theme} sessionMessage={session.message} />;
   }
-  if (session.status === "session-unavailable") {
+  const authenticatedSession = recoverableAuthenticatedSession(session);
+  if (session.status === "session-unavailable" && authenticatedSession === null) {
     return (
       <main className="signin-shell">
         <section className="signin-card">
@@ -1501,7 +1733,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       </main>
     );
   }
-  if (session.method !== "email") {
+  if (authenticatedSession === null) {
     return (
       <main className="signin-shell">
         <section className="signin-card">
@@ -1528,12 +1760,21 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           </p>
           {runtimeState.error !== null && (
             <div className="message-actions">
-              <button type="button" onClick={() => void startWorkspaceSession(session)}>
+              <button
+                type="button"
+                onClick={() =>
+                  void (session.status === "session-unavailable"
+                    ? retrySession()
+                    : startWorkspaceSession(authenticatedSession))
+                }
+              >
                 Retry
               </button>
-              <button type="button" onClick={() => void rebuildLocalCache(session)}>
-                Reset local cache
-              </button>
+              {session.status === "signed-in" && (
+                <button type="button" onClick={() => void rebuildLocalCache(session)}>
+                  Reset local cache
+                </button>
+              )}
             </div>
           )}
           <ThemeSelector theme={theme} />
@@ -1555,11 +1796,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
   );
   const currentUserId = bootstrap.currentUser.user.id;
+  const unreadItems = listUnreadConversations(bootstrap.conversations, (summary) =>
+    runtime.conversationName(summary),
+  );
+  const unreadTotals = unreadBadgeTotals(unreadItems);
 
   return (
     <main
       className={
-        destination === "ai" || selectedThreadRootId === null ? "shell" : "shell thread-open"
+        destination !== "workspace" || selectedThreadRootId === null ? "shell" : "shell thread-open"
       }
       data-testid="workspace-ready"
     >
@@ -1641,6 +1886,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
         <nav aria-label="Conversations">
           <div className="nav-heading">
+            <span>Catch up</span>
+          </div>
+          <button
+            className={
+              destination === "unreads"
+                ? "conversation unreads-destination active"
+                : "conversation unreads-destination"
+            }
+            type="button"
+            aria-current={destination === "unreads" ? "page" : undefined}
+            onClick={openUnreads}
+          >
+            <span className="conversation-label">
+              <UnreadsIcon />
+              <span className="conversation-label-text">Unreads</span>
+            </span>
+            <ConversationBadge
+              unreadCount={unreadTotals.unreadCount}
+              mentionCount={unreadTotals.mentionCount}
+            />
+          </button>
+
+          <div className="nav-heading">
             <span>AI</span>
           </div>
           <button
@@ -1659,6 +1927,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             </span>
             <span className="ai-channel-local-badge">Local</span>
           </button>
+
+          {bootstrap.currentUser.role === "owner" && (
+            <>
+              <div className="nav-heading">
+                <span>Admin</span>
+              </div>
+              <button
+                className={
+                  destination === "admin"
+                    ? "conversation communication-paths-destination active"
+                    : "conversation communication-paths-destination"
+                }
+                type="button"
+                aria-current={destination === "admin" ? "page" : undefined}
+                onClick={openCommunicationPaths}
+              >
+                <span className="conversation-label">
+                  <CommunicationPathsIcon />
+                  <span className="conversation-label-text">Communication paths</span>
+                </span>
+              </button>
+            </>
+          )}
 
           <div className="nav-heading">
             <span>Channels</span>
@@ -1732,6 +2023,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             </button>
           ))}
         </nav>
+
         <footer className="sidebar-footer">
           <button
             ref={preferencesTrigger}
@@ -1750,7 +2042,22 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       </aside>
 
       {aiChannelVisited && <AiChannel transport={client} active={destination === "ai"} />}
-      <section className="conversation-pane" hidden={destination === "ai"}>
+      <UnreadsView
+        items={unreadItems}
+        active={destination === "unreads"}
+        onOpen={selectConversation}
+      />
+      {bootstrap.currentUser.role === "owner" && (
+        <CommunicationPathsView
+          // Keyed by the authenticated identity so the cached aggregate can never survive a
+          // session change into another workspace, even across a direct signed-in transition.
+          key={`${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+          client={client}
+          members={bootstrap.members}
+          active={destination === "admin"}
+        />
+      )}
+      <section className="conversation-pane" hidden={destination !== "workspace"}>
         <header className="conversation-header">
           <div>
             <h2>
@@ -1774,64 +2081,113 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               stale={runtimeState.stale}
               cacheMode={runtimeState.cacheMode}
               notice={workspaceNotice}
-              onRetry={() => void startWorkspaceSession(session)}
-              onResetCache={() => void rebuildLocalCache(session)}
+              onRetry={() =>
+                void (session.status === "session-unavailable"
+                  ? retrySession()
+                  : startWorkspaceSession(authenticatedSession))
+              }
+              {...(session.status === "signed-in"
+                ? { onResetCache: () => void rebuildLocalCache(session) }
+                : {})}
               onCheckForUpdates={client.checkForUpdates}
             />
           </div>
-          {selectedSummary !== undefined &&
-            (tasksAvailable || selectedSummary.conversation.kind === "channel") && (
-              <div className="conversation-header-actions">
+          {selectedSummary !== undefined && (
+            <div className="conversation-header-actions">
+              <div className="pane-toggle" aria-label="Conversation view">
+                <button
+                  type="button"
+                  className={paneView === "chat" ? "active" : ""}
+                  onClick={() => setPaneView("chat")}
+                >
+                  Chat
+                </button>
                 {tasksAvailable && (
-                  <div className="pane-toggle" aria-label="Conversation view">
-                    <button
-                      type="button"
-                      className={paneView === "chat" ? "active" : ""}
-                      onClick={() => setPaneView("chat")}
-                    >
-                      Chat
-                    </button>
-                    <button
-                      type="button"
-                      className={paneView === "tasks" ? "active" : ""}
-                      onClick={() => setPaneView("tasks")}
-                    >
-                      Tasks
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    className={paneView === "tasks" ? "active" : ""}
+                    onClick={() => setPaneView("tasks")}
+                  >
+                    Tasks
+                  </button>
                 )}
-                {selectedSummary.conversation.kind === "channel" && (
-                  <>
-                    <button
-                      ref={channelMembersTrigger}
-                      className="quiet-button"
-                      type="button"
-                      onClick={() => setPeopleSource("channel")}
-                    >
-                      {selectedSummary.conversation.access === "members"
-                        ? `${String(selectedSummary.participantIds.length)} members`
-                        : "Everyone"}
-                    </button>
-                    {selectedSummary.conversation.slug !== "general" &&
-                      !selectedSummary.conversation.isArchived &&
-                      bootstrap.currentUser.role === "owner" && (
-                        <button
-                          className="quiet-button"
-                          type="button"
-                          onClick={() =>
-                            void runtime.archiveChannel(selectedSummary.conversation.id)
-                          }
-                        >
-                          Archive
-                        </button>
-                      )}
-                  </>
-                )}
+                <button
+                  type="button"
+                  className={paneView === "files" ? "active" : ""}
+                  onClick={() => setPaneView("files")}
+                >
+                  Files
+                </button>
               </div>
-            )}
+              {selectedSummary.conversation.kind === "channel" && (
+                <>
+                  <button
+                    ref={channelMembersTrigger}
+                    className="quiet-button"
+                    type="button"
+                    onClick={() => setPeopleSource("channel")}
+                  >
+                    {selectedSummary.conversation.access === "members"
+                      ? `${String(selectedSummary.participantIds.length)} members`
+                      : "Everyone"}
+                  </button>
+                  {selectedSummary.conversation.slug !== "general" &&
+                    !selectedSummary.conversation.isArchived &&
+                    bootstrap.currentUser.role === "owner" && (
+                      <button
+                        className="quiet-button"
+                        type="button"
+                        onClick={() => void runtime.archiveChannel(selectedSummary.conversation.id)}
+                      >
+                        Archive
+                      </button>
+                    )}
+                </>
+              )}
+            </div>
+          )}
         </header>
 
-        {paneView === "tasks" && tasksAvailable && selectedSummary !== undefined ? (
+        {paneView === "files" && selectedSummary !== undefined ? (
+          <>
+            <FilesView
+              conversationName={runtime.conversationName(selectedSummary)}
+              files={runtimeState.conversationFiles}
+              members={bootstrap.members}
+              busy={runtimeState.conversationFilesBusy}
+              error={runtimeState.conversationFilesError}
+              onOpen={(attachmentId) => runtime.openFile(attachmentId)}
+              onOpenSource={openAttachmentSource}
+            />
+            {selectedSummary.conversation.isArchived === true ? (
+              <ArchivedConversationNotice />
+            ) : selectedIsAnnouncement && !canPublishBulletins ? (
+              <AnnouncementPostingNotice />
+            ) : (
+              <MessageComposer
+                contextKey={selectedSummary.conversation.id}
+                conversationName={runtime.conversationName(selectedSummary)}
+                draft={draft}
+                pendingAttachments={composerAttachments}
+                disabled={false}
+                attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
+                error={composerError}
+                inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
+                inputRef={attachComposerInput}
+                placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
+                submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
+                onDraftChange={setDraft}
+                onAttach={() => attachToComposer(selectedSummary.conversation.id)}
+                onRemoveAttachment={(attachmentId) =>
+                  replacePendingAttachments(selectedSummary.conversation.id, (current) =>
+                    current.filter((attachment) => attachment.id !== attachmentId),
+                  )
+                }
+                onSubmit={send}
+              />
+            )}
+          </>
+        ) : paneView === "tasks" && tasksAvailable && selectedSummary !== undefined ? (
           <TasksView
             conversationId={selectedSummary.conversation.id}
             personal={selectedIsPersonal === true}
@@ -1915,13 +2271,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       message={message}
                       members={bootstrap.members}
                       reactions={reactionsByMessage.get(message.id) ?? []}
+                      attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
+                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                       onCreateTask={
                         tasksAvailable ? () => createTaskFromMessage(message) : undefined
                       }
+                      onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
                       channelReferences={channelReferences}
@@ -1969,6 +2328,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <PendingMessageRow
                       item={item}
                       currentUser={bootstrap.currentUser.user}
+                      members={bootstrap.members}
                       continuation={continuation}
                       editing={editingClientMessageId === item.operation.message.clientMessageId}
                       mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
@@ -1996,17 +2356,33 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               <AnnouncementPostingNotice />
             ) : (
               <MessageComposer
+                contextKey={runtimeState.selectedConversationId ?? undefined}
                 conversationName={
                   selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
                 }
                 draft={draft}
+                pendingAttachments={composerAttachments}
                 disabled={selectedSummary === undefined}
+                attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
+                members={bootstrap.members}
+                currentUserId={currentUserId}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 onDraftChange={setDraft}
+                onAttach={
+                  selectedSummary === undefined
+                    ? undefined
+                    : () => attachToComposer(selectedSummary.conversation.id)
+                }
+                onRemoveAttachment={(attachmentId) => {
+                  if (runtimeState.selectedConversationId === null) return;
+                  replacePendingAttachments(runtimeState.selectedConversationId, (current) =>
+                    current.filter((attachment) => attachment.id !== attachmentId),
+                  );
+                }}
                 onSubmit={send}
               />
             )}
@@ -2064,10 +2440,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   message={threadRoot}
                   members={bootstrap.members}
                   reactions={reactionsByMessage.get(threadRoot.id) ?? []}
+                  attachments={attachmentsByMessage.get(threadRoot.id) ?? []}
                   currentUserId={currentUserId}
+                  onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                   reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                   onAddReaction={(emoji) => runtime.addReaction(threadRoot.id, emoji)}
                   onRemoveReaction={(emoji) => runtime.removeReaction(threadRoot.id, emoji)}
+                  onRetract={() => runtime.retractMessage(threadRoot.id)}
                   highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
                   continuation={false}
                   domIdPrefix="thread-message"
@@ -2101,10 +2480,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       message={message}
                       members={bootstrap.members}
                       reactions={reactionsByMessage.get(message.id) ?? []}
+                      attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
+                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
+                      onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedThreadMessageId}
                       continuation={isMessageContinuation(
                         message,
@@ -2146,6 +2528,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       <PendingMessageRow
                         item={item}
                         currentUser={bootstrap.currentUser.user}
+                        members={bootstrap.members}
                         continuation={continuation}
                         editing={
                           threadEditingClientMessageId === item.operation.message.clientMessageId
@@ -2180,13 +2563,18 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             <ArchivedConversationNotice thread />
           ) : (
             <MessageComposer
+              contextKey={`${String(runtimeState.selectedConversationId)}:${selectedThreadRootId}`}
               conversationName={null}
               draft={threadDraft}
+              pendingAttachments={threadComposerAttachments}
               disabled={threadRoot === undefined}
+              attachDisabled={threadComposerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
               error={threadComposerError}
               inputId="thread-message-composer"
               inputLabel="Reply"
               inputRef={attachThreadComposerInput}
+              members={bootstrap.members}
+              currentUserId={currentUserId}
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
@@ -2196,6 +2584,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   [selectedThreadRootId]: value,
                 }))
               }
+              onAttach={
+                threadComposerKey === null ? undefined : () => attachToComposer(threadComposerKey)
+              }
+              onRemoveAttachment={(attachmentId) => {
+                if (threadComposerKey === null) return;
+                replacePendingAttachments(threadComposerKey, (current) =>
+                  current.filter((attachment) => attachment.id !== attachmentId),
+                );
+              }}
               onSubmit={sendThreadReply}
             />
           )}

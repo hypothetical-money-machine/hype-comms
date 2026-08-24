@@ -22,48 +22,45 @@ describe("fixed-window attempt throttle", () => {
 });
 
 describe("sign-in throttle", () => {
-  it("allows attempts until the failure budget is spent", () => {
-    const now = 1_000;
-    const throttle = new SignInThrottle({ maxFailures: 3, windowMs: 60_000, now: () => now });
+  it("limits total requests per client even when the client rotates recipient addresses", () => {
+    const throttle = new SignInThrottle({
+      maxRequestsPerClient: 2,
+      maxRequestsPerEmailPerClient: 10,
+    });
 
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(0);
-    throttle.recordFailure("1.2.3.4");
-    throttle.recordFailure("1.2.3.4");
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(0);
-
-    throttle.recordFailure("1.2.3.4");
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(60_000);
+    expect(throttle.recordMagicLinkRequest("first@example.com", "1.2.3.4")).toBe(true);
+    expect(throttle.recordMagicLinkRequest("second@example.com", "1.2.3.4")).toBe(true);
+    expect(throttle.recordMagicLinkRequest("third@example.com", "1.2.3.4")).toBe(false);
+    expect(throttle.recordMagicLinkRequest("third@example.com", "5.6.7.8")).toBe(true);
   });
 
-  it("keeps budgets independent per key", () => {
-    const now = 0;
-    const throttle = new SignInThrottle({ maxFailures: 1, windowMs: 60_000, now: () => now });
+  it("isolates per-email request budgets by client", () => {
+    const throttle = new SignInThrottle({
+      maxRequestsPerClient: 10,
+      maxRequestsPerEmailPerClient: 2,
+    });
 
-    throttle.recordFailure("1.2.3.4");
-
-    expect(throttle.retryAfterMs("1.2.3.4")).toBeGreaterThan(0);
-    expect(throttle.retryAfterMs("5.6.7.8")).toBe(0);
+    expect(throttle.recordMagicLinkRequest("member@example.com", "1.2.3.4")).toBe(true);
+    expect(throttle.recordMagicLinkRequest("member@example.com", "1.2.3.4")).toBe(true);
+    expect(throttle.recordMagicLinkRequest("member@example.com", "1.2.3.4")).toBe(false);
+    expect(throttle.recordMagicLinkRequest("other@example.com", "1.2.3.4")).toBe(true);
+    expect(throttle.recordMagicLinkRequest("member@example.com", "5.6.7.8")).toBe(true);
   });
 
-  it("clears the budget once the window elapses", () => {
+  it("bounds deliveries per email across clients and resets at the window boundary", () => {
     let now = 0;
-    const throttle = new SignInThrottle({ maxFailures: 1, windowMs: 60_000, now: () => now });
+    const throttle = new SignInThrottle({
+      maxDeliveriesPerEmail: 2,
+      windowMs: 60_000,
+      now: () => now,
+    });
 
-    throttle.recordFailure("1.2.3.4");
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(60_000);
+    expect(throttle.reserveMagicLinkDelivery("member@example.com")).toBe(true);
+    expect(throttle.reserveMagicLinkDelivery("member@example.com")).toBe(true);
+    expect(throttle.reserveMagicLinkDelivery("member@example.com")).toBe(false);
+    expect(throttle.reserveMagicLinkDelivery("other@example.com")).toBe(true);
 
     now = 60_000;
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(0);
-  });
-
-  it("forgets failures after a successful sign-in", () => {
-    const now = 0;
-    const throttle = new SignInThrottle({ maxFailures: 2, windowMs: 60_000, now: () => now });
-
-    throttle.recordFailure("1.2.3.4");
-    throttle.recordSuccess("1.2.3.4");
-    throttle.recordFailure("1.2.3.4");
-
-    expect(throttle.retryAfterMs("1.2.3.4")).toBe(0);
+    expect(throttle.reserveMagicLinkDelivery("member@example.com")).toBe(true);
   });
 });

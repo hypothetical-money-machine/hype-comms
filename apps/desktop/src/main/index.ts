@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { realpath, stat } from "node:fs/promises";
+import { realpath, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,7 +24,6 @@ import {
   aiChannelStateSchema,
   cacheDecryptBatchRequestSchema,
   cacheEncryptBatchRequestSchema,
-  cacheScopeSchema,
   channelMemberTargetSchema,
   compactModePreferenceSchema,
   createChannelOperationSchema,
@@ -31,6 +31,8 @@ import {
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
+  conversationFilesQuerySchema,
+  listMessageAttachmentsRequestSchema,
   listMessageReactionsRequestSchema,
   messageThreadRequestSchema,
   messageReactionTargetSchema,
@@ -86,7 +88,11 @@ import { autoUpdater } from "electron-updater";
 import { createServerHealthUrl } from "../shared/api-origin";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
-import type { RealtimeConnectionState, ServerStatus } from "../shared/desktop-api";
+import {
+  AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE,
+  type RealtimeConnectionState,
+  type ServerStatus,
+} from "../shared/desktop-api";
 import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
 import { parseAuthCallback } from "./auth-callback";
 import { AuthKitFlow } from "./authkit-flow";
@@ -96,12 +102,18 @@ import {
   SafeStorageAuthKitPendingStore,
 } from "./authkit-pending-store";
 import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
+import {
+  DeepLinkSignInQueue,
+  routeOpenUrlMagicLink,
+  routeSecondInstanceMagicLink,
+} from "./deep-link-sign-in";
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
-import { ChatSession, ChatSessionError } from "./chat-session";
-import { CacheCrypto } from "./cache-crypto";
-import { createClaudeAcpHost } from "./claude-acp-host";
+import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
+import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
+import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
+import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
 import {
@@ -124,7 +136,11 @@ import {
   openHeadlessNotificationCaptureArtifact,
   type HeadlessNotificationCaptureArtifact,
 } from "./headless-notification-capture";
-import { protectMainProcessLogStreams, reportMainProcessError } from "./main-process-log";
+import {
+  protectMainProcessLogStreams,
+  reportMainProcessError,
+  reportMainProcessEvent,
+} from "./main-process-log";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
   createMacosNotificationAuthorization,
@@ -158,10 +174,15 @@ import {
   PendingNotificationAuthorizationBarrier,
   settlePendingNotificationAuthorization,
 } from "./pending-notification-authorization-barrier";
+import { authCapabilitiesForSession } from "./session-auth-lifecycle";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
-import { BeforeQuitCoordinator, handleLastWindowClosed } from "./window-lifecycle";
+import {
+  BeforeQuitCoordinator,
+  FinalQuitCoordinator,
+  handleLastWindowClosed,
+} from "./window-lifecycle";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -172,6 +193,7 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
+import { normalizeExternalMailtoUrl } from "../shared/external-mailto";
 import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
@@ -230,6 +252,33 @@ let authCallbacksReady = false;
 let drainingAuthCallbacks = false;
 let authCallbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authIntentGeneration = 0;
+const deepLinkSignInQueue = new DeepLinkSignInQueue({
+  confirm: confirmDeepLinkSignIn,
+  exchange: async (token) => {
+    const callbackIntent = advanceAuthIntent();
+    try {
+      await cancelPendingAuthKit();
+    } catch {
+      // This callback remains authoritative in the current process because its generation
+      // invalidates AuthKit. Protected deletion continues in the background and is retried on
+      // every restore before another provider callback can be accepted.
+    }
+    if (callbackIntent !== authIntentGeneration) return "failed";
+    const currentSession = chatSession;
+    if (currentSession === null) return "failed";
+    try {
+      await currentSession.exchangeMagicLink(token);
+      focusMainWindow();
+      return "succeeded";
+    } catch (error) {
+      if (error instanceof ChatSessionError && error.message === INVALID_MAGIC_LINK_MESSAGE) {
+        return "invalid";
+      }
+      throw error;
+    }
+  },
+  onInvalidLink: showInvalidDeepLinkSignIn,
+});
 const developmentProfile = app.isPackaged ? "" : resolveDevelopmentProfile(process.env);
 const macosNativeNotificationEvidenceConfiguration =
   resolveMacosNativeNotificationEvidenceConfiguration({
@@ -796,7 +845,7 @@ function flushPendingRendererEvents(): void {
 }
 
 function safelyOpenExternal(url: string): void {
-  const safeUrl = normalizeExternalHttpsUrl(url);
+  const safeUrl = normalizeExternalHttpsUrl(url) ?? normalizeExternalMailtoUrl(url);
   if (safeUrl !== null) {
     void shell.openExternal(safeUrl).catch((error: unknown) => {
       reportMainProcessError("Failed to open an external link", error);
@@ -1161,6 +1210,15 @@ function registerIpcHandlers(): void {
     return chatSession?.state ?? { status: "signed-out" };
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRetry);
+  ipcMain.handle(DESKTOP_CHANNELS.sessionRetry, async (event): Promise<ChatSessionState> => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted session-retry IPC sender");
+    }
+    if (chatSession === null) throw new Error("Chat is not configured");
+    return chatSession.restore();
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.sessionAuthCapabilities);
   ipcMain.handle(DESKTOP_CHANNELS.sessionAuthCapabilities, async (event) => {
     if (!isTrustedIpcSender(event)) {
@@ -1170,12 +1228,22 @@ function registerIpcHandlers(): void {
       throw new Error("Chat is not configured");
     }
 
-    const capabilities = await chatSession.getAuthCapabilities();
-    if (!capabilities.authKit || authKitPendingStore === null) return capabilities;
-    if (authKitCancellationFenced) return { ...capabilities, authKit: false };
+    const capabilities = authCapabilitiesForSession(
+      await chatSession.getAuthCapabilities(),
+      { chatSession, authKitFlow, authKitPendingStore },
+      authKitCancellationFenced,
+    );
+    const pendingStore = authKitPendingStore;
+    if (!capabilities.authKit || pendingStore === null) return capabilities;
     try {
-      await authKitPendingStore.assertAvailable();
-      return capabilities;
+      await pendingStore.assertAvailable();
+      // A final quit teardown can run while protected storage is being checked. If a later
+      // will-quit listener cancels that quit, never publish a capability captured before teardown.
+      return authCapabilitiesForSession(
+        capabilities,
+        { chatSession, authKitFlow, authKitPendingStore },
+        authKitCancellationFenced,
+      );
     } catch {
       return { ...capabilities, authKit: false };
     }
@@ -1187,7 +1255,7 @@ function registerIpcHandlers(): void {
       throw new Error("Untrusted AuthKit IPC sender");
     }
     if (chatSession === null || authKitFlow === null || authKitPendingStore === null) {
-      throw new Error("AuthKit sign-in is unavailable");
+      throw new Error(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE);
     }
     if (chatSession.state.status !== "signed-out") {
       throw new Error("Sign out before starting a different authentication attempt");
@@ -1452,16 +1520,23 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoInitialize);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event, scope: unknown) => {
+  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache initialization sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    return cacheCrypto.initialize(cacheScopeSchema.parse(scope));
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    if (scope === null) throw new Error("Cache access requires a credential-bound session");
+    return cacheCrypto.initialize(scope);
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoEncrypt);
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoEncrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache encryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
     return cacheCrypto.encrypt(cacheEncryptBatchRequestSchema.parse(input));
   });
 
@@ -1469,13 +1544,24 @@ function registerIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoDecrypt, (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache decryption sender");
     if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
     return cacheCrypto.decrypt(cacheDecryptBatchRequestSchema.parse(input));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoReset);
   ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoReset, async (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache reset sender");
-    await cacheCrypto?.clear();
+    if (cacheCrypto === null) return;
+    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+    const activeScope = cacheCrypto.activeScope;
+    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+      throw new Error("Cache access requires a credential-bound session");
+    }
+    await cacheCrypto.clear();
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceBootstrap);
@@ -1493,6 +1579,13 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace members sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.members();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths, async (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted communication paths sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.communicationPaths();
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
@@ -1528,11 +1621,81 @@ function registerIpcHandlers(): void {
     return workspaceTransport.messageById(entityIdSchema.parse(id));
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageRetract);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageRetract, async (event, id: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace retract sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.retractMessage(entityIdSchema.parse(id));
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSearch);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSearch, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAttachmentsList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceAttachmentsList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace attachments sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const request = listMessageAttachmentsRequestSchema.parse(input);
+    return workspaceTransport.attachments(request.messageIds);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationFilesList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationFilesList, async (event, input: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted conversation files sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !("conversationId" in input) ||
+      !("query" in input)
+    ) {
+      throw new Error("Invalid conversation files request");
+    }
+    return workspaceTransport.conversationFiles(
+      entityIdSchema.parse(input.conversationId),
+      conversationFilesQuerySchema.parse(input.query),
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileUpload);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileUpload, async (event, conversationId: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file upload sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const window = mainWindow;
+    const options: OpenDialogOptions = {
+      title: "Attach a file",
+      buttonLabel: "Attach",
+      properties: ["openFile"],
+    };
+    const selection =
+      window === null || window.isDestroyed()
+        ? await dialog.showOpenDialog(options)
+        : await dialog.showOpenDialog(window, options);
+    const selectedPath = selection.filePaths[0];
+    if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
+      return null;
+    }
+    return workspaceTransport.uploadLocalFile(entityIdSchema.parse(conversationId), selectedPath);
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileOpen);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileOpen, async (event, attachmentId: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file open sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const id = entityIdSchema.parse(attachmentId);
+    const file = await workspaceTransport.downloadFile(id);
+    const safeName = file.fileName.replace(/[\\/]/g, "_");
+    const destination = path.join(tmpdir(), `hype-comms-${id}-${safeName}`);
+    await writeFile(destination, file.bytes);
+    const openError = await shell.openPath(destination);
+    if (openError !== "") {
+      throw new Error(openError);
+    }
+    return { opened: true };
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTasksList);
@@ -1964,6 +2127,39 @@ async function showUpdateCheckDialog(
   }
 }
 
+/** Native prompt seam injected into DeepLinkSignInQueue; it intentionally receives no token. */
+async function confirmDeepLinkSignIn(): Promise<boolean> {
+  const options = {
+    type: "question" as const,
+    buttons: ["Cancel", "Sign in"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    message: "Sign in from a link?",
+    detail: "Continue to sign in to Hype Comms? This will replace any active session.",
+  };
+  const window = mainWindow;
+  const result =
+    window === null || window.isDestroyed()
+      ? await dialog.showMessageBox(options)
+      : await dialog.showMessageBox(window, options);
+  return result.response === 1;
+}
+
+async function showInvalidDeepLinkSignIn(): Promise<void> {
+  const options = {
+    type: "error" as const,
+    message: "Sign-in link invalid",
+    detail: "Request a new sign-in link and try again.",
+  };
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) {
+    await dialog.showMessageBox(options);
+  } else {
+    await dialog.showMessageBox(window, options);
+  }
+}
+
 function scheduleAuthCallbackRetry(callback: PendingAuthCallback): boolean {
   const delay = AUTH_CALLBACK_RETRY_DELAYS_MS[callback.transientAttempts];
   if (delay === undefined) return false;
@@ -2006,22 +2202,7 @@ async function drainPendingAuthCallbacks(): Promise<void> {
       }
       const currentSession = chatSession;
       if (parsed.kind === "magic_link") {
-        const callbackIntent = advanceAuthIntent();
-        try {
-          await cancelPendingAuthKit();
-        } catch {
-          // This callback remains authoritative in the current process because its generation
-          // invalidates AuthKit. Protected deletion continues in the background and is retried on
-          // every restore before another provider callback can be accepted.
-        }
-        if (callbackIntent !== authIntentGeneration) continue;
-        try {
-          beginSessionReplacement();
-          await currentSession.exchangeMagicLink(parsed.token);
-          focusMainWindow();
-        } catch {
-          // ChatSession publishes the credential-preserving or terminal failure state.
-        }
+        deepLinkSignInQueue.enqueue(parsed.token);
         continue;
       }
 
@@ -2056,10 +2237,11 @@ async function drainPendingAuthCallbacks(): Promise<void> {
           continue;
         }
 
+        if (!(await confirmDeepLinkSignIn())) continue;
+
         // Once enqueued, ChatSession serializes this exchange against sign-out. The generation
         // check covers a sign-out that completed while protected state was being read; a later
         // sign-out queues behind the exchange and therefore wins.
-        beginSessionReplacement();
         await currentSession.exchangeAuthKitHandoff({
           code: outcome.handoff.callback.code,
           codeVerifier: outcome.handoff.codeVerifier,
@@ -2087,6 +2269,9 @@ async function drainPendingAuthCallbacks(): Promise<void> {
 }
 
 function handleAuthCallback(value: string): boolean {
+  if (routeOpenUrlMagicLink(value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__, deepLinkSignInQueue)) {
+    return true;
+  }
   const parsed = parseAuthCallback(value, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
   if (parsed === null) return false;
   if (parsed.kind === "authkit" && authKitCancellationFenced) {
@@ -2124,6 +2309,15 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, commandLine) => {
+    if (
+      routeSecondInstanceMagicLink(
+        commandLine,
+        __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+        deepLinkSignInQueue,
+      )
+    ) {
+      return;
+    }
     const callbackUrl = findAuthCallbackUrl(commandLine, __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__);
     if (callbackUrl === null || !handleAuthCallback(callbackUrl)) {
       focusMainWindow();
@@ -2162,7 +2356,8 @@ if (!hasSingleInstanceLock) {
       });
       aiChannelController = new AiChannelController({
         preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
-        hostFactory: createClaudeAcpHost,
+        hostFactory: createClaudeAiAgentHost,
+        hostPresentation: { displayName: "Claude Code", executableName: "claude" },
         reportListenerError: () => {
           reportMainProcessError("AI Channel state listener failed");
         },
@@ -2248,6 +2443,12 @@ if (!hasSingleInstanceLock) {
         authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
+        contexts: new AuthenticatedSessionContextStore({
+          apiOrigin: __HYPE_COMMS_API_ORIGIN__,
+          platform: process.platform,
+          safeStorage,
+          userDataPath: app.getPath("userData"),
+        }),
       });
       authKitPendingStore = new SafeStorageAuthKitPendingStore({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
@@ -2434,6 +2635,7 @@ if (!hasSingleInstanceLock) {
         );
       }
       authCallbacksReady = true;
+      await deepLinkSignInQueue.markReady();
       await drainPendingAuthCallbacks();
 
       app.on("activate", () => {
@@ -2477,6 +2679,26 @@ if (!hasSingleInstanceLock) {
     cleanup: () => {
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
+    },
+    teardown: async () => {
+      const localAiChannel = quittingAiChannel;
+      quittingAiChannel = null;
+      await localAiChannel?.dispose();
+    },
+    reportCleanupFailure: () => {
+      reportMainProcessError("Failed to prepare application cleanup before quitting");
+    },
+    reportTeardownFailure: () => {
+      reportMainProcessError("Failed to stop the local AI Channel");
+    },
+    quit: () => app.quit(),
+  });
+  app.on("before-quit", (event) => {
+    beforeQuitCoordinator.handle(event);
+  });
+
+  const finalQuitCoordinator = new FinalQuitCoordinator({
+    teardownSession: () => {
       macosNativeNotificationEvidenceSession?.handle.close();
       macosNativeNotificationEvidenceSession = null;
       if (authCallbackRetryTimer !== null) {
@@ -2491,6 +2713,8 @@ if (!hasSingleInstanceLock) {
       authKitFlow = null;
       authKitPendingStore = null;
       authKitStartPromise = null;
+    },
+    cleanup: () => {
       macWindowlessRealtimeActive = false;
       workspaceRealtime?.resetSession();
       notificationScope = null;
@@ -2517,20 +2741,22 @@ if (!hasSingleInstanceLock) {
       stopAiChannelSubscription?.();
       stopAiChannelSubscription = null;
     },
-    teardown: async () => {
-      const localAiChannel = quittingAiChannel;
-      quittingAiChannel = null;
-      await localAiChannel?.dispose();
+    reportSessionTeardown: () => {
+      reportMainProcessEvent("session_teardown", { trigger: "will-quit" });
     },
     reportCleanupFailure: () => {
-      reportMainProcessError("Failed to complete application cleanup before quitting");
+      reportMainProcessError("Failed to complete final application cleanup");
     },
-    reportTeardownFailure: () => {
-      reportMainProcessError("Failed to stop the local AI Channel");
+    reportQuitCancelledAfterTeardown: () => {
+      reportMainProcessEvent("quit_cancelled_after_session_teardown", {
+        trigger: "will-quit",
+      });
     },
-    quit: () => app.quit(),
+    scheduleQuitCancellationCheck: (check) => {
+      setImmediate(check).unref();
+    },
   });
-  app.on("before-quit", (event) => {
-    beforeQuitCoordinator.handle(event);
+  app.on("will-quit", (event) => {
+    finalQuitCoordinator.handle(event);
   });
 }

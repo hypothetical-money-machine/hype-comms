@@ -141,7 +141,8 @@ describeWithPostgres("message-delivery authorization", () => {
   beforeEach(async () => {
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions, messages,
+               sync_events, conversation_read_cursors, message_reactions, message_mentions,
+               attachments, messages,
                conversation_memberships, conversations, device_sessions, magic_link_tokens,
                invitations, workspace_memberships, workspaces, users
       CASCADE
@@ -228,7 +229,7 @@ describeWithPostgres("message-delivery authorization", () => {
     throw new Error(`Timed out waiting for blocked query containing: ${queryFragment}`);
   }
 
-  async function waitForQueryActivity(
+  async function waitForBlockedQueryByPid(
     pid: number,
     queryFragment: string,
   ): Promise<{
@@ -237,7 +238,7 @@ describeWithPostgres("message-delivery authorization", () => {
     readonly state: string;
     readonly wait_event_type: string | null;
   }> {
-    const deadline = Date.now() + 2_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const result = await adminPool.query<{
         blocking_pids: number[];
@@ -251,14 +252,17 @@ describeWithPostgres("message-delivery authorization", () => {
                 wait_event_type
            FROM pg_stat_activity
           WHERE pid = $1
-            AND position($2 IN query) > 0`,
+            AND position($2 IN query) > 0
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND cardinality(pg_blocking_pids(pid)) > 0`,
         [pid, queryFragment],
       );
       const activity = result.rows[0];
       if (activity !== undefined) return activity;
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
-    throw new Error(`Timed out waiting for query activity containing: ${queryFragment}`);
+    throw new Error(`Timed out waiting for blocked query containing: ${queryFragment}`);
   }
 
   async function insertActiveAgent(): Promise<void> {
@@ -509,12 +513,7 @@ describeWithPostgres("message-delivery authorization", () => {
         [workspaceId, memberId],
       );
 
-      const activity = await waitForQueryActivity(pid, queryMarker);
-      expect(activity).toMatchObject({
-        state: "active",
-        wait_event_type: "Lock",
-      });
-      expect(activity.blocking_pids.length).toBeGreaterThan(0);
+      await waitForBlockedQueryByPid(pid, queryMarker);
 
       continueSend.resolve();
       await expect(sending).resolves.toMatchObject({

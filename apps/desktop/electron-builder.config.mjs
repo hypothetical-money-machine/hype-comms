@@ -1,7 +1,12 @@
 import { resolveDesktopBuildFlavor } from "./build-flavor.mjs";
+import { resolveWindowsSigningConfiguration } from "./windows-signing.mjs";
 
-export function createElectronBuilderConfiguration(value) {
+export function createElectronBuilderConfiguration(
+  value,
+  { env = process.env, argv = process.argv, platform = process.platform } = {},
+) {
   const flavor = resolveDesktopBuildFlavor(value);
+  const windowsSigning = resolveWindowsSigningConfiguration({ argv, env, flavor, platform });
 
   return {
     appId: flavor.appId,
@@ -79,6 +84,15 @@ export function createElectronBuilderConfiguration(value) {
           arch: ["x64", "arm64"],
         },
       ],
+      // electron-builder 26.15.3 owns Azure Trusted Signing as win.azureSignOptions.
+      // v27 renamed that to win.sign.type=azure; do not bump just to change the key.
+      ...(windowsSigning.status === "configured"
+        ? {
+            azureSignOptions: windowsSigning.azureSignOptions,
+            forceCodeSigning: true,
+            verifyUpdateCodeSignature: true,
+          }
+        : {}),
     },
     nsis: {
       buildUniversalInstaller: false,

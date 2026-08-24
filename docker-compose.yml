@@ -27,8 +27,9 @@ services:
       # The desktop client's renderer origins, not the API hostname. The websocket route
       # rejects any Origin not listed here.
       HYPE_COMMS_ALLOWED_ORIGINS: ${HYPE_COMMS_ALLOWED_ORIGINS:-app://bundle,http://127.0.0.1:5173}
-      # Trust forwarded client addresses only from Docker-private peers. Override this with the
-      # narrow IP/CIDR used by your reverse proxy when Docker uses a different network range.
+      # Host proxy/tunnel traffic reaches the container through Docker's bridge rather than
+      # loopback. Trust only that private peer range, and have the proxy replace X-Forwarded-For.
+      # Override this with the narrow IP/CIDR of a stable bridge gateway when available.
       HYPE_COMMS_TRUSTED_PROXIES: ${HYPE_COMMS_TRUSTED_PROXIES:-172.16.0.0/12}
       HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED: ${HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED:-false}
       HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: ${HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED:-false}

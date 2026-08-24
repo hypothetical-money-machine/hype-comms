@@ -204,6 +204,7 @@ function createHarness(): Harness {
     platform: "linux",
     isHeadless: true,
     getSessionState: async () => session,
+    retrySession: async () => session,
     onSessionChanged: () => () => undefined,
     signOut: async () => ({ status: "signed-out" }) as const,
     getAppVersion: async () => "0.1.27-test",
@@ -211,10 +212,12 @@ function createHarness(): Harness {
     checkForUpdates: async () => undefined,
     restartToInstallUpdate: async () => undefined,
     onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async (scope: {
-      readonly userId: string;
-      readonly workspaceId: string;
-    }) => ({ mode: "memory_only", scope, reason: "credential_store_unavailable" }) as const,
+    initializeCacheCrypto: async () =>
+      ({
+        mode: "memory_only",
+        scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+        reason: "credential_store_unavailable",
+      }) as const,
     getWorkspaceBootstrap: async () => bootstrap,
     listWorkspaceMembers: async () => ({ members: [] }),
     listConversations: async () => ({
@@ -245,6 +248,10 @@ function createHarness(): Harness {
       };
     },
     listMessageReactions: async () => ({ reactions: [] }),
+    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listMessageAttachments: async () => ({ attachments: [] }),
+    chooseAndUploadConversationFile: async () => null,
+    openConversationFile: async () => ({ opened: true }),
     searchMessages: async () => ({
       results: [{ message: launchMessage }, { message: threadReply }],
       nextCursor: null,
@@ -474,7 +481,7 @@ describe("main composer focus on conversation changes", () => {
       act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
 
       await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
-      expect(document.activeElement).toBe(control);
+      await waitFor(() => expect(document.activeElement).toBe(control), { timeout: 5_000 });
       expect(dialog.contains(document.activeElement)).toBe(true);
     } finally {
       dialog.remove();
@@ -538,7 +545,7 @@ describe("main composer focus on conversation changes", () => {
     fireEvent.click(chatToggle);
 
     await screen.findByRole("textbox", { name: "Message" });
-    expect(document.activeElement).toBe(chatToggle);
+    await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
   });
 
   it("does not steal focus when the pane toggle remounts the composer", async () => {
@@ -553,7 +560,7 @@ describe("main composer focus on conversation changes", () => {
     fireEvent.click(chatToggle);
 
     await screen.findByRole("textbox", { name: "Message" });
-    expect(document.activeElement).toBe(chatToggle);
+    await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
   });
 
   it("focuses the composer when the conversation changes while the Tasks pane is showing", async () => {

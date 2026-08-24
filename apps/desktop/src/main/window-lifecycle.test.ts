@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BeforeQuitCoordinator, handleLastWindowClosed } from "./window-lifecycle";
+import { authCapabilitiesForSession, isAuthKitSessionComplete } from "./session-auth-lifecycle";
+import {
+  BeforeQuitCoordinator,
+  FinalQuitCoordinator,
+  handleLastWindowClosed,
+} from "./window-lifecycle";
 
 function deferred(): {
   readonly promise: Promise<void>;
@@ -116,6 +121,74 @@ describe("BeforeQuitCoordinator", () => {
 
     pendingTeardown.resolve();
     await vi.waitFor(() => expect(quit).toHaveBeenCalledOnce());
+  });
+});
+
+describe("FinalQuitCoordinator", () => {
+  it("cannot leave AuthKit advertised after a final teardown is subsequently cancelled", () => {
+    const chatSession: object | null = {};
+    let authKitFlow: object | null = {};
+    let authKitPendingStore: object | null = {};
+    const scheduledChecks: Array<() => void> = [];
+    const reportSessionTeardown = vi.fn();
+    const reportQuitCancelledAfterTeardown = vi.fn();
+    const event = { defaultPrevented: false };
+    const sessionParts = () => ({ chatSession, authKitFlow, authKitPendingStore });
+    const capabilitiesHandler = () =>
+      authCapabilitiesForSession({ authKit: true, magicLink: true }, sessionParts(), false);
+    const startHandler = () => {
+      if (!isAuthKitSessionComplete(sessionParts())) {
+        throw new Error("AuthKit sign-in is unavailable");
+      }
+    };
+    const coordinator = new FinalQuitCoordinator({
+      teardownSession: () => {
+        authKitFlow = null;
+        authKitPendingStore = null;
+      },
+      cleanup: vi.fn(),
+      reportSessionTeardown,
+      reportCleanupFailure: vi.fn(),
+      reportQuitCancelledAfterTeardown,
+      scheduleQuitCancellationCheck: (check) => scheduledChecks.push(check),
+    });
+
+    expect(capabilitiesHandler().authKit).toBe(true);
+    expect(startHandler).not.toThrow();
+
+    coordinator.handle(event);
+    event.defaultPrevented = true;
+    for (const check of scheduledChecks) check();
+
+    expect(reportSessionTeardown).toHaveBeenCalledOnce();
+    expect(reportQuitCancelledAfterTeardown).toHaveBeenCalledOnce();
+    expect(startHandler).toThrow("AuthKit sign-in is unavailable");
+    expect(capabilitiesHandler()).toEqual({ authKit: false, magicLink: true });
+    expect(chatSession).not.toBeNull();
+  });
+
+  it("runs final teardown once and does not report a quit that remains committed", () => {
+    const teardownSession = vi.fn();
+    const cleanup = vi.fn();
+    const reportQuitCancelledAfterTeardown = vi.fn();
+    const scheduledChecks: Array<() => void> = [];
+    const coordinator = new FinalQuitCoordinator({
+      teardownSession,
+      cleanup,
+      reportSessionTeardown: vi.fn(),
+      reportCleanupFailure: vi.fn(),
+      reportQuitCancelledAfterTeardown,
+      scheduleQuitCancellationCheck: (check) => scheduledChecks.push(check),
+    });
+    const event = { defaultPrevented: false };
+
+    coordinator.handle(event);
+    coordinator.handle(event);
+    for (const check of scheduledChecks) check();
+
+    expect(teardownSession).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(reportQuitCancelledAfterTeardown).not.toHaveBeenCalled();
   });
 });
 

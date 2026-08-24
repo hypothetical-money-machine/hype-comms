@@ -1,13 +1,14 @@
 import {
   sendMessageOperationSchema,
   TASK_PAGE_MAX_LIMIT,
+  type AuthenticatedSessionContext,
   type CacheCryptoStatus,
   type CacheScope,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type Attachment,
   type ChannelAccess,
   type ChannelMode,
-  type ChatSessionState,
   type ConversationSummary,
   type Message,
   type MessageSearchResponse,
@@ -37,11 +38,17 @@ import {
   compareTasks,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  applyRetractReservation,
+  preferRetainedMessage,
+  retractReservationMap,
+  tombstoneMessage,
+  upsertRetractReservation,
   type CachedWorkspaceState,
   type MembershipRepairMarker,
   type OutboxItem,
   type OutboxStatus,
   type OutboxUpdateExpectation,
+  type RetractReservation,
   type WorkspaceCache,
 } from "./workspace-cache";
 
@@ -54,6 +61,10 @@ export interface WorkspaceRuntimeState {
   readonly threadSummaries: readonly MessageThreadSummary[];
   readonly threadsSupported: boolean;
   readonly reactions: readonly Reaction[];
+  readonly attachments: readonly Attachment[];
+  readonly conversationFiles: readonly Attachment[];
+  readonly conversationFilesBusy: boolean;
+  readonly conversationFilesError: string | null;
   readonly tasks: readonly Task[];
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
@@ -75,6 +86,11 @@ export interface WorkspaceRuntimeState {
 export interface WorkspaceRuntimeOptions {
   /** Test seam: lets a test observe cache traffic without reaching for IndexedDB. */
   readonly createCache?: (status: CacheCryptoStatus) => WorkspaceCache;
+}
+
+export interface WorkspaceStartOptions {
+  /** Opens only the already-authorized encrypted replica and performs no product network I/O. */
+  readonly offline?: boolean;
 }
 
 interface OutboxUpdate {
@@ -124,6 +140,10 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   // Conservative until history negotiation succeeds: previous servers keep replies inline.
   threadsSupported: false,
   reactions: [],
+  attachments: [],
+  conversationFiles: [],
+  conversationFilesBusy: false,
+  conversationFilesError: null,
   tasks: [],
   outbox: [],
   selectedConversationId: null,
@@ -167,6 +187,20 @@ function isTaskConversation(summary: ConversationSummary, currentUserId: string)
   );
 }
 
+/** The unique 1:1 (or self) DM for `memberId` already present in the local catalog. */
+function isDirectConversationWith(
+  summary: ConversationSummary,
+  currentUserId: string,
+  memberId: string,
+): boolean {
+  if (summary.conversation.kind !== "direct_message") return false;
+  const participants = new Set(summary.participantIds);
+  if (memberId === currentUserId) {
+    return participants.size === 1 && participants.has(currentUserId);
+  }
+  return participants.size === 2 && participants.has(currentUserId) && participants.has(memberId);
+}
+
 /** Full jitter between one second and 30 seconds, per the delivery contract. */
 function retryDelay(attempt: number): number {
   const maximum = Math.min(1_000 * 2 ** Math.min(attempt, 5), 30_000);
@@ -189,7 +223,9 @@ function mergeMessages(
 ): readonly Message[] {
   if (incoming.length === 0) return messages;
   const byId = new Map(messages.map((message) => [message.id, message]));
-  for (const message of incoming) byId.set(message.id, message);
+  for (const message of incoming) {
+    byId.set(message.id, preferRetainedMessage(byId.get(message.id), message));
+  }
   return [...byId.values()].sort((left, right) =>
     compareSequence(left.conversationSequence, right.conversationSequence),
   );
@@ -273,6 +309,36 @@ function replaceMessageReactions(
   return mergeReactions(
     reactions.filter((reaction) => !replaced.has(reaction.messageId)),
     incoming,
+  );
+}
+
+function mergeAttachments(
+  attachments: readonly Attachment[],
+  incoming: readonly Attachment[],
+): readonly Attachment[] {
+  if (incoming.length === 0) return attachments;
+  const byId = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+  for (const attachment of incoming) byId.set(attachment.id, attachment);
+  return [...byId.values()];
+}
+
+function replaceMessageAttachments(
+  attachments: readonly Attachment[],
+  messageIds: readonly string[],
+  incoming: readonly Attachment[],
+): readonly Attachment[] {
+  const replaced = new Set(messageIds);
+  return mergeAttachments(
+    attachments.filter(
+      (attachment) => attachment.messageId === null || !replaced.has(attachment.messageId),
+    ),
+    incoming,
+  );
+}
+
+function attachedConversationFiles(attachments: readonly Attachment[]): readonly Attachment[] {
+  return attachments.filter(
+    (attachment) => attachment.status === "ready" && attachment.messageId !== null,
   );
 }
 
@@ -397,6 +463,7 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
+  #offlineOnly = false;
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
   #outboxFlushOwner: ProjectionGuard | null = null;
   #outboxFlushRequested = false;
@@ -456,8 +523,11 @@ export class WorkspaceRuntime {
   /** The immutable main-process scope currently authorized to mutate this renderer cache. */
   #realtimeScope: RealtimeSessionScope | null = null;
   readonly #historyCursors = new Map<string, string | null>();
+  /** In-flight first-page hydrations so opening the same conversation does not stack fetches. */
+  readonly #historyHydrations = new Map<string, Promise<void>>();
   readonly #readTargets = new Map<string, ReadTarget>();
   readonly #threadCursors = new Map<string, string | null>();
+  #retractReservations: RetractReservation[] = [];
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
 
@@ -506,7 +576,7 @@ export class WorkspaceRuntime {
     return result;
   }
 
-  async start(session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }>) {
+  async start(session: AuthenticatedSessionContext, options: WorkspaceStartOptions = {}) {
     const scope: CacheScope = {
       userId: session.userId,
       workspaceId: session.workspaceId,
@@ -516,6 +586,7 @@ export class WorkspaceRuntime {
       this.#scope.userId !== scope.userId ||
       this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
+    this.#offlineOnly = options.offline === true;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -541,7 +612,9 @@ export class WorkspaceRuntime {
       this.#cache = null;
       this.#syncCursor = null;
       this.#historyCursors.clear();
+      this.#historyHydrations.clear();
       this.#threadCursors.clear();
+      this.#retractReservations = [];
       this.#setState({ ...INITIAL_STATE, busy: true });
     } else {
       this.#setState({ busy: true, error: null });
@@ -608,7 +681,7 @@ export class WorkspaceRuntime {
     // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
     // and that reset has to know which member's database it is allowed to delete.
     try {
-      const cryptoStatus = await this.#client.initializeCacheCrypto(scope);
+      const cryptoStatus = await this.#client.initializeCacheCrypto();
       if (generation !== this.#generation || scope !== this.#scope) return;
       if (
         cryptoStatus.scope.userId !== scope.userId ||
@@ -618,13 +691,24 @@ export class WorkspaceRuntime {
       }
       const cache = this.#createCache(cryptoStatus);
       this.#cache = cache;
-      const cached = await cache.load();
+      let cached = await cache.load();
       if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
+      if (
+        cached.bootstrap !== null &&
+        (cached.bootstrap.currentUser.user.id !== scope.userId ||
+          cached.bootstrap.workspace.id !== scope.workspaceId)
+      ) {
+        // A correctly scoped encrypted database cannot contain another identity. Treat any such
+        // projection as corrupt, remove it before first paint, and rebuild only while online.
+        await cache.clearAll();
+        cached = await cache.load();
+        if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
+          return;
+      }
+      this.#hydrateRetractReservations(cached.retractReservations);
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
-      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
-      if (generation !== this.#generation || this.#cache !== cache) return;
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -637,7 +721,22 @@ export class WorkspaceRuntime {
         cacheMode: cryptoStatus.mode,
         cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
         stale: true,
+        ...(this.#offlineOnly
+          ? {
+              busy: false,
+              connection: "offline" as const,
+              error:
+                cached.bootstrap === null
+                  ? "No encrypted workspace is available for this signed-in account."
+                  : null,
+            }
+          : {}),
       });
+
+      if (this.#offlineOnly) return;
+
+      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
+      if (generation !== this.#generation || this.#cache !== cache) return;
 
       const replicaAvailable = cached.bootstrap !== null;
       if (cached.repairMarker !== null) {
@@ -662,9 +761,12 @@ export class WorkspaceRuntime {
           this.#setState({ busy: false, stale: true });
           return;
         }
-        this.#startupReplicaCatchUpPending = false;
+        await this.#completeStartupAfterReplicaCatchUp(generation);
+        return;
       }
-      await this.#completeStartupAfterReplicaCatchUp(generation);
+      await this.#refreshSnapshot(generation);
+      if (generation !== this.#generation || this.#cache === null) return;
+      await this.#completeStartupAfterSnapshot(generation);
     } catch (error) {
       if (generation !== this.#generation) return;
       this.#startupReplicaCatchUpPending = false;
@@ -679,6 +781,7 @@ export class WorkspaceRuntime {
 
   async stop(): Promise<void> {
     ++this.#generation;
+    this.#offlineOnly = false;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -702,7 +805,10 @@ export class WorkspaceRuntime {
     else await this.#client.stopWorkspaceRealtime(realtimeScope);
     this.#cache = null;
     this.#syncCursor = null;
+    this.#retractReservations = [];
     this.#membersDirty = false;
+    this.#historyCursors.clear();
+    this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
     for (const listener of this.#listeners) listener(this.#state);
@@ -734,6 +840,9 @@ export class WorkspaceRuntime {
       threadLoading: false,
       threadError: null,
     });
+    // First paint uses whatever the encrypted replica already has. History for a conversation
+    // that this session has not hydrated yet is fetched after the selection is published.
+    this.#ensureConversationHistory(conversationId);
   }
 
   openTaskSource(task: Task): void {
@@ -748,6 +857,7 @@ export class WorkspaceRuntime {
   }
 
   markConversationReadThrough(conversationId: string, messageId: string): void {
+    if (this.#offlineOnly) return;
     const message = this.#state.messages.find(
       (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
     );
@@ -835,6 +945,7 @@ export class WorkspaceRuntime {
     body: string,
     mentionedUserIds: readonly string[],
     threadRootId: string | null = null,
+    attachmentIds: readonly string[] = [],
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -865,7 +976,7 @@ export class WorkspaceRuntime {
         bodyFormat: "hype_comms_markdown_v1",
         clientMessageId,
         mentionedUserIds: [...mentionedUserIds],
-        attachmentIds: [],
+        attachmentIds: [...attachmentIds],
       },
     });
     const createdAt = new Date().toISOString();
@@ -1117,6 +1228,64 @@ export class WorkspaceRuntime {
     return applied;
   }
 
+  async loadConversationFiles(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) throw new Error("Workspace cache is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    this.#setState({ conversationFilesBusy: true, conversationFilesError: null });
+    try {
+      const files: Attachment[] = [];
+      let before: string | undefined;
+      for (;;) {
+        const page = await this.#client.listConversationFiles(conversationId, {
+          ...(before === undefined ? {} : { before }),
+          limit: 50,
+        });
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        files.push(...page.files);
+        if (!page.hasMore || page.nextCursor === null || page.nextCursor === before) break;
+        before = page.nextCursor;
+      }
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      this.#setState({ conversationFiles: files });
+    } catch (error) {
+      if (projection.generation === this.#generation) {
+        this.#setState({
+          conversationFilesError: errorMessage(error, "Could not load shared files"),
+        });
+      }
+      throw error;
+    } finally {
+      if (projection.generation === this.#generation) {
+        this.#setState({ conversationFilesBusy: false });
+      }
+    }
+  }
+
+  async attachFile(conversationId: string): Promise<Attachment | null> {
+    return this.#client.chooseAndUploadConversationFile(conversationId);
+  }
+
+  async openFile(attachmentId: string): Promise<void> {
+    await this.#client.openConversationFile(attachmentId);
+  }
+
+  openAttachmentSource(attachment: Attachment): void {
+    if (attachment.messageId === null) return;
+    const message = this.#state.messages.find((candidate) => candidate.id === attachment.messageId);
+    this.#setState({
+      selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
+      focusedMessageId:
+        message === undefined || message.threadRootId === null ? attachment.messageId : null,
+      selectedThreadRootId: message?.threadRootId ?? null,
+      focusedThreadMessageId:
+        message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
+      threadLoading: false,
+      threadError: null,
+    });
+  }
+
   async loadConversationTasks(conversationId: string): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -1307,7 +1476,10 @@ export class WorkspaceRuntime {
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       // Keep the query inside the event queue. Events already received are applied first, while
       // events committed during the query queue behind this projection and therefore win after it.
-      const hydrated = await this.#client.listMessageReactions([result.message.id]);
+      const [hydrated, files] = await Promise.all([
+        this.#client.listMessageReactions([result.message.id]),
+        this.#client.listMessageAttachments([result.message.id]),
+      ]);
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       const persisted = await cache.upsertHistory(
         conversationId,
@@ -1316,13 +1488,18 @@ export class WorkspaceRuntime {
         projection.signal,
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
-      const messages = mergeMessages(this.#state.messages, [result.message]);
+      const messages = mergeMessages(this.#state.messages, this.#retainMessages([result.message]));
       this.#setState({
         messages,
         reactions: replaceMessageReactions(
           this.#state.reactions,
           [result.message.id],
           hydrated.reactions,
+        ),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          [result.message.id],
+          files.attachments,
         ),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
@@ -1405,8 +1582,13 @@ export class WorkspaceRuntime {
         if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
         this.#threadCursors.set(threadRootId, thread.nextCursor);
         this.#setState({
-          messages: mergeMessages(this.#state.messages, messages),
+          messages: mergeMessages(this.#state.messages, this.#retainMessages(messages)),
           reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+          attachments: replaceMessageAttachments(
+            this.#state.attachments,
+            messageIds,
+            thread.attachments ?? [],
+          ),
           ...(this.#state.selectedThreadRootId === threadRootId
             ? { threadLoading: false, threadError: null }
             : {}),
@@ -1471,10 +1653,15 @@ export class WorkspaceRuntime {
       this.#historyCursors.set(root.conversationId, history.nextCursor);
       const selectedThreadRootId = this.#state.selectedThreadRootId;
       this.#setState({
-        messages: mergeMessages(this.#state.messages, history.messages),
+        messages: mergeMessages(this.#state.messages, this.#retainMessages(history.messages)),
         threadSummaries: [],
         threadsSupported: false,
         reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          messageIds,
+          history.attachments ?? [],
+        ),
         selectedThreadRootId: null,
         focusedThreadMessageId: null,
         threadLoading: false,
@@ -1510,6 +1697,31 @@ export class WorkspaceRuntime {
   async discardMessage(clientMessageId: string): Promise<void> {
     await this.#cache?.removeOutbox(clientMessageId);
     this.#setState({ outbox: this.#withoutOutbox([clientMessageId]) });
+  }
+
+  async retractMessage(messageId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
+    const current = this.#state.messages.find((message) => message.id === messageId);
+    const conversationId = current?.conversationId ?? this.#state.selectedConversationId;
+    if (conversationId === null) throw new Error("Message is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    const result = await this.#client.retractMessage(messageId);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    await this.#serialize(async () => {
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const persisted = await cache.upsertHistory(
+        conversationId,
+        [result.message],
+        undefined,
+        projection.signal,
+      );
+      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
+      this.#applyRetractedMessage(result.message);
+    });
   }
 
   async addReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
@@ -1642,9 +1854,75 @@ export class WorkspaceRuntime {
   }
 
   async createDirectConversation(memberId: string): Promise<void> {
+    const existingId = this.#directConversationId(memberId);
+    if (existingId !== null) {
+      this.selectConversation(existingId);
+      return;
+    }
+
+    const generation = this.#generation;
+    const cache = this.#cache;
+    if (cache === null || this.#state.bootstrap === null) {
+      throw new Error("Workspace is still loading");
+    }
     const result = await this.#client.createDirectConversation({ memberId });
-    await this.#refreshSnapshot(this.#generation);
-    this.selectConversation(result.conversation.conversation.id);
+    const snapshotAfterCreate = this.#state.bootstrap;
+    if (generation !== this.#generation || cache !== this.#cache || snapshotAfterCreate === null) {
+      return;
+    }
+    const conversationId = result.conversation.conversation.id;
+    if (
+      snapshotAfterCreate.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      )
+    ) {
+      this.selectConversation(conversationId);
+      return;
+    }
+
+    // Same projection path as channel creation: publish the conversation and select it without
+    // re-downloading every conversation's history. First paint uses the mutation summary plus any
+    // already-cached messages; `#ensureConversationHistory` lazy-hydrates this thread only.
+    const projection = this.#eventQueue.then(async () => {
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      const snapshot = this.#state.bootstrap;
+      if (snapshot === null) return;
+      const projected = replaceConversation(snapshot, conversationId, (current) => ({
+        ...result.conversation,
+        lastMessage: current?.lastMessage ?? result.conversation.lastMessage,
+        unreadCount: current?.unreadCount ?? result.conversation.unreadCount,
+        mentionCount: current?.mentionCount ?? result.conversation.mentionCount,
+        readCursor: current?.readCursor ?? result.conversation.readCursor,
+      }));
+      const summary = projected.conversations.find(
+        (candidate) => candidate.conversation.id === conversationId,
+      );
+      if (summary === undefined) return;
+
+      let repairError: string | null = null;
+      try {
+        await cache.upsertConversation(summary);
+      } catch {
+        repairError =
+          "The conversation was opened, but its local cache needs repair. Reconnect to refresh it.";
+      }
+      if (generation !== this.#generation || cache !== this.#cache) return;
+      this.#setState({
+        bootstrap: projected,
+        selectedConversationId: conversationId,
+        focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+        ...(repairError === null ? {} : { stale: true, error: repairError }),
+      });
+    });
+    this.#eventQueue = projection;
+    await projection;
+    if (generation === this.#generation && cache === this.#cache) {
+      this.#ensureConversationHistory(conversationId);
+    }
   }
 
   async archiveChannel(conversationId: string): Promise<void> {
@@ -1716,7 +1994,7 @@ export class WorkspaceRuntime {
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#setState({
-        messages: mergeMessages(this.#state.messages, history.messages),
+        messages: mergeMessages(this.#state.messages, this.#retainMessages(history.messages)),
         threadSummaries: history.threadsSupported
           ? mergeThreadSummaries(this.#state.threadSummaries, history.threadSummaries)
           : [],
@@ -1730,12 +2008,46 @@ export class WorkspaceRuntime {
               threadError: null,
             }),
         reactions: replaceMessageReactions(this.#state.reactions, messageIds, hydrated.reactions),
+        attachments: replaceMessageAttachments(
+          this.#state.attachments,
+          messageIds,
+          history.attachments ?? [],
+        ),
       });
     });
   }
 
   hasOlder(conversationId: string): boolean {
     return this.#historyCursors.get(conversationId) !== null;
+  }
+
+  #directConversationId(memberId: string): string | null {
+    const snapshot = this.#state.bootstrap;
+    const currentUserId = snapshot?.currentUser.user.id;
+    if (snapshot === null || currentUserId === undefined) return null;
+    return (
+      snapshot.conversations.find((summary) =>
+        isDirectConversationWith(summary, currentUserId, memberId),
+      )?.conversation.id ?? null
+    );
+  }
+
+  /**
+   * Fetches the first history page only when this session has not already hydrated the
+   * conversation. Selection must already be published so the pane can paint cached messages first.
+   */
+  #ensureConversationHistory(conversationId: string): void {
+    if (
+      this.#offlineOnly ||
+      this.#historyCursors.has(conversationId) ||
+      this.#historyHydrations.has(conversationId)
+    ) {
+      return;
+    }
+    const hydration = this.loadOlder(conversationId).finally(() => {
+      this.#historyHydrations.delete(conversationId);
+    });
+    this.#historyHydrations.set(conversationId, hydration);
   }
 
   async resetLocalCache(): Promise<void> {
@@ -1765,7 +2077,9 @@ export class WorkspaceRuntime {
     await this.#client.resetCacheCrypto();
     this.#cache = null;
     this.#syncCursor = null;
+    this.#retractReservations = [];
     this.#historyCursors.clear();
+    this.#historyHydrations.clear();
     this.#threadCursors.clear();
     this.#setState({ ...INITIAL_STATE, error: "Local cache reset. Rebuilding the workspace…" });
   }
@@ -1888,6 +2202,7 @@ export class WorkspaceRuntime {
     const messages: Message[] = [];
     const threadSummaries: MessageThreadSummary[] = [];
     const reactions: Reaction[] = [];
+    const attachments: Attachment[] = [];
     const tasks: Task[] = [];
     const seenTaskIds = new Set<string>();
     let threadsSupported = true;
@@ -1905,6 +2220,7 @@ export class WorkspaceRuntime {
       historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
       threadSummaries.push(...history.threadSummaries);
+      attachments.push(...(history.attachments ?? []));
       threadsSupported &&= history.threadsSupported;
       if (history.messages.length > 0) {
         const hydrated = await this.#client.listMessageReactions(
@@ -1984,6 +2300,15 @@ export class WorkspaceRuntime {
           !refreshedMessageIds.has(reaction.messageId),
       ),
     );
+    let refreshedAttachments: readonly Attachment[] = mergeAttachments(
+      attachments,
+      this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null &&
+          queuedThreadRootIds.has(attachment.messageId) &&
+          !refreshedMessageIds.has(attachment.messageId),
+      ),
+    );
     const selectedConversationStillVisible =
       openThreadConversationId !== null && visibleConversationIds.has(openThreadConversationId);
     if (threadsSupported && openThreadRootId !== null && selectedConversationStillVisible) {
@@ -2004,6 +2329,11 @@ export class WorkspaceRuntime {
         threadMessages.map((message) => message.id),
         hydrated.reactions,
       );
+      refreshedAttachments = replaceMessageAttachments(
+        refreshedAttachments,
+        threadMessages.map((message) => message.id),
+        thread.attachments ?? [],
+      );
     }
     if (!isCurrent()) return false;
     try {
@@ -2015,6 +2345,7 @@ export class WorkspaceRuntime {
     if (!isCurrent()) return false;
     const loaded = await cache.load();
     if (!isCurrent()) return false;
+    this.#hydrateRetractReservations(loaded.retractReservations);
     this.#membershipRepairPending =
       loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
     this.#syncCursor = loaded.syncCursor;
@@ -2050,6 +2381,7 @@ export class WorkspaceRuntime {
       threadSummaries,
       threadsSupported,
       reactions: loaded.reactions,
+      attachments: refreshedAttachments,
       tasks: loaded.tasks,
       outbox: loaded.outbox,
       selectedConversationId,
@@ -2498,6 +2830,102 @@ export class WorkspaceRuntime {
     }
   }
 
+  /**
+   * Refreshes server-owned workspace and conversation metadata without downloading history,
+   * reactions, tasks, or thread bodies for every conversation. If the metadata snapshot is ahead
+   * of the durable cursor, its intervening events are applied first so replacing the catalog can
+   * never skip message data.
+   */
+  async #refreshWorkspaceMetadata(generation: number): Promise<boolean> {
+    const cache = this.#cache;
+    const scope = this.#scope;
+    if (cache === null || scope === null || generation !== this.#generation) return false;
+    const snapshot = await this.#fetchSnapshot();
+    if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
+      return false;
+    }
+    if (
+      snapshot.currentUser.user.id !== scope.userId ||
+      snapshot.workspace.id !== scope.workspaceId
+    ) {
+      throw new Error("The workspace catalog did not match the signed-in session");
+    }
+
+    const cursorBeforeMetadata = this.#syncCursor ?? "0";
+    if (compareSequence(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
+      await this.#repairAndFlush(generation, false);
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        this.#syncRecoveryPending ||
+        this.#membershipRepairPending
+      ) {
+        return false;
+      }
+    }
+
+    const loaded = await cache.load();
+    if (generation !== this.#generation || cache !== this.#cache || loaded.bootstrap === null) {
+      return false;
+    }
+    const durableCursor = loaded.syncCursor ?? "0";
+    if (compareSequence(durableCursor, snapshot.syncCursor) < 0) {
+      throw new Error("The workspace metadata advanced beyond the repaired cursor");
+    }
+
+    // When events landed after the metadata response, their cached catalog and member projection
+    // is newer. Keep it while still taking workspace, identity-role, and feature metadata from the
+    // response. The final catch-up closes the smaller race after this replacement.
+    const metadataAtDurableCursor = compareSequence(durableCursor, snapshot.syncCursor) === 0;
+    const catalog = metadataAtDurableCursor
+      ? snapshot.conversations
+      : loaded.bootstrap.conversations;
+    const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
+    const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
+    const messages = loaded.messages.filter((message) =>
+      visibleConversationIds.has(message.conversationId),
+    );
+    const visibleMessageIds = new Set(messages.map((message) => message.id));
+    const reactions = loaded.reactions.filter((reaction) =>
+      visibleMessageIds.has(reaction.messageId),
+    );
+    const tasks = loaded.tasks.filter((task) => visibleConversationIds.has(task.conversationId));
+    const signal = this.#projectionAbortController.signal;
+    await cache.replaceSnapshot(
+      {
+        currentUser: snapshot.currentUser,
+        workspace: snapshot.workspace,
+        members,
+        conversations: catalog,
+        syncCursor: durableCursor,
+        featureFlags: snapshot.featureFlags,
+      },
+      messages,
+      reactions,
+      tasks,
+      signal,
+    );
+    if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
+    if (!(await this.#reloadCache(generation, cache))) return false;
+
+    for (const conversationId of this.#historyCursors.keys()) {
+      if (!visibleConversationIds.has(conversationId)) this.#historyCursors.delete(conversationId);
+    }
+    const currentSelection = this.#state.selectedConversationId;
+    if (currentSelection !== null && !visibleConversationIds.has(currentSelection)) {
+      const bootstrap = this.#state.bootstrap;
+      this.#setState({
+        selectedConversationId: bootstrap === null ? null : firstConversation(bootstrap),
+        focusedMessageId: null,
+        selectedThreadRootId: null,
+        focusedThreadMessageId: null,
+        threadLoading: false,
+        threadError: null,
+      });
+    }
+    return true;
+  }
+
   #scheduleResync(generation: number, request: number, delayMs: number): void {
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
@@ -2510,8 +2938,12 @@ export class WorkspaceRuntime {
 
   async #completeStartupAfterReplicaCatchUp(generation: number): Promise<void> {
     if (generation !== this.#generation || this.#cache === null) return;
-    await this.#refreshSnapshot(generation);
-    if (generation !== this.#generation || this.#cache === null) return;
+    const refreshed = await this.#refreshWorkspaceMetadata(generation);
+    if (!refreshed || generation !== this.#generation || this.#cache === null) {
+      if (generation === this.#generation) this.#setState({ busy: false, stale: true });
+      return;
+    }
+    this.#startupReplicaCatchUpPending = false;
     await this.#completeStartupAfterSnapshot(generation);
   }
 
@@ -2575,6 +3007,8 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation) return;
     this.#startupRealtimePending = false;
     this.#setState({ busy: false });
+    const selectedConversationId = this.#state.selectedConversationId;
+    if (selectedConversationId !== null) this.#ensureConversationHistory(selectedConversationId);
   }
 
   async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
@@ -2731,6 +3165,14 @@ export class WorkspaceRuntime {
         visibleMessageIds.has(summary.threadRootId),
       ),
       reactions: state.reactions,
+      attachments: this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null && visibleMessageIds.has(attachment.messageId),
+      ),
+      conversationFiles:
+        selectedConversationId === this.#state.selectedConversationId
+          ? this.#state.conversationFiles
+          : [],
       tasks: state.tasks,
       outbox: state.outbox,
       selectedConversationId,
@@ -2788,6 +3230,11 @@ export class WorkspaceRuntime {
         messageIds.has(summary.threadRootId),
       ),
       reactions: this.#state.reactions.filter((reaction) => messageIds.has(reaction.messageId)),
+      attachments: this.#state.attachments.filter(
+        (attachment) => attachment.messageId !== null && messageIds.has(attachment.messageId),
+      ),
+      conversationFiles:
+        this.#state.selectedConversationId === conversationId ? [] : this.#state.conversationFiles,
       tasks: this.#state.tasks.filter((task) => task.conversationId !== conversationId),
       outbox: this.#state.outbox.filter((item) => item.operation.conversationId !== conversationId),
       selectedConversationId,
@@ -2862,10 +3309,49 @@ export class WorkspaceRuntime {
     this.#projectEvent(event);
   }
 
+  #hydrateRetractReservations(reservations: readonly RetractReservation[]): void {
+    this.#retractReservations = [...reservations];
+  }
+
+  #reserveRetractedMessage(event: Extract<WorkspaceEvent, { type: "message.retracted" }>): void {
+    this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
+      messageId: event.payload.messageId,
+      deletedAt: event.payload.deletedAt,
+      entityVersion: event.entityVersion,
+    });
+  }
+
+  #retainMessages(messages: readonly Message[]): Message[] {
+    const reservations = retractReservationMap(this.#retractReservations);
+    return messages.map((message) => applyRetractReservation(message, reservations));
+  }
+
+  #applyRetractedMessage(tombstone: Message): void {
+    const snapshot = this.#state.bootstrap;
+    this.#setState({
+      messages: mergeMessages(this.#state.messages, [tombstone]),
+      threadSummaries: this.#state.threadSummaries.map((summary) =>
+        summary.latestReply.id === tombstone.id ? { ...summary, latestReply: tombstone } : summary,
+      ),
+      attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
+      conversationFiles: this.#state.conversationFiles.filter(
+        (attachment) => attachment.messageId !== tombstone.id,
+      ),
+      bootstrap:
+        snapshot === null
+          ? null
+          : replaceConversation(snapshot, tombstone.conversationId, (summary) => {
+              if (summary === undefined) return null;
+              if (summary.lastMessage?.id !== tombstone.id) return summary;
+              return { ...summary, lastMessage: tombstone };
+            }),
+    });
+  }
+
   #projectEvent(event: WorkspaceEvent): void {
     const snapshot = this.#state.bootstrap;
     if (event.type === "message.created") {
-      const message = event.payload.message;
+      const message = this.#retainMessages([event.payload.message])[0] ?? event.payload.message;
       const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
       this.#setState({
         messages: mergeMessages(this.#state.messages, [message]),
@@ -2873,6 +3359,21 @@ export class WorkspaceRuntime {
         outbox: this.#withoutOutbox([message.clientMessageId]),
         bootstrap: snapshot === null ? null : countMessage(snapshot, event),
       });
+      void this.#hydrateCreatedMessageAttachments(message);
+      return;
+    }
+    if (event.type === "message.retracted") {
+      this.#reserveRetractedMessage(event);
+      const current = this.#state.messages.find(
+        (message) => message.id === event.payload.messageId,
+      );
+      const lastMessage = snapshot?.conversations.find(
+        (summary) => summary.conversation.id === event.conversationId,
+      )?.lastMessage;
+      const source =
+        current ?? (lastMessage?.id === event.payload.messageId ? lastMessage : undefined);
+      if (source === undefined) return;
+      this.#applyRetractedMessage(tombstoneMessage(source, event));
       return;
     }
     if (event.type === "reaction.added") {
@@ -2913,7 +3414,9 @@ export class WorkspaceRuntime {
     // server re-read and never reaches this projection. `member.updated` in particular must have
     // no upsert path here — that is the whole reason a disable used to re-assert the disabled
     // member instead of removing it.
-    if (event.type === "channel.membership_changed" || event.type === "member.updated") return;
+    if (event.type === "channel.membership_changed" || event.type === "member.updated") {
+      return;
+    }
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,
@@ -2929,7 +3432,12 @@ export class WorkspaceRuntime {
 
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
-    if (this.#membershipRepairPending || cache === null || generation !== this.#generation) {
+    if (
+      this.#offlineOnly ||
+      this.#membershipRepairPending ||
+      cache === null ||
+      generation !== this.#generation
+    ) {
       return;
     }
     const owner = this.#captureProjection(cache);
@@ -3006,7 +3514,7 @@ export class WorkspaceRuntime {
           ) {
             return;
           }
-          this.#acceptMessage(result.response.message, id);
+          this.#acceptMessage(result.response.message, id, result.response.attachments ?? []);
           continue;
         }
         if (result.status === "authentication_required") {
@@ -3076,7 +3584,11 @@ export class WorkspaceRuntime {
     }
   }
 
-  #acceptMessage(message: Message, clientMessageId: string): void {
+  #acceptMessage(
+    message: Message,
+    clientMessageId: string,
+    attachments: readonly Attachment[] = [],
+  ): void {
     const snapshot = this.#state.bootstrap;
     const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
     const bootstrap =
@@ -3089,11 +3601,38 @@ export class WorkspaceRuntime {
     this.#setState({
       messages: mergeMessages(this.#state.messages, [message]),
       threadSummaries: projectReplySummary(this.#state.threadSummaries, message, newlyObserved),
+      attachments: mergeAttachments(this.#state.attachments, attachments),
+      conversationFiles:
+        this.#state.selectedConversationId === message.conversationId
+          ? mergeAttachments(this.#state.conversationFiles, attachedConversationFiles(attachments))
+          : this.#state.conversationFiles,
       // Both ids are dropped so a server that does not echo the client id cannot leave the
       // delivered item queued and spin the flush loop.
       outbox: this.#withoutOutbox([clientMessageId, message.clientMessageId]),
       bootstrap,
     });
+  }
+
+  async #hydrateCreatedMessageAttachments(message: Message): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    try {
+      const result = await this.#client.listMessageAttachments([message.id]);
+      if (!this.#isProjectionCurrent(projection, message.conversationId)) return;
+      this.#setState({
+        attachments: mergeAttachments(this.#state.attachments, result.attachments),
+        conversationFiles:
+          this.#state.selectedConversationId === message.conversationId
+            ? mergeAttachments(
+                this.#state.conversationFiles,
+                attachedConversationFiles(result.attachments),
+              )
+            : this.#state.conversationFiles,
+      });
+    } catch {
+      // Live chips catch up on the next history read.
+    }
   }
 
   #withoutOutbox(clientMessageIds: readonly string[]): readonly OutboxItem[] {
@@ -3154,6 +3693,11 @@ export class WorkspaceRuntime {
       messages: loaded.messages,
       threadSummaries,
       reactions: loaded.reactions,
+      attachments: this.#state.attachments.filter(
+        (attachment) =>
+          attachment.messageId !== null &&
+          loaded.messages.some((message) => message.id === attachment.messageId),
+      ),
       tasks: loaded.tasks,
       outbox: loaded.outbox,
     });
@@ -3210,7 +3754,6 @@ export class WorkspaceRuntime {
           this.#startupReplicaCatchUpPending &&
           !this.#syncRecoveryPending
         ) {
-          this.#startupReplicaCatchUpPending = false;
           await this.#completeStartupAfterReplicaCatchUp(generation);
           return;
         }
@@ -3224,6 +3767,10 @@ export class WorkspaceRuntime {
           if (generation !== this.#generation) return;
           this.#startupRealtimePending = false;
           this.#setState({ busy: false });
+          const selectedConversationId = this.#state.selectedConversationId;
+          if (selectedConversationId !== null) {
+            this.#ensureConversationHistory(selectedConversationId);
+          }
         }
       }).catch((error: unknown) => {
         if (generation === this.#generation) {

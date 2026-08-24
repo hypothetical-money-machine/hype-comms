@@ -1,13 +1,11 @@
 # Local Linux release runner
 
-The ARM64 runner replaces the GitHub-hosted Linux release lane and runs the required PostgreSQL
-CI job in an isolated Ubuntu container, natively on the Apple-silicon Mac Mini. PostgreSQL 16 is
-baked into the image so CI can create an unprivileged, job-scoped database cluster without a
-Docker socket or passwordless sudo. Linux release packaging and pull-request smoke packaging both
-run on this native ARM64 service. The legacy x64 service remains available for ad hoc
-release-environment compatibility checks. Each service uses the matching official GitHub Actions
-runner and AWS CLI binaries, stores only runner state in its own named Docker volume, and does not
-mount the host filesystem or Docker socket.
+The ARM64 runner handles trusted Linux release packaging and native smoke builds from `main` or a
+manual dispatch, natively on an Apple-silicon host. Public pull requests run only on disposable
+GitHub-hosted infrastructure and must never target this persistent release service. The optional
+x64 service remains available for ad hoc compatibility checks. Each service uses the matching
+official GitHub Actions runner and AWS CLI binaries, stores only runner state in its own named
+Docker volume, and does not mount the host filesystem or Docker socket.
 
 Build and register the ARM64 runner once:
 
@@ -15,7 +13,7 @@ Build and register the ARM64 runner once:
 docker compose -f docker-compose.runner.yml build linux-arm64
 runner_token="$(
   gh api -X POST \
-    repos/hype-comms/hype-comms/actions/runners/registration-token \
+    repos/hypothetical-money-machine/hype-comms/actions/runners/registration-token \
     --jq .token
 )"
 RUNNER_TOKEN="$runner_token" docker compose -f docker-compose.runner.yml run \
@@ -40,7 +38,7 @@ Check the local container and GitHub registration:
 
 ```bash
 docker compose -f docker-compose.runner.yml ps linux-arm64
-gh api repos/hype-comms/hype-comms/actions/runners \
+gh api repos/hypothetical-money-machine/hype-comms/actions/runners \
   --jq '.runners[] | select(.name == "hype-comms-docker-linux-arm64")'
 ```
 
@@ -53,21 +51,22 @@ docker compose -f docker-compose.runner.yml rm --stop --force linux-arm64
 docker volume rm hype-comms-runner-data-arm64
 ```
 
-## Multiple x64 CI hosts
+## Optional x64 CI pool
 
 The x64 service can also register against an organization runner group. Give every physical host
 a unique runner name, while using the same group and capability labels to form a shared pool. The
-group must already exist and allow this repository before registration.
+group must already exist, allow this public repository, and remain excluded from pull-request
+workflows. Standard CI does not depend on this pool.
 
 Set these non-secret values on each host before building, registering, or starting the service:
 
 The examples in this section use Bash; start `bash` first when the host's login shell is fish.
 
 ```bash
-export HYPE_COMMS_X64_RUNNER_URL=https://github.com/hype-comms
-export HYPE_COMMS_X64_RUNNER_GROUP=hmm-linux-x64-ci
-export HYPE_COMMS_X64_RUNNER_LABELS=hmm-ci
-export HYPE_COMMS_X64_RUNNER_NAME=self-hosted-ci-runner # use lenovo-t550-ci-01 on the T550
+export HYPE_COMMS_X64_RUNNER_URL=https://github.com/hypothetical-money-machine
+export HYPE_COMMS_X64_RUNNER_GROUP=hype-linux-x64-ci
+export HYPE_COMMS_X64_RUNNER_LABELS=hype-ci
+export HYPE_COMMS_X64_RUNNER_NAME=self-hosted-ci-runner # use a unique name per physical host
 ```
 
 Build and register the service using a short-lived organization registration token:
@@ -86,4 +85,4 @@ docker compose -f docker-compose.runner.yml up --detach linux-x64
 Generate `runner_token` from an authenticated operator session immediately before registration;
 do not save it in the repository, an environment file, shell history, or the host's persistent
 runner volume. The GitHub Actions runner adds the standard `self-hosted`, `Linux`, and `X64` labels
-alongside `hmm-ci`. Jobs in this pool do not receive the `hype-comms-release` or `docker` labels.
+alongside `hype-ci`. Jobs in this pool do not receive the `hype-comms-release` or `docker` labels.

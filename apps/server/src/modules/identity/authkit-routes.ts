@@ -3,7 +3,6 @@ import {
   authKitCallbackQuerySchema,
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
-  currentUserSchema,
   desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
   exchangeAuthHandoffRequestSchema,
@@ -13,7 +12,7 @@ import type { FastifyPluginAsync } from "fastify";
 
 import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
-import { desktopCurrentUserResponse, setSessionCookie } from "./routes.js";
+import { desktopCurrentUserResponse, setSessionCookie, supportsMemberProfiles } from "./routes.js";
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService } from "./service.js";
 
@@ -106,6 +105,17 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
             providerState: result.data.state,
           },
     );
+    if (completion.kind === "error" && completion.failureCategory !== undefined) {
+      request.log.warn(
+        { authKitFailureCategory: completion.failureCategory },
+        "AuthKit callback failed",
+      );
+    }
+    if (completion.kind === "error" && !("desktopState" in completion)) {
+      const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
+      callbackUrl.searchParams.set("error", "authentication_failed");
+      return reply.redirect(callbackUrl.href);
+    }
     const parameters = desktopAuthCallbackParametersSchema.parse(
       completion.kind === "success"
         ? { code: completion.handoffCode, state: completion.desktopState }
@@ -118,7 +128,9 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
     } else {
       callbackUrl.searchParams.set("error", parameters.error);
     }
-    callbackUrl.searchParams.set("state", parameters.state);
+    if (parameters.state !== undefined) {
+      callbackUrl.searchParams.set("state", parameters.state);
+    }
     return reply.redirect(callbackUrl.href);
   });
 
@@ -143,6 +155,13 @@ export const authKitRoutes: FastifyPluginAsync<AuthKitRoutesOptions> = async (
       throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
     }
     setSessionCookie(reply, session, cookieSecure);
-    return reply.code(200).send(currentUserSchema.parse(desktopCurrentUserResponse(currentUser)));
+    return reply
+      .code(200)
+      .send(
+        desktopCurrentUserResponse(
+          currentUser,
+          supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
+        ),
+      );
   });
 };

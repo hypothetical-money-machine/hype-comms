@@ -46,6 +46,10 @@ async function emulateFixture(
 }
 
 describe("WorkOS access-token verification", () => {
+  it("pins the default issuer to WorkOS's documented access-token issuer", () => {
+    expect(DEFAULT_WORKOS_JWT_ISSUER).toBe("https://api.workos.com");
+  });
+
   it("requires bounded identity, session, temporal, unique, and expected-client claims", () => {
     const claims = {
       iss: DEFAULT_WORKOS_JWT_ISSUER,
@@ -75,6 +79,21 @@ describe("WorkOS access-token verification", () => {
     expect(() =>
       validateWorkOSAccessTokenClaims(
         { ...claims, iss: "https://auth.example.com" },
+        "client_test",
+      ),
+    ).toThrow("Unexpected WorkOS access-token claims");
+    expect(
+      validateWorkOSAccessTokenClaims(
+        { ...claims, iss: "https://api.workos.com/user_management/client_test" },
+        "client_test",
+      ),
+    ).toEqual({ subject: "user_01ABC", sessionId: "session_01ABC" });
+    expect(
+      validateWorkOSAccessTokenClaims({ ...claims, iss: "https://api.workos.com" }, "client_test"),
+    ).toEqual({ subject: "user_01ABC", sessionId: "session_01ABC" });
+    expect(() =>
+      validateWorkOSAccessTokenClaims(
+        { ...claims, iss: "https://api.workos.com/user_management/client_other" },
         "client_test",
       ),
     ).toThrow("Unexpected WorkOS access-token claims");
@@ -111,6 +130,19 @@ describe("WorkOS access-token verification", () => {
       subject: "user_01ABC",
       sessionId: "session_01ABC",
     });
+    await expect(
+      verifyAccessToken(
+        await sign("client_test", "https://api.workos.com/user_management/client_test"),
+      ),
+    ).resolves.toEqual({
+      subject: "user_01ABC",
+      sessionId: "session_01ABC",
+    });
+    await expect(
+      verifyAccessToken(
+        await sign("client_test", "https://api.workos.com/user_management/client_other"),
+      ),
+    ).rejects.toBeInstanceOf(joseErrors.JWTClaimValidationFailed);
     await expect(verifyAccessToken(await sign("client_other"))).rejects.toBeInstanceOf(
       joseErrors.JWTClaimValidationFailed,
     );
@@ -122,6 +154,14 @@ describe("WorkOS access-token verification", () => {
     );
     await expect(
       verifyCustomIssuer(await sign("client_test", "https://auth.example.com")),
+    ).resolves.toEqual({
+      subject: "user_01ABC",
+      sessionId: "session_01ABC",
+    });
+    await expect(
+      verifyCustomIssuer(
+        await sign("client_test", "https://auth.example.com/user_management/client_test"),
+      ),
     ).resolves.toEqual({
       subject: "user_01ABC",
       sessionId: "session_01ABC",

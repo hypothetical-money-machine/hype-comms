@@ -95,7 +95,7 @@ describeWithPostgres("agent identity and owner administration", () => {
     await pool.query(`
       TRUNCATE agent_tokens, agents, realtime_tickets, api_idempotency_records,
                sync_event_audiences, sync_events, conversation_read_cursors, message_mentions,
-               messages, conversations, device_sessions, magic_link_tokens, invitations,
+               attachments, messages, conversations, device_sessions, magic_link_tokens, invitations,
                workspace_memberships, workspaces, users
       CASCADE
     `);

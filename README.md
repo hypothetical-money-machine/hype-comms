@@ -7,7 +7,7 @@ first-class scoped agent identities, a PostgreSQL-backed conversation core, reco
 delivery, and a restart-safe encrypted desktop outbox.
 
 Product strategy and delivery work are tracked in
-[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+[GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
 See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
 contracts, [integrations/hermes-hype-comms/README.md](integrations/hermes-hype-comms/README.md) for
 the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
@@ -78,6 +78,16 @@ server log. An owner can also issue a manual invitation:
 
 ```bash
 npm run invite --workspace @hype-comms/server -- --email member@example.com
+```
+
+The same server-side operator interface manages workspace owners. Promote an active human member
+by username or email; to transfer ownership, promote the replacement first and then demote the
+former owner. The last active owner cannot be demoted:
+
+```bash
+npm run owner --workspace @hype-comms/server -- promote member@example.com
+npm run owner --workspace @hype-comms/server -- demote former-owner
+npm run owner --workspace @hype-comms/server -- list
 ```
 
 The landing page offers both `Hype Comms` and `Hype Comms DEV`. The recipient chooses the
@@ -251,6 +261,12 @@ The API and database ports bind to loopback. PostgreSQL is authoritative for ide
 conversations, messages, idempotency records, read cursors, and sync events. There is no SQLite
 runtime volume or shared access-code mode.
 
+The server accepts forwarded client addresses only from `HYPE_COMMS_TRUSTED_PROXIES`. Host-run
+production defaults to the exact IPv4 and IPv6 loopback addresses; Compose supplies its private
+bridge range because host proxy traffic reaches the container through that bridge. Configure the
+narrowest stable proxy IP/CIDR available, and make the proxy replace `X-Forwarded-For` rather than
+append to a value supplied by the client. Direct development leaves proxy trust disabled.
+
 `HYPE_COMMS_EMAIL_DELIVERY=manual` permits an administrator to issue links without an SMTP provider.
 Self-service requests return a uniform refusal in that mode. Configure `HYPE_COMMS_SMTP_URL` and
 `HYPE_COMMS_EMAIL_FROM`, then select `smtp`, for delivered mail.
@@ -362,11 +378,25 @@ which is deliberate: an unsigned macOS build cannot auto-update at all, because 
 not apply an update it cannot match to the running app's code signature. A red macOS job therefore
 means "no macOS build shipped", while Windows and Linux still publish normally.
 
-Windows installers are not signed. The update mechanism still works — `electron-updater` skips
-Authenticode verification when no publisher name is recorded — but that means a Windows update is
-protected by HTTPS and the manifest checksum rather than by a signature independent of the
-transport. macOS is protected by Developer ID and notarization in addition to those. Closing that
-gap needs a Windows code-signing certificate.
+Windows installers are not signed today. The update mechanism still works — `electron-updater`
+skips Authenticode verification when no publisher name is recorded on the running app — so a
+0.1.29 Windows client will still accept the first signed build. The release workflow is wired for
+Azure Trusted Signing and stays inert until every value below is present; a partial set, or a
+signing failure after that, publishes nothing. DEV smoke builds stay unsigned. See
+[docs/windows-signing.md](docs/windows-signing.md). Do not invent a publisher subject.
+
+Repository **secrets** (empty today; mapped to `AZURE_*` for electron-builder 26):
+
+- `HYPE_COMMS_WINDOWS_AZURE_TENANT_ID`
+- `HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID`
+- `HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET`
+
+Repository **variables** (empty today):
+
+- `HYPE_COMMS_WINDOWS_AZURE_ENDPOINT`
+- `HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME`
+- `HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME`
+- `HYPE_COMMS_WINDOWS_PUBLISHER_NAME` (exact issued certificate subject)
 
 ## Verification
 
@@ -435,9 +465,10 @@ on the example-project, which is where the registry, the cluster, and the databa
 - `ci.yml` runs `npm run check` on every pull request and push to `main`.
 - `desktop-package-smoke.yml` packages the default DEV artifacts on macOS, Windows, and Ubuntu,
   then packages production on Linux to check the stable identity and updater feed before a tag.
-  macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu artifacts remain unsigned. Its
-  signed macOS notification-evidence job selects the production identity because that evidence
-  applies to a release candidate.
+  Pull requests use disposable GitHub-hosted ARM64 runners; trusted `main` and manual runs retain
+  native self-hosted coverage. macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu
+  artifacts remain unsigned. Its signed macOS notification-evidence job selects the production
+  identity because that evidence applies to a release candidate.
 - `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
 
 The desktop half cannot move to the example-project: macOS artifacts must be built and signed on macOS,
@@ -453,6 +484,12 @@ workspace-visible and members-only channels, 1:1 DMs, paginated text history, au
 message search, mentions, reactions, unread state, ordered reconnect sync, date-separated
 timelines, one-level threads, scoped agent identities, and restart-safe sends. The repository also
 contains native-notification Milestones 0 through 3 behind default-off build and device settings;
-installed notification proof and any default flip remain open alongside attachments, complete
-release signing, and hosted operations. Product direction and delivery status are tracked in
-[Hype Comms on the tracker](https://github.com/hypothetical-money-machine/hype-comms/issues).
+installed notification proof and any default flip remain open alongside attachments, Windows
+Authenticode identity provisioning, Linux release signatures, and hosted operations. Product direction and delivery status are tracked in
+[GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
+
+## License
+
+Hype Comms is [MIT-licensed](LICENSE). By contributing you agree to the licensing terms in
+[CONTRIBUTING.md](CONTRIBUTING.md), including the maintainers' right to relicense future
+versions.

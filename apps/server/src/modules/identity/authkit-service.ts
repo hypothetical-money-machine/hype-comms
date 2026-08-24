@@ -15,8 +15,16 @@ import {
 } from "@hype-comms/contracts";
 
 import { ApiError } from "../../errors.js";
-import type { AuthKitIdentityProvider } from "./authkit-provider.js";
-import { AuthKitCredentialRejectedError, type AuthKitRepository } from "./authkit-repository.js";
+import {
+  AuthKitIdentityRejectedError,
+  AuthKitProviderUnavailableError,
+  type AuthKitIdentityProvider,
+} from "./authkit-provider.js";
+import {
+  AuthKitAdmissionDeniedError,
+  AuthKitCredentialRejectedError,
+  type AuthKitRepository,
+} from "./authkit-repository.js";
 import type { RedeemedSession } from "./service.js";
 
 const PROVIDER_TRANSACTION_TTL_MS = 10 * 60 * 1_000;
@@ -30,9 +38,24 @@ export type AuthKitCallbackCompletion =
     }
   | {
       readonly kind: "error";
+      readonly failureCategory?: AuthKitCallbackFailureCategory;
       readonly desktopState: AuthDesktopState;
       readonly desktopAuthVariant: DesktopAuthVariant;
+    }
+  | {
+      readonly kind: "error";
+      readonly failureCategory?: AuthKitCallbackFailureCategory;
     };
+
+export type AuthKitCallbackFailureCategory =
+  "identity_rejected" | "provider_unavailable" | "admission_denied" | "internal";
+
+function classifyCallbackFailure(error: unknown): AuthKitCallbackFailureCategory {
+  if (error instanceof AuthKitIdentityRejectedError) return "identity_rejected";
+  if (error instanceof AuthKitProviderUnavailableError) return "provider_unavailable";
+  if (error instanceof AuthKitAdmissionDeniedError) return "admission_denied";
+  return "internal";
+}
 
 export interface AuthKitSessionReconciliationResult {
   readonly checked: number;
@@ -101,7 +124,7 @@ export class AuthKitService {
       throw new ApiError(503, "SERVICE_UNAVAILABLE", "Authentication is temporarily unavailable");
     }
     if (transaction === null) {
-      throw new ApiError(403, "FORBIDDEN", "Authentication could not be completed");
+      return { kind: "error", failureCategory: "internal" };
     }
     if (input.kind === "error") {
       return {
@@ -131,11 +154,12 @@ export class AuthKitService {
         desktopState: transaction.desktopState,
         desktopAuthVariant: transaction.desktopAuthVariant,
       };
-    } catch {
+    } catch (error) {
       // Once provider state is consumed every failure is terminal. Collapse identity, admission,
       // capacity, and dependency details into the same credential-free desktop callback.
       return {
         kind: "error",
+        failureCategory: classifyCallbackFailure(error),
         desktopState: transaction.desktopState,
         desktopAuthVariant: transaction.desktopAuthVariant,
       };

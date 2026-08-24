@@ -3,7 +3,15 @@ import type {
   ChannelMembersResponse,
   User,
 } from "@hype-comms/contracts";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { Avatar } from "./avatar";
@@ -113,6 +121,29 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     };
   }, [triggerRef]);
 
+  const trapFocus = (event: ReactKeyboardEvent<HTMLElement>): void => {
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    const firstFocusable = focusable[0];
+    const lastFocusable = focusable.at(-1);
+    if (firstFocusable === undefined || lastFocusable === undefined) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+
+    const activeElement = document.activeElement;
+    if (event.shiftKey && (activeElement === firstFocusable || activeElement === dialog)) {
+      event.preventDefault();
+      lastFocusable.focus();
+    } else if (!event.shiftKey && activeElement === lastFocusable) {
+      event.preventDefault();
+      firstFocusable.focus();
+    }
+  };
+
   const availableMembers = useMemo(() => {
     const current = new Set(details?.members.map((member) => member.user.id) ?? []);
     return workspaceMembers.filter((member) => !current.has(member.id));
@@ -157,6 +188,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
         aria-labelledby={titleId}
         aria-busy={busyUserId !== null}
         tabIndex={-1}
+        onKeyDown={trapFocus}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>

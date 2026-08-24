@@ -15,12 +15,13 @@ test("supports unique x64 runner identities and an optional organization group",
   );
   assert.match(
     compose,
-    /RUNNER_URL: \$\{HYPE_COMMS_X64_RUNNER_URL:-https:\/\/github\.com\/hype-comms\/hype-comms\}/u,
+    /RUNNER_URL: \$\{HYPE_COMMS_X64_RUNNER_URL:-https:\/\/github\.com\/hypothetical-money-machine\/hype-comms\}/u,
   );
   assert.match(compose, /RUNNER_GROUP: \$\{HYPE_COMMS_X64_RUNNER_GROUP:-\}/u);
+  assert.match(compose, /RUNNER_LABELS: \$\{HYPE_COMMS_X64_RUNNER_LABELS:-hype-ci\}/u);
   assert.match(
     compose,
-    /RUNNER_LABELS: \$\{HYPE_COMMS_X64_RUNNER_LABELS:-hype-comms-release,docker\}/u,
+    /RUNNER_URL: \$\{HYPE_COMMS_ARM64_RUNNER_URL:-https:\/\/github\.com\/hypothetical-money-machine\/hype-comms\}/u,
   );
 
   assert.match(entrypoint, /config_args=\(/u);

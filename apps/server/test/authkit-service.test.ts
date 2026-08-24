@@ -7,8 +7,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import type { AuthKitIdentityProvider } from "../src/modules/identity/authkit-provider.js";
 import {
+  AuthKitIdentityRejectedError,
+  AuthKitProviderUnavailableError,
+  type AuthKitIdentityProvider,
+} from "../src/modules/identity/authkit-provider.js";
+import {
+  AuthKitAdmissionDeniedError,
   AuthKitCredentialRejectedError,
   type AuthKitRepository,
 } from "../src/modules/identity/authkit-repository.js";
@@ -38,6 +43,7 @@ const currentUser: CurrentUser = {
     username: "owner",
     displayName: "Owner",
     avatarUrl: null,
+    title: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
   },
@@ -192,10 +198,9 @@ describe("AuthKitService", () => {
       desktopState: DESKTOP_STATE,
       desktopAuthVariant: "production",
     });
-    await expect(service.completeCallback(input)).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
-      message: "Authentication could not be completed",
+    await expect(service.completeCallback(input)).resolves.toEqual({
+      kind: "error",
+      failureCategory: "internal",
     });
 
     expect(consumeTransaction).toHaveBeenCalledTimes(2);
@@ -249,6 +254,73 @@ describe("AuthKitService", () => {
       }),
     ).resolves.toEqual({
       kind: "error",
+      failureCategory: "internal",
+      desktopState: DESKTOP_STATE,
+      desktopAuthVariant: "production",
+    });
+  });
+
+  it.each([
+    ["identity_rejected", new AuthKitIdentityRejectedError()],
+    ["provider_unavailable", new AuthKitProviderUnavailableError()],
+  ] as const)(
+    "classifies %s callback failures without exposing provider details",
+    async (category, error) => {
+      const service = new AuthKitService({
+        provider: {
+          createAuthorization: vi.fn(),
+          authenticateCode: vi.fn().mockRejectedValue(error),
+          createLogoutUrl: vi.fn(),
+          listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+        },
+        repository: repositoryWith({ consumeTransaction: vi.fn().mockResolvedValue(transaction) }),
+        now: () => NOW,
+      });
+
+      await expect(
+        service.completeCallback({
+          kind: "success",
+          code: PROVIDER_CODE,
+          providerState: PROVIDER_STATE,
+        }),
+      ).resolves.toEqual({
+        kind: "error",
+        failureCategory: category,
+        desktopState: DESKTOP_STATE,
+        desktopAuthVariant: "production",
+      });
+    },
+  );
+
+  it("classifies local admission failures without exposing identity details", async () => {
+    const service = new AuthKitService({
+      provider: {
+        createAuthorization: vi.fn(),
+        authenticateCode: vi.fn().mockResolvedValue({
+          provider: "workos",
+          subject: "user_01ABC",
+          verifiedEmail: "member@example.com",
+          providerSessionId: "session_01ABC",
+        }),
+        createLogoutUrl: vi.fn(),
+        listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+      },
+      repository: repositoryWith({
+        consumeTransaction: vi.fn().mockResolvedValue(transaction),
+        admitIdentity: vi.fn().mockRejectedValue(new AuthKitAdmissionDeniedError()),
+      }),
+      now: () => NOW,
+    });
+
+    await expect(
+      service.completeCallback({
+        kind: "success",
+        code: PROVIDER_CODE,
+        providerState: PROVIDER_STATE,
+      }),
+    ).resolves.toEqual({
+      kind: "error",
+      failureCategory: "admission_denied",
       desktopState: DESKTOP_STATE,
       desktopAuthVariant: "production",
     });
@@ -741,6 +813,103 @@ describe("AuthKit routes", () => {
       payload,
       signature: "signed-test-payload",
     });
+  });
+
+  it("redirects a consume-miss, including replay, to the desktop error callback", async () => {
+    const authenticateCode = vi.fn().mockResolvedValue({
+      provider: "workos",
+      subject: "user_01ABC",
+      verifiedEmail: "member@example.com",
+      providerSessionId: "session_01ABC",
+    });
+    const consumeTransaction = vi
+      .fn()
+      .mockResolvedValueOnce(transaction)
+      .mockResolvedValueOnce(null);
+    const admitIdentity = vi.fn().mockResolvedValue({
+      handoffCode: HANDOFF_CODE,
+      expiresAt: new Date(NOW.getTime() + 5 * 60_000),
+    });
+    const service = new AuthKitService({
+      provider: {
+        createAuthorization: vi.fn(),
+        authenticateCode,
+        createLogoutUrl: vi.fn(),
+        listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+      },
+      repository: repositoryWith({ consumeTransaction, admitIdentity }),
+      now: () => NOW,
+    });
+    const identity = new FakeIdentityService();
+    const app = await buildApp({
+      identity: {
+        service: identity.asService(),
+        authKitAdmissionEnabled: true,
+        authKitService: service,
+      },
+    });
+    apps.push(app);
+    const callbackUrl = `/v1/auth/workos/callback?code=${PROVIDER_CODE}&state=${PROVIDER_STATE}`;
+
+    const admitted = await app.inject({ method: "GET", url: callbackUrl });
+    const replayed = await app.inject({ method: "GET", url: callbackUrl });
+
+    expect(admitted.statusCode).toBe(302);
+    expect(admitted.headers.location).toBe(
+      `hype-comms://auth/callback?code=${HANDOFF_CODE}&state=${DESKTOP_STATE}`,
+    );
+    expect(replayed.statusCode).toBe(302);
+    expect(replayed.headers.location).toBe(
+      "hype-comms://auth/callback?error=authentication_failed",
+    );
+    expect(replayed.headers["cache-control"]).toBe("no-store");
+    expect(replayed.headers["referrer-policy"]).toBe("no-referrer");
+    expect(replayed.headers["content-type"] ?? "").not.toContain("application/json");
+    expect(replayed.body).not.toContain("FORBIDDEN");
+    expect(replayed.body).not.toContain("Authentication could not be completed");
+    expect(consumeTransaction).toHaveBeenCalledTimes(2);
+    expect(authenticateCode).toHaveBeenCalledOnce();
+    expect(admitIdentity).toHaveBeenCalledOnce();
+  });
+
+  it("redirects a first-call consume-miss without rendering FORBIDDEN JSON", async () => {
+    const authenticateCode = vi.fn();
+    const service = new AuthKitService({
+      provider: {
+        createAuthorization: vi.fn(),
+        authenticateCode,
+        createLogoutUrl: vi.fn(),
+        listActiveSessionIds: vi.fn().mockResolvedValue(new Set()),
+      },
+      repository: repositoryWith({ consumeTransaction: vi.fn().mockResolvedValue(null) }),
+      now: () => NOW,
+    });
+    const identity = new FakeIdentityService();
+    const app = await buildApp({
+      identity: {
+        service: identity.asService(),
+        authKitAdmissionEnabled: true,
+        authKitService: service,
+      },
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/auth/workos/callback?code=${PROVIDER_CODE}&state=${PROVIDER_STATE}`,
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(
+      "hype-comms://auth/callback?error=authentication_failed",
+    );
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    expect(response.headers["x-request-id"]).toEqual(expect.any(String));
+    expect(response.headers["content-type"] ?? "").not.toContain("application/json");
+    expect(response.body).not.toContain("FORBIDDEN");
+    expect(response.body).not.toContain("Authentication could not be completed");
+    expect(authenticateCode).not.toHaveBeenCalled();
   });
 
   it("uses one fixed credential-free custom callback and hides provider cancellation details", async () => {

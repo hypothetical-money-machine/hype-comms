@@ -23,6 +23,7 @@ import {
   type EntityId,
   type Invitation,
   type IsoDateTime,
+  type MemberTitle,
   type MembershipStatus,
   type User,
   type Workspace,
@@ -33,6 +34,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
 
 import { withTransaction } from "../../db/pool.js";
+import { ApiError } from "../../errors.js";
 import { insertSyncEvent } from "../workspace/sync-events.js";
 
 interface UserRow extends QueryResultRow {
@@ -42,6 +44,7 @@ interface UserRow extends QueryResultRow {
   readonly username: unknown;
   readonly display_name: unknown;
   readonly avatar_url: unknown;
+  readonly title: unknown;
   readonly created_at: unknown;
   readonly updated_at: unknown;
 }
@@ -52,6 +55,7 @@ interface AgentRow extends QueryResultRow {
   readonly username: unknown;
   readonly display_name: unknown;
   readonly avatar_url: unknown;
+  readonly title: unknown;
   readonly user_created_at: unknown;
   readonly user_updated_at: unknown;
   readonly created_by: unknown;
@@ -77,6 +81,7 @@ interface AuthenticatedAgentRow extends QueryResultRow {
   readonly username: unknown;
   readonly display_name: unknown;
   readonly avatar_url: unknown;
+  readonly title: unknown;
   readonly user_created_at: unknown;
   readonly user_updated_at: unknown;
   readonly role: unknown;
@@ -281,6 +286,7 @@ function mapPublicUser(row: UserRow): User {
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
+    title: row.title,
     createdAt: timestamp(row.created_at),
     updatedAt: timestamp(row.updated_at),
   });
@@ -301,6 +307,7 @@ function mapAgent(row: AgentRow): Agent {
       username: row.username,
       displayName: row.display_name,
       avatarUrl: row.avatar_url,
+      title: row.title,
       createdAt: timestamp(row.user_created_at),
       updatedAt: timestamp(row.user_updated_at),
     },
@@ -440,7 +447,7 @@ export class IdentityRepository {
 
   async findUserById(id: EntityId): Promise<IdentityUser | null> {
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, title, created_at, updated_at
          FROM users
         WHERE id = $1 AND kind = 'human'`,
       [id],
@@ -451,7 +458,7 @@ export class IdentityRepository {
   async findUserByEmail(email: Email): Promise<IdentityUser | null> {
     const normalizedEmail = emailSchema.parse(email);
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, title, created_at, updated_at
          FROM users
         WHERE email = $1`,
       [normalizedEmail],
@@ -461,7 +468,7 @@ export class IdentityRepository {
 
   async findUserByUsername(username: string): Promise<User | null> {
     const result = await this.#database.query<UserRow>(
-      `SELECT id, email, kind, username, display_name, avatar_url, created_at, updated_at
+      `SELECT id, email, kind, username, display_name, avatar_url, title, created_at, updated_at
          FROM users
         WHERE username = $1`,
       [username],
@@ -483,6 +490,41 @@ export class IdentityRepository {
       ],
     );
     return mapUser(result.rows[0] as UserRow);
+  }
+
+  /** Updates one active member's display-only title and invalidates every member directory. */
+  async updateMemberTitle(
+    workspaceId: EntityId,
+    userId: EntityId,
+    title: MemberTitle | null,
+  ): Promise<User> {
+    const client = this.#requireTransactionalClient("updateMemberTitle");
+    const result = await this.#database.query<UserRow>(
+      `UPDATE users AS user_account
+          SET title = $3,
+              updated_at = clock_timestamp()
+         FROM workspace_memberships AS membership
+        WHERE user_account.id = $2
+          AND membership.workspace_id = $1
+          AND membership.user_id = user_account.id
+          AND membership.status = 'active'
+          AND user_account.kind = 'human'
+      RETURNING user_account.id, user_account.email, user_account.kind, user_account.username,
+                user_account.display_name, user_account.avatar_url, user_account.title,
+                user_account.created_at, user_account.updated_at`,
+      [workspaceId, userId, title],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new ApiError(401, "UNAUTHORIZED", "Sign in to continue");
+    const user = mapPublicUser(row);
+    await insertSyncEvent(client, {
+      workspaceId,
+      actorUserId: userId,
+      type: "member.updated",
+      conversationId: null,
+      payload: { member: user },
+    });
+    return user;
   }
 
   async findWorkspaceById(id: EntityId): Promise<Workspace | null> {
@@ -1024,6 +1066,7 @@ export class IdentityRepository {
               user_account.username,
               user_account.display_name,
               user_account.avatar_url,
+              user_account.title,
               user_account.created_at AS user_created_at,
               user_account.updated_at AS user_updated_at,
               agent.created_by,
@@ -1044,6 +1087,7 @@ export class IdentityRepository {
               user_account.username,
               user_account.display_name,
               user_account.avatar_url,
+              user_account.title,
               user_account.created_at AS user_created_at,
               user_account.updated_at AS user_updated_at,
               agent.created_by,
@@ -1172,6 +1216,7 @@ export class IdentityRepository {
               user_account.username,
               user_account.display_name,
               user_account.avatar_url,
+              user_account.title,
               user_account.created_at AS user_created_at,
               user_account.updated_at AS user_updated_at,
               membership.role,

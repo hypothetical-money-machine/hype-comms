@@ -185,6 +185,20 @@ const messageCreatedEvent: WorkspaceEvent = {
   payload: { message: messageSequence2, mentionedUserIds: [MORGAN_ID] },
 };
 
+const messageRetractedEvent: WorkspaceEvent = {
+  version: 1,
+  id: "10000000-0000-4000-8000-000000000066",
+  type: "message.retracted",
+  occurredAt: NOW,
+  workspaceId: WORKSPACE_ID,
+  conversationId: ALPHA_ID,
+  workspaceSequence: "9",
+  conversationSequence: "2",
+  entityVersion: 2,
+  delivery: "at_least_once",
+  payload: { messageId: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW },
+};
+
 const readCursorEvent: WorkspaceEvent = {
   version: 1,
   id: "10000000-0000-4000-8000-000000000062",
@@ -499,6 +513,68 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.bootstrap).toBeNull();
     expect(state.messages.map((message) => message.id)).toEqual([MESSAGE_SEQUENCE_2_ID]);
     expect(state.syncCursor).toBe("7");
+  });
+
+  it("applies a message.retracted tombstone and refuses to resurrect the body", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
+
+    const retracted = await cache.load();
+    expect(retracted.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        body: "Message 2",
+        deletedAt: NOW,
+        version: 2,
+      }),
+    ]);
+    const alpha = retracted.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha?.lastMessage).toMatchObject({
+      id: MESSAGE_SEQUENCE_2_ID,
+      body: "Message 2",
+      deletedAt: NOW,
+    });
+
+    await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2])).resolves.toBe(true);
+    const afterHistory = await cache.load();
+    expect(afterHistory.messages[0]).toMatchObject({
+      id: MESSAGE_SEQUENCE_2_ID,
+      body: "Message 2",
+      deletedAt: NOW,
+    });
+  });
+
+  it("does not let stale history resurrect a source-less message.retracted event", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+
+    const reserved = await cache.load();
+    expect(reserved.messages).toEqual([]);
+    expect(reserved.syncCursor).toBe("9");
+    expect(reserved.retractReservations).toEqual([
+      {
+        messageId: MESSAGE_SEQUENCE_2_ID,
+        deletedAt: NOW,
+        entityVersion: 2,
+      },
+    ]);
+
+    await expect(cache.upsertHistory(ALPHA_ID, [messageSequence2])).resolves.toBe(true);
+    const afterHistory = await cache.load();
+    expect(afterHistory.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        body: "Message 2",
+        deletedAt: NOW,
+        version: 2,
+      }),
+    ]);
   });
 
   it("counts an unread mention once and rejects the duplicate event", async () => {
@@ -1043,6 +1119,28 @@ describe("PersistentWorkspaceCache durability", () => {
     expect(state.tasks).toEqual([]);
     expect(state.outbox).toEqual([]);
     expect(state.repairMarker?.conversationId).toBe(ALPHA_ID);
+  });
+
+  it("keeps a source-less retract reservation durable across reopen", async () => {
+    const first = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await first.replaceSnapshot(snapshot, []);
+    await first.applyEvent(messageRetractedEvent);
+
+    const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    expect((await reopened.load()).retractReservations).toEqual([
+      {
+        messageId: MESSAGE_SEQUENCE_2_ID,
+        deletedAt: NOW,
+        entityVersion: 2,
+      },
+    ]);
+    await expect(reopened.upsertHistory(ALPHA_ID, [messageSequence2])).resolves.toBe(true);
+    expect((await reopened.load()).messages[0]).toMatchObject({
+      id: MESSAGE_SEQUENCE_2_ID,
+      body: "Message 2",
+      deletedAt: NOW,
+      version: 2,
+    });
   });
 
   it("finishes a staged self-removal purge before exposing a reopened cache", async () => {

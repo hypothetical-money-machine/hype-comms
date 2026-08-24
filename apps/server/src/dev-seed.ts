@@ -184,6 +184,7 @@ function currentUser(
       username: user.username,
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
+      title: user.title,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     },

@@ -120,4 +120,6 @@ test("maps build flavors to separate native package identities", async () => {
   assert.equal(production.mac.hardenedRuntime, true);
   assert.equal(production.mac.identity, undefined);
   assert.equal(production.mac.notarize, true);
+  assert.equal(production.win.azureSignOptions, undefined);
+  assert.equal(production.win.forceCodeSigning, undefined);
 });

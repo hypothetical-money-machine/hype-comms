@@ -11,6 +11,7 @@ import {
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
   requestMagicLinkSchema,
+  type AuthenticatedSessionContext,
   type ChatSessionState,
   type AuthCapabilities,
   type AuthKitLogoutUrl,
@@ -86,18 +87,23 @@ function isCredentialRefusal(status: number): boolean {
 }
 
 /** Neither outcome is a verdict on the credential, so both keep it and invite a retry. */
-function unavailableState(status: "unreachable" | "failed"): SessionUnavailableState {
+function unavailableState(
+  status: "unreachable" | "failed",
+  lastAuthenticatedSession?: AuthenticatedSessionContext,
+): SessionUnavailableState {
   if (status === "unreachable") {
     return {
       status: "session-unavailable",
       reason: "server_unreachable",
       message: SESSION_UNREACHABLE_MESSAGE,
+      ...(lastAuthenticatedSession === undefined ? {} : { lastAuthenticatedSession }),
     };
   }
   return {
     status: "session-unavailable",
     reason: "server_error",
     message: SESSION_SERVER_ERROR_MESSAGE,
+    ...(lastAuthenticatedSession === undefined ? {} : { lastAuthenticatedSession }),
   };
 }
 
@@ -108,6 +114,22 @@ export interface SessionCookieStore {
   }) => Promise<SessionCookie[]>;
   readonly remove: (url: string, name: string) => Promise<void>;
 }
+
+/** Main-owned durable identity context, matched against the exact protected credential. */
+export interface AuthenticatedSessionContextPersistence {
+  readonly load: (credential: string) => Promise<AuthenticatedSessionContext | null>;
+  readonly replace: (input: {
+    readonly credential: string;
+    readonly session: AuthenticatedSessionContext;
+  }) => Promise<void>;
+  readonly clear: () => Promise<void>;
+}
+
+const emptyAuthenticatedSessionContexts: AuthenticatedSessionContextPersistence = {
+  load: async () => null,
+  replace: async () => undefined,
+  clear: async () => undefined,
+};
 
 export type SessionFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -136,6 +158,7 @@ export class ChatSession {
   readonly #authVariant: DesktopAuthVariant;
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
+  readonly #contexts: AuthenticatedSessionContextPersistence;
   readonly #identitySessionUrl: string;
   readonly #authCapabilitiesUrl: string;
   readonly #authHandoffExchangeUrl: string;
@@ -146,6 +169,7 @@ export class ChatSession {
   readonly #listeners = new Set<(state: ChatSessionState) => void>();
   #mutation: Promise<void> = Promise.resolve();
   #state: ChatSessionState = { status: "signed-out" };
+  #cacheAuthorizationActive = false;
   #renewalTimer: ReturnType<typeof setTimeout> | null = null;
   #renewalFailures = 0;
   #logoutUrl: AuthKitLogoutUrl | null = null;
@@ -155,11 +179,13 @@ export class ChatSession {
     authVariant: DesktopAuthVariant;
     cookies: SessionCookieStore;
     request: SessionFetch;
+    contexts?: AuthenticatedSessionContextPersistence;
   }) {
     this.#apiOrigin = options.apiOrigin;
     this.#authVariant = desktopAuthVariantSchema.parse(options.authVariant);
     this.#cookies = options.cookies;
     this.#request = options.request;
+    this.#contexts = options.contexts ?? emptyAuthenticatedSessionContexts;
     this.#identitySessionUrl = createIdentitySessionUrl(options.apiOrigin);
     this.#authCapabilitiesUrl = createAuthCapabilitiesUrl(options.apiOrigin);
     this.#authHandoffExchangeUrl = createAuthHandoffExchangeUrl(options.apiOrigin);
@@ -171,6 +197,11 @@ export class ChatSession {
 
   get state(): ChatSessionState {
     return this.#state;
+  }
+
+  /** Main-process-only state from which cache IPC may derive an authorized scope. */
+  get cacheAuthorizationState(): ChatSessionState | null {
+    return this.#cacheAuthorizationActive ? this.#state : null;
   }
 
   get apiOrigin(): string {
@@ -204,26 +235,36 @@ export class ChatSession {
   async #restore(): Promise<ChatSessionState> {
     let probe = await this.#probeIdentity();
     // A `401` gets exactly one credential rotation before this device pauses for login.
-    if (probe.status === "expired" && (await this.#rotateSession())) {
-      probe = await this.#probeIdentity();
+    if (probe.status === "expired") {
+      const previousContext = await this.#loadAuthenticatedContext();
+      if (await this.#rotateSession()) {
+        if (previousContext !== null) await this.#rememberAuthenticatedContext(previousContext);
+        probe = await this.#probeIdentity();
+      }
     }
 
     switch (probe.status) {
       case "identified": {
-        this.#applySignedIn(probe.identity);
+        const context = this.#contextFor(probe.identity);
+        await this.#rememberAuthenticatedContext(context);
+        this.#applySignedIn(context);
         await this.#scheduleRenewal();
         return this.#state;
       }
       case "expired": {
         // The only outcome that discards a stored credential: the service refused it.
         this.#stopRenewal();
+        this.#revokeCacheAuthorization();
         await this.#clearCookie(IDENTITY_COOKIE_NAME);
+        await this.#clearAuthenticatedContext();
         this.#setState({ status: "signed-out" });
         return this.#state;
       }
       default: {
         // Unreachable or answering unusably. Neither says the credential is bad, so it stays.
-        this.#setState(unavailableState(probe.status));
+        const context = await this.#loadAuthenticatedContext();
+        this.#cacheAuthorizationActive = context !== null;
+        this.#setState(unavailableState(probe.status, context ?? undefined));
         return this.#state;
       }
     }
@@ -258,15 +299,22 @@ export class ChatSession {
       : { status: "failed" };
   }
 
-  #applySignedIn(identity: CurrentUser): void {
-    this.#logoutUrl = null;
-    this.#setState({
-      status: "signed-in",
+  #contextFor(identity: CurrentUser): AuthenticatedSessionContext {
+    return {
       method: "email",
       name: identity.user.displayName,
       email: identity.email,
       userId: identity.user.id,
       workspaceId: identity.workspaceId,
+    };
+  }
+
+  #applySignedIn(context: AuthenticatedSessionContext): void {
+    this.#logoutUrl = null;
+    this.#cacheAuthorizationActive = true;
+    this.#setState({
+      status: "signed-in",
+      ...context,
     });
   }
 
@@ -354,6 +402,7 @@ export class ChatSession {
 
   async #exchangeAuthKitHandoff(input: ExchangeAuthHandoffRequest): Promise<ChatSessionState> {
     const handoff = exchangeAuthHandoffRequestSchema.parse(input);
+    const precedingCacheCredential = await this.#readAuthorizedCacheCredential();
     let response: Response;
     try {
       response = await this.#fetch(this.#authHandoffExchangeUrl, {
@@ -368,19 +417,27 @@ export class ChatSession {
       return this.#failAuthKitSignIn();
     }
 
+    // The response may already have replaced the jar credential. Revoke the predecessor scope
+    // before parsing or protected persistence yields so it can never authorize cache access for
+    // the replacement credential.
+    this.#revokeCacheAuthorization();
     let identity: CurrentUser;
     try {
       identity = currentUserSchema.parse(await response.json());
     } catch {
-      return this.#failAuthKitSignIn();
+      await this.#restoreCacheAuthorizationIfCredentialUnchanged(precedingCacheCredential);
+      throw new ChatSessionError(AUTHKIT_FAILED_MESSAGE);
     }
-    this.#applySignedIn(identity);
+    const context = this.#contextFor(identity);
+    await this.#rememberAuthenticatedContext(context);
+    this.#applySignedIn(context);
     await this.#scheduleRenewal();
     return this.#state;
   }
 
   reportAuthKitFailure(): void {
     if (this.#state.status !== "signed-in") {
+      this.#revokeCacheAuthorization();
       this.#setState({ status: "signed-out", message: AUTHKIT_FAILED_MESSAGE });
     }
   }
@@ -400,6 +457,7 @@ export class ChatSession {
       return this.#rejectMagicLink();
     }
 
+    const precedingCacheCredential = await this.#readAuthorizedCacheCredential();
     let response: Response;
     try {
       response = await this.#fetch(this.#identitySessionUrl, {
@@ -423,23 +481,35 @@ export class ChatSession {
         : this.#failMagicLink("failed");
     }
 
+    // A successful exchange can replace the cookie before its identity body is validated. Drop
+    // the predecessor's authorization immediately; only a new credential-bound record can reopen
+    // a cache from this point.
+    this.#revokeCacheAuthorization();
     let identity: CurrentUser;
     try {
       identity = currentUserSchema.parse(await response.json());
     } catch {
       // The exchange may well have succeeded; a body this device cannot read is not a refusal.
+      await this.#restoreCacheAuthorizationIfCredentialUnchanged(precedingCacheCredential);
       return this.#failMagicLink("failed");
     }
 
-    this.#applySignedIn(identity);
+    const context = this.#contextFor(identity);
+    await this.#rememberAuthenticatedContext(context);
+    this.#applySignedIn(context);
     await this.#scheduleRenewal();
     return this.#state;
   }
 
-  /** The service refused the link: the only exchange outcome that discards the credential. */
+  /** The service refused the link. An active identity is never evidence that it has expired. */
   async #rejectMagicLink(): Promise<never> {
+    if (this.#state.status === "signed-in") {
+      throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
+    }
     this.#stopRenewal();
+    this.#revokeCacheAuthorization();
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
+    await this.#clearAuthenticatedContext();
     this.#setState({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
   }
@@ -449,8 +519,12 @@ export class ChatSession {
    * left untouched, so a retry can still recover the session this device already had.
    */
   #failMagicLink(status: "unreachable" | "failed"): never {
-    const state = unavailableState(status);
-    this.#setState(state);
+    // The context rides along so a cold offline start can open the credential-bound cache.
+    const state = unavailableState(status, this.#authenticatedContextFromState() ?? undefined);
+    // A deep-link exchange is allowed to change this session only after it returns a new signed-in
+    // identity or an explicit 401 refusal. Keeping an active state here also keeps its realtime,
+    // cache, and notification scopes alive when the server did not reach a verdict on the link.
+    if (this.#state.status !== "signed-in") this.#setState(state);
     throw new ChatSessionError(state.message);
   }
 
@@ -460,9 +534,11 @@ export class ChatSession {
 
   async #signOut(): Promise<ChatSessionState> {
     this.#stopRenewal();
+    this.#revokeCacheAuthorization();
     this.#logoutUrl = null;
     const logoutUrl = await this.#deleteSession(this.#identitySessionUrl);
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
+    await this.#clearAuthenticatedContext();
     this.#logoutUrl = logoutUrl;
     this.#setState({ status: "signed-out" });
     return this.#state;
@@ -490,8 +566,10 @@ export class ChatSession {
       return;
     }
 
+    const context = this.#authenticatedContextFromState();
     if (await this.#rotateSession()) {
       this.#renewalFailures = 0;
+      if (context !== null) await this.#rememberAuthenticatedContext(context);
       await this.#scheduleRenewal();
       return;
     }
@@ -560,6 +638,86 @@ export class ChatSession {
     }
   }
 
+  #authenticatedContextFromState(): AuthenticatedSessionContext | null {
+    if (this.#state.status === "signed-in") {
+      const { method, name, email, userId, workspaceId } = this.#state;
+      return { method, name, email, userId, workspaceId };
+    }
+    return this.#state.status === "session-unavailable"
+      ? (this.#state.lastAuthenticatedSession ?? null)
+      : null;
+  }
+
+  async #readIdentityCredential(): Promise<string | null> {
+    try {
+      const cookies = await this.#cookies.get({
+        url: this.#apiOrigin,
+        name: IDENTITY_COOKIE_NAME,
+      });
+      const credential = cookies.find((cookie) => cookie.name === IDENTITY_COOKIE_NAME)?.value;
+      return credential === undefined || credential === "" ? null : credential;
+    } catch {
+      return null;
+    }
+  }
+
+  async #readAuthorizedCacheCredential(): Promise<string | null> {
+    return this.#cacheAuthorizationActive ? this.#readIdentityCredential() : null;
+  }
+
+  #revokeCacheAuthorization(): void {
+    this.#cacheAuthorizationActive = false;
+  }
+
+  async #restoreCacheAuthorizationIfCredentialUnchanged(
+    precedingCredential: string | null,
+  ): Promise<void> {
+    const context = this.#authenticatedContextFromState();
+    const currentCredential = await this.#readIdentityCredential();
+    if (
+      context !== null &&
+      precedingCredential !== null &&
+      currentCredential === precedingCredential
+    ) {
+      this.#cacheAuthorizationActive = true;
+      return;
+    }
+    await this.#clearAuthenticatedContext();
+  }
+
+  async #loadAuthenticatedContext(): Promise<AuthenticatedSessionContext | null> {
+    const credential = await this.#readIdentityCredential();
+    if (credential === null) return null;
+    try {
+      return await this.#contexts.load(credential);
+    } catch {
+      return null;
+    }
+  }
+
+  async #rememberAuthenticatedContext(session: AuthenticatedSessionContext): Promise<void> {
+    const credential = await this.#readIdentityCredential();
+    if (credential === null) {
+      await this.#clearAuthenticatedContext();
+      return;
+    }
+    try {
+      await this.#contexts.replace({ credential, session });
+    } catch {
+      // Online authentication remains usable. Offline cache selection fails closed until a later
+      // validated identity can persist a record successfully.
+      await this.#clearAuthenticatedContext();
+    }
+  }
+
+  async #clearAuthenticatedContext(): Promise<void> {
+    try {
+      await this.#contexts.clear();
+    } catch {
+      // Removing the cookie still breaks the credential binding; stale context is never exposed.
+    }
+  }
+
   async #deleteSession(url: string): Promise<AuthKitLogoutUrl | null> {
     try {
       const response = await this.#fetch(url, { method: "DELETE" });
@@ -584,6 +742,9 @@ export class ChatSession {
 
   /** Authenticated request against the chat API. Redirects are refused, cookies are included. */
   async fetch(url: string, init: RequestInit = {}): Promise<Response> {
+    if (this.#state.status === "session-unavailable") {
+      throw new ChatSessionError("Workspace requests require a validated session");
+    }
     return this.#fetch(url, init);
   }
 
@@ -598,10 +759,15 @@ export class ChatSession {
   }
 
   /** Marks the session as ended after the server rejects an authenticated request. */
-  markSignedOut(): void {
-    this.#stopRenewal();
-    if (this.#state.status !== "signed-out") {
-      this.#setState({ status: "signed-out" });
-    }
+  markSignedOut(): Promise<void> {
+    return this.#runMutation(async () => {
+      this.#stopRenewal();
+      this.#revokeCacheAuthorization();
+      await this.#clearCookie(IDENTITY_COOKIE_NAME);
+      await this.#clearAuthenticatedContext();
+      if (this.#state.status !== "signed-out") {
+        this.#setState({ status: "signed-out" });
+      }
+    });
   }
 }

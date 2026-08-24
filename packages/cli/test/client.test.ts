@@ -1,23 +1,86 @@
-import { describe, expect, it, vi } from "vitest";
+import { createServer, type Server } from "node:http";
+import { constants, createGzip, gzipSync } from "node:zlib";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { ApiClient } from "../src/client.js";
+import { ApiClient, RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
 import { CliError, EXIT_API, EXIT_CONTRACT, EXIT_TRANSIENT } from "../src/errors.js";
 import { jsonResponse } from "./helpers.js";
 
-function client(fetch: typeof globalThis.fetch): ApiClient {
+const servers: Server[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    servers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => (error === undefined ? resolve() : reject(error)));
+        }),
+    ),
+  );
+});
+
+function client(
+  fetch: typeof globalThis.fetch,
+  apiOrigin = "https://chat.example.test",
+): ApiClient {
   return new ApiClient({
     profile: {
       name: "test",
-      apiOrigin: "https://chat.example.test",
+      apiOrigin,
       credential: { kind: "agent", token: `hype_comms_agent_${"a".repeat(43)}` },
-      credentialOrigin: "https://chat.example.test",
+      credentialOrigin: apiOrigin,
       credentialFromEnvironment: true,
       configDirectory: "/unused",
     },
     fetch,
     timeoutMs: 1_000,
   });
+}
+
+function jsonBodyOfByteLength(length: number): string {
+  const prefix = '{"payload":"';
+  const suffix = '"}';
+  return `${prefix}${"a".repeat(length - prefix.length - suffix.length)}${suffix}`;
+}
+
+function streamedResponse(
+  body: string,
+  splitAt: number,
+): {
+  readonly response: Response;
+  readonly wasCancelled: () => boolean;
+} {
+  const bytes = new TextEncoder().encode(body);
+  let index = 0;
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index === 0) {
+        index += 1;
+        controller.enqueue(bytes.subarray(0, splitAt));
+      } else if (index === 1) {
+        index += 1;
+        controller.enqueue(bytes.subarray(splitAt));
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return {
+    response: new Response(stream, { headers: { "content-type": "application/json" } }),
+    wasCancelled: () => cancelled,
+  };
+}
+
+async function listen(server: Server): Promise<string> {
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("Missing test address");
+  return `http://127.0.0.1:${address.port}`;
 }
 
 describe("ApiClient", () => {
@@ -182,5 +245,103 @@ describe("ApiClient", () => {
         responseSchema: z.object({ ok: z.literal(true) }).strict(),
       }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT });
+  });
+
+  it("accepts a response exactly at the byte limit", async () => {
+    const value = client(
+      vi.fn<typeof globalThis.fetch>(async () =>
+        jsonResponse(JSON.parse(jsonBodyOfByteLength(RESPONSE_BODY_MAX_BYTES)) as unknown),
+      ),
+    );
+
+    await expect(
+      value.request({
+        path: "/v1/example",
+        responseSchema: z.object({ payload: z.string() }).strict(),
+      }),
+    ).resolves.toMatchObject({ payload: expect.any(String) });
+  });
+
+  it("cancels an uncompressed response one byte over the limit", async () => {
+    const oversized = streamedResponse(
+      jsonBodyOfByteLength(RESPONSE_BODY_MAX_BYTES + 1),
+      RESPONSE_BODY_MAX_BYTES,
+    );
+    const value = client(vi.fn<typeof globalThis.fetch>(async () => oversized.response));
+
+    await expect(
+      value.request({ path: "/v1/example", responseSchema: z.object({ payload: z.string() }) }),
+    ).rejects.toMatchObject({
+      exitCode: EXIT_CONTRACT,
+      code: "INVALID_SERVER_CONTRACT",
+      retryable: false,
+    });
+    expect(oversized.wasCancelled()).toBe(true);
+  });
+
+  it("bounds a compressed success response before its full decompressed body is read", async () => {
+    const chunk = Buffer.alloc(64 * 1_024, "a");
+    const expandedSize = RESPONSE_BODY_MAX_BYTES * 2;
+    let decompressedBytesSent = 0;
+    let responseClosed: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      responseClosed = resolve;
+    });
+    const server = createServer((_request, response) => {
+      response.writeHead(200, {
+        "content-encoding": "gzip",
+        "content-type": "application/json",
+      });
+      const gzip = createGzip();
+      gzip.pipe(response);
+      response.once("close", () => {
+        gzip.destroy();
+        responseClosed?.();
+      });
+      const writeChunk = (): void => {
+        if (decompressedBytesSent >= expandedSize) {
+          gzip.end('"}');
+          return;
+        }
+        decompressedBytesSent += chunk.byteLength;
+        gzip.write(decompressedBytesSent === chunk.byteLength ? '{"payload":"' : chunk, () => {
+          gzip.flush(constants.Z_SYNC_FLUSH, () => setTimeout(writeChunk, 1));
+        });
+      };
+      writeChunk();
+    });
+    const origin = await listen(server);
+
+    await expect(
+      client(globalThis.fetch, origin).request({
+        path: "/success",
+        responseSchema: z.object({ payload: z.string() }).strict(),
+      }),
+    ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, retryable: false });
+    await closed;
+    expect(decompressedBytesSent).toBeLessThan(expandedSize);
+    expect(decompressedBytesSent).toBeLessThanOrEqual(
+      RESPONSE_BODY_MAX_BYTES + 4 * chunk.byteLength,
+    );
+  });
+
+  it("treats an oversized compressed error response as a non-retryable contract error", async () => {
+    const server = createServer((_request, response) => {
+      const body = jsonBodyOfByteLength(RESPONSE_BODY_MAX_BYTES + 1);
+      response.writeHead(503, {
+        "content-encoding": "gzip",
+        "content-type": "application/json",
+      });
+      response.end(gzipSync(body));
+    });
+    const origin = await listen(server);
+
+    await expect(
+      client(globalThis.fetch, origin).request({ path: "/error", responseSchema: z.unknown() }),
+    ).rejects.toMatchObject({
+      exitCode: EXIT_CONTRACT,
+      code: "INVALID_SERVER_CONTRACT",
+      retryable: false,
+    });
   });
 });

@@ -514,7 +514,9 @@ review.
 
 Every `BrowserWindow` disables Node integration, enables context isolation, sandboxing, and
 web security, and uses a fixed local preload. Navigation and new windows are denied;
-allowlisted `https:` links open in the system browser after URL validation. The production
+allowlisted `https:` links open in the system browser after URL validation, and validated
+RFC 6068 `mailto:` links open the operating system's mail composer through the same
+single main-process handoff; every other scheme is dropped. The production
 CSP defaults to `default-src 'self'`, forbids object/embed content and inline/eval scripts,
 and sets `connect-src 'self'` because only main performs product networking. Remote renderer
 code, Electron `remote`, arbitrary IPC, shell execution, and generic filesystem/network
@@ -652,19 +654,22 @@ service and reported alongside error rates rather than inferred from anecdotes.
 
 ## Signing, distribution, and compatibility
 
-Pull requests build DEV smoke packages on native self-hosted runners: macOS packages are ad-hoc
-signed, while Windows and Linux packages remain unsigned. Only a version tag on `main` whose name
-matches the desktop package version may invoke release jobs and credentials.
+Pull requests build DEV smoke packages on disposable GitHub-hosted ARM64 macOS, Windows, and Linux
+runners: macOS packages are ad-hoc signed, while Windows and Linux packages remain unsigned.
+Pushes to `main` and manual smoke dispatches retain coverage on the isolated native self-hosted
+runners. Only a version tag on `main` whose name matches the desktop package version may invoke
+release jobs and credentials, which are protected by the `release` environment.
 The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
 feed. Its platform-signature status is:
 
 - macOS application bundles are Developer ID signed, notarized, stapled, and independently
   verified by the release workflow for arm64 and x64. The DMG container itself still needs
   fresh-download Gatekeeper evidence.
-- Windows x64 and ARM64 NSIS artifacts are currently unsigned. Authenticode requires an externally
-  procured code-signing certificate, its publisher subject, protected runner credentials, and an
-  independent `Get-AuthenticodeSignature` release gate. Until then Windows updates rely on HTTPS
-  plus the manifest checksum and do not meet the hosted target.
+- Windows x64 and ARM64 NSIS artifacts stay unsigned until Azure Trusted Signing secrets and the
+  exact publisher subject are present. The lane is inert without those values and fail-closed once
+  they exist: `Get-AuthenticodeSignature` must report Valid on each installer and unpacked
+  `hype-comms.exe` before upload. See [windows-signing.md](windows-signing.md). 0.1.29 clients have
+  no `publisherName` and will still accept the first signed update.
 - Linux x64 and ARM64 AppImage and Debian packages carry the updater manifest's SHA-512 digest but
   do not yet have a detached GPG signature or SBOM gate.
 

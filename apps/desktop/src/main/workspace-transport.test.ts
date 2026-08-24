@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -29,6 +31,8 @@ const CLIENT_CAPABILITIES = [
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -38,6 +42,7 @@ const CURRENT_USER = {
     username: "morgan",
     displayName: "Morgan",
     avatarUrl: null,
+    title: null,
     createdAt: NOW,
     updatedAt: NOW,
   },
@@ -264,6 +269,7 @@ describe("WorkspaceTransport threads", () => {
 
     await expect(transport.messageById(THREAD_REPLY.id)).resolves.toEqual({
       message: THREAD_REPLY,
+      attachments: [],
     });
     expect(requests).toEqual([
       {
@@ -279,6 +285,34 @@ describe("WorkspaceTransport threads", () => {
     );
 
     await expect(transport.messageById(THREAD_REPLY.id)).rejects.toThrow();
+  });
+
+  it("retracts a message with DELETE and keeps the stored body on the tombstone", async () => {
+    const retracted = { ...THREAD_REPLY, deletedAt: NOW, version: 2, updatedAt: NOW };
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ message: retracted, syncCursor: "44" });
+    });
+
+    await expect(transport.retractMessage(THREAD_REPLY.id)).resolves.toEqual({
+      message: retracted,
+      syncCursor: "44",
+    });
+    expect(requests).toEqual([
+      {
+        url: `https://chat.example/v1/messages/${THREAD_REPLY.id}`,
+        init: expect.objectContaining({ method: "DELETE" }),
+      },
+    ]);
+  });
+
+  it("rejects a retract response that empties deletedAt", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse({ message: THREAD_REPLY, syncCursor: "44" }),
+    );
+
+    await expect(transport.retractMessage(THREAD_REPLY.id)).rejects.toThrow();
   });
 
   it("advertises thread support when requesting conversation history", async () => {
@@ -332,7 +366,7 @@ describe("WorkspaceTransport threads", () => {
 
     await expect(
       transport.thread({ messageId: THREAD_ROOT.id, before: "cursor-2", limit: 25 }),
-    ).resolves.toEqual(response);
+    ).resolves.toEqual({ ...response, attachments: [] });
     expect(requests).toEqual([
       {
         url: `https://chat.example/v1/messages/${THREAD_ROOT.id}/thread?before=cursor-2&limit=25`,
@@ -583,6 +617,7 @@ describe("WorkspaceTransport send classification", () => {
           headers: {
             "content-type": "application/json",
             "idempotency-key": THREAD_REPLY_CLIENT_ID,
+            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
           },
           body: JSON.stringify(operation.message),
         }),

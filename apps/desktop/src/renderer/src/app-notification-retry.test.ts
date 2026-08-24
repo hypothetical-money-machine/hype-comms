@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import "fake-indexeddb/auto";
+
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   AiChannelState,
@@ -25,6 +27,7 @@ import type { CompactModeRuntime } from "./compact-mode-runtime";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
+import { clearPersistentWorkspaceCaches } from "./workspace-cache";
 
 const USER_ID = "20000000-0000-4000-8000-000000000001";
 const WORKSPACE_ID = "20000000-0000-4000-8000-000000000002";
@@ -182,6 +185,7 @@ interface RetryHarnessOptions {
   readonly delayFirstActivity?: boolean;
   readonly delayFirstMessage?: boolean;
   readonly notificationAction?: NotificationAction;
+  readonly persistentCache?: boolean;
 }
 
 function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
@@ -210,6 +214,7 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     platform: "linux",
     isHeadless: true,
     getSessionState: async () => session,
+    retrySession: async () => session,
     onSessionChanged: (listener: (next: ChatSessionState) => void) => {
       sessionListeners.add(listener);
       return () => sessionListeners.delete(listener);
@@ -220,10 +225,54 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     checkForUpdates: async () => undefined,
     restartToInstallUpdate: async () => undefined,
     onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async (scope: {
-      readonly userId: string;
-      readonly workspaceId: string;
-    }) => ({ mode: "memory_only", scope, reason: "credential_store_unavailable" }) as const,
+    initializeCacheCrypto: async () =>
+      options.persistentCache === true
+        ? ({
+            mode: "persistent",
+            scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+            keyVersion: 1,
+          } as const)
+        : ({
+            mode: "memory_only",
+            scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+            reason: "credential_store_unavailable",
+          } as const),
+    encryptCacheRecords: async (input: Parameters<DesktopApi["encryptCacheRecords"]>[0]) => ({
+      items: input.items.map((item) => ({
+        store: item.store,
+        recordId: item.recordId,
+        schemaVersion: 1 as const,
+        value: {
+          version: 1 as const,
+          keyVersion: 1 as const,
+          schemaVersion: 1 as const,
+          nonce: "AAAAAAAAAAAAAAAA",
+          ciphertext: btoa(String.fromCharCode(...new TextEncoder().encode(item.plaintext)))
+            .replaceAll("+", "-")
+            .replaceAll("/", "_")
+            .replaceAll("=", ""),
+        },
+      })),
+    }),
+    decryptCacheRecords: async (input: Parameters<DesktopApi["decryptCacheRecords"]>[0]) => ({
+      items: input.items.map((item) => ({
+        store: item.store,
+        recordId: item.recordId,
+        schemaVersion: 1 as const,
+        plaintext: new TextDecoder().decode(
+          Uint8Array.from(
+            atob(
+              item.value.ciphertext
+                .replaceAll("-", "+")
+                .replaceAll("_", "/")
+                .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+            ),
+            (character) => character.charCodeAt(0),
+          ),
+        ),
+      })),
+    }),
+    resetCacheCrypto: async () => undefined,
     getWorkspaceBootstrap: async () => {
       bootstrapRequests += 1;
       if (failFirstBootstrap && bootstrapRequests === 1) {
@@ -246,6 +295,10 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
       reactionHydrations += 1;
       return { reactions: [] };
     },
+    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listMessageAttachments: async () => ({ attachments: [] }),
+    chooseAndUploadConversationFile: async () => null,
+    openConversationFile: async () => ({ opened: true }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     syncWorkspace: async (after: string) =>
       ({
@@ -383,9 +436,53 @@ function createFencedBlockquotes(): FencedBlockquoteRuntime {
   } as unknown as FencedBlockquoteRuntime;
 }
 
-afterEach(() => cleanup());
+afterEach(async () => {
+  cleanup();
+  await clearPersistentWorkspaceCaches();
+});
 
 describe("App notification session recovery", () => {
+  it("keeps a credential-bound cached workspace visible in explicit stale offline mode", async () => {
+    const harness = createRetryHarness({
+      failFirstBootstrap: false,
+      bootstrap: channelBootstrap,
+      persistentCache: true,
+    });
+    render(
+      createElement(App, {
+        client: harness.client,
+        theme: createTheme(),
+        compactMode: createCompactMode(),
+        fencedBlockquotes: createFencedBlockquotes(),
+        sidebarPosition: createSidebarPosition(),
+      }),
+    );
+
+    await screen.findByTestId("workspace-ready");
+    expect(harness.bootstrapRequests).toBe(1);
+
+    act(() =>
+      harness.emitSession({
+        status: "session-unavailable",
+        reason: "server_unreachable",
+        message: "Could not reach the chat server. Your session is preserved.",
+        lastAuthenticatedSession: {
+          method: session.method,
+          name: session.name,
+          email: session.email,
+          userId: session.userId,
+          workspaceId: session.workspaceId,
+        },
+      }),
+    );
+
+    await screen.findByRole("heading", { name: "# General" });
+    await screen.findByText(/Showing cached messages; new activity may be delayed\./u);
+    expect(screen.getByText("Offline")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Chat server unavailable" })).toBeNull();
+    expect(harness.bootstrapRequests).toBe(1);
+  });
+
   it("rebinds and reports activity when workspace Retry recovers a failed bootstrap", async () => {
     const harness = createRetryHarness();
     render(

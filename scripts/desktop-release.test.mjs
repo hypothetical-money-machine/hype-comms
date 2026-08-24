@@ -76,7 +76,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     "utf8",
   );
   const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
+  const releaseValidationJob = workflowJob(releaseWorkflow, "validate");
+  const releasePrepareJob = workflowJob(releaseWorkflow, "prepare-github-release");
   const releasePackageJob = workflowJob(releaseWorkflow, "package");
+  const releasePublishJob = workflowJob(releaseWorkflow, "github-release");
   const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
   const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
   const targetArchitectures = (platform) =>
@@ -117,15 +120,18 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(releaseWorkflow, /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production$/mu);
   assert.match(
     releaseWorkflow,
-    /runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/u,
+    /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
   );
-  assert.match(
-    releaseWorkflow,
-    /^ {2}prepare-github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
-  );
-  assert.match(
-    releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?^ {4}runs-on: \[self-hosted, Linux, ARM64, hype-comms-release, docker\]/mu,
+  assert.match(releaseValidationJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
+  assert.match(releaseValidationJob, /^ {4}permissions:\n {6}contents: read$/mu);
+  assert.match(releasePrepareJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
+  assert.match(releasePrepareJob, /^ {4}environment: release$/mu);
+  assert.match(releasePackageJob, /^ {4}environment: release$/mu);
+  assert.match(releasePublishJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
+  assert.match(releasePublishJob, /^ {4}environment: release$/mu);
+  assert.doesNotMatch(
+    `${releaseValidationJob}${releasePrepareJob}${releasePublishJob}`,
+    /self-hosted|hmm-linux-x64-ci|hmm-ci/u,
   );
   assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
   assert.match(
@@ -159,10 +165,36 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     packageSmokeWorkflow,
-    /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
+    /'\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
+  );
+  assert.match(
+    matrixEntry(smokePackageJob, "macOS"),
+    /github\.event_name == 'pull_request' && '\["macos-15"\]'/u,
+  );
+  assert.match(
+    matrixEntry(smokePackageJob, "Windows"),
+    /github\.event_name == 'pull_request' && '\["windows-11-arm"\]'/u,
+  );
+  assert.match(
+    matrixEntry(smokePackageJob, "Linux"),
+    /github\.event_name == 'pull_request' && '\["ubuntu-24\.04-arm"\]'/u,
   );
   assert.equal(
+    smokePackageJob.match(/self_hosted: \$\{\{ github\.event_name != 'pull_request' \}\}/gu)
+      ?.length,
+    3,
+  );
+  assert.doesNotMatch(smokePackageJob, /head\.repo\.full_name/u);
+  assert.equal(
     packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/require-windows-signing-env\.mjs$/gmu)?.length,
+    2,
+  );
+  assert.equal(
+    packageSmokeWorkflow.match(/^ {6}- scripts\/verify-windows-release\.mjs$/gmu)?.length,
     2,
   );
   assert.equal(
@@ -194,7 +226,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.doesNotMatch(smokePackageJob, /^ {6}HYPE_COMMS_BUILD_FLAVOR:/mu);
   assert.match(
     smokePackageJob,
-    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
+    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && github\.event_name == 'pull_request' && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
   );
   assert.match(
     smokePackageJob,
@@ -212,12 +244,51 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     nativeEvidenceJob,
     /^ {4}if: github\.event_name == 'workflow_dispatch' && inputs\.native_notification_evidence$/mu,
   );
+  assert.match(nativeEvidenceJob, /^ {4}environment: release$/mu);
   assert.match(
     nativeEvidenceJob,
     /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"$/mu,
   );
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac/u);
   assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
+  assert.match(releasePackageJob, /name: Configure Windows Authenticode signing/u);
+  assert.match(releasePackageJob, /node scripts\/require-windows-signing-env\.mjs/u);
+  assert.match(releasePackageJob, /name: Verify Windows release signing/u);
+  assert.match(
+    releasePackageJob,
+    /if: matrix\.platform == 'Windows' && env\.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'/u,
+  );
+  assert.match(releasePackageJob, /npm run verify:desktop-package:windows-release/u);
+  assert.ok(
+    releasePackageJob.indexOf("name: Configure Windows Authenticode signing") <
+      releasePackageJob.indexOf("name: Package desktop application on Windows"),
+    "Windows signing env must be required before the Windows package step",
+  );
+  assert.ok(
+    releasePackageJob.indexOf("name: Package desktop application on Windows") <
+      releasePackageJob.indexOf("name: Verify Windows release signing"),
+    "Windows Authenticode verification must run after packaging and before publication",
+  );
+  assert.ok(
+    releasePackageJob.indexOf("name: Verify Windows release signing") <
+      releasePackageJob.indexOf("name: Stage GitHub Release assets"),
+    "When signing is enabled, Authenticode verification must run before staging",
+  );
+  for (const secret of [
+    "HYPE_COMMS_WINDOWS_AZURE_TENANT_ID",
+    "HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID",
+    "HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET",
+  ]) {
+    assert.match(releasePackageJob, new RegExp(`secrets\\.${secret}`, "u"));
+  }
+  for (const variable of [
+    "HYPE_COMMS_WINDOWS_AZURE_ENDPOINT",
+    "HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME",
+    "HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME",
+    "HYPE_COMMS_WINDOWS_PUBLISHER_NAME",
+  ]) {
+    assert.match(releasePackageJob, new RegExp(`vars\\.${variable}`, "u"));
+  }
   assert.match(nativeEvidenceJob, /name: Build signed macOS capture helper/u);
   assert.match(
     nativeEvidenceJob,

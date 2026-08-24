@@ -8,6 +8,7 @@ import {
 } from "./common.js";
 import { channelSlugSchema } from "./channel-slug.js";
 import {
+  attachmentSchema,
   channelAccessSchema,
   channelModeSchema,
   conversationMembershipRoleSchema,
@@ -20,6 +21,7 @@ import {
   userSchema,
   workspaceSchema,
 } from "./entities.js";
+import { ATTACHMENTS_PER_MESSAGE_MAX } from "./files.js";
 import { currentPrincipalSchema, currentUserSchema } from "./identity.js";
 import {
   realtimeEventEnvelopeSchema,
@@ -41,6 +43,9 @@ export const TASK_EVENTS_CAPABILITY = "task-events-v1";
 export const THREADS_CAPABILITY = "threads-v1";
 export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
 export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
+export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
+export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
+export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
   .min(1)
@@ -123,6 +128,49 @@ export const workspaceSnapshotSchema = z
 export const listMembersResponseSchema = z
   .object({
     members: z.array(userSchema).max(25),
+  })
+  .strict();
+
+/**
+ * Owner-only workspace administration: one undirected communication link between two distinct
+ * active members. `memberAId` is always lexicographically before `memberBId` so each pair appears
+ * exactly once.
+ */
+export const COMMUNICATION_PATHS_MAX_MEMBERS = 25;
+export const COMMUNICATION_PATHS_MAX_PATHS = 300;
+
+export const communicationPathSchema = z
+  .object({
+    memberAId: entityIdSchema,
+    memberBId: entityIdSchema,
+    directMessageCount: z.number().int().nonnegative(),
+    sharedChannelCount: z.number().int().nonnegative(),
+    channelMessageCount: z.number().int().nonnegative(),
+    lastActivityAt: isoDateTimeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((path, context) => {
+    if (path.memberAId === path.memberBId) {
+      context.addIssue({
+        code: "custom",
+        path: ["memberBId"],
+        message: "A communication path must join two distinct members",
+      });
+    }
+    if (path.memberAId > path.memberBId) {
+      context.addIssue({
+        code: "custom",
+        path: ["memberAId"],
+        message: "memberAId must sort before memberBId",
+      });
+    }
+  });
+
+export const communicationPathsResponseSchema = z
+  .object({
+    generatedAt: isoDateTimeSchema,
+    members: z.array(userSchema).max(COMMUNICATION_PATHS_MAX_MEMBERS),
+    paths: z.array(communicationPathSchema).max(COMMUNICATION_PATHS_MAX_PATHS),
   })
   .strict();
 
@@ -260,6 +308,10 @@ export const messageHistoryResponseSchema = z
     messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     threadSummaries: z.array(messageThreadSummarySchema).max(MESSAGE_HISTORY_MAX_LIMIT).default([]),
     threadsSupported: z.boolean().default(false),
+    attachments: z
+      .array(attachmentSchema)
+      .max(MESSAGE_HISTORY_MAX_LIMIT * ATTACHMENTS_PER_MESSAGE_MAX)
+      .default([]),
     nextCursor: paginationCursorSchema.nullable(),
   })
   .strict()
@@ -302,6 +354,10 @@ export const messageThreadResponseSchema = z
   .object({
     root: messageSchema,
     replies: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
+    attachments: z
+      .array(attachmentSchema)
+      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * ATTACHMENTS_PER_MESSAGE_MAX)
+      .default([]),
     nextCursor: paginationCursorSchema.nullable(),
   })
   .strict()
@@ -335,6 +391,7 @@ export const messageThreadResponseSchema = z
 export const messageByIdResponseSchema = z
   .object({
     message: messageSchema,
+    attachments: z.array(attachmentSchema).max(ATTACHMENTS_PER_MESSAGE_MAX).default([]),
   })
   .strict();
 
@@ -443,9 +500,37 @@ export const sendMessageOperationSchema = z
 export const sendMessageResponseSchema = z
   .object({
     message: messageSchema,
+    attachments: z.array(attachmentSchema).max(ATTACHMENTS_PER_MESSAGE_MAX).default([]),
     syncCursor: sequenceSchema,
   })
   .strict();
+
+/**
+ * `DELETE /v1/messages/:id` — author-only delete-in-window retract.
+ *
+ * No request body. Scope `messages:write`. Server clock vs `createdAt`; UI may use
+ * `MESSAGE_RETRACT_WINDOW_MS` only to show the control. Other author → 403.
+ * After five minutes → 409; the row stays immutable. Success keeps the row, sets
+ * `deletedAt`, bumps version, and leaves `body` intact. Attachments disappear with
+ * this tombstone. Already retracted → idempotent 200 with the same tombstone (not 409).
+ * Live fanout is `message.retracted` to clients that send
+ * {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
+ */
+export const retractMessageResponseSchema = z
+  .object({
+    message: messageSchema,
+    syncCursor: sequenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.message.deletedAt === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["message", "deletedAt"],
+        message: "A retracted message must include deletedAt",
+      });
+    }
+  });
 
 export const advanceReadCursorRequestSchema = z
   .object({
@@ -582,6 +667,24 @@ export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.exte
     .strict(),
 });
 
+/**
+ * Tombstone for delete-in-window retract. Payload identifies the message and when it
+ * disappeared. It does not carry a body: retract is not an edit, and the message body schema
+ * forbids a blank body. Clients that omit {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} never
+ * receive it; older desktops ignore unknown types.
+ */
+export const messageRetractedEventSchema = workspaceEventBaseSchema.extend({
+  type: z.literal("message.retracted"),
+  conversationId: entityIdSchema,
+  conversationSequence: sequenceSchema,
+  payload: z
+    .object({
+      messageId: entityIdSchema,
+      deletedAt: isoDateTimeSchema,
+    })
+    .strict(),
+});
+
 export const messageCreatedEventSchema = workspaceEventBaseSchema
   .extend({
     type: z.literal("message.created"),
@@ -690,6 +793,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   conversationUpdatedEventSchema,
   channelMembershipChangedEventSchema,
   messageCreatedEventSchema,
+  messageRetractedEventSchema,
   reactionAddedEventSchema,
   reactionRemovedEventSchema,
   readCursorUpdatedEventSchema,
@@ -754,6 +858,8 @@ export type WorkspaceBootstrapResponse = z.infer<typeof workspaceBootstrapRespon
 export type HumanWorkspaceBootstrapResponse = z.infer<typeof humanWorkspaceBootstrapResponseSchema>;
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
 export type ListMembersResponse = z.infer<typeof listMembersResponseSchema>;
+export type CommunicationPath = z.infer<typeof communicationPathSchema>;
+export type CommunicationPathsResponse = z.infer<typeof communicationPathsResponseSchema>;
 export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>;
 export type ListConversationsResponse = z.infer<typeof listConversationsResponseSchema>;
 export type CreateChannelRequest = z.infer<typeof createChannelRequestSchema>;
@@ -786,6 +892,7 @@ export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;
 export type SendConversationMessageRequest = z.infer<typeof sendConversationMessageRequestSchema>;
 export type SendMessageOperation = z.infer<typeof sendMessageOperationSchema>;
 export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
+export type RetractMessageResponse = z.infer<typeof retractMessageResponseSchema>;
 export type AdvanceReadCursorRequest = z.infer<typeof advanceReadCursorRequestSchema>;
 export type AdvanceReadCursorResponse = z.infer<typeof advanceReadCursorResponseSchema>;
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;

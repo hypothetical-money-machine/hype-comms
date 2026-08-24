@@ -19,6 +19,10 @@ export type RealtimePrincipal =
       readonly announcementChannels?: boolean;
       /** False/absent for tickets predating recipient-specific thread notification reasons. */
       readonly participatedThreadNotifications?: boolean;
+      /** False/absent for tickets predating message.retracted sync events. */
+      readonly messageRetractEvents?: boolean;
+      /** False/absent for tickets issued to clients predating member profile titles. */
+      readonly memberProfiles?: boolean;
     }
   | {
       readonly userId: string;
@@ -36,6 +40,10 @@ export type RealtimePrincipal =
       readonly announcementChannels?: boolean;
       /** False/absent for tickets predating recipient-specific thread notification reasons. */
       readonly participatedThreadNotifications?: boolean;
+      /** False/absent for tickets predating message.retracted sync events. */
+      readonly messageRetractEvents?: boolean;
+      /** False/absent for tickets issued to clients predating member profile titles. */
+      readonly memberProfiles?: boolean;
     };
 
 /**

@@ -13,13 +13,38 @@ const PRODUCTION_SCHEME = AUTH_PROTOCOL_SCHEMES.production;
 
 describe("magic-link callback processing", () => {
   it("exchanges exactly one valid callback token", async () => {
+    const confirm = vi.fn(async () => true);
     const exchange = vi.fn(async () => undefined);
 
     await expect(
-      processAuthCallback(`hype-comms://auth/callback?token=${TOKEN}`, PRODUCTION_SCHEME, exchange),
+      processAuthCallback(
+        `hype-comms://auth/callback?token=${TOKEN}`,
+        PRODUCTION_SCHEME,
+        confirm,
+        exchange,
+      ),
     ).resolves.toBe("succeeded");
+    expect(confirm).toHaveBeenCalledOnce();
     expect(exchange).toHaveBeenCalledOnce();
     expect(exchange).toHaveBeenCalledWith(TOKEN);
+  });
+
+  it("does not exchange until the user confirms without passing the token to the prompt", async () => {
+    const confirm = vi.fn(async (...arguments_: readonly unknown[]) => {
+      expect(arguments_).toEqual([]);
+      return false;
+    });
+    const exchange = vi.fn(async () => undefined);
+
+    await expect(
+      processAuthCallback(
+        `hype-comms://auth/callback?token=${TOKEN}`,
+        PRODUCTION_SCHEME,
+        confirm,
+        exchange,
+      ),
+    ).resolves.toBe("cancelled");
+    expect(exchange).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -30,14 +55,19 @@ describe("magic-link callback processing", () => {
     `hype-comms://auth/other?token=${TOKEN}`,
     `https://auth/callback?token=${TOKEN}`,
   ])("ignores an invalid callback without attempting an exchange: %s", async (url) => {
+    const confirm = vi.fn(async () => true);
     const exchange = vi.fn(async () => undefined);
 
     expect(parseAuthCallbackToken(url, PRODUCTION_SCHEME)).toBeNull();
-    await expect(processAuthCallback(url, PRODUCTION_SCHEME, exchange)).resolves.toBe("ignored");
+    await expect(processAuthCallback(url, PRODUCTION_SCHEME, confirm, exchange)).resolves.toBe(
+      "ignored",
+    );
+    expect(confirm).not.toHaveBeenCalled();
     expect(exchange).not.toHaveBeenCalled();
   });
 
   it("collapses exchange failures into a credential-free outcome", async () => {
+    const confirm = vi.fn(async () => true);
     const exchange = vi.fn(async () => {
       throw new Error(`Server rejected ${TOKEN}`);
     });
@@ -45,6 +75,7 @@ describe("magic-link callback processing", () => {
     const outcome = await processAuthCallback(
       `hype-comms://auth/callback?token=${TOKEN}`,
       PRODUCTION_SCHEME,
+      confirm,
       exchange,
     );
 
@@ -86,6 +117,18 @@ describe("AuthKit callback parsing", () => {
     expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toEqual({
       kind: "authkit",
       callback: { error: "authentication_failed", state },
+    });
+  });
+
+  it("parses a credential-free terminal error without desktop state", () => {
+    const value = "hype-comms://auth/callback?error=authentication_failed";
+
+    expect(parseAuthKitCallback(value, PRODUCTION_SCHEME)).toEqual({
+      error: "authentication_failed",
+    });
+    expect(parseAuthCallback(value, PRODUCTION_SCHEME)).toEqual({
+      kind: "authkit",
+      callback: { error: "authentication_failed" },
     });
   });
 

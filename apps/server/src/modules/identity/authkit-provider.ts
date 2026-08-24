@@ -105,7 +105,22 @@ export interface VerifiedWorkOSAccessToken {
 
 type VerifyWorkOSAccessToken = (accessToken: string) => Promise<VerifiedWorkOSAccessToken>;
 
-export const DEFAULT_WORKOS_JWT_ISSUER = "https://api.workos.com/";
+export const DEFAULT_WORKOS_JWT_ISSUER = "https://api.workos.com";
+
+/**
+ * Live WorkOS mints AuthKit access tokens with `iss` of `<origin>/user_management/<client_id>`;
+ * some token generations use the bare origin with or without its trailing slash. Every accepted
+ * form is WorkOS-controlled for this exact Application: the JWKS endpoint is already bound to the
+ * client ID and the `client_id` claim is compared separately, so issuer validation stays an
+ * exact-set membership over these derived values.
+ */
+export function allowedWorkOSJwtIssuers(
+  clientId: string,
+  configuredIssuer = DEFAULT_WORKOS_JWT_ISSUER,
+): readonly string[] {
+  const origin = new URL(configuredIssuer).origin;
+  return [`${origin}/user_management/${clientId}`, origin, `${origin}/`];
+}
 
 const authorizationResultSchema = z
   .object({
@@ -203,7 +218,7 @@ export function validateWorkOSAccessTokenClaims(
   const result = workOSAccessTokenClaimsSchema.safeParse(payload);
   if (
     !result.success ||
-    result.data.iss !== issuer ||
+    !allowedWorkOSJwtIssuers(clientId, issuer).includes(result.data.iss) ||
     result.data.client_id !== clientId ||
     result.data.act !== undefined
   ) {
@@ -228,7 +243,7 @@ export function createWorkOSAccessTokenVerifier(
   return async (accessToken) => {
     const verified = await jwtVerify(accessToken, jwks, {
       algorithms: ["RS256"],
-      issuer,
+      issuer: [...allowedWorkOSJwtIssuers(clientId, issuer)],
       requiredClaims: ["iss", "sub", "sid", "client_id", "jti", "exp", "iat"],
     });
     return validateWorkOSAccessTokenClaims(verified.payload, clientId, issuer);

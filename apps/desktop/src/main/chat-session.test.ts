@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DesktopAuthVariant, MagicLinkToken } from "@hype-comms/contracts";
+import type {
+  AuthenticatedSessionContext,
+  DesktopAuthVariant,
+  MagicLinkToken,
+} from "@hype-comms/contracts";
 
 import {
   AUTHKIT_FAILED_MESSAGE,
@@ -11,6 +15,7 @@ import {
   SESSION_UNREACHABLE_MESSAGE,
   type SessionCookieStore,
   type SessionFetch,
+  type AuthenticatedSessionContextPersistence,
 } from "./chat-session";
 
 const API_ORIGIN = "https://chat.example";
@@ -41,6 +46,17 @@ const CURRENT_USER = {
   role: "member",
 } as const;
 
+const OTHER_USER = {
+  ...CURRENT_USER,
+  user: {
+    ...CURRENT_USER.user,
+    id: "10000000-0000-4000-8000-000000000004",
+    displayName: "Avery",
+  },
+  email: "avery@example.com",
+  workspaceId: "10000000-0000-4000-8000-000000000005",
+} as const;
+
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
   /** Seconds since the epoch, matching how Electron reports cookie expiry. */
@@ -65,6 +81,33 @@ class MemoryCookies implements SessionCookieStore {
   }
 }
 
+class MemoryAuthenticatedContexts implements AuthenticatedSessionContextPersistence {
+  credential: string | null = null;
+  session: AuthenticatedSessionContext | null = null;
+
+  async load(credential: string): Promise<AuthenticatedSessionContext | null> {
+    if (credential !== this.credential) {
+      this.credential = null;
+      this.session = null;
+      return null;
+    }
+    return this.session;
+  }
+
+  async replace(input: {
+    readonly credential: string;
+    readonly session: AuthenticatedSessionContext;
+  }): Promise<void> {
+    this.credential = input.credential;
+    this.session = input.session;
+  }
+
+  async clear(): Promise<void> {
+    this.credential = null;
+    this.session = null;
+  }
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -80,8 +123,15 @@ function createSession(
   request: SessionFetch,
   cookies = new MemoryCookies(),
   authVariant: DesktopAuthVariant = "production",
+  contexts?: AuthenticatedSessionContextPersistence,
 ): ChatSession {
-  return new ChatSession({ apiOrigin: API_ORIGIN, authVariant, cookies, request });
+  return new ChatSession({
+    apiOrigin: API_ORIGIN,
+    authVariant,
+    cookies,
+    request,
+    ...(contexts === undefined ? {} : { contexts }),
+  });
 }
 
 /** A jar holding a credential that is still valid for the full 30-day window. */
@@ -208,6 +258,99 @@ describe("ChatSession restore", () => {
     expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
   });
 
+  it("cold-restores only the identity bound to the exact preserved credential", async () => {
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const online = createSession(
+      async () => jsonResponse(CURRENT_USER),
+      cookies,
+      "production",
+      contexts,
+    );
+    await online.restore();
+    online.stop();
+
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+      lastAuthenticatedSession: {
+        method: "email",
+        name: "Morgan",
+        email: "morgan@example.com",
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+      },
+    });
+  });
+
+  it("does not restore a cache identity without a protected credential", async () => {
+    const contexts = new MemoryAuthenticatedContexts();
+    await contexts.replace({
+      credential: "identity-cookie",
+      session: {
+        method: "email",
+        name: "Morgan",
+        email: "morgan@example.com",
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+      },
+    });
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      new MemoryCookies(),
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    });
+  });
+
+  it("does not restore a cache identity after the protected credential is replaced", async () => {
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const online = createSession(
+      async () => jsonResponse(CURRENT_USER),
+      cookies,
+      "production",
+      contexts,
+    );
+    await online.restore();
+    online.stop();
+    cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+
+    const offline = createSession(
+      async () => {
+        throw new TypeError("offline");
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+
+    await expect(offline.restore()).resolves.toEqual({
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: SESSION_UNREACHABLE_MESSAGE,
+    });
+    expect(contexts.session).toBeNull();
+  });
+
   it("keeps the stored credential when the identity check times out", async () => {
     const cookies = storedIdentityCookies();
     const session = createSession(async () => {
@@ -311,6 +454,110 @@ describe("ChatSession lifecycle", () => {
 });
 
 describe("ChatSession magic links", () => {
+  it("keeps an active identity and its scope transition untouched when an exchange has no verdict", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return jsonResponse({ error: "boom" }, 500);
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(SESSION_SERVER_ERROR_MESSAGE);
+
+    expect(session.state).toMatchObject({
+      status: "signed-in",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+    });
+    expect(transitions).toEqual([]);
+    expect(session.cacheAuthorizationState).toEqual(session.state);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
+  it("publishes one complete state transition when a confirmed link replaces an active identity", async () => {
+    const cookies = storedIdentityCookies();
+    const replacementResponse = jsonResponse(OTHER_USER);
+    let cacheAuthorizationWhileParsing: unknown = "not observed";
+    vi.spyOn(replacementResponse, "json").mockImplementation(async () => {
+      cacheAuthorizationWhileParsing = session.cacheAuthorizationState;
+      return OTHER_USER;
+    });
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return replacementResponse;
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).resolves.toMatchObject({
+      status: "signed-in",
+      userId: OTHER_USER.user.id,
+      workspaceId: OTHER_USER.workspaceId,
+    });
+
+    expect(transitions).toEqual([
+      {
+        status: "signed-in",
+        method: "email",
+        name: "Avery",
+        email: "avery@example.com",
+        userId: OTHER_USER.user.id,
+        workspaceId: OTHER_USER.workspaceId,
+      },
+    ]);
+    expect(cacheAuthorizationWhileParsing).toBeNull();
+    expect(session.cacheAuthorizationState).toEqual(session.state);
+    expect(cookies.removals).toEqual([]);
+    session.stop();
+  });
+
+  it("keeps an active identity and its scope transition intact when a link is rejected", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return jsonResponse({ error: "unauthorized" }, 401);
+    }, cookies);
+    await session.restore();
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
+
+    expect(session.state).toMatchObject({
+      status: "signed-in",
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+    });
+    expect(transitions).toEqual([]);
+    expect(session.cacheAuthorizationState).toEqual(session.state);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
+  it("restores silent cache authorization when an unreadable success kept the credential", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      return new Response("not json");
+    }, cookies);
+    await session.restore();
+    const precedingState = session.state;
+    const transitions: unknown[] = [];
+    session.subscribe((state) => transitions.push(state));
+
+    await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(SESSION_SERVER_ERROR_MESSAGE);
+
+    expect(session.state).toBe(precedingState);
+    expect(session.cacheAuthorizationState).toBe(precedingState);
+    expect(transitions).toEqual([]);
+    expectPreservedCredential(cookies);
+    session.stop();
+  });
+
   it("publishes only a generic, token-free state and error after a failed exchange", async () => {
     const session = createSession(async () =>
       jsonResponse(
@@ -342,14 +589,14 @@ describe("ChatSession magic links", () => {
     expect(caught instanceof Error ? caught.message : "").not.toContain(TOKEN);
   });
 
-  it("discards the stored credential when the service refuses the link with 401", async () => {
+  it("signs out when the service refuses a link while no identity is active", async () => {
     const cookies = storedIdentityCookies();
     const session = createSession(
       async () => jsonResponse({ error: "unauthorized" }, 401),
       cookies,
     );
 
-    // The one exchange outcome that is a verdict on the link, and so on the jar.
+    // A link can establish no session while signed out, so an explicit refusal remains terminal.
     await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(INVALID_MAGIC_LINK_MESSAGE);
     expect(session.state).toEqual({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     expect(cookies.removals).toEqual(["hype_comms_session"]);

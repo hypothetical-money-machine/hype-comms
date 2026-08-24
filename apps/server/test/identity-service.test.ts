@@ -75,7 +75,12 @@ describeWithPostgres("IdentityService and identity routes", () => {
     service = new IdentityService(
       repository,
       sender,
-      new SignInThrottle({ maxFailures: 10, windowMs: 15 * 60_000, now: () => nowMs }),
+      new SignInThrottle({
+        maxRequestsPerClient: 10,
+        maxRequestsPerEmailPerClient: 10,
+        windowMs: 15 * 60_000,
+        now: () => nowMs,
+      }),
       () => new Date(nowMs),
       "http://127.0.0.1:3000",
       { tokenReuseDetected: () => (reuseDetections += 1) },
@@ -463,27 +468,58 @@ describeWithPostgres("IdentityService and identity routes", () => {
     await seedOwner();
     const original = await signIn("owner@example.com");
 
-    const attempts = await Promise.allSettled([
-      service.refreshSession(original.token),
-      service.refreshSession(original.token),
-    ]);
-    const winners = attempts.filter(
-      (attempt): attempt is PromiseFulfilledResult<Awaited<typeof original>> =>
-        attempt.status === "fulfilled",
-    );
+    // Promise.all does not guarantee that both database statements capture their snapshots before
+    // the first rotation commits. Hold the row lock until both rotation statements are waiting so
+    // this test exercises the service's true-overlap path instead of a historical-token replay.
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM device_sessions WHERE token_hash = $1 FOR UPDATE", [
+        hashToken(original.token),
+      ]);
 
-    expect(winners).toHaveLength(1);
-    expect(attempts.filter(({ status }) => status === "rejected")).toEqual([
-      expect.objectContaining({
-        reason: expect.objectContaining({ statusCode: 401, code: "UNAUTHORIZED" }),
-      }),
-    ]);
-    await expect(service.refreshSession(winners[0]?.value.token ?? "")).resolves.toBeDefined();
-    const history = await pool.query<{ count: number }>(
-      "SELECT count(*)::integer AS count FROM device_session_token_history",
-    );
-    expect(history.rows[0]?.count).toBe(2);
-    expect(reuseDetections).toBe(0);
+      const attemptsPromise = Promise.allSettled([
+        service.refreshSession(original.token),
+        service.refreshSession(original.token),
+      ]);
+      let waitingRotations = 0;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const activity = await pool.query<{ waiting: number }>(
+          `SELECT count(*)::integer AS waiting
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND wait_event_type = 'Lock'
+              AND query LIKE '%rotation_attempt AS MATERIALIZED%'`,
+        );
+        waitingRotations = activity.rows[0]?.waiting ?? 0;
+        if (waitingRotations === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingRotations).toBe(2);
+      await blocker.query("COMMIT");
+
+      const attempts = await attemptsPromise;
+      const winners = attempts.filter(
+        (attempt): attempt is PromiseFulfilledResult<Awaited<typeof original>> =>
+          attempt.status === "fulfilled",
+      );
+
+      expect(winners).toHaveLength(1);
+      expect(attempts.filter(({ status }) => status === "rejected")).toEqual([
+        expect.objectContaining({
+          reason: expect.objectContaining({ statusCode: 401, code: "UNAUTHORIZED" }),
+        }),
+      ]);
+      await expect(service.refreshSession(winners[0]?.value.token ?? "")).resolves.toBeDefined();
+      const history = await pool.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM device_session_token_history",
+      );
+      expect(history.rows[0]?.count).toBe(2);
+      expect(reuseDetections).toBe(0);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
   });
 
   it("does not revoke a lineage for reuse after the historical credential expires", async () => {
@@ -659,6 +695,98 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(await service.authenticate(refreshedCookie?.value ?? "")).toBeNull();
   });
 
+  it("updates only the authenticated profile title, validates it, and publishes an invalidation", async () => {
+    const owner = await seedOwner();
+    const session = await signIn("owner@example.com");
+    await service.createInvitation(owner.id, emailSchema.parse("member@example.com"), "member");
+    await signIn("member@example.com");
+    const member = await repository.findUserByEmail(emailSchema.parse("member@example.com"));
+    if (member === null) throw new Error("Member was not created");
+    const app = await buildApp({ cookieSecure: false, identity: { service } });
+    const headers = {
+      cookie: `hype_comms_session=${session.token}`,
+      "x-hype-comms-capabilities": "member-profiles-v1",
+    };
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: "  Chief Mischief Officer  " },
+    });
+    const legacy = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers: { cookie: `hype_comms_session=${session.token}` },
+      payload: { title: "Director of Shenanigans" },
+    });
+    const rejectedControlCharacter = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: "No\u0000pe" },
+    });
+    const rejectedOtherUser = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { userId: member.id, title: "Nope" },
+    });
+    const cleared = await app.inject({
+      method: "PATCH",
+      url: "/v1/profile",
+      headers,
+      payload: { title: null },
+    });
+    await app.close();
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      user: { id: owner.id, title: "Chief Mischief Officer" },
+    });
+    expect(legacy.statusCode).toBe(200);
+    expect(legacy.json().user).not.toHaveProperty("title");
+    expect(rejectedControlCharacter.statusCode).toBe(400);
+    expect(rejectedOtherUser.statusCode).toBe(400);
+    expect(cleared.json()).toMatchObject({ user: { id: owner.id, title: null } });
+    expect(
+      (await repository.findUserByEmail(emailSchema.parse("member@example.com")))?.title,
+    ).toBeNull();
+    const events = await pool.query<{ payload: { member: { id: string; title: string | null } } }>(
+      `SELECT payload FROM sync_events WHERE event_type = 'member.updated' ORDER BY workspace_sequence`,
+    );
+    expect(
+      events.rows.some(
+        (event) =>
+          event.payload.member.id === owner.id &&
+          event.payload.member.title === "Chief Mischief Officer",
+      ),
+    ).toBe(true);
+  });
+
+  it("rate limits profile updates per user", async () => {
+    await seedOwner();
+    const session = await signIn("owner@example.com");
+    const app = await buildApp({ identity: { service } });
+    const headers = { cookie: `hype_comms_session=${session.token}` };
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(
+        await app.inject({
+          method: "PATCH",
+          url: "/v1/profile",
+          headers,
+          payload: { title: null },
+        }),
+      );
+    }
+    await app.close();
+
+    expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
+    expect(responses[10]?.statusCode).toBe(429);
+    expect(responses[10]?.headers["retry-after"]).toBeDefined();
+  });
+
   it("revokes exactly one owned device and never another user's device", async () => {
     const owner = await seedOwner();
     const first = await signIn("owner@example.com", "127.0.0.1");
@@ -738,14 +866,20 @@ describeWithPostgres("IdentityService and identity routes", () => {
     expect(await repository.countActiveMembers(membership.workspaceId)).toBe(25);
   });
 
-  it("returns the same accepted response without emailing unknown or throttled callers", async () => {
+  it("returns the same accepted response while enforcing client and delivery limits", async () => {
     const owner = await seedOwner();
     await service.createInvitation(owner.id, emailSchema.parse("invited-a@example.com"), "member");
     await service.createInvitation(owner.id, emailSchema.parse("invited-b@example.com"), "member");
     service = new IdentityService(
       repository,
       sender,
-      new SignInThrottle({ maxFailures: 1, windowMs: 60_000, now: () => nowMs }),
+      new SignInThrottle({
+        maxRequestsPerClient: 1,
+        maxRequestsPerEmailPerClient: 1,
+        maxDeliveriesPerEmail: 2,
+        windowMs: 60_000,
+        now: () => nowMs,
+      }),
       () => new Date(nowMs),
       "http://127.0.0.1:3000",
     );
@@ -754,6 +888,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
     const invitedResponse = await app.inject({
       method: "POST",
       url: "/v1/auth/magic-link",
+      remoteAddress: "127.0.0.1",
       payload: { email: "invited-a@example.com" },
     });
     await app.close();
@@ -762,23 +897,38 @@ describeWithPostgres("IdentityService and identity routes", () => {
       emailSchema.parse("unknown@example.com"),
       "127.0.0.2",
     );
-    const emailLimited = await service.requestMagicLink(
+    const sameClientLimited = await service.requestMagicLink(
       emailSchema.parse("invited-a@example.com"),
-      "127.0.0.3",
+      "127.0.0.1",
     );
     const ipLimited = await service.requestMagicLink(
       emailSchema.parse("invited-b@example.com"),
       "127.0.0.1",
     );
+    const differentClientAllowed = await service.requestMagicLink(
+      emailSchema.parse("invited-a@example.com"),
+      "127.0.0.3",
+    );
+    const globalDeliveryLimited = await service.requestMagicLink(
+      emailSchema.parse("invited-a@example.com"),
+      "127.0.0.4",
+    );
 
-    expect([invited, unknown, emailLimited, ipLimited]).toEqual([
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-      magicLinkRequestedSchema.parse({ status: "accepted" }),
-    ]);
+    expect([
+      invited,
+      unknown,
+      sameClientLimited,
+      ipLimited,
+      differentClientAllowed,
+      globalDeliveryLimited,
+    ]).toEqual(
+      Array.from({ length: 6 }, () => magicLinkRequestedSchema.parse({ status: "accepted" })),
+    );
     expect(invitedResponse.statusCode).toBe(202);
-    expect(sender.sent.map(({ to }) => to)).toEqual(["invited-a@example.com"]);
+    expect(sender.sent.map(({ to }) => to)).toEqual([
+      "invited-a@example.com",
+      "invited-a@example.com",
+    ]);
   });
 
   it("rejects revoked and expired invitations and accepts an invitation only once", async () => {

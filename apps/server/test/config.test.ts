@@ -27,6 +27,7 @@ describe("loadConfig", () => {
       allowedOrigins: ["app://bundle"],
       publicApiUrl: "https://chat-api.example.invalid",
       cookieSecure: true,
+      trustedProxies: ["127.0.0.1", "::1"],
       agentProvisioningEnabled: false,
     });
   });
@@ -195,7 +196,7 @@ describe("loadConfig", () => {
         apiKey: "sk_test_example",
         clientId: "client_example",
         redirectUri: "http://127.0.0.1:3000/v1/auth/workos/callback",
-        jwtIssuer: "https://api.workos.com/",
+        jwtIssuer: "https://api.workos.com",
         encryptionKey: Buffer.alloc(32),
       },
     });
@@ -278,8 +279,18 @@ describe("loadConfig", () => {
     };
     expect(loadConfig(environment)).toMatchObject({
       authKitAdmissionEnabled: false,
-      trustedProxies: [],
+      trustedProxies: ["127.0.0.1", "::1"],
       workos: { clientId: "client_example" },
+    });
+
+    expect(
+      loadConfig({
+        ...environment,
+        WORKOS_API_KEY: "sk_opaque_production_example",
+      }),
+    ).toMatchObject({
+      authKitAdmissionEnabled: false,
+      workos: { apiKey: "sk_opaque_production_example" },
     });
 
     expect(() =>

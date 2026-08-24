@@ -224,6 +224,29 @@ describe("ChannelMembersDialog", () => {
     expect(await screen.findByRole("button", { name: "Close channel access" })).toBeTruthy();
   });
 
+  it("keeps Tab and Shift+Tab focus inside the workspace directory", () => {
+    render(
+      createElement(ChannelMembersDialog, {
+        source: "workspace",
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+      }),
+    );
+
+    const close = screen.getByRole("button", { name: "Close people" });
+    const done = screen.getByRole("button", { name: "Done" });
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(done);
+
+    fireEvent.keyDown(done, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+  });
+
   it("restores focus to the trigger when unmounted", () => {
     const triggerRef = createRef<HTMLButtonElement>();
     const dialog = createElement(ChannelMembersDialog, {

@@ -135,6 +135,16 @@ describe("AuthKit contracts", () => {
         state: "d".repeat(43),
       }),
     ).toMatchObject({ error: "authentication_failed" });
+    expect(
+      desktopAuthCallbackParametersSchema.parse({
+        error: "authentication_failed",
+      }),
+    ).toEqual({ error: "authentication_failed" });
+    expect(() =>
+      desktopAuthCallbackParametersSchema.parse({
+        code: "c".repeat(43),
+      }),
+    ).toThrow();
     expect(() =>
       desktopAuthCallbackParametersSchema.parse({
         error: "access_denied",

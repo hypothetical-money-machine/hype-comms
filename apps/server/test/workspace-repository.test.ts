@@ -1,9 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import {
+  COMMUNICATION_PATHS_MAX_PATHS,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
@@ -18,10 +22,13 @@ import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
+import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
 import {
   type AnnouncementAuditRecord,
+  type WorkspaceRepositoryHooks,
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
+import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
@@ -155,6 +162,14 @@ describeWithPostgres("WorkspaceRepository", () => {
   let adminPool: Pool;
   let pool: Pool;
   let repository: WorkspaceRepository;
+  let attachmentRoot: string;
+  let attachmentStore: LocalAttachmentStore;
+
+  function repositoryHooks(
+    overrides: Omit<WorkspaceRepositoryHooks, "attachmentStore"> = {},
+  ): WorkspaceRepositoryHooks {
+    return { ...overrides, attachmentStore };
+  }
 
   beforeAll(async () => {
     if (testDatabaseUrl === undefined) return;
@@ -162,13 +177,17 @@ describeWithPostgres("WorkspaceRepository", () => {
     await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
     pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
     await runMigrations(pool);
-    repository = new WorkspaceRepository(pool);
+    attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
+    attachmentStore = new LocalAttachmentStore(attachmentRoot);
+    repository = new WorkspaceRepository(pool, repositoryHooks());
   });
 
   beforeEach(async () => {
+    repository = new WorkspaceRepository(pool, repositoryHooks());
     await pool.query(`
       TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions, messages,
+               sync_events, conversation_read_cursors, message_reactions, message_mentions,
+               attachments, messages,
                conversation_memberships, conversations, device_sessions, magic_link_tokens,
                invitations,
                workspace_memberships, workspaces, users
@@ -212,6 +231,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.end();
     await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
     await adminPool.end();
+    if (attachmentRoot !== undefined) await rm(attachmentRoot, { recursive: true, force: true });
   });
 
   async function seedChannels(count: number): Promise<void> {
@@ -410,6 +430,186 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
   });
 
+  it("lets an author retract their own message within five minutes and fans the tombstone out", async () => {
+    const secret = `bot token ${randomUUID()}`;
+    const channel = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const direct = await repository.createDirectConversation(owner, { memberId });
+    const dm = await repository.sendMessage(owner, direct.conversation.conversation.id, {
+      ...message(randomUUID(), secret),
+      mentionedUserIds: [],
+    });
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "thread root stays"),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), secret),
+      threadRootId: root.message.id,
+      mentionedUserIds: [],
+    });
+
+    const [channelRetract, channelReplay] = await Promise.all([
+      repository.retractMessage(owner, channel.message.id),
+      repository.retractMessage(owner, channel.message.id),
+    ]);
+    expect(channelReplay).toEqual(channelRetract);
+    expect(channelRetract.message).toMatchObject({
+      id: channel.message.id,
+      conversationId: generalId,
+      conversationSequence: channel.message.conversationSequence,
+      body: secret,
+      deletedAt: expect.any(String),
+    });
+    expect(channelRetract.message.deletedAt).not.toBeNull();
+
+    const dmRetract = await repository.retractMessage(owner, dm.message.id);
+    const replyRetract = await repository.retractMessage(owner, reply.message.id);
+
+    await expect(repository.retractMessage(member, channel.message.id)).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+    } satisfies Partial<ApiError>);
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.some((item) => item.id === channel.message.id)).toBe(false);
+    expect(history.messages.some((item) => item.body.includes("bot token"))).toBe(false);
+
+    const thread = await repository.thread(member, root.message.id, undefined, 50);
+    expect(thread.root.body).toBe("thread root stays");
+    expect(thread.replies).toEqual([]);
+    expect(replyRetract.message.body).toBe(secret);
+
+    const search = await repository.searchMessages(member, "bot token", undefined, 50);
+    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
+
+    await expect(repository.messageById(member, channel.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const afterCreate = channel.syncCursor;
+    const legacy = await repository.sync(observer, afterCreate, 100);
+    expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
+    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+
+    const capable = await repository.sync(
+      observer,
+      afterCreate,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
+    expect(retractEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "message.retracted",
+          conversationId: generalId,
+          conversationSequence: channel.message.conversationSequence,
+          payload: {
+            messageId: channel.message.id,
+            deletedAt: channelRetract.message.deletedAt,
+          },
+        }),
+        expect.objectContaining({
+          type: "message.retracted",
+          conversationId: generalId,
+          conversationSequence: reply.message.conversationSequence,
+          payload: {
+            messageId: reply.message.id,
+            deletedAt: replyRetract.message.deletedAt,
+          },
+        }),
+      ]),
+    );
+    expect(
+      retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
+    ).toBe(false);
+
+    const dmCapable = await repository.sync(
+      member,
+      dm.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(
+      dmCapable.events.filter(
+        (event) =>
+          event.type === "message.retracted" &&
+          event.conversationId === direct.conversation.conversation.id,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: direct.conversation.conversation.id,
+        conversationSequence: dm.message.conversationSequence,
+        payload: {
+          messageId: dm.message.id,
+          deletedAt: dmRetract.message.deletedAt,
+        },
+      }),
+    ]);
+    expect(
+      retractEvents.some(
+        (event) => "message" in event.payload && typeof event.payload.message === "object",
+      ),
+    ).toBe(false);
+
+    const stored = await pool.query<{ body: string; deleted_at: Date | string | null }>(
+      `SELECT body, deleted_at FROM messages WHERE id = $1`,
+      [channel.message.id],
+    );
+    expect(stored.rows[0]).toMatchObject({ body: secret, deleted_at: expect.anything() });
+    expect(stored.rows[0]?.deleted_at).not.toBeNull();
+  });
+
+  it("rejects retracting another member's message and an author retract after five minutes", async () => {
+    const own = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "still secret after the window"),
+      mentionedUserIds: [],
+    });
+    const theirs = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "member wrote this"),
+      mentionedUserIds: [],
+    });
+
+    await expect(repository.retractMessage(owner, theirs.message.id)).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+    } satisfies Partial<ApiError>);
+
+    await pool.query(
+      `UPDATE messages
+          SET created_at = clock_timestamp() - interval '5 minutes 1 second',
+              updated_at = created_at
+        WHERE id = $1`,
+      [own.message.id],
+    );
+    await expect(repository.retractMessage(owner, own.message.id)).rejects.toMatchObject({
+      statusCode: 409,
+      code: "CONFLICT",
+    } satisfies Partial<ApiError>);
+
+    const persisted = await repository.messageById(member, own.message.id);
+    expect(persisted.message).toMatchObject({
+      id: own.message.id,
+      body: "still secret after the window",
+      deletedAt: null,
+    });
+  });
+
   it("projects roots in history and paginates replies inside one thread", async () => {
     const root = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "thread root"),
@@ -481,12 +681,39 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("rejects oversized history cursors before bigint casts for history and threads", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "history cursor root"),
+      mentionedUserIds: [],
+    });
+    const oversizedCursor = Buffer.from(
+      JSON.stringify({ sequence: "9223372036854775808" }),
+      "utf8",
+    ).toString("base64url");
+
+    await expect(repository.history(member, generalId, oversizedCursor, 50)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message: "Invalid history cursor",
+    } satisfies Partial<ApiError>);
+    await expect(
+      repository.thread(member, root.message.id, oversizedCursor, 50),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message: "Invalid history cursor",
+    } satisfies Partial<ApiError>);
+  });
+
   it("enforces announcement publishing while preserving threads, reactions, and replay", async () => {
     const audits: AnnouncementAuditRecord[] = [];
-    repository = new WorkspaceRepository(pool, {
-      announcementChannelsEnabled: true,
-      onAnnouncementAudit: (record) => audits.push(record),
-    });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({
+        announcementChannelsEnabled: true,
+        onAnnouncementAudit: (record) => audits.push(record),
+      }),
+    );
     const created = await repository.createChannel(
       owner,
       {
@@ -640,7 +867,10 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   it("rejects every task access path and hides legacy task rows in announcements", async () => {
-    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ announcementChannelsEnabled: true }),
+    );
     const created = await repository.createChannel(
       owner,
       {
@@ -720,7 +950,10 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   it("serializes announcement sends behind archive, private removal, and owner demotion", async () => {
-    repository = new WorkspaceRepository(pool, { announcementChannelsEnabled: true });
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ announcementChannelsEnabled: true }),
+    );
     const observe = <T>(promise: Promise<T>) => {
       let settled = false;
       const outcome = promise
@@ -1265,6 +1498,52 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("hides message.retracted from clients that did not negotiate the capability", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "retract capability target"),
+      mentionedUserIds: [],
+    });
+    const deletedAt = "2026-08-20T17:00:00.000Z";
+    const client = await pool.connect();
+    try {
+      await insertSyncEvent(client, {
+        workspaceId,
+        actorUserId: ownerId,
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        entityVersion: 2,
+        payload: { messageId: sent.message.id, deletedAt },
+      });
+    } finally {
+      client.release();
+    }
+
+    const legacy = await repository.sync(observer, sent.syncCursor, 100);
+    expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
+    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+
+    const capable = await repository.sync(
+      observer,
+      sent.syncCursor,
+      100,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+    );
+    expect(capable.events).toEqual([
+      expect.objectContaining({
+        type: "message.retracted",
+        conversationId: generalId,
+        conversationSequence: sent.message.conversationSequence,
+        payload: { messageId: sent.message.id, deletedAt },
+      }),
+    ]);
+  });
+
   it("serializes the per-member reaction cap at its concurrent boundary", async () => {
     const sent = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "member quota target"),
@@ -1446,6 +1725,7 @@ describeWithPostgres("WorkspaceRepository", () => {
 
     await expect(repository.messageById(owner, sent.message.id)).resolves.toEqual({
       message: sent.message,
+      attachments: [],
     });
     await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
       statusCode: 404,
@@ -1455,6 +1735,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
     await expect(repository.messageById(member, sent.message.id)).resolves.toEqual({
       message: sent.message,
+      attachments: [],
     });
 
     await repository.removeChannelMember(owner, conversationId, memberId);
@@ -2122,10 +2403,21 @@ describeWithPostgres("WorkspaceRepository", () => {
       taskEvents: false,
       announcementChannels: false,
       participatedThreadNotifications: false,
+      messageRetractEvents: false,
+      memberProfiles: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, true, true, true, true, true);
+    const capable = await repository.issueRealtimeTicket(
+      owner,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    );
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
@@ -2136,6 +2428,8 @@ describeWithPostgres("WorkspaceRepository", () => {
       taskEvents: true,
       announcementChannels: true,
       participatedThreadNotifications: true,
+      messageRetractEvents: true,
+      memberProfiles: true,
     });
   });
 
@@ -2355,5 +2649,314 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.revalidateRealtimePrincipal({ ...ownerPrincipal, workspaceId: randomUUID() }),
     ).resolves.toEqual({ status: "invalid", reason: "membership_inactive" });
+  });
+
+  async function stageReadyFile(
+    conversationId: string,
+    fileName: string,
+    body: string,
+  ): Promise<string> {
+    const bytes = Buffer.from(body);
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId,
+        fileName,
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    const completed = await repository.completeFileUpload(
+      owner,
+      staged.attachment.id,
+      { sizeBytes: bytes.byteLength, contentSha256 },
+      randomUUID(),
+    );
+    expect(completed.attachment.status).toBe("ready");
+    expect(completed.attachment.messageId).toBeNull();
+    return completed.attachment.id;
+  }
+
+  it("attaches a ready file to a channel message and lists it for the conversation", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Sharing the brief"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    expect(sent.attachments).toEqual([
+      expect.objectContaining({
+        id: attachmentId,
+        messageId: sent.message.id,
+        fileName: "brief.txt",
+        status: "ready",
+        downloadUrl: null,
+      }),
+    ]);
+
+    const history = await repository.history(owner, generalId, undefined, 50);
+    expect(history.attachments.map((attachment) => attachment.id)).toEqual([attachmentId]);
+
+    const files = await repository.listConversationFiles(owner, generalId, undefined, 50);
+    expect(files.files.map((file) => file.fileName)).toEqual(["brief.txt"]);
+    expect(files.hasMore).toBe(false);
+
+    const downloaded = await repository.readFileContent(member, attachmentId);
+    expect(downloaded.bytes.toString()).toBe("channel notes");
+  });
+
+  it("hides attachment metadata and bytes after the parent message is retracted", async () => {
+    const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Sharing the brief"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    const before = await repository.messageById(member, sent.message.id);
+    expect(before.attachments.map((attachment) => attachment.id)).toEqual([attachmentId]);
+
+    const retracted = await repository.retractMessage(owner, sent.message.id);
+    expect(retracted.message).toMatchObject({
+      id: sent.message.id,
+      body: "Sharing the brief",
+      deletedAt: expect.any(String),
+    });
+    expect(retracted).not.toHaveProperty("attachments");
+
+    await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(
+      repository.listMessageAttachments(member, [sent.message.id]),
+    ).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    const history = await repository.history(member, generalId, undefined, 50);
+    expect(history.messages.some((item) => item.id === sent.message.id)).toBe(false);
+    expect(history.attachments.some((attachment) => attachment.id === attachmentId)).toBe(false);
+
+    const files = await repository.listConversationFiles(member, generalId, undefined, 50);
+    expect(files.files.some((file) => file.id === attachmentId)).toBe(false);
+
+    const search = await repository.searchMessages(member, "Sharing the brief", undefined, 50);
+    expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
+  });
+
+  it("attaches a ready file to a DM and hides it from a third member", async () => {
+    const dm = await repository.createDirectConversation(owner, { memberId });
+    const conversationId = dm.conversation.conversation.id;
+    const attachmentId = await stageReadyFile(conversationId, "clip.txt", "dm only");
+    await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "A private file"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+
+    const ownerFiles = await repository.listConversationFiles(owner, conversationId, undefined, 50);
+    expect(ownerFiles.files).toHaveLength(1);
+    await expect(
+      repository.listConversationFiles(observer, conversationId, undefined, 50),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    await expect(repository.readFileContent(observer, attachmentId)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+  });
+
+  it("rejects executables and attaching a file twice", async () => {
+    await expect(
+      repository.createFileUpload(
+        owner,
+        {
+          conversationId: generalId,
+          fileName: "setup.exe",
+          contentType: "application/x-msdownload",
+          sizeBytes: 12,
+          contentSha256: "a".repeat(64),
+        },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, message: "Executable files are not allowed" });
+
+    const attachmentId = await stageReadyFile(generalId, "once.txt", "one use");
+    await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "first"),
+      mentionedUserIds: [],
+      attachmentIds: [attachmentId],
+    });
+    await expect(
+      repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "second"),
+        mentionedUserIds: [],
+        attachmentIds: [attachmentId],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  describe("communicationPaths", () => {
+    function pathFor(
+      response: Awaited<ReturnType<WorkspaceRepository["communicationPaths"]>>,
+      a: string,
+      b: string,
+    ) {
+      const [low, high] = [a, b].sort();
+      return response.paths.find((path) => path.memberAId === low && path.memberBId === high);
+    }
+
+    it("aggregates direct messages, shared channels, and channel volume per pair", async () => {
+      const dm = await repository.createDirectConversation(owner, { memberId });
+      await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "one"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "two"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(member, generalId, {
+        ...message(randomUUID(), "three"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(owner, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm one"),
+        mentionedUserIds: [],
+      });
+      await repository.sendMessage(member, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm two"),
+        mentionedUserIds: [],
+      });
+
+      const response = await repository.communicationPaths(owner);
+
+      // Every endpoint is a listed member.
+      const memberIds = new Set(response.members.map((entry) => entry.id));
+      for (const path of response.paths) {
+        expect(memberIds.has(path.memberAId)).toBe(true);
+        expect(memberIds.has(path.memberBId)).toBe(true);
+      }
+      const ownerMember = pathFor(response, ownerId, memberId);
+      expect(ownerMember).toMatchObject({
+        directMessageCount: 2,
+        sharedChannelCount: 1,
+        channelMessageCount: 3,
+      });
+      // The observer shares #general but exchanged no DMs.
+      const ownerObserver = pathFor(response, ownerId, observerId);
+      expect(ownerObserver).toMatchObject({
+        directMessageCount: 0,
+        sharedChannelCount: 1,
+        channelMessageCount: 2,
+      });
+      // Pairs with actual messages sort above co-membership-only pairs.
+      expect(response.paths[0]).toMatchObject({ directMessageCount: 2 });
+    });
+
+    it("counts restricted channels only for explicit live members", async () => {
+      const restricted = await repository.createChannel(owner, {
+        name: "Private",
+        slug: "private",
+        topic: null,
+        access: "members",
+      });
+      await repository.upsertChannelMember(
+        owner,
+        restricted.conversation.conversation.id,
+        memberId,
+        {
+          role: "member",
+        },
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(pathFor(response, ownerId, memberId)).toMatchObject({
+        sharedChannelCount: 2,
+        channelMessageCount: 0,
+      });
+      expect(pathFor(response, ownerId, observerId)).toMatchObject({
+        sharedChannelCount: 1,
+        channelMessageCount: 0,
+      });
+    });
+
+    it("drops deactivated members from every path, including their DM history", async () => {
+      const dm = await repository.createDirectConversation(owner, { memberId });
+      await repository.sendMessage(owner, dm.conversation.conversation.id, {
+        ...message(randomUUID(), "dm"),
+        mentionedUserIds: [],
+      });
+      await pool.query(
+        `UPDATE workspace_memberships SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, memberId],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(pathFor(response, ownerId, memberId)).toBeUndefined();
+      for (const path of response.paths) {
+        expect(path.memberAId).not.toBe(memberId);
+        expect(path.memberBId).not.toBe(memberId);
+      }
+    });
+
+    it("never treats bots as pair endpoints even with an active membership", async () => {
+      const botId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, username, display_name, kind)
+         VALUES ($1, 'helper-bot', 'Helper Bot', 'bot')`,
+        [botId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+        [workspaceId, botId],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      for (const path of response.paths) {
+        expect(path.memberAId).not.toBe(botId);
+        expect(path.memberBId).not.toBe(botId);
+      }
+    });
+
+    it("parses exactly at the wire contract's path cap with 25 active members", async () => {
+      // The server caps active membership at 25, so C(25,2) = 300 pairs is the real worst case:
+      // one workspace-access channel puts every pair in `shared` and the response must still
+      // validate instead of overflowing its own schema.
+      const extraUsers = Array.from({ length: 22 }, () => randomUUID());
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         SELECT id,
+                'user-' || substring(id::text, 1, 8) || '@example.com',
+                'user-' || substring(id::text, 1, 8),
+                'User'
+           FROM unnest($1::uuid[]) AS id`,
+        [extraUsers],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         SELECT $1, id, 'member', 'active' FROM unnest($2::uuid[]) AS id`,
+        [workspaceId, extraUsers],
+      );
+
+      const response = await repository.communicationPaths(owner);
+
+      expect(response.paths).toHaveLength(COMMUNICATION_PATHS_MAX_PATHS);
+      expect(
+        new Set(response.paths.map((path) => `${path.memberAId}:${path.memberBId}`)).size,
+      ).toBe(COMMUNICATION_PATHS_MAX_PATHS);
+    });
   });
 });

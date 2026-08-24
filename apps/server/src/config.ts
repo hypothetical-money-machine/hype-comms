@@ -10,6 +10,7 @@ const optionalString = <T extends z.ZodType>(schema: T) =>
 const WORKSPACE_SLUG = "hype-comms";
 /** The pre-cutover default. Migration 0018 renames a workspace row carrying it. */
 const LEGACY_WORKSPACE_SLUG = "hmm-chat";
+const PRODUCTION_LOOPBACK_PROXIES = ["127.0.0.1", "::1"] as const;
 
 const rawConfigSchema = z
   .object({
@@ -59,6 +60,7 @@ const rawConfigSchema = z
     ),
     workosWebhookSecret: optionalString(z.string().min(16).max(512)),
     trustedProxies: optionalString(z.string().min(1)),
+    attachmentDir: optionalString(z.string().min(1)),
   })
   .strict();
 
@@ -185,6 +187,8 @@ export interface ServerConfig {
     readonly workspaceSlug: string;
   };
   /** Server-only WorkOS AuthKit integration. No value in this object crosses into Electron. */
+  /** Directory for staged and ready attachment bytes. */
+  readonly attachmentDir: string;
   readonly workos?: {
     readonly apiKey: string;
     readonly clientId: string;
@@ -233,6 +237,7 @@ export function loadConfig(
     workosWebhookSecret: env.WORKOS_WEBHOOK_SECRET,
     trustedProxies: env.HYPE_COMMS_TRUSTED_PROXIES,
     webRoot: env.HYPE_COMMS_WEB_ROOT,
+    attachmentDir: env.HYPE_COMMS_ATTACHMENT_DIR,
   });
 
   if (!result.success) {
@@ -334,7 +339,11 @@ export function loadConfig(
   }
 
   const proxyCandidates =
-    result.data.trustedProxies === undefined ? [] : result.data.trustedProxies.split(",");
+    result.data.trustedProxies === undefined
+      ? result.data.nodeEnv === "production"
+        ? [...PRODUCTION_LOOPBACK_PROXIES]
+        : []
+      : result.data.trustedProxies.split(",");
   const trustedProxiesResult = z.array(trustedProxySchema).safeParse(proxyCandidates);
   if (!trustedProxiesResult.success) {
     throw new ConfigError(
@@ -390,10 +399,14 @@ export function loadConfig(
     result.data.workosRedirectUri !== undefined &&
     result.data.workosEncryptionKey !== undefined
   ) {
-    const expectedKeyPrefix = result.data.nodeEnv === "production" ? "sk_live_" : "sk_test_";
-    if (!result.data.workosApiKey.startsWith(expectedKeyPrefix)) {
+    const expectedLegacyKeyPrefix = result.data.nodeEnv === "production" ? "sk_live_" : "sk_test_";
+    const oppositeLegacyKeyPrefix = result.data.nodeEnv === "production" ? "sk_test_" : "sk_live_";
+    if (
+      !result.data.workosApiKey.startsWith("sk_") ||
+      result.data.workosApiKey.startsWith(oppositeLegacyKeyPrefix)
+    ) {
       throw new ConfigError([
-        `workosApiKey: ${result.data.nodeEnv} requires a ${expectedKeyPrefix} API key`,
+        `workosApiKey: ${result.data.nodeEnv} requires a ${expectedLegacyKeyPrefix} or opaque sk_ API key`,
       ]);
     }
 
@@ -418,7 +431,7 @@ export function loadConfig(
       throw new ConfigError(["workosRedirectUri: Expected the configured public API origin"]);
     }
 
-    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com/";
+    const jwtIssuer = result.data.workosJwtIssuer ?? "https://api.workos.com";
     const jwtIssuerResult = configuredJwtIssuerSchema.safeParse(jwtIssuer);
     if (!jwtIssuerResult.success) {
       throw new ConfigError([
@@ -442,7 +455,7 @@ export function loadConfig(
     if (
       result.data.nodeEnv === "production" &&
       result.data.authKitAdmissionEnabled &&
-      trustedProxies.length === 0
+      result.data.trustedProxies === undefined
     ) {
       throw new ConfigError([
         "trustedProxies: HYPE_COMMS_TRUSTED_PROXIES must name the reverse proxy IP/CIDR for " +
@@ -496,5 +509,10 @@ export function loadConfig(
           },
         }),
     ...(workos === undefined ? {} : { workos }),
+    attachmentDir:
+      result.data.attachmentDir ??
+      (result.data.nodeEnv === "production"
+        ? "/var/lib/hype-comms/attachments"
+        : `${process.cwd()}/data/attachments`),
   };
 }

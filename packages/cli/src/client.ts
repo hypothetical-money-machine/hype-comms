@@ -34,6 +34,21 @@ export interface ApiClientOptions {
   readonly timeoutMs: number;
 }
 
+export const RESPONSE_BODY_MAX_BYTES = 4 * 1_024 * 1_024;
+
+const RESPONSE_TOO_LARGE_MESSAGE = "The server response was too large";
+
+class ResponseTooLargeError extends CliError {
+  constructor() {
+    super({
+      exitCode: EXIT_CONTRACT,
+      code: "INVALID_SERVER_CONTRACT",
+      message: RESPONSE_TOO_LARGE_MESSAGE,
+      retryable: false,
+    });
+  }
+}
+
 export interface EmptyApiRequestOptions<TRequest> {
   readonly method: "POST" | "PUT" | "PATCH" | "DELETE";
   readonly path: string;
@@ -66,12 +81,10 @@ async function parseJson(response: Response): Promise<unknown> {
   }
   let text: string;
   try {
-    text = await response.text();
+    text = await readResponseText(response);
   } catch (error) {
+    if (error instanceof CliError) throw error;
     throw networkError(error);
-  }
-  if (text.length > 4 * 1_024 * 1_024) {
-    throw contractError("The server response was too large");
   }
   try {
     return JSON.parse(text) as unknown;
@@ -93,9 +106,45 @@ async function parseJson(response: Response): Promise<unknown> {
 async function parseErrorBody(response: Response): Promise<unknown> {
   try {
     return await parseJson(response);
-  } catch {
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) throw error;
     return undefined;
   }
+}
+
+async function readResponseText(response: Response): Promise<string> {
+  if (response.body === null) return "";
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (length + value.byteLength > RESPONSE_BODY_MAX_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The response is already over the limit; a cancellation failure must not mask that
+          // non-retryable contract error.
+        }
+        throw new ResponseTooLargeError();
+      }
+      chunks.push(value);
+      length += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export class ApiClient {

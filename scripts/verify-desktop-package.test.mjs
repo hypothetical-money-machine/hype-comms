@@ -11,6 +11,7 @@ import {
 import {
   collectPackageFiles,
   excludedPackageDirectories,
+  verifyPackageEntries,
   verifyPackageMetadata,
   verifyUpdateConfiguration,
 } from "./verify-desktop-package.mjs";
@@ -18,6 +19,48 @@ import {
 const missingFile = async () => {
   throw Object.assign(new Error("missing"), { code: "ENOENT" });
 };
+
+const baselinePackageEntries = () =>
+  new Set([
+    "/dist/main/index.js",
+    "/dist/main/claude-acp-worker.js",
+    "/dist/main/codex-app-server-worker.js",
+    "/dist/preload/index.js",
+    "/dist/renderer/index.html",
+    "/dist/renderer/assets/index.js",
+    "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+    "/node_modules/@agentclientprotocol/sdk/package.json",
+    "/node_modules/electron-updater/package.json",
+    "/node_modules/electron-updater/out/main.js",
+  ]);
+
+test("requires the Codex worker without allowing bundled Codex packages or executables", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  assert.doesNotThrow(() => verifyPackageEntries(asarPath, baselinePackageEntries()));
+
+  const missingWorker = baselinePackageEntries();
+  missingWorker.delete("/dist/main/codex-app-server-worker.js");
+  assert.throws(
+    () => verifyPackageEntries(asarPath, missingWorker),
+    /missing \/dist\/main\/codex-app-server-worker\.js/u,
+  );
+
+  const bundledPackage = baselinePackageEntries();
+  bundledPackage.add("/node_modules/@openai/codex/package.json");
+  assert.throws(
+    () => verifyPackageEntries(asarPath, bundledPackage),
+    /contains bundled official Codex packages/u,
+  );
+
+  for (const executable of ["/vendor/codex", "/vendor/codex.exe"]) {
+    const bundledExecutable = baselinePackageEntries();
+    bundledExecutable.add(executable);
+    assert.throws(
+      () => verifyPackageEntries(asarPath, bundledExecutable),
+      /contains a bundled Codex executable/u,
+    );
+  }
+});
 
 test("requires development packages to omit updater configuration", async () => {
   await assert.doesNotReject(
@@ -53,6 +96,36 @@ test("requires production packages to use the stable update feed", async () => {
     ),
     /update feed must be https:\/\/updates\.hypemm\.com\/desktop/u,
   );
+});
+
+test("requires publisherName in production update config when Windows signing is configured", async () => {
+  const previousPublisher = process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME;
+  process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME =
+    "CN=Hype Comms, O=Hypothetical Money Machine, C=US";
+  try {
+    await assert.doesNotReject(
+      verifyUpdateConfiguration(
+        "/tmp/hype-comms/resources/app.asar",
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+        async () =>
+          "provider: generic\nurl: https://updates.hypemm.com/desktop\npublisherName: CN=Hype Comms, O=Hypothetical Money Machine, C=US\n",
+      ),
+    );
+    await assert.rejects(
+      verifyUpdateConfiguration(
+        "/tmp/hype-comms/resources/app.asar",
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+        async () => "provider: generic\nurl: https://updates.hypemm.com/desktop\n",
+      ),
+      /must contain exactly one publisherName/u,
+    );
+  } finally {
+    if (previousPublisher === undefined) {
+      delete process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME;
+    } else {
+      process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME = previousPublisher;
+    }
+  }
 });
 
 test("requires packaged metadata to carry the selected native identity", () => {

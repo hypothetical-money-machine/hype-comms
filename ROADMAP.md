@@ -53,15 +53,26 @@ acceptance and native evidence are scoped to the platforms named by the work.
   messages, verified mentions, capability-gated participated-thread replies, exact scoped
   click-through, stable preferences/capability state, and replica-first macOS window recreation are
   covered deterministically.
+- The SQLite-to-PostgreSQL cutover ([`docs/sqlite-cutover.md`](docs/sqlite-cutover.md)) is
+  complete and the prototype data path is retired.
+- File attachments on the local-disk dogfood path: composer attach in channels, DMs, and
+  threads, attachment chips with Open, and a per-conversation Files pane. Quarantine,
+  malware scanning, and hosted storage remain under **Next**.
+- Structured mention completion: composer `@` autocomplete over workspace members, with
+  mention chips in the composer, transcript, and pending outbox on the verified mention model.
+- Five-minute own-message retraction: author-only delete-and-disappear with a server-clock
+  window, tombstoned rows, and attachment disappearance. Messages remain immutable otherwise.
+- An owner-only Communication paths admin view: metadata-only member-pair aggregates with no
+  message-body access.
+- Clickable `mailto:` handoffs to the operating-system mail composer through the validated
+  main-process external-link path.
 
-Deliberate current constraints: one workspace, at most 25 active members, immutable
-messages, desktop only. Each is enforced in code and gets lifted on purpose, not by
-accident.
+Deliberate current constraints: one workspace, at most 25 active members, no message
+editing (only the five-minute own-message retraction), desktop only. Each is enforced in
+code and gets lifted on purpose, not by accident.
 
 ## Now: move ourselves onto it
 
-- Run the SQLite-to-PostgreSQL cutover ([`docs/sqlite-cutover.md`](docs/sqlite-cutover.md))
-  and retire the prototype data path.
 - Verify two-client convergence for real: exchange channel and DM messages while one client
   goes offline, restarts, or is disconnected mid-send, and confirm the queued retry resolves
   to one canonical server message.
@@ -72,18 +83,17 @@ accident.
 
 Roughly in order:
 
-- Structured mention completion on the existing verified mention model.
-- File attachments: quarantined direct uploads, malware scanning, expiring downloads, and
-  authorized filename search.
+- Harden attachments beyond the local-disk dogfood path: quarantined direct uploads, malware
+  scanning, expiring downloads, hosted storage, and authorized filename search.
 - Finish the [native notifications](docs/native-notifications-roadmap.md) rollout platform by
   platform. The signed/notarized macOS release artifact is the first opt-in pilot; collect its
   installed Milestone 4 display/click/lifecycle evidence while Windows and Linux remain compiled
   off. Let each platform ship after its applicable gate rather than blocking on the combined
   macOS, Windows, and Linux matrix; keep every platform's device preference default-off until its
   own gate passes.
-- Close the remaining release-signature gaps: procure a Windows Authenticode certificate and add
-  an independent signature gate, then add Linux detached signatures/SBOM/provenance. macOS signing
-  and notarization plus the cross-platform update feed are already running.
+- Close the remaining release-signature gaps: finish Azure Trusted Signing onboarding so the
+  inert Windows Authenticode hooks can sign, then add Linux detached signatures/SBOM/provenance.
+  macOS signing and notarization plus the Windows pipeline wiring are already in tree.
 - A small hosted deployment (the AWS/Cloudflare target in `docs/architecture.md`) once
   daily use justifies it.
 
@@ -92,8 +102,8 @@ Roughly in order:
 Direction, not commitment — revisit once we are happily living in it:
 
 - Multiple workspaces and inviting other small teams.
-- Message editing and deletion, group DMs, presence and typing indicators — table stakes
-  for anyone who is not us.
+- Message editing and deletion beyond the five-minute own-message retraction, group DMs,
+  presence and typing indicators — table stakes for anyone who is not us.
 - Browser and mobile clients; the renderer already sits behind a transport interface for
   exactly this reason.
 - Extend the agent-native foundation beyond tasks: event delivery, richer audit history, safe bot

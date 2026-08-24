@@ -255,6 +255,44 @@ describe("AuthKitFlow", () => {
     flow.dispose();
   });
 
+  it("fails an in-flight pending sign-in on a stateless authentication_failed callback", async () => {
+    const { flow, store } = createFlow();
+    await flow.start();
+    expect(store.pending).not.toBeNull();
+    const operationsBeforeCallback = store.operations.slice();
+
+    await expect(flow.handleCallback({ error: "authentication_failed" })).resolves.toEqual({
+      status: "authentication_failed",
+    });
+    expect(store.pending).toBeNull();
+    expect(store.operations).toEqual([...operationsBeforeCallback, "clear"]);
+    flow.dispose();
+  });
+
+  it("does not invent a transaction for a stateless authentication_failed callback", async () => {
+    const { flow, store } = createFlow();
+    await expect(flow.initialize()).resolves.toEqual({ status: "idle" });
+
+    await expect(flow.handleCallback({ error: "authentication_failed" })).resolves.toEqual({
+      status: "ignored",
+    });
+    expect(store.pending).toBeNull();
+    expect(store.operations).toEqual(["load"]);
+    flow.dispose();
+  });
+
+  it("still rejects a success callback that omits state", async () => {
+    const { flow, store } = createFlow();
+    await flow.start();
+    const pending = store.pending;
+
+    await expect(
+      flow.handleCallback({ code: HANDOFF_CODE } as DesktopAuthCallbackParameters),
+    ).resolves.toEqual({ status: "ignored" });
+    expect(store.pending).toBe(pending);
+    flow.dispose();
+  });
+
   it("retires an expired callback instead of returning a handoff", async () => {
     let now = NOW;
     const store = new MemoryPendingStore();

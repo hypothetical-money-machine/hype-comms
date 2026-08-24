@@ -11,25 +11,31 @@ import type {
   CacheDecryptBatchResponse,
   CacheEncryptBatchRequest,
   CacheEncryptBatchResponse,
-  CacheScope,
   ChatSessionState,
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
+  CommunicationPathsResponse,
+  Attachment,
+  ConversationFilesResponse,
   ConversationMutationResponse,
   CreateTaskOperation,
   CreateChannelOperation,
   DirectConversationRequest,
+  ConversationFilesQuery,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
+  ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   MessageHistoryResponse,
   MessageByIdResponse,
+  RetractMessageResponse,
   MessageThreadResponse,
   MessageSearchQuery,
   MessageSearchResponse,
   MoveTaskOperation,
+  OpenAttachmentResponse,
   NotificationAction,
   NotificationActionAcknowledgement,
   NotificationActionDrainRequest,
@@ -63,6 +69,7 @@ import type {
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
 export type ServerStatus = "reachable" | "unreachable";
+export const AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE = "AuthKit sign-in is unavailable";
 /** Re-exported from the contracts package so main, preload, and the renderer cannot drift. */
 export type {
   NotificationAction,
@@ -81,6 +88,7 @@ export type {
 export interface SessionTransport {
   readonly getServerStatus: () => Promise<ServerStatus>;
   readonly getSessionState: () => Promise<ChatSessionState>;
+  readonly retrySession: () => Promise<ChatSessionState>;
   /** Optional only so narrow test transports and older embedders remain source-compatible. */
   readonly getAuthCapabilities?: () => Promise<AuthCapabilities>;
   readonly startAuthKitSignIn?: () => Promise<void>;
@@ -166,7 +174,8 @@ export interface DesktopApi
   readonly checkForUpdates: () => Promise<void>;
   readonly restartToInstallUpdate: () => Promise<void>;
   readonly onUpdateStateChanged: (listener: (state: UpdateState) => void) => () => void;
-  readonly initializeCacheCrypto: (scope: CacheScope) => Promise<CacheCryptoStatus>;
+  /** Main derives the authorized cache scope; the renderer supplies no scope selector. */
+  readonly initializeCacheCrypto: () => Promise<CacheCryptoStatus>;
   readonly encryptCacheRecords: (
     input: CacheEncryptBatchRequest,
   ) => Promise<CacheEncryptBatchResponse>;
@@ -182,6 +191,11 @@ export interface DesktopApi
    */
   readonly listWorkspaceMembers: () => Promise<ListMembersResponse>;
   /**
+   * Owner-only workspace administration: member-to-member communication links with per-link
+   * message volume. The server rejects non-owners, so callers must gate the UI on the role.
+   */
+  readonly getCommunicationPaths: () => Promise<CommunicationPathsResponse>;
+  /**
    * Fetches one page of conversation summaries. Bootstrap returns the first page; callers page
    * with `after` until `hasMore` is false so a large workspace cannot exceed the wire contract.
    */
@@ -194,6 +208,7 @@ export interface DesktopApi
     readonly limit?: number;
   }) => Promise<MessageHistoryResponse>;
   readonly getMessageById: (messageId: string) => Promise<MessageByIdResponse>;
+  readonly retractMessage: (messageId: string) => Promise<RetractMessageResponse>;
   readonly getMessageThread: (input: {
     readonly messageId: string;
     readonly before?: string;
@@ -211,6 +226,15 @@ export interface DesktopApi
     emoji: ReactionEmoji,
   ) => Promise<RemoveReactionResponse>;
   readonly searchMessages: (input: MessageSearchQuery) => Promise<MessageSearchResponse>;
+  readonly listConversationFiles: (
+    conversationId: string,
+    input?: Partial<ConversationFilesQuery>,
+  ) => Promise<ConversationFilesResponse>;
+  readonly listMessageAttachments: (
+    messageIds: readonly string[],
+  ) => Promise<ListMessageAttachmentsResponse>;
+  readonly chooseAndUploadConversationFile: (conversationId: string) => Promise<Attachment | null>;
+  readonly openConversationFile: (attachmentId: string) => Promise<OpenAttachmentResponse>;
   readonly listConversationTasks: (
     conversationId: string,
     input?: Partial<TaskListQuery>,

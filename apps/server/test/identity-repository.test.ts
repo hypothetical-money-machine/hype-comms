@@ -59,6 +59,10 @@ describeWithPostgres("IdentityRepository", () => {
     await adminPool.end();
   });
 
+  it("maps a pre-title user row to a null title", async () => {
+    await expect(repository.findUserById(userId)).resolves.toMatchObject({ title: null });
+  });
+
   it("consumes a magic link exactly once under concurrent consumers", async () => {
     const tokenHash = Buffer.alloc(32, 1);
     await repository.insertMagicLink({

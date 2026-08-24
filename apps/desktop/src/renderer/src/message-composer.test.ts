@@ -1,10 +1,25 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createElement, createRef } from "react";
+import type { User } from "@hype-comms/contracts";
+import { createElement, createRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { Attachment } from "@hype-comms/contracts";
+
 import { MessageComposer } from "./message-composer";
+
+const pendingAttachment: Attachment = {
+  id: "10000000-0000-4000-8000-000000000010",
+  messageId: null,
+  uploadedBy: "10000000-0000-4000-8000-000000000001",
+  fileName: "launch-notes.pdf",
+  contentType: "application/pdf",
+  sizeBytes: 2048,
+  status: "ready",
+  downloadUrl: null,
+  createdAt: "2026-08-04T12:00:00.000Z",
+};
 
 afterEach(cleanup);
 
@@ -143,5 +158,188 @@ describe("MessageComposer", () => {
 
     rerender(createElement(MessageComposer, { ...props, disabled: true }));
     expect(screen.getByRole("textbox", { name: "Message" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("lets a pending attachment send without a draft", () => {
+    const { props } = renderComposer({
+      draft: "",
+      pendingAttachments: [pendingAttachment],
+      onAttach: vi.fn().mockResolvedValue(undefined),
+    });
+    expect(screen.getByText("launch-notes.pdf")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(props.onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("exposes an attach action that does not submit the draft", () => {
+    const onAttach = vi.fn().mockResolvedValue(undefined);
+    const { props } = renderComposer({ draft: "A useful update", onAttach });
+    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+    expect(onAttach).toHaveBeenCalledOnce();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+const NOW = "2026-08-04T12:00:00.000Z";
+
+const morgan: User = {
+  id: "10000000-0000-4000-8000-000000000001",
+  kind: "human",
+  username: "morgan",
+  displayName: "Morgan",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+const alex: User = {
+  id: "10000000-0000-4000-8000-000000000002",
+  kind: "human",
+  username: "alex",
+  displayName: "Alex Rivera",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+function renderLiveComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]> = {}) {
+  const onDraftChange = vi.fn();
+  const onSubmit = overrides.onSubmit ?? vi.fn().mockResolvedValue(undefined);
+
+  function Harness() {
+    const [draft, setDraft] = useState(overrides.draft ?? "");
+    return createElement(MessageComposer, {
+      conversationName: "# General",
+      disabled: false,
+      error: "",
+      members: [morgan, alex],
+      currentUserId: morgan.id,
+      ...overrides,
+      draft,
+      onDraftChange: (value) => {
+        onDraftChange(value);
+        setDraft(value);
+      },
+      onSubmit,
+    });
+  }
+
+  return { onDraftChange, onSubmit, ...render(createElement(Harness)) };
+}
+
+function typeDraft(textbox: HTMLTextAreaElement, value: string): void {
+  fireEvent.change(textbox, {
+    target: { value, selectionStart: value.length, selectionEnd: value.length },
+  });
+}
+
+describe("MessageComposer mentions", () => {
+  it("opens a member picker on @ and filters as the user types", () => {
+    renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@");
+    expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Morgan/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Alex Rivera/ })).toBeTruthy();
+
+    typeDraft(textbox, "@al");
+    expect(screen.getByRole("option", { name: /Alex Rivera/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Morgan/ })).toBeNull();
+  });
+
+  it("inserts a visible mention chip instead of leftover ordinary @name text", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@");
+    fireEvent.click(screen.getByRole("option", { name: /Alex Rivera/ }));
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("@alex ");
+    expect(onSubmit).not.toHaveBeenCalled();
+    const chip = document.querySelector(".mention-chip");
+    expect(chip?.textContent).toBe("@alex");
+    expect(chip?.getAttribute("data-mention-user-id")).toBe(alex.id);
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("chooses the highlighted member with Enter or Tab and does not send", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@");
+    fireEvent.keyDown(textbox, { key: "ArrowDown" });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(onDraftChange).toHaveBeenLastCalledWith("@alex ");
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    typeDraft(textbox, "thanks @mo");
+    fireEvent.keyDown(textbox, { key: "Tab" });
+    expect(onDraftChange).toHaveBeenLastCalledWith("thanks @morgan ");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the picker with Escape and leaves the typed query", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@al");
+    fireEvent.keyDown(textbox, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(onDraftChange).toHaveBeenLastCalledWith("@al");
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("sends with Enter while the open picker has no matching members", () => {
+    const { onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@nobody-matches");
+    expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
+
+    fireEvent.keyDown(textbox, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("reopens a dismissed picker when the composer context changes", () => {
+    function ContextHarness() {
+      const [draft, setDraft] = useState("");
+      const [contextKey, setContextKey] = useState("conversation-1");
+      return createElement(
+        "div",
+        null,
+        createElement(
+          "button",
+          { type: "button", onClick: () => setContextKey("conversation-2") },
+          "switch",
+        ),
+        createElement(MessageComposer, {
+          contextKey,
+          conversationName: "# General",
+          disabled: false,
+          error: "",
+          members: [morgan, alex],
+          currentUserId: morgan.id,
+          draft,
+          onDraftChange: (value: string) => setDraft(value),
+          onSubmit: vi.fn().mockResolvedValue(undefined),
+        }),
+      );
+    }
+
+    render(createElement(ContextHarness));
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@al");
+    expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
+    fireEvent.keyDown(textbox, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "switch" }));
+    expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
   });
 });

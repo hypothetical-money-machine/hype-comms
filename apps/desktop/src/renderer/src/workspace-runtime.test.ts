@@ -4,6 +4,7 @@ import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
   AiChannelState,
+  Attachment,
   CacheCryptoStatus,
   CacheDecryptBatchResponse,
   CacheEncryptBatchResponse,
@@ -11,13 +12,17 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ChatSessionState,
+  CommunicationPathsResponse,
+  ConversationFilesResponse,
   ConversationMutationResponse,
   ConversationSummary,
   CreateChannelOperation,
   CreateTaskOperation,
+  DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
+  ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
   MagicLinkDeliveryState,
   Message,
@@ -27,6 +32,7 @@ import type {
   MessageSearchResponse,
   MoveTaskOperation,
   MessageThreadResponse,
+  OpenAttachmentResponse,
   NotificationAction as ExactNotificationAction,
   NotificationContext,
   ProductRealtimeEvent,
@@ -34,6 +40,7 @@ import type {
   ReactionEmoji,
   RealtimeAcknowledgement,
   RemoveReactionResponse,
+  RetractMessageResponse,
   RealtimeConnectionState,
   RealtimeSessionScope,
   SendAttemptResult,
@@ -62,7 +69,13 @@ import type {
   CachedWorkspaceState,
   MembershipRepairMarker,
   OutboxItem,
+  RetractReservation,
   WorkspaceCache,
+} from "./workspace-cache";
+import {
+  applyRetractReservation,
+  retractReservationMap,
+  upsertRetractReservation,
 } from "./workspace-cache";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
@@ -82,6 +95,9 @@ const PEER_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-00000000000b";
 const CONNECTED_EVENT_ID = "20000000-0000-4000-8000-00000000000c";
 const CONNECTION_ID = "20000000-0000-4000-8000-00000000000d";
 const CREATED_CHANNEL_ID = "20000000-0000-4000-8000-000000000010";
+const DIRECT_CONVERSATION_ID = "20000000-0000-4000-8000-000000000033";
+const DIRECT_MESSAGE_ID = "20000000-0000-4000-8000-000000000034";
+const DIRECT_CLIENT_MESSAGE_ID = "20000000-0000-4000-8000-000000000035";
 const REACTION_ID = "20000000-0000-4000-8000-000000000011";
 const REACTION_EVENT_ID = "20000000-0000-4000-8000-000000000012";
 const REACTION_REMOVED_EVENT_ID = "20000000-0000-4000-8000-000000000013";
@@ -139,6 +155,16 @@ const user = {
   kind: "human",
   username: "morgan",
   displayName: "Morgan",
+  avatarUrl: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
+
+const peer = {
+  id: PEER_ID,
+  kind: "human",
+  username: "cpo",
+  displayName: "CPO",
   avatarUrl: null,
   createdAt: NOW,
   updatedAt: NOW,
@@ -497,6 +523,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
   #repairMarker: MembershipRepairMarker | null = null;
+  #retractReservations: RetractReservation[] = [];
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
   readonly loadBarriers: Promise<void>[] = [];
@@ -525,6 +552,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
       syncCursor: this.#syncCursor,
       lastSyncedAt: null,
       repairMarker: this.#repairMarker,
+      retractReservations: this.#retractReservations,
     };
   }
 
@@ -541,9 +569,20 @@ class FakeWorkspaceCache implements WorkspaceCache {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
     this.operations.push("replaceSnapshot");
-    this.#snapshot = snapshot;
+    const reservations = retractReservationMap(this.#retractReservations);
+    this.#snapshot = {
+      ...snapshot,
+      conversations: snapshot.conversations.map((summary) => {
+        if (summary.lastMessage === null) return summary;
+        const lastMessage = applyRetractReservation(summary.lastMessage, reservations);
+        return lastMessage === summary.lastMessage ? summary : { ...summary, lastMessage };
+      }),
+    };
     this.#messages.clear();
-    for (const item of messages) this.#messages.set(item.id, item);
+    for (const item of messages) {
+      const retained = applyRetractReservation(item, reservations);
+      this.#messages.set(retained.id, retained);
+    }
     this.#reactions.clear();
     for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
     this.#tasks.clear();
@@ -641,8 +680,27 @@ class FakeWorkspaceCache implements WorkspaceCache {
         }
       }
     } else if (event.type === "message.created") {
-      this.#messages.set(event.payload.message.id, event.payload.message);
-      this.#outbox.delete(event.payload.message.clientMessageId);
+      const created = applyRetractReservation(
+        event.payload.message,
+        retractReservationMap(this.#retractReservations),
+      );
+      this.#messages.set(created.id, created);
+      this.#outbox.delete(created.clientMessageId);
+    } else if (event.type === "message.retracted") {
+      this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
+        messageId: event.payload.messageId,
+        deletedAt: event.payload.deletedAt,
+        entityVersion: event.entityVersion,
+      });
+      const current = this.#messages.get(event.payload.messageId);
+      if (current !== undefined) {
+        this.#messages.set(event.payload.messageId, {
+          ...current,
+          deletedAt: event.payload.deletedAt,
+          version: event.entityVersion,
+          updatedAt: event.payload.deletedAt,
+        });
+      }
     } else if (event.type === "reaction.added") {
       this.#reactions.set(event.payload.reaction.id, event.payload.reaction);
     } else if (event.type === "reaction.removed") {
@@ -681,7 +739,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     if (messages.some((message) => message.conversationId !== conversationId)) {
       throw new Error("The workspace history crossed conversation scope");
     }
-    for (const item of messages) this.#messages.set(item.id, item);
+    const reservations = retractReservationMap(this.#retractReservations);
+    for (const item of messages) {
+      const retained = applyRetractReservation(item, reservations);
+      this.#messages.set(retained.id, retained);
+    }
     if (reactions !== undefined) {
       const messageIds = new Set(messages.map((message) => message.id));
       for (const [id, reaction] of this.#reactions) {
@@ -747,7 +809,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     ) {
       return false;
     }
-    this.#messages.set(item.id, item);
+    const retained = applyRetractReservation(
+      item,
+      retractReservationMap(this.#retractReservations),
+    );
+    this.#messages.set(retained.id, retained);
     this.#outbox.delete(expectedClientMessageId);
     this.#outbox.delete(item.clientMessageId);
     await this.advanceCursor(syncCursor);
@@ -900,8 +966,25 @@ class FakeDesktopApi implements DesktopApi {
   /** When set, every handshake reports itself live first, exactly as the real server does. */
   connectedOnStart = false;
   readonly conversationPages = new Map<string, ListConversationsResponse>();
-  readonly histories = new Map<string, MessageHistoryResponse>();
-  readonly threadResults: MessageThreadResponse[] = [];
+  readonly histories = new Map<
+    string,
+    Omit<MessageHistoryResponse, "attachments"> & { readonly attachments?: Attachment[] }
+  >();
+  readonly attachments: Attachment[] = [];
+  readonly attachmentResults: (
+    ListMessageAttachmentsResponse | Promise<ListMessageAttachmentsResponse>
+  )[] = [];
+  readonly attachmentRequests: string[][] = [];
+  readonly conversationFileResults: (
+    ConversationFilesResponse | Promise<ConversationFilesResponse>
+  )[] = [];
+  readonly conversationFileRequests: string[] = [];
+  readonly uploadedFiles: string[] = [];
+  readonly openedFiles: string[] = [];
+  chooseAndUploadResult: Attachment | null | Promise<Attachment | null> = null;
+  readonly threadResults: Array<
+    Omit<MessageThreadResponse, "attachments"> & { readonly attachments?: Attachment[] }
+  > = [];
   readonly threadRequests: {
     readonly messageId: string;
     readonly before?: string;
@@ -916,8 +999,21 @@ class FakeDesktopApi implements DesktopApi {
   readonly removeReactionResults: RemoveReactionResponse[] = [];
   readonly addedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
   readonly removedReactions: { readonly messageId: string; readonly emoji: ReactionEmoji }[] = [];
+  readonly retractResults: RetractMessageResponse[] = [];
+  readonly retractedMessageIds: string[] = [];
   readonly syncResults: (SyncAttemptResult | Promise<SyncAttemptResult>)[] = [];
-  readonly sendResults: (SendAttemptResult | Promise<SendAttemptResult>)[] = [];
+  readonly sendResults: (
+    | SendAttemptResult
+    | Promise<SendAttemptResult>
+    | {
+        readonly status: "accepted";
+        readonly response: {
+          readonly message: Message;
+          readonly syncCursor: string;
+          readonly attachments?: readonly Attachment[];
+        };
+      }
+  )[] = [];
   readonly channelResults: (
     ConversationMutationResponse | Promise<ConversationMutationResponse>
   )[] = [];
@@ -925,6 +1021,10 @@ class FakeDesktopApi implements DesktopApi {
   readonly acknowledged: string[] = [];
   readonly sent: SendMessageOperation[] = [];
   readonly createdChannels: CreateChannelOperation[] = [];
+  readonly createdDirectConversations: string[] = [];
+  readonly directConversationResults: (
+    ConversationMutationResponse | Promise<ConversationMutationResponse>
+  )[] = [];
   readonly syncedFrom: string[] = [];
   readonly listedAfter: (string | undefined)[] = [];
   readonly historyRequests: string[] = [];
@@ -932,7 +1032,10 @@ class FakeDesktopApi implements DesktopApi {
     string,
     (MessageHistoryResponse | Promise<MessageHistoryResponse>)[]
   >();
-  readonly messageByIdResults: (MessageByIdResponse | Promise<MessageByIdResponse>)[] = [];
+  readonly messageByIdResults: Array<
+    | (Omit<MessageByIdResponse, "attachments"> & { readonly attachments?: Attachment[] })
+    | Promise<Omit<MessageByIdResponse, "attachments"> & { readonly attachments?: Attachment[] }>
+  > = [];
   readonly messageByIdRequests: string[] = [];
   messageByIdFailures = 0;
   readonly searchResults: (MessageSearchResponse | Promise<MessageSearchResponse>)[] = [];
@@ -990,6 +1093,10 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async getSessionState(): Promise<ChatSessionState> {
+    return session;
+  }
+
+  async retrySession(): Promise<ChatSessionState> {
     return session;
   }
 
@@ -1138,6 +1245,10 @@ class FakeDesktopApi implements DesktopApi {
     return { members: [...this.members] };
   }
 
+  async getCommunicationPaths(): Promise<CommunicationPathsResponse> {
+    return { generatedAt: "2026-01-01T00:00:00.000Z", members: [...this.members], paths: [] };
+  }
+
   async listConversations(
     input: Partial<ListConversationsQuery> = {},
   ): Promise<ListConversationsResponse> {
@@ -1160,6 +1271,7 @@ class FakeDesktopApi implements DesktopApi {
     return {
       threadSummaries: [],
       threadsSupported: true,
+      attachments: [],
       messages: [],
       nextCursor: null,
       ...this.histories.get(input.conversationId),
@@ -1174,7 +1286,14 @@ class FakeDesktopApi implements DesktopApi {
     this.threadRequests.push(input);
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
-    return response;
+    return { attachments: [], ...response };
+  }
+
+  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    this.retractedMessageIds.push(messageId);
+    const result = this.retractResults.shift();
+    if (result === undefined) throw new Error("The test queued no retract-message result");
+    return result;
   }
 
   async getMessageById(messageId: string): Promise<MessageByIdResponse> {
@@ -1187,7 +1306,7 @@ class FakeDesktopApi implements DesktopApi {
     if (response === undefined) {
       throw new Error("The workspace runtime test queued no exact-message response");
     }
-    return await response;
+    return { attachments: [], ...(await response) };
   }
 
   async listMessageReactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
@@ -1221,6 +1340,40 @@ class FakeDesktopApi implements DesktopApi {
     const response = this.searchResults.shift();
     if (response === undefined) throw new Error("The test queued no search result");
     return await response;
+  }
+
+  async listConversationFiles(conversationId: string): Promise<ConversationFilesResponse> {
+    this.conversationFileRequests.push(conversationId);
+    return (
+      (await this.conversationFileResults.shift()) ?? {
+        files: [],
+        nextCursor: null,
+        hasMore: false,
+      }
+    );
+  }
+
+  async listMessageAttachments(
+    messageIds: readonly string[],
+  ): Promise<ListMessageAttachmentsResponse> {
+    this.attachmentRequests.push([...messageIds]);
+    const queued = this.attachmentResults.shift();
+    if (queued !== undefined) return queued;
+    return {
+      attachments: this.attachments.filter(
+        (attachment) => attachment.messageId !== null && messageIds.includes(attachment.messageId),
+      ),
+    };
+  }
+
+  async chooseAndUploadConversationFile(conversationId: string): Promise<Attachment | null> {
+    this.uploadedFiles.push(conversationId);
+    return this.chooseAndUploadResult;
+  }
+
+  async openConversationFile(attachmentId: string): Promise<OpenAttachmentResponse> {
+    this.openedFiles.push(attachmentId);
+    return { opened: true };
   }
 
   async listConversationTasks(
@@ -1274,6 +1427,7 @@ class FakeDesktopApi implements DesktopApi {
       status: "accepted",
       response: {
         ...result.response,
+        attachments: [...(result.response.attachments ?? [])],
         message: { ...result.response.message, clientMessageId: input.message.clientMessageId },
       },
     };
@@ -1305,8 +1459,13 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("The runtime test does not remove channel members");
   }
 
-  async createDirectConversation(): Promise<ConversationMutationResponse> {
-    throw new Error("The runtime test does not create direct conversations");
+  async createDirectConversation(
+    input: DirectConversationRequest,
+  ): Promise<ConversationMutationResponse> {
+    this.createdDirectConversations.push(input.memberId);
+    const result = this.directConversationResults.shift();
+    if (result === undefined) throw new Error("The test queued no direct conversation result");
+    return await result;
   }
 
   async advanceReadCursor(
@@ -1405,6 +1564,72 @@ class FakeDesktopApi implements DesktopApi {
   onWorkspaceEvent(listener: (frame: ScopedProductRealtimeEvent) => void): () => void {
     this.#eventListeners.add(listener);
     return () => this.#eventListeners.delete(listener);
+  }
+}
+
+class DeterministicMessageServer {
+  readonly messages = new Map<string, Message>();
+  attempts = 0;
+
+  send(input: SendMessageOperation): SendAttemptResult {
+    this.attempts += 1;
+    if (this.attempts === 1) {
+      // The connection disappears before the server commits anything.
+      return { status: "retryable", reason: "network", retryAfterMs: 1_000 };
+    }
+
+    let canonical = this.messages.get(input.message.clientMessageId);
+    if (canonical === undefined) {
+      canonical = {
+        ...ownMessage,
+        id: "20000000-0000-4000-8000-000000000073",
+        clientMessageId: input.message.clientMessageId,
+        body: input.message.body,
+        conversationSequence: "3",
+      };
+      this.messages.set(input.message.clientMessageId, canonical);
+    }
+    if (this.attempts === 2) {
+      // The commit is durable, but the response disappears. The next request must reuse the same
+      // UUID and receive this canonical row rather than creating a second message.
+      return { status: "retryable", reason: "network", retryAfterMs: 1_000 };
+    }
+    return {
+      status: "accepted",
+      response: { message: canonical, attachments: [], syncCursor: "11" },
+    };
+  }
+
+  event(): WorkspaceEvent {
+    const canonical = [...this.messages.values()][0];
+    if (canonical === undefined) throw new Error("Expected the deterministic message commit");
+    return {
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000074",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: canonical.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: canonical, mentionedUserIds: [] },
+    };
+  }
+}
+
+class DeterministicDeliveryApi extends FakeDesktopApi {
+  constructor(
+    bootstrap: HumanWorkspaceBootstrapResponse,
+    private readonly server: DeterministicMessageServer,
+  ) {
+    super(bootstrap);
+  }
+
+  override async sendConversationMessage(input: SendMessageOperation): Promise<SendAttemptResult> {
+    this.sent.push(input);
+    return this.server.send(input);
   }
 }
 
@@ -1530,6 +1755,152 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
+    const api = new FakeDesktopApi(bootstrapAt("99"));
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session, { offline: true });
+
+    expect(runtime.state).toMatchObject({
+      bootstrap: expect.objectContaining({ syncCursor: "10" }),
+      messages: [ownMessage],
+      reactions: [ownReaction],
+      tasks: [task],
+      connection: "offline",
+      stale: true,
+      busy: false,
+      error: null,
+    });
+    expect(api.bootstrapRequests).toBe(0);
+    expect(api.syncedFrom).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect(api.historyRequests).toEqual([]);
+    expect(api.reactionRequests).toEqual([]);
+    expect(api.conversationTaskRequests).toEqual([]);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Written during a cold offline restart", []);
+    expect(api.sent).toEqual([]);
+    expect(runtime.state.outbox).toHaveLength(1);
+    expect((await cache.load()).outbox).toHaveLength(1);
+  });
+
+  it("converges two clients after disconnects before and after the canonical commit", async () => {
+    vi.useFakeTimers();
+    try {
+      const initial = bootstrapAt("10");
+      const senderCache = new FakeWorkspaceCache();
+      await senderCache.replaceSnapshot(initial, []);
+      const offlineSender = runtimeWith(new FakeDesktopApi(bootstrapAt("99")), senderCache);
+      await offlineSender.start(session, { offline: true });
+      await offlineSender.sendMessage(CONVERSATION_ID, "One durable offline message", []);
+      const clientMessageId = offlineSender.state.outbox[0]?.operation.message.clientMessageId;
+      if (clientMessageId === undefined) throw new Error("Expected the offline outbox item");
+      await offlineSender.stop();
+
+      const server = new DeterministicMessageServer();
+      const senderApi = new DeterministicDeliveryApi(initial, server);
+      const restartedSender = runtimeWith(senderApi, senderCache);
+      await restartedSender.start(session);
+      await settle(
+        () => restartedSender.state.outbox[0]?.status === "retry_wait",
+        "disconnect before commit",
+      );
+      expect(server.attempts).toBe(1);
+      expect(server.messages.size).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(
+        () => server.attempts === 2 && restartedSender.state.outbox[0]?.status === "retry_wait",
+        "disconnect after commit before response",
+      );
+      expect(server.messages.size).toBe(1);
+      expect(restartedSender.state.outbox).toHaveLength(1);
+
+      const canonical = [...server.messages.values()][0];
+      if (canonical === undefined) throw new Error("Expected one canonical server message");
+      const initialConversation = initial.conversations[0];
+      if (initialConversation === undefined) throw new Error("Expected the initial conversation");
+      const observerCache = new FakeWorkspaceCache();
+      await observerCache.replaceSnapshot(initial, []);
+      const observerBootstrap = bootstrapAt("11", {
+        conversations: [
+          {
+            ...initialConversation,
+            lastMessage: canonical,
+          },
+        ],
+      });
+      const observerApi = new FakeDesktopApi(observerBootstrap);
+      observerApi.syncResults.push({
+        status: "accepted",
+        response: {
+          events: [server.event()],
+          nextCursor: "11",
+          highWaterCursor: "11",
+          hasMore: false,
+        },
+      });
+      const observer = runtimeWith(observerApi, observerCache);
+      await observer.start(session);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle(() => restartedSender.state.outbox.length === 0, "idempotent retry response");
+
+      expect(server.attempts).toBe(3);
+      expect(server.messages.size).toBe(1);
+      expect(senderApi.sent.map((input) => input.message.clientMessageId)).toEqual([
+        clientMessageId,
+        clientMessageId,
+        clientMessageId,
+      ]);
+      expect(
+        restartedSender.state.messages.filter(
+          (message) => message.clientMessageId === clientMessageId,
+        ),
+      ).toEqual([canonical]);
+      expect(
+        observer.state.messages.filter((message) => message.clientMessageId === clientMessageId),
+      ).toEqual([canonical]);
+
+      await restartedSender.stop();
+      await observer.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("repairs a cached restart from its cursor and hydrates history only when selected", async () => {
+    const secondSummary = channel(SECOND_CONVERSATION_ID, "random");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000071",
+      clientMessageId: "20000000-0000-4000-8000-000000000072",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const snapshot = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(snapshot, [peerMessage, secondMessage], [ownReaction], [task]);
+    const api = new FakeDesktopApi(snapshot);
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+    await settle(() => api.historyRequests.length === 1, "selected history hydration");
+
+    expect(api.syncedFrom).toEqual(["10", "10"]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([]);
+    expect(runtime.state.messages).toEqual([peerMessage, secondMessage]);
+
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 2, "second history hydration");
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+  });
+
   it("replaces a legacy channel mode before syncing or restarting realtime", async () => {
     const cached = bootstrapAt("8");
     const announcement = channel(CONVERSATION_ID, "company-news");
@@ -1550,6 +1921,15 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(cached, []);
     const api = new FakeDesktopApi(capable);
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: "10",
+        highWaterCursor: "10",
+        hasMore: false,
+      },
+    });
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
@@ -2163,14 +2543,165 @@ describe("WorkspaceRuntime", () => {
       threadsSupported: true,
       nextCursor: null,
     });
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [],
+        nextCursor: "10",
+        highWaterCursor: "10",
+        hasMore: false,
+      },
+    });
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await settle(() => runtime.state.threadsSupported, "selected conversation hydration");
 
     expect(runtime.state.threadsSupported).toBe(true);
     expect(runtime.state.messages).toContainEqual(ownMessage);
     expect(runtime.state.outbox[0]?.operation.message.threadRootId).toBe(OWN_MESSAGE_ID);
     expect((await cache.load()).messages).toContainEqual(ownMessage);
+  });
+
+  it("projects a message.retracted tombstone and drops that message's attachments", async () => {
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000ad",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "secrets.txt",
+      contentType: "text/plain",
+      sizeBytes: 32,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const leaked = { ...ownMessage, body: "bot token leaked in comms" };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [leaked],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [attachment],
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    expect(runtime.state.messages).toContainEqual(leaked);
+    expect(runtime.state.attachments).toEqual([attachment]);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000ae",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: leaked.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "message-retracted acknowledgement");
+
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: "bot token leaked in comms",
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+    expect(runtime.state.attachments).toEqual([]);
+  });
+
+  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.retractResults.push({
+      message: { ...ownMessage, deletedAt: NOW, version: 2, updatedAt: NOW },
+      syncCursor: "11",
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    runtime.selectConversation(CONVERSATION_ID);
+
+    await runtime.retractMessage(OWN_MESSAGE_ID);
+
+    expect(api.retractedMessageIds).toEqual([OWN_MESSAGE_ID]);
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+  });
+
+  it("does not let stale history resurrect a source-less message.retracted event", async () => {
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.messages).toEqual([]);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000af",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: ownMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: OWN_MESSAGE_ID, deletedAt: NOW },
+    });
+    await settle(
+      () => api.acknowledged.includes("11"),
+      "source-less message-retracted acknowledgement",
+    );
+
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).retractReservations).toEqual([
+      {
+        messageId: OWN_MESSAGE_ID,
+        deletedAt: NOW,
+        entityVersion: 2,
+      },
+    ]);
+
+    await runtime.openSearchResult({ message: ownMessage });
+
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
+    expect((await cache.load()).messages).toContainEqual(
+      expect.objectContaining({
+        id: OWN_MESSAGE_ID,
+        body: ownMessage.body,
+        deletedAt: NOW,
+        version: 2,
+      }),
+    );
   });
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {
@@ -2284,7 +2815,7 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
-  it("replaces stale cached tasks from the authoritative startup snapshot", async () => {
+  it("keeps cached tasks until that conversation is opened on demand", async () => {
     const staleTask = { ...task, title: "Stale cached title" };
     const currentTask: Task = {
       ...task,
@@ -2304,7 +2835,9 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
 
-    expect(cache.cursor).toBe("12");
+    expect(api.conversationTaskRequests).toEqual([]);
+    expect(runtime.state.tasks).toEqual([staleTask]);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(runtime.state.tasks).toEqual([currentTask]);
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
@@ -2880,7 +3413,7 @@ describe("WorkspaceRuntime", () => {
     // The send is allocated workspace sequence 12 while a peer's event 11 is still in flight.
     api.sendResults.push({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
     await settle(() => runtime.state.outbox.length === 0, "send acknowledgement");
@@ -2898,6 +3431,73 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("sends attachment ids and hydrates files from history and live messages", async () => {
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "launch-notes.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [attachment],
+      nextCursor: null,
+    });
+    api.sendResults.push({
+      status: "accepted",
+      response: {
+        message: { ...ownMessage, id: "20000000-0000-4000-8000-0000000000ab" },
+        attachments: [
+          {
+            ...attachment,
+            id: "20000000-0000-4000-8000-0000000000ac",
+            messageId: "20000000-0000-4000-8000-0000000000ab",
+          },
+        ],
+        syncCursor: "11",
+      },
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.attachments).toEqual([attachment]);
+
+    await runtime.sendMessage(CONVERSATION_ID, "Notes", [], null, [attachment.id]);
+    await settle(() => runtime.state.outbox.length === 0, "attached send acknowledgement");
+    expect(api.sent[0]?.message.attachmentIds).toEqual([attachment.id]);
+    expect(runtime.state.attachments.map((item) => item.fileName)).toContain("launch-notes.pdf");
+
+    const liveAttachment: Attachment = {
+      ...attachment,
+      id: "20000000-0000-4000-8000-0000000000ad",
+      messageId: PEER_MESSAGE_ID,
+      fileName: "dm-clip.webm",
+    };
+    api.attachmentResults.push({ attachments: [liveAttachment] });
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(
+      () => runtime.state.attachments.some((item) => item.id === liveAttachment.id),
+      "live attachment hydration",
+    );
+    expect(runtime.state.attachments.some((item) => item.fileName === "dm-clip.webm")).toBe(true);
+
+    api.conversationFileResults.push({
+      files: [attachment, liveAttachment],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await runtime.loadConversationFiles(CONVERSATION_ID);
+    expect(runtime.state.conversationFiles).toEqual([attachment, liveAttachment]);
   });
 
   it("counts out-of-order replies once across HTTP and realtime delivery", async () => {
@@ -3291,6 +3891,144 @@ describe("WorkspaceRuntime", () => {
     expect(cache.cursor).toBe("10");
   });
 
+  it("opens a cached direct message immediately without a snapshot or history refresh", async () => {
+    const peerDm = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]);
+    const cachedDirectMessage: Message = {
+      ...peerMessage,
+      id: DIRECT_MESSAGE_ID,
+      clientMessageId: DIRECT_CLIENT_MESSAGE_ID,
+      conversationId: DIRECT_CONVERSATION_ID,
+      body: "Cached CPO thread",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        members: [user, peer],
+        conversations: [channel(CONVERSATION_ID, "general"), peerDm],
+      }),
+    );
+    api.histories.set(DIRECT_CONVERSATION_ID, {
+      messages: [cachedDirectMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const bootstrapRequestsAfterStart = api.bootstrapRequests;
+    const historyRequestsAfterStart = api.historyRequests.length;
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.messages).toContainEqual(cachedDirectMessage);
+
+    await runtime.createDirectConversation(PEER_ID);
+
+    expect(api.createdDirectConversations).toEqual([]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([cachedDirectMessage]);
+
+    runtime.selectConversation(CONVERSATION_ID);
+    runtime.selectConversation(DIRECT_CONVERSATION_ID);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+  });
+
+  it("projects a new direct message and hydrates its history after first paint", async () => {
+    const createdDm = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]);
+    const hydratedMessage: Message = {
+      ...peerMessage,
+      id: DIRECT_MESSAGE_ID,
+      clientMessageId: DIRECT_CLIENT_MESSAGE_ID,
+      conversationId: DIRECT_CONVERSATION_ID,
+      body: "Hydrated after first paint",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const delayedHistory = deferred<MessageHistoryResponse>();
+    api.directConversationResults.push({ conversation: createdDm, syncCursor: "12" });
+    api.historyResults.set(DIRECT_CONVERSATION_ID, [delayedHistory.promise]);
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const bootstrapRequestsAfterStart = api.bootstrapRequests;
+    const historyRequestsAfterStart = api.historyRequests.length;
+
+    const opening = runtime.createDirectConversation(PEER_ID);
+    await settle(() => api.createdDirectConversations.length === 1, "direct conversation request");
+    await opening;
+
+    expect(api.createdDirectConversations).toEqual([PEER_ID]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
+    expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
+    expect(runtime.state.bootstrap?.conversations.map((item) => item.conversation.id)).toEqual([
+      CONVERSATION_ID,
+      DIRECT_CONVERSATION_ID,
+    ]);
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([]);
+    await settle(
+      () => api.historyRequests.length === historyRequestsAfterStart + 1,
+      "lazy direct-message history fetch",
+    );
+    expect(api.historyRequests.at(-1)).toBe(DIRECT_CONVERSATION_ID);
+
+    delayedHistory.resolve({
+      messages: [hydratedMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: null,
+    });
+    await settle(
+      () => runtime.state.messages.some((item) => item.id === DIRECT_MESSAGE_ID),
+      "lazy-hydrated direct-message history",
+    );
+    expect(
+      runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
+    ).toEqual([hydratedMessage]);
+    expect(
+      (await cache.load()).bootstrap?.conversations.map((item) => item.conversation.id),
+    ).toContain(DIRECT_CONVERSATION_ID);
+    expect((await cache.load()).messages).toContainEqual(hydratedMessage);
+  });
+
+  it("rejects direct-message creation before bootstrap without contacting the server", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await expect(runtime.createDirectConversation(PEER_ID)).rejects.toThrow(
+      "Workspace is still loading",
+    );
+    expect(api.createdDirectConversations).toEqual([]);
+  });
+
+  it("does not project a successful direct conversation into a replacement session", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    let resolveResult: ((result: ConversationMutationResponse) => void) | undefined;
+    api.directConversationResults.push(
+      new Promise((resolve) => {
+        resolveResult = resolve;
+      }),
+    );
+    const opening = runtime.createDirectConversation(PEER_ID);
+    await settle(() => api.createdDirectConversations.length === 1, "direct conversation request");
+    await runtime.stop();
+    resolveResult?.({
+      conversation: directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]),
+      syncCursor: "12",
+    });
+
+    await expect(opening).resolves.toBeUndefined();
+    expect(runtime.state.bootstrap).toBeNull();
+    expect(runtime.state.selectedConversationId).toBeNull();
+  });
+
   it("rearms the retry timer so a retryable send is redelivered with no user action", async () => {
     vi.useFakeTimers();
     try {
@@ -3301,7 +4039,7 @@ describe("WorkspaceRuntime", () => {
       api.sendResults.push({ status: "retryable", reason: "network", retryAfterMs: 5_000 });
       api.sendResults.push({
         status: "accepted",
-        response: { message: ownMessage, syncCursor: "11" },
+        response: { message: ownMessage, attachments: [], syncCursor: "11" },
       });
 
       await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
@@ -3322,7 +4060,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -3341,7 +4079,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     await drain();
 
@@ -3399,7 +4137,7 @@ describe("WorkspaceRuntime", () => {
 
     replacementSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
     });
     await settle(() => api.sent.length === 3, "replacement owner second conversation send");
     await restarted;
@@ -3427,7 +4165,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -3454,7 +4192,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: "12" },
     });
     await drain();
 
@@ -3766,7 +4504,7 @@ describe("WorkspaceRuntime", () => {
       reason: "credential_store_unavailable",
     };
     await runtime.start(otherSession);
-    hydration.resolve({ message: peerMessage });
+    hydration.resolve({ message: peerMessage, attachments: [] });
     await opening;
 
     expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
@@ -4216,6 +4954,7 @@ describe("WorkspaceRuntime", () => {
       messages: [olderPrivateMessage],
       threadSummaries: [],
       threadsSupported: true,
+      attachments: [],
       nextCursor: null,
     });
     await loading;
@@ -4490,6 +5229,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });
@@ -4554,6 +5294,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });
@@ -4607,6 +5348,7 @@ describe("WorkspaceRuntime", () => {
           clientMessageId: sent.message.clientMessageId,
           conversationId: SECOND_CONVERSATION_ID,
         },
+        attachments: [],
         syncCursor: "12",
       },
     });
@@ -5064,7 +5806,7 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
     api.members = [user];
-    api.emitWorkspaceEvent(memberUpdated(SECOND_MEMBER_EVENT_ID, "11", agent));
+    api.emitWorkspaceEvent(memberUpdated(SECOND_MEMBER_EVENT_ID, "12", agent));
     await settle(() => api.memberRequests === 2, "current session member directory read");
     await settle(
       () => runtime.state.bootstrap?.members.length === 1,

@@ -1,5 +1,8 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -9,12 +12,16 @@ import {
   archiveChannelRequestSchema,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
+  completeFileUploadRequestSchema,
+  conversationFilesQuerySchema,
   createChannelRequestSchema,
+  createFileUploadRequestSchema,
   createTaskRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
   idempotencyKeySchema,
   listConversationsQuerySchema,
+  listMessageAttachmentsRequestSchema,
   listMessageReactionsRequestSchema,
   messageHistoryQuerySchema,
   messageSearchQuerySchema,
@@ -31,6 +38,7 @@ import type {
   ConversationMutationResponse,
   ConversationSummary,
   ListConversationsResponse,
+  User,
   WorkspaceBootstrapResponse,
 } from "@hype-comms/contracts";
 import type { FastifyPluginAsync } from "fastify";
@@ -129,14 +137,61 @@ function withoutChannelMode(summary: ConversationSummary) {
   return { ...summary, conversation };
 }
 
-function projectBootstrap(response: WorkspaceBootstrapResponse, capable: boolean) {
+function withoutTitle(user: User): Omit<User, "title"> {
+  const { title, ...legacy } = user;
+  void title;
+  return legacy;
+}
+
+function projectMembers<T extends { readonly members: readonly User[] }>(
+  response: T,
+  capable: boolean,
+) {
   if (capable) return response;
+  return { ...response, members: response.members.map(withoutTitle) };
+}
+
+function projectChannelMembers<T extends { readonly members: readonly { readonly user: User }[] }>(
+  response: T,
+  capable: boolean,
+) {
+  if (capable) return response;
+  return {
+    ...response,
+    members: response.members.map((member) => ({ ...member, user: withoutTitle(member.user) })),
+  };
+}
+
+function withoutMemberEventTitle(event: unknown): unknown {
+  if (typeof event !== "object" || event === null || !("type" in event)) return event;
+  if (event.type !== "member.updated" || !("payload" in event)) return event;
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || !("member" in payload)) return event;
+  return { ...event, payload: { ...payload, member: withoutTitle(payload.member as User) } };
+}
+
+function projectSyncMemberTitles<T extends { readonly events: readonly unknown[] }>(
+  response: T,
+  capable: boolean,
+) {
+  if (capable) return response;
+  return { ...response, events: response.events.map(withoutMemberEventTitle) };
+}
+
+function projectBootstrap(
+  response: WorkspaceBootstrapResponse,
+  supportsAnnouncements: boolean,
+  supportsMemberProfiles: boolean,
+) {
+  const members = supportsMemberProfiles ? response.members : response.members.map(withoutTitle);
+  if (supportsAnnouncements) return { ...response, members };
   const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
     ...response.featureFlags,
   };
   delete featureFlags.announcementChannels;
   return {
     ...response,
+    members,
     conversations: response.conversations.map(withoutChannelMode),
     featureFlags,
   };
@@ -152,6 +207,17 @@ function projectConversationMutation(response: ConversationMutationResponse, cap
   return { ...response, conversation: withoutChannelMode(response.conversation) };
 }
 
+function withoutAttachments<T extends { readonly attachments?: unknown }>(
+  value: T,
+  capable: boolean,
+): T | Omit<T, "attachments"> {
+  if (capable) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "attachments")) as Omit<
+    T,
+    "attachments"
+  >;
+}
+
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (app, options) => {
   const { identityService, botService, repository } = options;
   app.get("/bootstrap", async (request) => {
@@ -161,13 +227,41 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return projectBootstrap(
       await repository.bootstrap(identity),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 
   app.get("/members", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    return repository.listMembers(identity);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectMembers(
+      await repository.listMembers(identity),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
+  });
+
+  app.get("/admin/communication-paths", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    if (identity.currentUser.role !== "owner") {
+      throw new ApiError(403, "FORBIDDEN", "Only workspace owners can view communication paths");
+    }
+    // This endpoint exposes per-pair activity for conversations the owner may not be party to,
+    // so every read is recorded even though it is a query.
+    request.log.info(
+      {
+        event: "admin.communication_paths_viewed",
+        actorUserId: identity.currentUser.user.id,
+        workspaceId: identity.currentUser.workspaceId,
+      },
+      "Workspace owner viewed member communication paths",
+    );
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectMembers(
+      await repository.communicationPaths(identity),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
   });
 
   app.get("/conversations", async (request) => {
@@ -216,7 +310,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
-    return repository.listChannelMembers(identity, id);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectChannelMembers(
+      await repository.listChannelMembers(identity, id),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+    );
   });
 
   app.put("/channels/:id/members/:userId", async (request) => {
@@ -261,6 +359,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     const supportsThreads = supported.includes(THREADS_CAPABILITY);
+    const supportsAttachments = supported.includes(ATTACHMENTS_CAPABILITY);
     const history = await repository.history(
       identity,
       id,
@@ -268,8 +367,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       query.data.limit,
       !supportsThreads,
     );
-    if (supportsThreads) return history;
-    return { messages: history.messages, nextCursor: history.nextCursor };
+    if (supportsThreads) return withoutAttachments(history, supportsAttachments);
+    return {
+      messages: history.messages,
+      nextCursor: history.nextCursor,
+      ...(supportsAttachments ? { attachments: history.attachments } : {}),
+    };
   });
 
   app.get("/messages/:id/thread", async (request) => {
@@ -278,14 +381,29 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid thread query");
-    return repository.thread(identity, id, query.data.before, query.data.limit);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return withoutAttachments(
+      await repository.thread(identity, id, query.data.before, query.data.limit),
+      supported.includes(ATTACHMENTS_CAPABILITY),
+    );
   });
 
   app.get("/messages/:id", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
-    return repository.messageById(identity, id);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return withoutAttachments(
+      await repository.messageById(identity, id),
+      supported.includes(ATTACHMENTS_CAPABILITY),
+    );
+  });
+
+  app.delete("/messages/:id", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
+    const { id } = parameters(request.params);
+    return repository.retractMessage(identity, id);
   });
 
   app.get("/search", async (request) => {
@@ -413,14 +531,103 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return reply
       .code(201)
       .send(
-        await repository.sendMessage(
-          identity,
-          id,
-          body.data,
-          request.id,
-          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        withoutAttachments(
+          await repository.sendMessage(
+            identity,
+            id,
+            body.data,
+            request.id,
+            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+          ),
+          supported.includes(ATTACHMENTS_CAPABILITY),
         ),
       );
+  });
+
+  app.get("/conversations/:id/files", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    const { id } = parameters(request.params);
+    const query = conversationFilesQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid files query");
+    return repository.listConversationFiles(identity, id, query.data.before, query.data.limit);
+  });
+
+  app.post("/attachments/query", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    const body = listMessageAttachmentsRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid attachment query");
+    return repository.listMessageAttachments(identity, body.data.messageIds);
+  });
+
+  app.post("/files/uploads", async (request, reply) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
+    const body = createFileUploadRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file upload");
+    return reply
+      .code(201)
+      .send(
+        await repository.createFileUpload(
+          identity,
+          body.data,
+          requiredIdempotencyKey(request.headers["idempotency-key"]),
+        ),
+      );
+  });
+
+  app.post("/files/:id/complete", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "messages:write");
+    const { id } = parameters(request.params);
+    const body = completeFileUploadRequestSchema.safeParse(request.body);
+    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file completion");
+    return repository.completeFileUpload(
+      identity,
+      id,
+      body.data,
+      requiredIdempotencyKey(request.headers["idempotency-key"]),
+    );
+  });
+
+  app.get("/files/:id/content", async (request, reply) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireAgentScope(identity, "workspace:read");
+    const { id } = parameters(request.params);
+    const file = await repository.readFileContent(identity, id);
+    return reply
+      .header("content-type", file.attachment.contentType)
+      .header(
+        "content-disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(file.attachment.fileName)}`,
+      )
+      .header("x-content-type-options", "nosniff")
+      .send(file.bytes);
+  });
+
+  await app.register(async (files) => {
+    files.addContentTypeParser(
+      "*",
+      { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 },
+      (_request, body, done) => {
+        done(null, body);
+      },
+    );
+    files.put("/files/:id/content", { bodyLimit: 25 * 1024 * 1024 }, async (request, reply) => {
+      const identity = await requireAuthenticatedIdentity(request, identityService);
+      requireAgentScope(identity, "messages:write");
+      const { id } = parameters(request.params);
+      const contentType = request.headers["content-type"];
+      if (typeof contentType !== "string" || contentType.trim() === "") {
+        throw new ApiError(400, "BAD_REQUEST", "Content-Type is required");
+      }
+      if (!Buffer.isBuffer(request.body)) {
+        throw new ApiError(400, "BAD_REQUEST", "Expected raw file bytes");
+      }
+      await repository.putFileContent(identity, id, contentType, request.body);
+      return reply.code(204).send();
+    });
   });
 
   app.post("/reactions/query", async (request) => {
@@ -460,15 +667,20 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return repository.sync(
-      identity,
-      query.data.after,
-      query.data.limit,
-      supported.includes(REACTION_EVENTS_CAPABILITY),
-      supported.includes(READ_STATE_EVENTS_CAPABILITY),
-      supported.includes(TASK_EVENTS_CAPABILITY),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+    return projectSyncMemberTitles(
+      await repository.sync(
+        identity,
+        query.data.after,
+        query.data.limit,
+        supported.includes(REACTION_EVENTS_CAPABILITY),
+        supported.includes(READ_STATE_EVENTS_CAPABILITY),
+        supported.includes(TASK_EVENTS_CAPABILITY),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+        supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+      ),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 
@@ -483,6 +695,8 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(TASK_EVENTS_CAPABILITY),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
+      supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
     );
   });
 };

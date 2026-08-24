@@ -18,7 +18,9 @@ import {
   type EntityId,
   type Invitation,
   type MagicLinkRequested,
+  type MemberTitle,
   type SessionToken,
+  type User,
 } from "@hype-comms/contracts";
 
 import { ApiError } from "../../errors.js";
@@ -152,13 +154,7 @@ export class IdentityService {
     logger?: ServiceLogger,
   ): Promise<MagicLinkRequested> {
     const accepted = magicLinkRequestedSchema.parse({ status: "accepted" });
-    const ipKey = `ip:${clientIp}`;
-    const emailKey = `email:${email}`;
-    if (this.#throttle.retryAfterMs(ipKey) > 0 || this.#throttle.retryAfterMs(emailKey) > 0) {
-      return accepted;
-    }
-    this.#throttle.recordFailure(ipKey);
-    this.#throttle.recordFailure(emailKey);
+    const clientAllowed = this.#throttle.recordMagicLinkRequest(email, clientIp);
 
     try {
       const now = this.#clock();
@@ -171,6 +167,7 @@ export class IdentityService {
           ? pendingInvitation
           : null;
       if (membership === null && invitation === null) return accepted;
+      if (!clientAllowed || !this.#throttle.reserveMagicLinkDelivery(email)) return accepted;
 
       const issued = issueToken();
       const normalExpiry = new Date(now.getTime() + MAGIC_LINK_TTL_MS);
@@ -337,6 +334,14 @@ export class IdentityService {
     const owner = await this.#requireOwner(actorUserId, this.#repository);
     await this.#repository.expireInvitations(iso(this.#clock()));
     return this.#repository.listInvitations(owner.workspaceId);
+  }
+
+  async updateProfileTitle(actorUserId: EntityId, title: MemberTitle | null): Promise<User> {
+    return this.#repository.transaction(async (repository) => {
+      const membership = await repository.findActiveMembershipByUserId(actorUserId);
+      if (membership === null) throw unauthenticated();
+      return repository.updateMemberTitle(membership.workspaceId, actorUserId, title);
+    });
   }
 
   async revokeInvitation(actorUserId: EntityId, invitationId: EntityId): Promise<boolean> {

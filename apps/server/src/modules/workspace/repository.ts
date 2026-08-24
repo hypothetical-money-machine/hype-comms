@@ -1,17 +1,28 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENTS_PER_MESSAGE_MAX,
+  CONVERSATION_FILES_MAX_LIMIT,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   MESSAGE_HISTORY_MAX_LIMIT,
   MESSAGE_SEARCH_MAX_LIMIT,
+  POSTGRES_BIGINT_MAX,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
+  attachmentSchema,
+  completeFileUploadResponseSchema,
+  conversationFilesResponseSchema,
+  createFileUploadResponseSchema,
+  listMessageAttachmentsResponseSchema,
   advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
+  COMMUNICATION_PATHS_MAX_PATHS,
+  communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
   conversationSummarySchema,
@@ -28,6 +39,7 @@ import {
   readCursorSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
+  retractMessageResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
   taskListResponseSchema,
@@ -41,10 +53,19 @@ import {
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
+  isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type Attachment,
+  type CompleteFileUploadRequest,
+  type CompleteFileUploadResponse,
+  type ConversationFilesResponse,
+  type CreateFileUploadRequest,
+  type CreateFileUploadResponse,
+  type ListMessageAttachmentsResponse,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
+  type CommunicationPathsResponse,
   type Conversation,
   type ConversationMutationResponse,
   type ConversationSummary,
@@ -63,6 +84,7 @@ import {
   type Reaction,
   type ReactionEmoji,
   type RemoveReactionResponse,
+  type RetractMessageResponse,
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
@@ -85,6 +107,14 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
+import {
+  ATTACHMENT_UPLOAD_TTL_MS,
+  isRejectedAttachment,
+  sanitizeFileName,
+  sha256Buffer,
+  sha256Hex,
+  type AttachmentStore,
+} from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
@@ -102,7 +132,6 @@ import {
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
-const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -125,6 +154,7 @@ interface UserRow extends QueryResultRow {
   username: string;
   display_name: string;
   avatar_url: string | null;
+  title: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -162,6 +192,15 @@ interface ChannelMemberRow extends UserRow {
   joined_at: Date | string;
 }
 
+interface CommunicationPathRow extends QueryResultRow {
+  member_a_id: string;
+  member_b_id: string;
+  direct_message_count: string;
+  shared_channel_count: string;
+  channel_message_count: string;
+  last_activity_at: Date | string | null;
+}
+
 interface MessageRow extends QueryResultRow {
   id: string;
   conversation_id: string;
@@ -176,6 +215,23 @@ interface MessageRow extends QueryResultRow {
   body_format: "hype_comms_markdown_v1";
   edited_at: Date | string | null;
   deleted_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface AttachmentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  message_id: string | null;
+  uploaded_by: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: string;
+  content_sha256: Buffer;
+  status: "pending" | "ready" | "failed";
+  upload_expires_at: Date | string | null;
+  content_received_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -268,6 +324,8 @@ interface TicketRow extends QueryResultRow {
   task_events: boolean;
   announcement_channels: boolean;
   participated_thread_notifications: boolean;
+  message_retract_events: boolean;
+  member_profiles: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -312,6 +370,8 @@ export interface WorkspaceRepositoryHooks {
   readonly afterArchiveConversationLocked?: () => Promise<void>;
   /** Test seam for holding the conversation lock before a member removal commits. */
   readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
+  /** Local or remote object bytes for staged attachments. */
+  readonly attachmentStore?: AttachmentStore;
 }
 
 export interface AnnouncementAuditRecord {
@@ -334,6 +394,8 @@ export interface WorkspacePrincipal {
   readonly taskEvents?: boolean;
   readonly announcementChannels?: boolean;
   readonly participatedThreadNotifications?: boolean;
+  readonly messageRetractEvents?: boolean;
+  readonly memberProfiles?: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -366,6 +428,7 @@ function mapUser(row: UserRow) {
     username: row.username,
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
+    title: row.title,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
@@ -459,6 +522,47 @@ function mapMessage(row: MessageRow): Message {
   });
 }
 
+function mapAttachment(row: AttachmentRow): Attachment {
+  return attachmentSchema.parse({
+    id: row.id,
+    messageId: row.message_id,
+    uploadedBy: row.uploaded_by,
+    fileName: row.file_name,
+    contentType: row.content_type,
+    sizeBytes: Number(row.size_bytes),
+    status: row.status,
+    downloadUrl: null,
+    createdAt: iso(row.created_at),
+  });
+}
+
+function encodeFilesCursor(createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
+}
+
+function decodeFilesCursor(cursor: string | undefined): { createdAt: string; id: string } | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("createdAt" in parsed) ||
+      !("id" in parsed) ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.id !== "string" ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      return null;
+    }
+    const createdAt = new Date(parsed.createdAt);
+    if (Number.isNaN(createdAt.getTime())) return null;
+    return { createdAt: createdAt.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
 function mapReaction(row: ReactionRow): Reaction {
   return reactionSchema.parse({
     id: row.id,
@@ -525,7 +629,8 @@ function decodeHistoryCursor(cursor: string | undefined): string | null {
       parsed === null ||
       !("sequence" in parsed) ||
       typeof parsed.sequence !== "string" ||
-      !/^[1-9]\d*$/.test(parsed.sequence)
+      !/^[1-9]\d*$/.test(parsed.sequence) ||
+      !isPostgresBigintString(parsed.sequence)
     ) {
       throw new Error("Invalid cursor");
     }
@@ -576,7 +681,7 @@ function decodeSearchCursor(cursor: string | undefined, queryHash: string): Sear
       !("workspaceSequence" in parsed) ||
       typeof parsed.workspaceSequence !== "string" ||
       !/^[1-9]\d*$/.test(parsed.workspaceSequence) ||
-      BigInt(parsed.workspaceSequence) > POSTGRES_BIGINT_MAX ||
+      !isPostgresBigintString(parsed.workspaceSequence) ||
       !("id" in parsed) ||
       typeof parsed.id !== "string" ||
       !UUID_PATTERN.test(parsed.id)
@@ -822,6 +927,145 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Owner-only administration: every undirected communication link between two distinct active
+   * human or agent members, aggregated from committed messages and memberships. Message bodies
+   * are never read; only counts and timestamps leave the database. Owner authorization happens
+   * at the route, where the authenticated principal's role is already resolved per request.
+   *
+   * Deliberate scope decisions:
+   * - Bots are excluded. They are integrations rather than members: their channel access comes
+   *   from `bot_channel_grants` rather than membership semantics, so treating them as pair
+   *   endpoints would fabricate links no human recognizes.
+   * - Deactivated members are excluded from both endpoints of every path, so revoked members'
+   *   DM history does not resurface in the owner's report.
+   * - Pairs that share channels but have exchanged no messages are still reported (as potential
+   *   paths), but sort strictly below pairs with actual message volume.
+   *
+   * Both reads run in one repeatable-read snapshot so `members` and `paths` can never disagree,
+   * and the result is bounded by the contract's path cap -- with endpoints restricted to active
+   * human/agent members the pair count is at most C(25,2), which equals the cap exactly.
+   */
+  async communicationPaths(identity: AuthenticatedIdentity): Promise<CommunicationPathsResponse> {
+    return this.#transaction(
+      async (client) => {
+        const members = await this.#members(client, identity.currentUser.workspaceId);
+        const result = await client.query<CommunicationPathRow>(
+          // `actor` is the active human/agent member set; every path endpoint comes from it.
+          // `accessible` mirrors the channel-visibility rule for those actors: workspace-access
+          // channels are visible to every actor, restricted channels through a live explicit
+          // membership. Bots are deliberately absent here -- their grant-based access never
+          // produces a member-to-member path under the scope decisions above.
+          `WITH actor AS (
+           SELECT membership.user_id AS user_id
+             FROM workspace_memberships AS membership
+             JOIN users AS user_account ON user_account.id = membership.user_id
+            WHERE membership.workspace_id = $1
+              AND membership.status = 'active'
+              AND user_account.kind IN ('human', 'agent')
+         ),
+         accessible AS (
+           SELECT actor.user_id AS user_id,
+                  conversation.id AS conversation_id
+             FROM actor
+             JOIN conversations AS conversation
+               ON conversation.workspace_id = $1
+              AND conversation.kind = 'channel'
+              AND conversation.is_archived = false
+              AND conversation.channel_access = 'workspace'
+            UNION
+           SELECT conversation_membership.user_id AS user_id,
+                  conversation_membership.conversation_id AS conversation_id
+             FROM conversation_memberships AS conversation_membership
+             JOIN conversations AS conversation
+               ON conversation.id = conversation_membership.conversation_id
+              AND conversation.kind = 'channel'
+              AND conversation.is_archived = false
+             JOIN actor ON actor.user_id = conversation_membership.user_id
+            WHERE conversation_membership.workspace_id = $1
+              AND conversation_membership.left_at IS NULL
+         ),
+         dm AS (
+           SELECT conversation.dm_user_low_id AS member_a_id,
+                  conversation.dm_user_high_id AS member_b_id,
+                  COUNT(message.id) AS direct_message_count,
+                  MAX(message.created_at) AS last_dm_at
+             FROM conversations AS conversation
+             JOIN actor AS low ON low.user_id = conversation.dm_user_low_id
+             JOIN actor AS high ON high.user_id = conversation.dm_user_high_id
+             JOIN messages AS message
+               ON message.conversation_id = conversation.id
+              AND message.deleted_at IS NULL
+            WHERE conversation.workspace_id = $1
+              AND conversation.kind = 'direct_message'
+              AND conversation.dm_user_low_id <> conversation.dm_user_high_id
+            GROUP BY 1, 2
+         ),
+         shared AS (
+            SELECT sender.user_id AS member_a_id,
+                   peer.user_id AS member_b_id,
+                   COUNT(DISTINCT sender.conversation_id) AS shared_channel_count
+              FROM accessible AS sender
+              JOIN accessible AS peer
+                ON peer.conversation_id = sender.conversation_id
+               AND peer.user_id > sender.user_id
+             GROUP BY 1, 2
+         ),
+         channel_activity AS (
+           SELECT LEAST(message.author_id, recipient.user_id) AS member_a_id,
+                  GREATEST(message.author_id, recipient.user_id) AS member_b_id,
+                  COUNT(*) AS channel_message_count,
+                  MAX(message.created_at) AS last_channel_at
+             FROM messages AS message
+             JOIN actor AS author ON author.user_id = message.author_id
+             JOIN conversations AS conversation
+               ON conversation.id = message.conversation_id
+              AND conversation.kind = 'channel'
+             JOIN accessible AS recipient
+               ON recipient.conversation_id = message.conversation_id
+              AND recipient.user_id <> message.author_id
+            WHERE message.workspace_id = $1
+              AND message.deleted_at IS NULL
+            GROUP BY 1, 2
+         )
+         SELECT COALESCE(dm.member_a_id, shared.member_a_id, activity.member_a_id) AS member_a_id,
+                COALESCE(dm.member_b_id, shared.member_b_id, activity.member_b_id) AS member_b_id,
+                COALESCE(dm.direct_message_count, 0) AS direct_message_count,
+                COALESCE(shared.shared_channel_count, 0) AS shared_channel_count,
+                COALESCE(activity.channel_message_count, 0) AS channel_message_count,
+                GREATEST(dm.last_dm_at, activity.last_channel_at) AS last_activity_at
+           FROM dm
+           FULL OUTER JOIN shared
+             ON shared.member_a_id = dm.member_a_id
+            AND shared.member_b_id = dm.member_b_id
+           FULL OUTER JOIN channel_activity AS activity
+             ON activity.member_a_id = COALESCE(dm.member_a_id, shared.member_a_id)
+            AND activity.member_b_id = COALESCE(dm.member_b_id, shared.member_b_id)
+          ORDER BY COALESCE(dm.direct_message_count, 0)
+                 + COALESCE(activity.channel_message_count, 0) DESC,
+                 COALESCE(shared.shared_channel_count, 0) DESC,
+                 member_a_id,
+                 member_b_id
+          LIMIT $2`,
+          [identity.currentUser.workspaceId, COMMUNICATION_PATHS_MAX_PATHS],
+        );
+        return communicationPathsResponseSchema.parse({
+          generatedAt: new Date().toISOString(),
+          members,
+          paths: result.rows.map((row) => ({
+            memberAId: row.member_a_id,
+            memberBId: row.member_b_id,
+            directMessageCount: Number(row.direct_message_count),
+            sharedChannelCount: Number(row.shared_channel_count),
+            channelMessageCount: Number(row.channel_message_count),
+            lastActivityAt: nullableIso(row.last_activity_at),
+          })),
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listConversations(
@@ -1254,6 +1498,7 @@ export class WorkspaceRepository {
            FROM messages
           WHERE conversation_id = $1
             ${threadScope}
+            AND deleted_at IS NULL
             AND ($2::bigint IS NULL OR conversation_sequence < $2::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $3`,
@@ -1265,6 +1510,10 @@ export class WorkspaceRepository {
       const messages = selected.reverse().map(mapMessage);
       return messageHistoryResponseSchema.parse({
         messages,
+        attachments: await this.#attachmentsForMessages(
+          client,
+          messages.map((message) => message.id),
+        ),
         threadSummaries: includeThreadReplies
           ? []
           : await this.#threadSummaries(
@@ -1310,6 +1559,7 @@ export class WorkspaceRepository {
            FROM messages
           WHERE thread_root_id = $1
             AND conversation_id = $2
+            AND deleted_at IS NULL
             AND ($3::bigint IS NULL OR conversation_sequence < $3::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $4`,
@@ -1318,9 +1568,15 @@ export class WorkspaceRepository {
       const hasMore = result.rows.length > limit;
       const selected = result.rows.slice(0, limit);
       const oldest = selected.at(-1);
+      const replies = selected.reverse().map(mapMessage);
+      const rootMessage = mapMessage(root);
       return messageThreadResponseSchema.parse({
-        root: mapMessage(root),
-        replies: selected.reverse().map(mapMessage),
+        root: rootMessage,
+        replies,
+        attachments: await this.#attachmentsForMessages(client, [
+          rootMessage.id,
+          ...replies.map((message) => message.id),
+        ]),
         nextCursor:
           hasMore && oldest !== undefined
             ? encodeHistoryCursor(oldest.conversation_sequence)
@@ -1346,11 +1602,351 @@ export class WorkspaceRepository {
       [messageId, identity.currentUser.workspaceId, identity.currentUser.user.id],
     );
     const message = result.rows[0];
-    if (message === undefined) {
-      // Missing and unauthorized targets deliberately share one response.
+    if (message === undefined || message.deleted_at !== null) {
+      // Missing, unauthorized, and retracted targets deliberately share one response.
       throw new ApiError(404, "NOT_FOUND", "Message not found");
     }
-    return messageByIdResponseSchema.parse({ message: mapMessage(message) });
+    const attachments = await this.pool.query<AttachmentRow>(
+      `SELECT attachment.*
+         FROM attachments AS attachment
+         JOIN messages AS parent ON parent.id = attachment.message_id
+        WHERE attachment.message_id = $1
+          AND attachment.status = 'ready'
+          AND parent.deleted_at IS NULL
+        ORDER BY attachment.created_at, attachment.id`,
+      [messageId],
+    );
+    return messageByIdResponseSchema.parse({
+      message: mapMessage(message),
+      attachments: attachments.rows.map(mapAttachment),
+    });
+  }
+
+  async createFileUpload(
+    identity: AuthenticatedIdentity,
+    input: CreateFileUploadRequest,
+    idempotencyKey: string,
+  ): Promise<CreateFileUploadResponse> {
+    const fileName = sanitizeFileName(input.fileName);
+    const contentType = input.contentType.trim();
+    if (isRejectedAttachment(fileName, contentType)) {
+      throw new ApiError(400, "BAD_REQUEST", "Executable files are not allowed");
+    }
+    if (input.sizeBytes > ATTACHMENT_MAX_BYTES) {
+      throw new ApiError(400, "BAD_REQUEST", "File exceeds the 25 MiB limit");
+    }
+    this.#attachmentStore();
+    return this.#transaction(async (client) => {
+      await this.#requireVisibleConversation(client, identity, input.conversationId, true);
+      await this.#requireActivePrincipal(client, identity);
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: "/v1/files/uploads",
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 201,
+          responseSchema: createFileUploadResponseSchema,
+        },
+        async () => {
+          const expiresAt = new Date(Date.now() + ATTACHMENT_UPLOAD_TTL_MS).toISOString();
+          const inserted = await client.query<AttachmentRow>(
+            `INSERT INTO attachments (
+               id, workspace_id, conversation_id, uploaded_by, file_name, content_type,
+               size_bytes, content_sha256, status, upload_expires_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+             RETURNING *`,
+            [
+              randomUUID(),
+              identity.currentUser.workspaceId,
+              input.conversationId,
+              identity.currentUser.user.id,
+              fileName,
+              contentType,
+              input.sizeBytes,
+              sha256Buffer(input.contentSha256),
+              expiresAt,
+            ],
+          );
+          const row = inserted.rows[0];
+          if (row === undefined) throw new Error("Attachment insert returned no row");
+          return createFileUploadResponseSchema.parse({
+            attachment: mapAttachment(row),
+            expiresAt,
+          });
+        },
+      );
+    });
+  }
+
+  async putFileContent(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+    contentType: string,
+    bytes: Uint8Array,
+  ): Promise<void> {
+    const store = this.#attachmentStore();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<AttachmentRow>(
+        `SELECT *
+           FROM attachments
+          WHERE id = $1
+            AND workspace_id = $2
+          FOR UPDATE`,
+        [attachmentId, identity.currentUser.workspaceId],
+      );
+      const row = locked.rows[0];
+      if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
+        throw new ApiError(404, "NOT_FOUND", "Upload not found");
+      }
+      if (row.status !== "pending") {
+        throw new ApiError(409, "CONFLICT", "This upload can no longer receive content");
+      }
+      if (
+        row.upload_expires_at !== null &&
+        new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
+      ) {
+        throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+      }
+      if (row.content_type !== contentType.trim()) {
+        throw new ApiError(400, "BAD_REQUEST", "Content type must match the staged upload");
+      }
+      if (Number(row.size_bytes) !== bytes.byteLength) {
+        throw new ApiError(400, "BAD_REQUEST", "File size must match the staged upload");
+      }
+      if (sha256Hex(bytes) !== row.content_sha256.toString("hex")) {
+        throw new ApiError(400, "BAD_REQUEST", "File hash must match the staged upload");
+      }
+      await store.write(identity.currentUser.workspaceId, attachmentId, bytes);
+      await client.query(
+        `UPDATE attachments
+            SET content_received_at = clock_timestamp(),
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [attachmentId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeFileUpload(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+    input: CompleteFileUploadRequest,
+    idempotencyKey: string,
+  ): Promise<CompleteFileUploadResponse> {
+    const store = this.#attachmentStore();
+    return this.#transaction(async (client) => {
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: `/v1/files/${attachmentId}/complete`,
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest(input),
+          responseStatus: 200,
+          responseSchema: completeFileUploadResponseSchema,
+        },
+        async () => {
+          const locked = await client.query<AttachmentRow>(
+            `SELECT *
+               FROM attachments
+              WHERE id = $1
+                AND workspace_id = $2
+              FOR UPDATE`,
+            [attachmentId, identity.currentUser.workspaceId],
+          );
+          const row = locked.rows[0];
+          if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
+            throw new ApiError(404, "NOT_FOUND", "Upload not found");
+          }
+          if (row.status === "ready") {
+            return completeFileUploadResponseSchema.parse({ attachment: mapAttachment(row) });
+          }
+          if (row.status !== "pending") {
+            throw new ApiError(409, "CONFLICT", "This upload can no longer be completed");
+          }
+          if (
+            row.upload_expires_at !== null &&
+            new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
+          ) {
+            throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+          }
+          if (row.content_received_at === null) {
+            throw new ApiError(400, "BAD_REQUEST", "Upload the file before completing it");
+          }
+          if (
+            Number(row.size_bytes) !== input.sizeBytes ||
+            row.content_sha256.toString("hex") !== input.contentSha256
+          ) {
+            throw new ApiError(
+              400,
+              "BAD_REQUEST",
+              "Completed file does not match the staged upload",
+            );
+          }
+          const stored = await store.read(identity.currentUser.workspaceId, attachmentId);
+          if (stored.byteLength !== input.sizeBytes || sha256Hex(stored) !== input.contentSha256) {
+            throw new ApiError(
+              400,
+              "BAD_REQUEST",
+              "Completed file does not match the staged upload",
+            );
+          }
+          const updated = await client.query<AttachmentRow>(
+            `UPDATE attachments
+                SET status = 'ready',
+                    updated_at = clock_timestamp()
+              WHERE id = $1
+              RETURNING *`,
+            [attachmentId],
+          );
+          const ready = updated.rows[0];
+          if (ready === undefined) throw new Error("Attachment complete returned no row");
+          return completeFileUploadResponseSchema.parse({ attachment: mapAttachment(ready) });
+        },
+      );
+    });
+  }
+
+  async listConversationFiles(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<ConversationFilesResponse> {
+    const client = await this.pool.connect();
+    try {
+      await this.#requireVisibleConversation(client, identity, conversationId, false);
+      const cursor = decodeFilesCursor(before);
+      if (before !== undefined && cursor === null) {
+        throw new ApiError(400, "BAD_REQUEST", "Invalid files cursor");
+      }
+      const result = await client.query<AttachmentRow>(
+        `SELECT attachment.*
+           FROM attachments AS attachment
+           JOIN messages AS message ON message.id = attachment.message_id
+          WHERE attachment.conversation_id = $1
+            AND attachment.workspace_id = $2
+            AND attachment.status = 'ready'
+            AND attachment.message_id IS NOT NULL
+            AND message.deleted_at IS NULL
+            AND (
+              $3::timestamptz IS NULL
+              OR attachment.created_at < $3::timestamptz
+              OR (attachment.created_at = $3::timestamptz AND attachment.id < $4::uuid)
+            )
+          ORDER BY attachment.created_at DESC, attachment.id DESC
+          LIMIT $5`,
+        [
+          conversationId,
+          identity.currentUser.workspaceId,
+          cursor?.createdAt ?? null,
+          cursor?.id ?? null,
+          Math.min(limit, CONVERSATION_FILES_MAX_LIMIT) + 1,
+        ],
+      );
+      const hasMore = result.rows.length > limit;
+      const selected = result.rows.slice(0, limit);
+      const oldest = selected.at(-1);
+      return conversationFilesResponseSchema.parse({
+        files: selected.map(mapAttachment),
+        nextCursor:
+          hasMore && oldest !== undefined
+            ? encodeFilesCursor(iso(oldest.created_at), oldest.id)
+            : null,
+        hasMore,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  async listMessageAttachments(
+    identity: AuthenticatedIdentity,
+    messageIds: readonly string[],
+  ): Promise<ListMessageAttachmentsResponse> {
+    const ids = [...new Set(messageIds)];
+    if (
+      ids.length === 0 ||
+      ids.length !== messageIds.length ||
+      ids.length > MESSAGE_HISTORY_MAX_LIMIT
+    ) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid attachment message IDs");
+    }
+    const client = await this.pool.connect();
+    try {
+      const visible = await client.query<{ id: string } & QueryResultRow>(
+        `SELECT message.id
+           FROM messages AS message
+           JOIN conversations AS conversation ON conversation.id = message.conversation_id
+          WHERE message.id = ANY($1::uuid[])
+            AND message.workspace_id = $2
+            AND conversation.workspace_id = $2
+            AND message.deleted_at IS NULL
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      if (visible.rows.length !== ids.length) {
+        throw new ApiError(404, "NOT_FOUND", "One or more messages were not found");
+      }
+      const attachments = await this.#attachmentsForMessages(client, ids);
+      return listMessageAttachmentsResponseSchema.parse({ attachments });
+    } finally {
+      client.release();
+    }
+  }
+
+  async readFileContent(
+    identity: AuthenticatedIdentity,
+    attachmentId: string,
+  ): Promise<{ readonly attachment: Attachment; readonly bytes: Buffer }> {
+    const store = this.#attachmentStore();
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<AttachmentRow>(
+        `SELECT attachment.*
+           FROM attachments AS attachment
+           JOIN conversations AS conversation
+             ON conversation.id = attachment.conversation_id
+          WHERE attachment.id = $1
+            AND attachment.workspace_id = $2
+            AND conversation.workspace_id = $2
+            AND attachment.status = 'ready'
+            AND (
+              attachment.message_id IS NOT NULL
+              OR attachment.uploaded_by = $3
+            )
+            AND (
+              attachment.message_id IS NULL
+              OR EXISTS (
+                SELECT 1
+                  FROM messages AS message
+                 WHERE message.id = attachment.message_id
+                   AND message.deleted_at IS NULL
+              )
+            )
+            AND ${conversationVisibilitySql("conversation", "$3")}`,
+        [attachmentId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      return {
+        attachment: mapAttachment(row),
+        bytes: await store.read(identity.currentUser.workspaceId, attachmentId),
+      };
+    } finally {
+      client.release();
+    }
   }
 
   async listMessageReactions(
@@ -1530,6 +2126,7 @@ export class WorkspaceRepository {
           CROSS JOIN search_query
           WHERE message.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
+            AND message.deleted_at IS NULL
             AND message.search_vector @@ search_query.value
             AND (
               $4::real IS NULL
@@ -2093,8 +2690,11 @@ export class WorkspaceRepository {
     correlationId?: string,
     announcementCapability = false,
   ): Promise<SendMessageResponse> {
-    if (input.attachmentIds.length > 0) {
-      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
+    if (input.attachmentIds.length !== new Set(input.attachmentIds).size) {
+      throw new ApiError(400, "BAD_REQUEST", "Attachment IDs must be unique");
+    }
+    if (input.attachmentIds.length > ATTACHMENTS_PER_MESSAGE_MAX) {
+      throw new ApiError(400, "BAD_REQUEST", "A message may include at most 10 files");
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     let bulletinAccepted = false;
@@ -2189,6 +2789,7 @@ export class WorkspaceRepository {
         }
         return sendMessageResponseSchema.parse({
           message: mapMessage(replay),
+          attachments: await this.#attachmentsForMessages(client, [replay.id]),
           syncCursor: replay.committed_workspace_sequence,
         });
       }
@@ -2235,6 +2836,12 @@ export class WorkspaceRepository {
         }
       }
       await this.#validateMentions(client, identity, conversation, input);
+      const attachments = await this.#claimAttachments(
+        client,
+        identity,
+        conversationId,
+        input.attachmentIds,
+      );
 
       const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
         `UPDATE conversations
@@ -2282,6 +2889,26 @@ export class WorkspaceRepository {
         await client.query(
           `INSERT INTO message_mentions (message_id, mentioned_user_id) VALUES ($1, $2)`,
           [messageId, mentionedUserId],
+        );
+      }
+      if (attachments.length > 0) {
+        await client.query(
+          `UPDATE attachments
+              SET message_id = $1,
+                  updated_at = clock_timestamp()
+            WHERE id = ANY($2::uuid[])
+              AND workspace_id = $3
+              AND conversation_id = $4
+              AND uploaded_by = $5
+              AND status = 'ready'
+              AND message_id IS NULL`,
+          [
+            messageId,
+            attachments.map((attachment) => attachment.id),
+            identity.currentUser.workspaceId,
+            conversationId,
+            identity.currentUser.user.id,
+          ],
         );
       }
       const audienceUserIds = await this.#conversationAudience(client, conversation);
@@ -2333,6 +2960,10 @@ export class WorkspaceRepository {
       }
       const response = sendMessageResponseSchema.parse({
         message: mapMessage(row),
+        attachments: attachments.map((attachment) => ({
+          ...attachment,
+          messageId,
+        })),
         syncCursor: event.workspaceSequence,
       });
       await client.query(
@@ -2363,6 +2994,100 @@ export class WorkspaceRepository {
       });
     }
     return response;
+  }
+
+  async retractMessage(
+    identity: AuthenticatedIdentity,
+    messageId: string,
+  ): Promise<RetractMessageResponse> {
+    return this.#transaction(async (client) => {
+      const located = await client.query<{ conversation_id: string } & QueryResultRow>(
+        `SELECT conversation_id
+           FROM messages
+          WHERE id = $1
+            AND workspace_id = $2`,
+        [messageId, identity.currentUser.workspaceId],
+      );
+      const conversationId = located.rows[0]?.conversation_id;
+      if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+
+      const conversation = await this.#requireVisibleConversation(
+        client,
+        identity,
+        conversationId,
+        false,
+        true,
+      );
+      await this.#requireActivePrincipal(client, identity);
+
+      const locked = await client.query<MessageRow & { retract_window_elapsed: boolean }>(
+        `SELECT message.*,
+                clock_timestamp() > (message.created_at + interval '5 minutes')
+                  AS retract_window_elapsed
+           FROM messages AS message
+          WHERE message.id = $1
+            AND message.conversation_id = $2
+          FOR UPDATE OF message`,
+        [messageId, conversationId],
+      );
+      const message = locked.rows[0];
+      if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+      if (message.author_id !== identity.currentUser.user.id) {
+        throw new ApiError(403, "FORBIDDEN", "Only the author can retract this message");
+      }
+      if (message.deleted_at !== null) {
+        return retractMessageResponseSchema.parse({
+          message: mapMessage(message),
+          syncCursor: message.committed_workspace_sequence,
+        });
+      }
+      if (message.retract_window_elapsed) {
+        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+      }
+
+      const workspaceSequence = await this.#nextWorkspaceSequence(
+        client,
+        identity.currentUser.workspaceId,
+      );
+      const updated = await client.query<MessageRow>(
+        `UPDATE messages
+            SET deleted_at = clock_timestamp(),
+                updated_at = clock_timestamp(),
+                version = version + 1,
+                committed_workspace_sequence = $3
+          WHERE id = $1
+            AND conversation_id = $2
+            AND deleted_at IS NULL
+            AND edited_at IS NULL
+            AND author_id = $4
+            AND clock_timestamp() <= created_at + interval '5 minutes'
+          RETURNING *`,
+        [messageId, conversationId, workspaceSequence, identity.currentUser.user.id],
+      );
+      const retracted = updated.rows[0];
+      if (retracted === undefined || retracted.deleted_at === null) {
+        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+      }
+      const tombstone = mapMessage(retracted);
+      if (tombstone.deletedAt === null) {
+        throw new Error("Retract committed without a deletedAt tombstone");
+      }
+      const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
+        type: "message.retracted",
+        conversation,
+        conversationSequence: retracted.conversation_sequence,
+        entityVersion: tombstone.version,
+        payload: {
+          messageId: tombstone.id,
+          deletedAt: tombstone.deletedAt,
+        },
+        audienceUserIds: await this.#conversationAudience(client, conversation),
+      });
+      return retractMessageResponseSchema.parse({
+        message: tombstone,
+        syncCursor: event.workspaceSequence,
+      });
+    });
   }
 
   async advanceReadCursor(
@@ -2456,6 +3181,8 @@ export class WorkspaceRepository {
     taskEvents = false,
     announcementChannels = false,
     participatedThreadNotifications = false,
+    messageRetractEvents = false,
+    memberProfiles = false,
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
@@ -2466,6 +3193,8 @@ export class WorkspaceRepository {
         taskEvents,
         announcementChannels,
         participatedThreadNotifications,
+        messageRetractEvents,
+        memberProfiles,
       },
       after,
       limit,
@@ -2539,6 +3268,10 @@ export class WorkspaceRepository {
                     $6::boolean
                     OR event.event_type NOT IN ('task.created', 'task.updated')
                   )
+                  AND (
+                    $8::boolean
+                    OR event.event_type <> 'message.retracted'
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -2553,6 +3286,7 @@ export class WorkspaceRepository {
           principal.reactionEvents ?? false,
           principal.taskEvents ?? false,
           principal.participatedThreadNotifications ?? false,
+          principal.messageRetractEvents ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -2565,6 +3299,7 @@ export class WorkspaceRepository {
               row,
               principal.readStateEvents ?? false,
               principal.participatedThreadNotifications ?? false,
+              principal.memberProfiles ?? false,
             ),
           ),
         nextCursor,
@@ -2588,6 +3323,8 @@ export class WorkspaceRepository {
     taskEvents = false,
     announcementChannels = false,
     participatedThreadNotifications = false,
+    messageRetractEvents = false,
+    memberProfiles = false,
   ) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -2601,8 +3338,8 @@ export class WorkspaceRepository {
       `INSERT INTO realtime_tickets
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          participated_thread_notifications, message_retract_events, member_profiles)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -2616,6 +3353,8 @@ export class WorkspaceRepository {
         taskEvents,
         announcementChannels,
         participatedThreadNotifications,
+        messageRetractEvents,
+        memberProfiles,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -2641,7 +3380,9 @@ export class WorkspaceRepository {
                    ticket.read_state_events,
                    ticket.task_events,
                    ticket.announcement_channels,
-                   ticket.participated_thread_notifications
+                   ticket.participated_thread_notifications,
+                   ticket.message_retract_events,
+                   ticket.member_profiles
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -2651,7 +3392,9 @@ export class WorkspaceRepository {
               ticket.read_state_events,
               ticket.task_events,
               ticket.announcement_channels,
-              ticket.participated_thread_notifications
+              ticket.participated_thread_notifications,
+              ticket.message_retract_events,
+              ticket.member_profiles
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -2703,6 +3446,8 @@ export class WorkspaceRepository {
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
+        messageRetractEvents: row.message_retract_events,
+        memberProfiles: row.member_profiles,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -2716,6 +3461,8 @@ export class WorkspaceRepository {
         taskEvents: row.task_events,
         announcementChannels: row.announcement_channels,
         participatedThreadNotifications: row.participated_thread_notifications,
+        messageRetractEvents: row.message_retract_events,
+        memberProfiles: row.member_profiles,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -2793,7 +3540,8 @@ export class WorkspaceRepository {
   async #members(client: PoolClient, workspaceId: string) {
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
-              user_account.avatar_url, user_account.created_at, user_account.updated_at
+              user_account.avatar_url, user_account.title, user_account.created_at,
+              user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
            ON membership.user_id = user_account.id
@@ -2887,6 +3635,7 @@ export class WorkspaceRepository {
     const latestResult = await client.query<MessageRow>(
       `SELECT * FROM messages
         WHERE conversation_id = $1
+          AND deleted_at IS NULL
         ORDER BY conversation_sequence DESC
         LIMIT 1`,
       [conversation.id],
@@ -2919,11 +3668,13 @@ export class WorkspaceRepository {
           SELECT count(*)::text AS reply_count
             FROM messages AS reply
            WHERE reply.thread_root_id = root.id
+             AND reply.deleted_at IS NULL
         ) AS totals
         CROSS JOIN LATERAL (
           SELECT reply.*
             FROM messages AS reply
            WHERE reply.thread_root_id = root.id
+             AND reply.deleted_at IS NULL
            ORDER BY reply.conversation_sequence DESC, reply.id DESC
            LIMIT 1
         ) AS latest
@@ -2950,6 +3701,7 @@ export class WorkspaceRepository {
           AND cursor.user_id = $2
         WHERE message.conversation_id = $1
           AND message.author_id <> $2
+          AND message.deleted_at IS NULL
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
       [conversationId, userId],
@@ -2964,6 +3716,7 @@ export class WorkspaceRepository {
         WHERE message.conversation_id = $1
           AND mention.mentioned_user_id = $2
           AND message.author_id <> $2
+          AND message.deleted_at IS NULL
           AND message.conversation_sequence
               > coalesce(cursor.last_read_conversation_sequence, 0)`,
       [conversationId, userId],
@@ -3044,7 +3797,7 @@ export class WorkspaceRepository {
     }
     if (input.sourceMessageId !== undefined && input.sourceMessageId !== null) {
       const source = await client.query(
-        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2`,
+        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2 AND deleted_at IS NULL`,
         [input.sourceMessageId, conversation.id],
       );
       if (source.rowCount !== 1) {
@@ -3225,7 +3978,8 @@ export class WorkspaceRepository {
         ? await client.query<ChannelMemberRow>(
             `SELECT user_account.id, user_account.kind, user_account.username,
                     user_account.display_name,
-                    user_account.avatar_url, user_account.created_at, user_account.updated_at,
+                    user_account.avatar_url, user_account.title, user_account.created_at,
+                    user_account.updated_at,
                     CASE WHEN user_account.id = $2 THEN 'owner' ELSE 'member' END AS role,
                     workspace_membership.created_at AS joined_at
                FROM users AS user_account
@@ -3249,7 +4003,7 @@ export class WorkspaceRepository {
             `SELECT audience.*
                FROM (
                  SELECT user_account.id, user_account.kind, user_account.username,
-                        user_account.display_name, user_account.avatar_url,
+                        user_account.display_name, user_account.avatar_url, user_account.title,
                         user_account.created_at, user_account.updated_at,
                         membership.role, membership.joined_at
                    FROM conversation_memberships AS membership
@@ -3263,7 +4017,7 @@ export class WorkspaceRepository {
                     AND user_account.kind IN ('human', 'agent')
                  UNION ALL
                  SELECT user_account.id, user_account.kind, user_account.username,
-                        user_account.display_name, user_account.avatar_url,
+                        user_account.display_name, user_account.avatar_url, user_account.title,
                         user_account.created_at, user_account.updated_at,
                         'member'::text AS role, grant_record.created_at AS joined_at
                    FROM bot_channel_grants AS grant_record
@@ -3347,6 +4101,68 @@ export class WorkspaceRepository {
     return result.rows.map((row) => row.user_id);
   }
 
+  #attachmentStore(): AttachmentStore {
+    const store = this.hooks.attachmentStore;
+    if (store === undefined) {
+      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
+    }
+    return store;
+  }
+
+  async #attachmentsForMessages(
+    client: PoolClient,
+    messageIds: readonly string[],
+  ): Promise<Attachment[]> {
+    if (messageIds.length === 0) return [];
+    const result = await client.query<AttachmentRow>(
+      `SELECT attachment.*
+         FROM attachments AS attachment
+         JOIN messages AS message ON message.id = attachment.message_id
+        WHERE attachment.message_id = ANY($1::uuid[])
+          AND attachment.status = 'ready'
+          AND message.deleted_at IS NULL
+        ORDER BY attachment.created_at, attachment.id`,
+      [messageIds],
+    );
+    return result.rows.map(mapAttachment);
+  }
+
+  async #claimAttachments(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    attachmentIds: readonly string[],
+  ): Promise<Attachment[]> {
+    if (attachmentIds.length === 0) return [];
+    const locked = await client.query<AttachmentRow>(
+      `SELECT *
+         FROM attachments
+        WHERE id = ANY($1::uuid[])
+          AND workspace_id = $2
+        FOR UPDATE`,
+      [attachmentIds, identity.currentUser.workspaceId],
+    );
+    if (locked.rows.length !== attachmentIds.length) {
+      throw new ApiError(400, "BAD_REQUEST", "One or more attachments were not found");
+    }
+    const byId = new Map(locked.rows.map((row) => [row.id, row]));
+    const claimed: Attachment[] = [];
+    for (const attachmentId of attachmentIds) {
+      const row = byId.get(attachmentId);
+      if (
+        row === undefined ||
+        row.conversation_id !== conversationId ||
+        row.uploaded_by !== identity.currentUser.user.id ||
+        row.status !== "ready" ||
+        row.message_id !== null
+      ) {
+        throw new ApiError(400, "BAD_REQUEST", "One or more attachments cannot be attached");
+      }
+      claimed.push(mapAttachment(row));
+    }
+    return claimed;
+  }
+
   async #membershipRole(
     client: PoolClient,
     identity: AuthenticatedIdentity,
@@ -3402,7 +4218,9 @@ export class WorkspaceRepository {
       [messageId, conversationId],
     );
     const message = messageResult.rows[0];
-    if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+    if (message === undefined || message.deleted_at !== null) {
+      throw new ApiError(404, "NOT_FOUND", "Message not found");
+    }
     return { conversation, message };
   }
 
@@ -3423,7 +4241,8 @@ export class WorkspaceRepository {
     }
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
-              user_account.avatar_url, user_account.created_at, user_account.updated_at
+              user_account.avatar_url, user_account.title, user_account.created_at,
+              user_account.updated_at
          FROM users AS user_account
          JOIN workspace_memberships AS membership
            ON membership.user_id = user_account.id
@@ -3551,6 +4370,7 @@ export class WorkspaceRepository {
     row: EventRow,
     readStateEvents: boolean,
     participatedThreadNotifications: boolean,
+    memberProfiles: boolean,
   ): WorkspaceEvent {
     const event = workspaceEventSchema.parse({
       version: 1,
@@ -3580,6 +4400,9 @@ export class WorkspaceRepository {
         },
       });
     }
+    if (event.type === "member.updated" && !memberProfiles) {
+      return this.#legacyMemberProfileEvent(event);
+    }
     if (event.type !== "read_cursor.updated" || readStateEvents) return event;
     // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
     // projecting its legacy shape for devices that did not negotiate read-state events.
@@ -3603,6 +4426,13 @@ export class WorkspaceRepository {
       ...event,
       payload: { ...event.payload, conversation },
     } as unknown as WorkspaceEvent;
+  }
+
+  #legacyMemberProfileEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (event.type !== "member.updated") return event;
+    const member: Partial<typeof event.payload.member> = { ...event.payload.member };
+    delete member.title;
+    return { ...event, payload: { member } } as unknown as WorkspaceEvent;
   }
 
   async #transaction<T>(

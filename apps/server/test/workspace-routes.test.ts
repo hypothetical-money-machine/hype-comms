@@ -1,5 +1,7 @@
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
+  MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   THREADS_CAPABILITY,
   type BotScope,
@@ -32,6 +34,7 @@ const currentUser: CurrentUser = {
     username: "owner",
     displayName: "Owner",
     avatarUrl: null,
+    title: "Chief Mischief Officer",
     createdAt: now,
     updatedAt: now,
   },
@@ -41,11 +44,15 @@ const currentUser: CurrentUser = {
 };
 
 class FakeIdentityService {
-  readonly authenticateContext = vi.fn(async () => ({
-    currentUser,
-    sessionId,
-    principalKind: "human" as const,
-  }));
+  readonly authenticateContext: ReturnType<typeof vi.fn>;
+
+  constructor(role: "owner" | "member" = "owner") {
+    this.authenticateContext = vi.fn(async () => ({
+      currentUser: { ...currentUser, role },
+      sessionId,
+      principalKind: "human" as const,
+    }));
+  }
 
   asService(): IdentityService {
     return this as unknown as IdentityService;
@@ -65,6 +72,7 @@ class FakeBotService {
           username: "task-bot",
           displayName: "Task Bot",
           avatarUrl: null,
+          title: null,
           createdAt: now,
           updatedAt: now,
         },
@@ -133,6 +141,13 @@ class FakeWorkspaceRepository {
     const bootstrap = await this.bootstrap();
     return { conversations: bootstrap.conversations, nextCursor: null, hasMore: false };
   });
+  readonly listMembers = vi.fn(async () => ({ members: [currentUser.user] }));
+  readonly listChannelMembers = vi.fn(async () => ({
+    conversationId,
+    access: "workspace" as const,
+    members: [{ user: currentUser.user, role: "owner" as const, joinedAt: now }],
+    canManage: true,
+  }));
   readonly createChannel = vi.fn(async () => ({
     conversation: (await this.bootstrap()).conversations[0],
     syncCursor: "1",
@@ -223,6 +238,24 @@ class FakeWorkspaceRepository {
       updatedAt: now,
     },
   }));
+  readonly retractMessage = vi.fn(async () => ({
+    message: {
+      id: messageId,
+      conversationId,
+      conversationSequence: "1",
+      version: 2,
+      clientMessageId: messageId,
+      authorId: userId,
+      threadRootId: null,
+      body: "Root",
+      bodyFormat: "hype_comms_markdown_v1",
+      editedAt: null,
+      deletedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+    syncCursor: "3",
+  }));
   readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
     message: {
       id: replyId,
@@ -242,7 +275,21 @@ class FakeWorkspaceRepository {
     syncCursor: "2",
   }));
   readonly sync = vi.fn(async () => ({
-    events: [],
+    events: [
+      {
+        version: 1,
+        id: replyId,
+        type: "member.updated" as const,
+        occurredAt: now,
+        workspaceId,
+        conversationId: null,
+        workspaceSequence: "1",
+        conversationSequence: null,
+        entityVersion: 1,
+        delivery: "at_least_once" as const,
+        payload: { member: currentUser.user },
+      },
+    ],
     nextCursor: "0",
     highWaterCursor: "0",
     hasMore: false,
@@ -273,6 +320,11 @@ class FakeWorkspaceRepository {
   readonly createChannelTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
   readonly updateTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "10" }));
   readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "11" }));
+  readonly communicationPaths = vi.fn(async () => ({
+    generatedAt: now,
+    members: [currentUser.user],
+    paths: [],
+  }));
 
   asRepository(): WorkspaceRepository {
     return this as unknown as WorkspaceRepository;
@@ -312,6 +364,21 @@ async function reactionApp(repository: FakeWorkspaceRepository, botService?: Bot
   return app;
 }
 
+async function appWithRole(
+  repository: FakeWorkspaceRepository,
+  role: "owner" | "member",
+): Promise<Awaited<ReturnType<typeof buildApp>>> {
+  const app = await buildApp({
+    identity: { service: new FakeIdentityService(role).asService() },
+    workspace: {
+      repository: repository.asRepository(),
+      realtimeHub: new FakeRealtimeEventHub().asHub(),
+    },
+  });
+  apps.push(app);
+  return app;
+}
+
 describe("event capability routes", () => {
   it("projects announcement bootstrap fields only for capable clients", async () => {
     const repository = new FakeWorkspaceRepository();
@@ -336,6 +403,56 @@ describe("event capability routes", () => {
     expect(capable.statusCode).toBe(200);
     expect(capable.json().featureFlags.announcementChannels).toBe(true);
     expect(capable.json().conversations[0].conversation.channelMode).toBe("announcement");
+  });
+
+  it("projects titles only to member-profile-capable clients on every user response surface", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
+    const capableHeaders = {
+      ...legacyHeaders,
+      "x-hype-comms-capabilities": MEMBER_PROFILES_CAPABILITY,
+    };
+    const requests = [
+      { url: "/v1/bootstrap", user: (body: Record<string, unknown>) => body.members?.[0] },
+      { url: "/v1/members", user: (body: Record<string, unknown>) => body.members?.[0] },
+      {
+        url: "/v1/channels/10000000-0000-4000-8000-000000000007/members",
+        user: (body: Record<string, unknown>) => (body.members as { user: unknown }[])?.[0]?.user,
+      },
+      {
+        url: "/v1/admin/communication-paths",
+        user: (body: Record<string, unknown>) => body.members?.[0],
+      },
+    ] as const;
+
+    for (const request of requests) {
+      const legacy = await app.inject({ method: "GET", url: request.url, headers: legacyHeaders });
+      const capable = await app.inject({
+        method: "GET",
+        url: request.url,
+        headers: capableHeaders,
+      });
+      expect(legacy.statusCode).toBe(200);
+      expect(capable.statusCode).toBe(200);
+      expect(request.user(legacy.json())).not.toHaveProperty("title");
+      expect(request.user(capable.json())).toMatchObject({ title: "Chief Mischief Officer" });
+    }
+
+    const legacySync = await app.inject({
+      method: "GET",
+      url: "/v1/sync?after=0&limit=100",
+      headers: legacyHeaders,
+    });
+    const capableSync = await app.inject({
+      method: "GET",
+      url: "/v1/sync?after=0&limit=100",
+      headers: capableHeaders,
+    });
+    expect(legacySync.json().events[0].payload.member).not.toHaveProperty("title");
+    expect(capableSync.json().events[0].payload.member).toMatchObject({
+      title: "Chief Mischief Officer",
+    });
   });
 
   it("strips channel mode from every legacy conversation response surface", async () => {
@@ -392,7 +509,7 @@ describe("event capability routes", () => {
       cookie: `hype_comms_session=${sessionToken}`,
       "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
-        PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+        `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}`,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -413,6 +530,8 @@ describe("event capability routes", () => {
       true,
       false,
       true,
+      true,
+      false,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
@@ -421,6 +540,8 @@ describe("event capability routes", () => {
       true,
       false,
       true,
+      true,
+      false,
     );
   });
 
@@ -445,6 +566,8 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
+      false,
+      false,
       false,
       false,
       false,
@@ -591,6 +714,23 @@ describe("task routes", () => {
       },
       payload: { expectedVersion: 2, status: "in_progress", beforeTaskId: null },
     });
+    const oversizedVersion = await app.inject({
+      method: "PATCH",
+      url: `/v1/tasks/${taskId}`,
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": "oversized-version",
+      },
+      payload: {
+        expectedVersion: Number.MAX_SAFE_INTEGER + 1,
+        title: "Should be rejected",
+        description: null,
+        priority: "none",
+        assigneeId: null,
+        dueOn: null,
+      },
+    });
 
     expect(listed.statusCode).toBe(200);
     expect(mine.statusCode).toBe(200);
@@ -598,6 +738,7 @@ describe("task routes", () => {
     expect(created.statusCode).toBe(201);
     expect(updated.statusCode).toBe(200);
     expect(moved.statusCode).toBe(200);
+    expect(oversizedVersion.statusCode).toBe(400);
     expect(repository.listConversationTasks).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       messageId,
@@ -777,6 +918,11 @@ describe("task routes", () => {
       url: "/v1/channels/general/tasks/0",
       headers,
     });
+    const oversizedNumber = await app.inject({
+      method: "GET",
+      url: "/v1/channels/general/tasks/9223372036854775808",
+      headers,
+    });
 
     expect(filtered.statusCode).toBe(200);
     expect(byNumber.statusCode).toBe(200);
@@ -784,6 +930,7 @@ describe("task routes", () => {
     expect(created.statusCode).toBe(201);
     expect(invalidRange.statusCode).toBe(400);
     expect(invalidNumber.statusCode).toBe(400);
+    expect(oversizedNumber.statusCode).toBe(400);
     expect(repository.listChannelTasks).toHaveBeenCalledWith(
       expect.objectContaining({ principalKind: "bot" }),
       "general",
@@ -852,6 +999,35 @@ describe("message thread routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(repository.messageById).not.toHaveBeenCalled();
+  });
+
+  it("forwards an authorized retract and rejects a malformed target", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = { cookie: `hype_comms_session=${sessionToken}` };
+
+    const retracted = await app.inject({
+      method: "DELETE",
+      url: `/v1/messages/${messageId}`,
+      headers,
+    });
+    const malformed = await app.inject({
+      method: "DELETE",
+      url: "/v1/messages/not-a-uuid",
+      headers,
+    });
+
+    expect(retracted.statusCode).toBe(200);
+    expect(retracted.json()).toMatchObject({
+      message: { id: messageId, body: "Root", deletedAt: now },
+      syncCursor: "3",
+    });
+    expect(repository.retractMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+    );
+    expect(malformed.statusCode).toBe(400);
+    expect(repository.retractMessage).toHaveBeenCalledTimes(1);
   });
 
   it("gates thread summaries while accepting legacy and capable history clients", async () => {
@@ -1012,5 +1188,62 @@ describe("channel mutation routes", () => {
       "req-2",
     );
     expect(repository.createChannel).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("admin communication paths route", () => {
+  it("returns aggregated member-to-member paths for workspace owners", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/communication-paths",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(repository.communicationPaths).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+    );
+    expect(response.json()).toEqual({
+      generatedAt: now,
+      members: [
+        {
+          id: userId,
+          kind: "human",
+          username: "owner",
+          displayName: "Owner",
+          avatarUrl: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      paths: [],
+    });
+  });
+
+  it("rejects non-owner members with 403 without querying the repository", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await appWithRole(repository, "member");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/communication-paths",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(repository.communicationPaths).not.toHaveBeenCalled();
+  });
+
+  it("requires an authenticated session", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({ method: "GET", url: "/v1/admin/communication-paths" });
+
+    expect(response.statusCode).toBe(401);
+    expect(repository.communicationPaths).not.toHaveBeenCalled();
   });
 });

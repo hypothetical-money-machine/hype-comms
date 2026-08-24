@@ -26,6 +26,7 @@ import { IdentityService } from "./modules/identity/service.js";
 import { installGracefulShutdown } from "./shutdown.js";
 import { SignInThrottle } from "./throttle.js";
 import { RealtimeEventHub } from "./modules/realtime/hub.js";
+import { LocalAttachmentStore } from "./modules/workspace/file-store.js";
 import { WorkspaceRepository } from "./modules/workspace/repository.js";
 
 async function main(): Promise<void> {
@@ -109,6 +110,7 @@ async function main(): Promise<void> {
       };
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
+        attachmentStore: new LocalAttachmentStore(config.attachmentDir),
         onAnnouncementAudit: (record) => {
           process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
         },
