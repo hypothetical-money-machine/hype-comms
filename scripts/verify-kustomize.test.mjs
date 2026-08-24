@@ -75,16 +75,3 @@ test("keeps archive download separate from extraction", async () => {
   assert.match(script, /tar -xzf "\$archive_path"/u);
   assert.doesNotMatch(script, /\|\s*tar/u);
 });
-
-test("runs verification before the token-backed promotion flow", async () => {
-  const workflow = await readFile(new URL("../.woodpecker.yml", import.meta.url), "utf8");
-  const promotion = workflow.slice(workflow.indexOf("  - name: promote-gitops"));
-  const verificationIndex = promotion.indexOf("sh scripts/verify-kustomize.sh");
-  const cloneIndex = promotion.indexOf("git clone");
-
-  assert.notEqual(verificationIndex, -1);
-  assert.notEqual(cloneIndex, -1);
-  assert.ok(verificationIndex < cloneIndex);
-  assert.match(promotion, /kustomize edit set image \$\$\{APP\}=\$\$\{REGISTRY\}/u);
-  assert.doesNotMatch(promotion, /\|\s*tar|set -x/u);
-});

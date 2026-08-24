@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem in Hype Comms.
+title: "[Bug]: "
+labels:
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe what happened and what you expected instead.
+      placeholder: Tell us what you observed and what you expected.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Desktop
+        - Server
+        - CLI
+        - Contracts
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: desktop-version
+    attributes:
+      label: Desktop app version
+      description: If this affects the desktop app, copy the version from the About/update dialog.
+      placeholder: For example, 0.1.0
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system and version
+      placeholder: For example, macOS 15.5 or Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give the shortest steps that reliably show the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security
+      options:
+        - label: This is not a security issue. Suspected vulnerabilities belong in [SECURITY.md](../../SECURITY.md), not in a public issue.
+          required: true

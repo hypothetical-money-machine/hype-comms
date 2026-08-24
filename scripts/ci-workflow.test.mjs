@@ -31,21 +31,24 @@ test("isolates a workflow job from neighboring jobs", () => {
   );
 });
 
-test("runs PostgreSQL CI on the shared x64 runner group", async () => {
+test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", async () => {
   const ciWorkflow = await readFile(
     new URL("../.github/workflows/ci.yml", import.meta.url),
     "utf8",
   );
-  const runnerDockerfile = await readFile(
-    new URL("../.github/runner/Dockerfile", import.meta.url),
-    "utf8",
-  );
   const postgresJob = workflowJob(ciWorkflow, "check");
 
-  assert.match(postgresJob, /runs-on:\n {6}group: hmm-linux-x64-ci\n {6}labels: hmm-ci/u);
-  assert.doesNotMatch(postgresJob, /ARM64|hype-comms-release|docker/u);
-  assert.match(runnerDockerfile, /^ {4}postgresql-16 \\$/mu);
-  assert.match(postgresJob, /Verify PostgreSQL 16 runner image/u);
+  assert.match(ciWorkflow, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/mu);
+  assert.match(ciWorkflow, /^permissions:\n {2}contents: read$/mu);
+  assert.match(postgresJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
+  assert.match(postgresJob, /^ {4}services:\n {6}postgres:\n {8}image: postgres:16$/mu);
+  assert.match(postgresJob, /^ {10}POSTGRES_DB: hype_comms_test$/mu);
+  assert.match(postgresJob, /^ {10}POSTGRES_USER: hype_comms$/mu);
+  assert.match(postgresJob, /^ {10}- 55432:5432$/mu);
+  assert.match(postgresJob, /HYPE_COMMS_TEST_DATABASE_URL: postgresql:\/\//u);
   assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
-  assert.doesNotMatch(postgresJob, /sudo|apt-get install/u);
+  assert.doesNotMatch(
+    postgresJob,
+    /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|initdb|pg_ctl|secrets\.|^ {4}environment:/mu,
+  );
 });
