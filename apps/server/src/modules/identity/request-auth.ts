@@ -111,19 +111,3 @@ export function requireAgentScope(identity: AuthenticatedRequestIdentity, scope:
     throw new ApiError(403, "FORBIDDEN", `Agent token requires the ${scope} scope`);
   }
 }
-
-export function requireAnyAgentScope(
-  identity: AuthenticatedRequestIdentity,
-  scopes: readonly AgentScope[],
-): void {
-  if (
-    identity.credentialType === "agent" &&
-    !scopes.some((scope) => identity.currentUser.scopes.includes(scope))
-  ) {
-    throw new ApiError(
-      403,
-      "FORBIDDEN",
-      `Agent token requires one of these scopes: ${scopes.join(", ")}`,
-    );
-  }
-}

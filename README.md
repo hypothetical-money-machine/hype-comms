@@ -248,7 +248,10 @@ seating, Atlas migration, rollback, and completion evidence, and the
 The [Hermes adapter](integrations/hermes-hype-comms/README.md) runs the CLI as its transport. It
 wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
 one Hermes session per Hype Comms conversation, and sends replies back to that canonical
-conversation.
+conversation. Each eligible wake carries a server-authoritative, bounded context pack with recent
+authors, verified mention status, the canonical channel or DM selector, and the correct reply
+target. Tokens with the optional `read-cursors:write` scope advance the agent's read state after a
+successful Hermes handoff.
 Install the server migration first, then the CLI, complete the agent enrollment, install the adapter
 under `~/.hermes/plugins/`, and finally start the Hermes gateway.
 

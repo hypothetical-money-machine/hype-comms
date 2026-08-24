@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
   ATTACHMENTS_CAPABILITY,
@@ -11,6 +12,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   advanceReadCursorRequestSchema,
+  agentContextHistoryQuerySchema,
   archiveChannelRequestSchema,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
@@ -48,11 +50,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { ApiError } from "../../errors.js";
 import { requireTaskIdentity } from "../bots/request-auth.js";
 import type { BotService } from "../bots/service.js";
-import {
-  requireAgentScope,
-  requireAnyAgentScope,
-  requireAuthenticatedIdentity,
-} from "../identity/request-auth.js";
+import { requireAgentScope, requireAuthenticatedIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "./repository.js";
 
@@ -135,6 +133,10 @@ function capabilities(value: string | string[] | undefined): readonly string[] {
   const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
   return parsed.data;
+}
+
+function missingDirectConversationWriteScope(): ApiError {
+  return new ApiError(403, "FORBIDDEN", "Agent token requires the conversations:write scope");
 }
 
 function withoutChannelMode(summary: ConversationSummary) {
@@ -342,20 +344,31 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     // Keep broad legacy credentials working while newly enrolled agents receive only the narrow
-    // permission needed to open a 1:1 conversation.
-    requireAnyAgentScope(identity, ["direct-conversations:write", "conversations:write"]);
+    // permission needed to open a 1:1 conversation. A read-only agent token may still look one up,
+    // so `workspace:read` alone reaches the read path below.
+    const canCreate =
+      identity.credentialType === "session" ||
+      identity.currentUser.scopes.includes("direct-conversations:write") ||
+      identity.currentUser.scopes.includes("conversations:write");
+    if (!canCreate && !identity.currentUser.scopes.includes("workspace:read")) {
+      throw missingDirectConversationWriteScope();
+    }
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
     }
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const opened = canCreate
+      ? await repository.createDirectConversation(identity, result.data)
+      : await repository.findDirectConversation(identity, result.data);
+    if (opened === null) {
+      // Read-only lookup found nothing; opening it would need the write scope.
+      throw missingDirectConversationWriteScope();
+    }
     return reply
       .code(201)
       .send(
-        projectConversationMutation(
-          await repository.createDirectConversation(identity, result.data),
-          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        ),
+        projectConversationMutation(opened, supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY)),
       );
   });
 
@@ -363,6 +376,25 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
+    if (
+      typeof request.query === "object" &&
+      request.query !== null &&
+      Object.hasOwn(request.query, "contextPack")
+    ) {
+      const query = agentContextHistoryQuerySchema.safeParse(request.query);
+      if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid context history query");
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
+        throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
+      }
+      return repository.contextHistory(
+        identity,
+        id,
+        query.data.before,
+        query.data.throughMessageId,
+        query.data.limit,
+      );
+    }
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);

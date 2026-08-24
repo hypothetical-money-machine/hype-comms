@@ -7,11 +7,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import {
+  AGENT_CONTEXT_PACK_MAX_BYTES,
   COMMUNICATION_PATHS_MAX_PATHS,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
+  agentContextHistoryResponseSchema,
+  injectionSafeCompactJsonByteLength,
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
@@ -33,7 +36,6 @@ import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
-const later = "2026-08-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
 const observerId = "10000000-0000-4000-8000-000000000003";
@@ -231,8 +233,8 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.query(
       `INSERT INTO device_sessions
          (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, $4, $4, $5)`,
-      [ownerSessionId, ownerId, Buffer.alloc(32, 7), now, later],
+       VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+      [ownerSessionId, ownerId, Buffer.alloc(32, 7), now],
     );
   });
 
@@ -751,6 +753,402 @@ describeWithPostgres("WorkspaceRepository", () => {
         }),
       }),
     );
+  });
+
+  it("projects chronological context with resolved authors, verified mentions, and canonical reply targets", async () => {
+    const root = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "context thread root"),
+      mentionedUserIds: [],
+    });
+    const nearby = await repository.sendMessage(member, generalId, {
+      ...message(randomUUID(), "literal @member without mention metadata"),
+      mentionedUserIds: [],
+    });
+    const reply = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "verified mention for @member"),
+      threadRootId: root.message.id,
+      mentionedUserIds: [memberId],
+    });
+    const afterAnchor = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "message after the requested anchor"),
+      mentionedUserIds: [],
+    });
+
+    const response = await repository.contextHistory(
+      member,
+      generalId,
+      undefined,
+      reply.message.id,
+      3,
+    );
+    expect(agentContextHistoryResponseSchema.safeParse(response).success).toBe(true);
+    expect(response.contextPack).toMatchObject({
+      version: 1,
+      conversation: {
+        id: generalId,
+        kind: "channel",
+        slug: "general",
+        selector: "#general",
+      },
+      anchorMessageId: reply.message.id,
+      messages: [
+        {
+          id: root.message.id,
+          conversationSequence: root.message.conversationSequence,
+          body: "context thread root",
+          author: {
+            id: ownerId,
+            kind: "human",
+            username: "owner",
+            displayName: "Owner",
+          },
+          mentionedYou: false,
+          threadRootId: null,
+        },
+        {
+          id: nearby.message.id,
+          conversationSequence: nearby.message.conversationSequence,
+          body: "literal @member without mention metadata",
+          author: {
+            id: memberId,
+            kind: "human",
+            username: "member",
+            displayName: "Member",
+          },
+          mentionedYou: false,
+          threadRootId: null,
+        },
+        {
+          id: reply.message.id,
+          conversationSequence: reply.message.conversationSequence,
+          body: "verified mention for @member",
+          author: {
+            id: ownerId,
+            kind: "human",
+            username: "owner",
+            displayName: "Owner",
+          },
+          mentionedYou: true,
+          threadRootId: root.message.id,
+        },
+      ],
+      threadRoot: null,
+      replyTarget: {
+        kind: "thread",
+        conversationId: generalId,
+        rootMessageId: root.message.id,
+      },
+      readThroughMessageId: reply.message.id,
+      truncatedBefore: false,
+      nextCursor: null,
+    });
+    expect(response.contextPack.messages.map((entry) => entry.id)).not.toContain(
+      afterAnchor.message.id,
+    );
+
+    const latest = await repository.contextHistory(
+      member,
+      generalId,
+      undefined,
+      reply.message.id,
+      1,
+    );
+    expect(latest.contextPack).toMatchObject({
+      anchorMessageId: reply.message.id,
+      messages: [{ id: reply.message.id }],
+      threadRoot: {
+        id: root.message.id,
+        author: { id: ownerId, username: "owner", displayName: "Owner" },
+        mentionedYou: false,
+        threadRootId: null,
+      },
+      replyTarget: { kind: "thread", rootMessageId: root.message.id },
+      readThroughMessageId: reply.message.id,
+      truncatedBefore: true,
+      nextCursor: expect.any(String),
+    });
+
+    const older = await repository.contextHistory(
+      member,
+      generalId,
+      latest.contextPack.nextCursor ?? undefined,
+      undefined,
+      2,
+    );
+    expect(older.contextPack).toMatchObject({
+      anchorMessageId: nearby.message.id,
+      messages: [{ id: root.message.id }, { id: nearby.message.id }],
+      threadRoot: null,
+      replyTarget: {
+        kind: "thread",
+        conversationId: generalId,
+        rootMessageId: nearby.message.id,
+      },
+      readThroughMessageId: nearby.message.id,
+      truncatedBefore: false,
+      nextCursor: null,
+    });
+  });
+
+  it("derives direct-message context selectors without weakening conversation privacy", async () => {
+    const direct = await repository.createDirectConversation(owner, { memberId });
+    const directConversationId = direct.conversation.conversation.id;
+    const sent = await repository.sendMessage(owner, directConversationId, {
+      ...message(randomUUID(), "private context for @member"),
+      mentionedUserIds: [memberId],
+    });
+
+    const response = await repository.contextHistory(
+      member,
+      directConversationId,
+      undefined,
+      sent.message.id,
+      8,
+    );
+    expect(response.contextPack).toMatchObject({
+      conversation: {
+        id: directConversationId,
+        kind: "direct_message",
+        selector: "@owner",
+        peer: {
+          id: ownerId,
+          kind: "human",
+          username: "owner",
+          displayName: "Owner",
+        },
+        self: false,
+      },
+      anchorMessageId: sent.message.id,
+      messages: [
+        {
+          id: sent.message.id,
+          author: { id: ownerId, username: "owner" },
+          mentionedYou: true,
+        },
+      ],
+      threadRoot: null,
+      replyTarget: { kind: "flat", conversationId: directConversationId },
+      readThroughMessageId: sent.message.id,
+    });
+
+    const threadedDirectMessage = await repository.sendMessage(owner, directConversationId, {
+      ...message(randomUUID(), "threaded private context"),
+      threadRootId: sent.message.id,
+      mentionedUserIds: [],
+    });
+    const threadedResponse = await repository.contextHistory(
+      member,
+      directConversationId,
+      undefined,
+      threadedDirectMessage.message.id,
+      1,
+    );
+    expect(threadedResponse.contextPack).toMatchObject({
+      anchorMessageId: threadedDirectMessage.message.id,
+      messages: [
+        {
+          id: threadedDirectMessage.message.id,
+          threadRootId: sent.message.id,
+        },
+      ],
+      threadRoot: null,
+      replyTarget: { kind: "flat", conversationId: directConversationId },
+      readThroughMessageId: threadedDirectMessage.message.id,
+      truncatedBefore: true,
+      nextCursor: expect.any(String),
+    });
+    await expect(
+      repository.contextHistory(observer, directConversationId, undefined, undefined, 8),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+  });
+
+  it("returns exact null invariants when visible history is empty", async () => {
+    const response = await repository.contextHistory(member, generalId, undefined, undefined, 8);
+    expect(response.contextPack).toEqual({
+      version: 1,
+      conversation: {
+        id: generalId,
+        kind: "channel",
+        slug: "general",
+        selector: "#general",
+      },
+      anchorMessageId: null,
+      messages: [],
+      threadRoot: null,
+      replyTarget: null,
+      readThroughMessageId: null,
+      truncatedBefore: false,
+      nextCursor: null,
+    });
+  });
+
+  it("projects selectors for valid channel slugs bounded by Unicode code points", async () => {
+    const slug = "𐐨".repeat(51);
+    const channel = await repository.createChannel(owner, {
+      name: "Astral Context",
+      slug,
+      topic: null,
+      access: "workspace",
+    });
+    const conversationId = channel.conversation.conversation.id;
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "context in an astral-slug channel"),
+      mentionedUserIds: [],
+    });
+
+    const response = await repository.contextHistory(
+      member,
+      conversationId,
+      undefined,
+      sent.message.id,
+      8,
+    );
+
+    expect(response.contextPack.conversation).toEqual({
+      id: conversationId,
+      kind: "channel",
+      slug,
+      selector: `#${slug}`,
+    });
+    expect(agentContextHistoryResponseSchema.safeParse(response).success).toBe(true);
+  });
+
+  it("rejects inaccessible, cross-conversation, and retracted context anchors", async () => {
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Private Context",
+      slug: "private-context",
+      topic: null,
+      access: "members",
+    });
+    const privateConversationId = privateChannel.conversation.conversation.id;
+    const privateMessage = await repository.sendMessage(owner, privateConversationId, {
+      ...message(randomUUID(), "not for context outsiders"),
+      mentionedUserIds: [],
+    });
+    await expect(
+      repository.contextHistory(member, privateConversationId, undefined, undefined, 8),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      repository.contextHistory(member, generalId, undefined, privateMessage.message.id, 8),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+
+    const retracted = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "soon retracted context"),
+      mentionedUserIds: [],
+    });
+    await repository.retractMessage(owner, retracted.message.id);
+    await expect(
+      repository.contextHistory(member, generalId, undefined, retracted.message.id, 8),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+  });
+
+  it("keeps context packs below 64 KiB by dropping only whole oldest messages", async () => {
+    const sent = [];
+    for (let index = 0; index < 20; index += 1) {
+      const body = `${String(index).padStart(2, "0")}:${"x".repeat(3_997)}`;
+      sent.push(
+        await repository.sendMessage(owner, generalId, {
+          ...message(randomUUID(), body),
+          mentionedUserIds: [],
+        }),
+      );
+    }
+
+    const response = await repository.contextHistory(
+      member,
+      generalId,
+      undefined,
+      sent.at(-1)?.message.id,
+      20,
+    );
+    const pack = response.contextPack;
+    expect(injectionSafeCompactJsonByteLength(pack)).toBeLessThanOrEqual(
+      AGENT_CONTEXT_PACK_MAX_BYTES,
+    );
+    expect(pack.messages.length).toBeGreaterThan(0);
+    expect(pack.messages.length).toBeLessThan(20);
+    expect(pack.messages.map((entry) => entry.id)).toEqual(
+      sent.slice(-pack.messages.length).map((entry) => entry.message.id),
+    );
+    for (const projected of pack.messages) {
+      const original = sent.find((entry) => entry.message.id === projected.id);
+      expect(projected.body).toBe(original?.message.body);
+    }
+    expect(pack).toMatchObject({
+      anchorMessageId: sent.at(-1)?.message.id,
+      readThroughMessageId: sent.at(-1)?.message.id,
+      truncatedBefore: true,
+      nextCursor: expect.any(String),
+    });
+    const older = await repository.contextHistory(
+      member,
+      generalId,
+      pack.nextCursor ?? undefined,
+      undefined,
+      20,
+    );
+    const olderIds = older.contextPack.messages.map((entry) => entry.id);
+    const retainedIds = pack.messages.map((entry) => entry.id);
+    expect(new Set(olderIds).intersection(new Set(retainedIds))).toEqual(new Set());
+    expect([...olderIds, ...retainedIds]).toEqual(sent.map((entry) => entry.message.id));
+    expect(older.contextPack).toMatchObject({ truncatedBefore: false, nextCursor: null });
+    expect(agentContextHistoryResponseSchema.safeParse(response).success).toBe(true);
+  });
+
+  it("prunes U+2028-rich context against the injection-safe byte cap", async () => {
+    const sent = [];
+    for (let index = 0; index < 10; index += 1) {
+      const body = `${String(index).padStart(2, "0")}:${"\u2028".repeat(2_997)}`;
+      sent.push(
+        await repository.sendMessage(owner, generalId, {
+          ...message(randomUUID(), body),
+          mentionedUserIds: [],
+        }),
+      );
+    }
+
+    const response = await repository.contextHistory(
+      member,
+      generalId,
+      undefined,
+      sent.at(-1)?.message.id,
+      10,
+    );
+    const pack = response.contextPack;
+    expect(agentContextHistoryResponseSchema.safeParse(response).success).toBe(true);
+    expect(injectionSafeCompactJsonByteLength(pack)).toBeLessThanOrEqual(
+      AGENT_CONTEXT_PACK_MAX_BYTES,
+    );
+    expect(pack.messages.length).toBeGreaterThan(0);
+    expect(pack.messages.length).toBeLessThan(10);
+    expect(pack.messages.map((entry) => entry.id)).toEqual(
+      sent.slice(-pack.messages.length).map((entry) => entry.message.id),
+    );
+    expect(pack).toMatchObject({
+      anchorMessageId: sent.at(-1)?.message.id,
+      readThroughMessageId: sent.at(-1)?.message.id,
+      truncatedBefore: true,
+      nextCursor: expect.any(String),
+    });
+    expect(JSON.parse(Buffer.from(pack.nextCursor ?? "", "base64url").toString("utf8"))).toEqual({
+      sequence: pack.messages.at(0)?.conversationSequence,
+    });
+
+    const immediatelyOlder = await repository.contextHistory(
+      member,
+      generalId,
+      pack.nextCursor ?? undefined,
+      undefined,
+      1,
+    );
+    const droppedMessage = immediatelyOlder.contextPack.messages.at(-1);
+    expect(droppedMessage?.id).toBe(sent.at(-(pack.messages.length + 1))?.message.id);
+    expect(
+      injectionSafeCompactJsonByteLength({
+        ...pack,
+        messages: droppedMessage === undefined ? pack.messages : [droppedMessage, ...pack.messages],
+      }),
+    ).toBeGreaterThan(AGENT_CONTEXT_PACK_MAX_BYTES);
   });
 
   it("rejects oversized history cursors before bigint casts for history and threads", async () => {
@@ -2570,8 +2968,8 @@ describeWithPostgres("WorkspaceRepository", () => {
       await client.query(
         `INSERT INTO device_sessions
            (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-         VALUES ($1, $2, $3, $4, $4, $5)`,
-        [member.sessionId, memberId, Buffer.alloc(32, 8), now, later],
+         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+        [member.sessionId, memberId, Buffer.alloc(32, 8), now],
       );
       await client.query(
         `DELETE FROM workspace_memberships

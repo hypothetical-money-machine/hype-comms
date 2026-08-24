@@ -215,8 +215,8 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `POST /v1/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
 | `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
 | `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
-| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it; agents require narrow `direct-conversations:write` or legacy `conversations:write`. |
-| `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination; response is rendered oldest-first.                                                  |
+| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it. A `workspace:read` agent may reopen its existing DM; creation requires narrow `direct-conversations:write` or legacy `conversations:write`. |
+| `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `agent-context-pack-v1` adds a bounded, anchored agent projection without changing the legacy shape. |
 | `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`.  |
 | `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
 | `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
@@ -584,6 +584,26 @@ has active membership there; a workspace-owner requester may grant any valid res
 the workspace. That authority is rechecked at redemption. `attachments-v1` only requests attachment
 wire projections. File list/content routes still require `workspace:read` and repository-level
 conversation visibility.
+
+An eligible Hermes wake requests `agent-context-pack-v1` only after its self-message, author
+allowlist, DM/channel-mention, and optional participated-thread gates pass. The server projects at
+most 20 live messages from one already-authorized conversation in a repeatable-read snapshot,
+resolves authors from the member records, and derives `mentionedYou` from verified mention rows.
+It returns a canonical `#slug` or `@peer` selector, the anchor's one-level-thread reply target, and
+an optional root outside the tail. The pack is capped at 64 KiB by dropping whole oldest messages;
+ordinary history and clients that do not negotiate the capability keep their previous wire shape.
+An anchored context `NOT_FOUND` covers both an unavailable trigger and a conversation that is no
+longer visible. The adapter checkpoints that event without inference or read-state mutation, keeping
+the privacy-preserving 404 and preventing one unavailable wake from poisoning every reconnect.
+
+This deliberately widens model-visible content for an eligible wake: nearby messages from the
+already-authorized conversation—including messages by authors who cannot independently wake
+Hermes—can enter its transcript even when they did not mention the agent. The adapter labels the
+entire projection as untrusted user content and places it in the inbound user message, never in
+`channel_prompt` or another system-prompt seam. After successful model handoff it
+atomically checkpoints the workspace delivery cursor and a pending read target, then advances the
+server cursor only when the token also has `read-cursors:write`; failed advances retry without a
+second inference. Tokens without that optional scope continue delivering context and warn once.
 
 For a rolling desktop upgrade, public member-directory and `member.updated` projections encode an
 agent as the previous release's `human` discriminator. Those shapes are mention/DM targets and do
