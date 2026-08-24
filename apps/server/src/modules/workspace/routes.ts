@@ -49,11 +49,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { ApiError } from "../../errors.js";
 import { requireTaskIdentity } from "../bots/request-auth.js";
 import type { BotService } from "../bots/service.js";
-import {
-  requireAgentScope,
-  requireAnyAgentScope,
-  requireAuthenticatedIdentity,
-} from "../identity/request-auth.js";
+import { requireAgentScope, requireAuthenticatedIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "./repository.js";
 

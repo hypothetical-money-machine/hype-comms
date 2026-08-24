@@ -3105,36 +3105,36 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     if not _has_access_policy():
         return None
     seed: Dict[str, Any] = {
-        \"api_origin\": origin,
-        \"context_limit\": context_limit,
+        "api_origin": origin,
+        "context_limit": context_limit,
         **CONVERSATION_SESSION_EXTRA,
     }
-    cli_path = os.getenv(\"HYPE_COMMS_CLI_PATH\", \"\").strip()
+    cli_path = os.getenv("HYPE_COMMS_CLI_PATH", "").strip()
     if cli_path:
-        seed[\"cli_path\"] = cli_path
-    home = os.getenv(\"HYPE_COMMS_HOME_CONVERSATION\", \"\").strip()
+        seed["cli_path"] = cli_path
+    home = os.getenv("HYPE_COMMS_HOME_CONVERSATION", "").strip()
     if home:
-        seed[\"home_channel\"] = {
-            \"chat_id\": home,
-            \"name\": \"Hype Comms home conversation\",
+        seed["home_channel"] = {
+            "chat_id": home,
+            "name": "Hype Comms home conversation",
         }
     return seed
 
 
 def register(ctx: Any) -> None:
-    \"\"\"Hermes plugin entry point.\"\"\"
+    """Hermes plugin entry point."""
 
     ctx.register_platform(
         name=PLATFORM_NAME,
-        label=\"Hype Comms\",
+        label="Hype Comms",
         adapter_factory=lambda cfg: HypeCommsAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=[\"HYPE_COMMS_API_ORIGIN\"],
+        required_env=["HYPE_COMMS_API_ORIGIN"],
         install_hint=(
-            \"Install hype-comms-cli and configure HYPE_COMMS_TOKEN or a saved \"
-            \"HYPE_COMMS_PROFILE\"
+            "Install hype-comms-cli and configure HYPE_COMMS_TOKEN or a saved "
+            "HYPE_COMMS_PROFILE"
         ),
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="HYPE_COMMS_HOME_CONVERSATION",

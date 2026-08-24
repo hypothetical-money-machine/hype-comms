@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AgentContextHistoryResponse } from "@hype-comms/contracts";
+import { type AgentContextHistoryResponse, ATTACHMENTS_CAPABILITY } from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli, HELP } from "../src/cli.js";
@@ -52,7 +52,9 @@ describe("messages history", () => {
       expect(String(input)).toBe(
         `https://chat.example.test/v1/conversations/${CONVERSATION_ID}/messages?before=older_page&limit=100`,
       );
-      expect(new Headers(init?.headers).has("x-hype-comms-capabilities")).toBe(false);
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
+        ATTACHMENTS_CAPABILITY,
+      );
       return jsonResponse(response);
     });
     const runtime = testRuntime({

@@ -2968,7 +2968,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 "hype-comms-cli",
                 ["read-cursors", "advance", DM_ID, message_id_for("101"), "--json"],
                 origin=ORIGIN,
-                token="unit-test-token",
+                credential=(None, "unit-test-token"),
                 process_factory=process_factory,
             )
         )
@@ -3003,7 +3003,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 "hype-comms-cli",
                 ["read-cursors", "advance", DM_ID, message_id_for("101"), "--json"],
                 origin=ORIGIN,
-                token="unit-test-token",
+                credential=(None, "unit-test-token"),
                 timeout=0.001,
                 process_factory=process_factory,
             )
