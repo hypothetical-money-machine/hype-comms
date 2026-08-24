@@ -86,6 +86,7 @@ export const agentWakeSignalSchema = z
   .strict()
   .readonly();
 
+/** Body-free durable progress shared by Wake realtime scan control and CLI stdout. */
 export const agentWakeCheckpointSchema = z
   .object({
     version: z.literal(1),

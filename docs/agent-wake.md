@@ -107,6 +107,11 @@ PR.
 - `agent.wake.checkpoint`: the highest safely observed workspace cursor; and
 - `agent.wake.repair_required`: a body-free cursor-expiry/reset/overflow control.
 
+The Wake-only realtime preamble may carry the same strict checkpoint record after visible page
+events when authorization filtering advanced the raw scan cursor further. The CLI accepts it only
+after the agent-bound handshake and forwards it durably before using that cursor on reconnect;
+plain realtime clients never receive or accept this control.
+
 The signal, wake bootstrap, CLI stdout, broker state, provider stdin, renderer IPC, and evidence
 record have no message body, prompt, history, provider credential, or agent token. Wake bootstrap
 uses the agent-only `GET /v1/agent-wake/bootstrap` route, which returns only agent/workspace IDs,

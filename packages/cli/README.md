@@ -199,7 +199,9 @@ instead of truncating it. Without `--after`, the first checkpoint is that high-w
 later one-to-one DM or server-verified @mention messages can wake the agent. Supply the last durably
 accepted checkpoint with `--after` to replay after a restart. Wake IDs are stable across
 at-least-once redelivery; persist a wake before acting on it and deduplicate provider work by
-`wakeId`.
+`wakeId`. On the opted-in Wake stream, the server also uses the same strict checkpoint shape after
+filtered scan rows advance the cursor without a visible event. The CLI validates that control only
+after the agent-bound handshake and durably forwards it before reconnecting from its cursor.
 
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
 `GET /v1/messages/:id`. Wake targets should use this command with the signaled `messageId`; using

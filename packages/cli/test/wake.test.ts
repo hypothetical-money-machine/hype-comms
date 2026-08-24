@@ -6,6 +6,7 @@ import { Writable } from "node:stream";
 import {
   agentWakeStreamRecordSchema,
   type AgentWakeBootstrapResponse,
+  type AgentWakeCheckpoint,
   type AgentWakeStreamRecord,
   type ConversationKind,
   type ConversationSummary,
@@ -181,6 +182,22 @@ function connectedEvent(sequence: string, number: number, userId = USER_ID): Pro
   };
 }
 
+function scanCheckpoint(cursor: string, agentUserId = USER_ID): AgentWakeCheckpoint {
+  return {
+    version: 1,
+    type: "agent.wake.checkpoint",
+    workspaceId: WORKSPACE_ID,
+    agentUserId,
+    cursor,
+  };
+}
+
+type WakeRealtimeFrame = ProductRealtimeEvent | AgentWakeCheckpoint;
+
+function frameCursor(frame: WakeRealtimeFrame): string {
+  return frame.type === "agent.wake.checkpoint" ? frame.cursor : frame.workspaceSequence;
+}
+
 function channelMembershipEvent(sequence: number): ProductRealtimeEvent {
   return {
     version: 1,
@@ -207,10 +224,13 @@ function outputRecords(runtime: TestRuntime): AgentWakeStreamRecord[] {
 }
 
 async function runScenario(input: {
-  readonly events: readonly ProductRealtimeEvent[];
+  readonly events: readonly WakeRealtimeFrame[];
   readonly bootstrap?: AgentWakeBootstrapResponse;
   readonly after?: string;
   readonly initialReplay?: boolean;
+  readonly reconnectAfterFirstEvent?: boolean;
+  readonly expectedExitCode?: number;
+  readonly expectedErrorCode?: string;
 }): Promise<{
   readonly runtime: TestRuntime;
   readonly observedAfter: readonly string[];
@@ -231,6 +251,17 @@ async function runScenario(input: {
     const after = url.searchParams.get("after") ?? "0";
     observedAfter.push(after);
     observedPreambles.push(url.searchParams.get("preamble"));
+    if (input.reconnectAfterFirstEvent === true) {
+      socket.send(JSON.stringify(connectedEvent(after, connectionNumber)));
+      if (connectionNumber === 1) {
+        const first = input.events[0];
+        if (first === undefined) throw new Error("Missing reconnect test event");
+        socket.send(JSON.stringify(first), () => socket.close(1011, "retry"));
+      } else {
+        for (const event of input.events.slice(1)) socket.send(JSON.stringify(event));
+      }
+      return;
+    }
     if (input.initialReplay === true) {
       const boundaryIndex = input.events.findIndex(
         (event) => event.type === "system.resync_required",
@@ -241,8 +272,9 @@ async function runScenario(input: {
       let boundaryCursor = after;
       for (const event of replayEvents) {
         socket.send(JSON.stringify(event));
-        if (BigInt(event.workspaceSequence) > BigInt(boundaryCursor)) {
-          boundaryCursor = event.workspaceSequence;
+        const eventCursor = frameCursor(event);
+        if (BigInt(eventCursor) > BigInt(boundaryCursor)) {
+          boundaryCursor = eventCursor;
         }
       }
       socket.send(JSON.stringify(connectedEvent(boundaryCursor, connectionNumber)));
@@ -283,9 +315,9 @@ async function runScenario(input: {
     "--json",
     ...(input.after === undefined ? [] : ["--after", input.after]),
   ];
-  expect(await executeCli(args, runtime)).toBe(4);
+  expect(await executeCli(args, runtime)).toBe(input.expectedExitCode ?? 4);
   expect(JSON.parse(runtime.stderrText())).toMatchObject({
-    error: { code: "RESYNC_REQUIRED", retryable: false },
+    error: { code: input.expectedErrorCode ?? "RESYNC_REQUIRED", retryable: false },
   });
   return { runtime, observedAfter, observedPreambles, requestedPaths };
 }
@@ -393,6 +425,45 @@ describe("wake watch", () => {
     });
   });
 
+  it("rejects a server scan checkpoint before the identity handshake", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing test address");
+    server.on("connection", (socket) => {
+      socket.send(JSON.stringify(scanCheckpoint("8")));
+    });
+    const runtime = testRuntime({
+      homeDirectory: await mkdtemp(join(tmpdir(), "hype-comms-wake-")),
+      env: {
+        HYPE_COMMS_API_ORIGIN: `http://127.0.0.1:${address.port}`,
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+      },
+      fetch: vi.fn<typeof globalThis.fetch>(async (request) => {
+        const url = new URL(String(request));
+        if (url.pathname === "/v1/agent-wake/bootstrap") return jsonResponse(wakeBootstrap());
+        if (url.pathname === "/v1/realtime/tickets") {
+          return jsonResponse({
+            ticket: "ticket_value_that_is_at_least_32_chars",
+            expiresAt: "2026-07-26T21:00:00.000Z",
+          });
+        }
+        throw new Error(`Unexpected route ${url.pathname}`);
+      }),
+    });
+
+    expect(await executeCli(["wake", "watch", "--json", "--after", "5"], runtime)).toBe(6);
+    expect(runtime.stdoutText()).toBe("");
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: {
+        code: "INVALID_SERVER_CONTRACT",
+        message: "Realtime sent a Wake checkpoint before the connection event",
+        retryable: false,
+      },
+    });
+  });
+
   it("starts at the bootstrap cursor and emits no wake for a pre-enrollment frame", async () => {
     const snapshot = wakeBootstrap([{ conversationId: CONVERSATION_ID, kind: "direct_message" }]);
     const staleBody = "pre-enrollment secret body";
@@ -462,6 +533,45 @@ describe("wake watch", () => {
       { type: "agent.wake.repair_required", cursor: "6", reason: "cursor_expired" },
     ]);
     expect(runtime.stdoutText()).not.toContain(replayBody);
+  });
+
+  it("resumes from a body-free server scan checkpoint", async () => {
+    const { runtime, observedAfter } = await runScenario({
+      after: "5",
+      reconnectAfterFirstEvent: true,
+      events: [scanCheckpoint("8"), repairEvent(8)],
+    });
+
+    expect(observedAfter).toEqual(["5", "8"]);
+    expect(outputRecords(runtime)).toEqual([
+      scanCheckpoint("5"),
+      scanCheckpoint("8"),
+      scanCheckpoint("8"),
+      {
+        version: 1,
+        type: "agent.wake.repair_required",
+        workspaceId: WORKSPACE_ID,
+        agentUserId: USER_ID,
+        cursor: "8",
+        reason: "cursor_expired",
+      },
+    ]);
+  });
+
+  it("rejects a server scan checkpoint for another agent", async () => {
+    const { runtime } = await runScenario({
+      after: "5",
+      events: [scanCheckpoint("8", id(98))],
+      expectedExitCode: 6,
+      expectedErrorCode: "INVALID_SERVER_CONTRACT",
+    });
+
+    expect(outputRecords(runtime)).toEqual([scanCheckpoint("5")]);
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: {
+        message: "Realtime checkpointed the wrong agent identity",
+      },
+    });
   });
 
   it("wakes for a DM and verified mention, but not text mentions, self messages, or group DMs", async () => {

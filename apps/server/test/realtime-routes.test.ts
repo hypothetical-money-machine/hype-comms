@@ -1,6 +1,7 @@
 import { once } from "node:events";
 
 import {
+  agentWakeCheckpointSchema,
   systemConnectedEventSchema,
   type ConversationSummary,
   type NotificationState,
@@ -380,7 +381,7 @@ describe("realtime session revalidation", () => {
     expect(repository.revalidations).toHaveLength(1);
   });
 
-  it("preserves replay-before-connected ordering for an agent without the wake preamble", async () => {
+  it("preserves replay ordering without sending Wake scan controls to a plain agent", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {
       workspaceId,
@@ -390,8 +391,8 @@ describe("realtime session revalidation", () => {
     };
     repository.syncResponse = {
       events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
+      nextCursor: "11",
+      highWaterCursor: "11",
       hasMore: false,
     };
     const app = await buildApp({
@@ -419,7 +420,7 @@ describe("realtime session revalidation", () => {
 
     expect(frames).toMatchObject([
       { type: "member.updated", workspaceSequence: "10" },
-      { type: "system.connected", workspaceSequence: "10" },
+      { type: "system.connected", workspaceSequence: "11" },
     ]);
     expect(repository.revalidations).toHaveLength(1);
   });
@@ -546,6 +547,138 @@ describe("realtime session revalidation", () => {
     }
     await vi.waitFor(() => expect(frames).toHaveLength(3));
     expect(frames[2]).toMatchObject({ type: "member.updated", workspaceSequence: "11" });
+  });
+
+  it("reports Wake scan progress across invisible replay rows", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000014",
+    };
+    repository.syncResponses.push(
+      {
+        events: [],
+        nextCursor: "10",
+        highWaterCursor: "12",
+        hasMore: true,
+      },
+      {
+        events: [secondReplayEvent],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    );
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    const frames: unknown[] = [];
+    socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+
+    await vi.waitFor(() => expect(frames).toHaveLength(4));
+
+    expect(frames).toMatchObject([
+      { type: "system.connected", workspaceSequence: "9" },
+      { type: "agent.wake.checkpoint", cursor: "10" },
+      { type: "member.updated", workspaceSequence: "11" },
+      { type: "agent.wake.checkpoint", cursor: "12" },
+    ]);
+    expect(agentWakeCheckpointSchema.parse(frames[1])).toEqual({
+      version: 1,
+      type: "agent.wake.checkpoint",
+      workspaceId,
+      agentUserId: userId,
+      cursor: "10",
+    });
+    expect(agentWakeCheckpointSchema.parse(frames[3])).toEqual({
+      version: 1,
+      type: "agent.wake.checkpoint",
+      workspaceId,
+      agentUserId: userId,
+      cursor: "12",
+    });
+  });
+
+  it("waits for a durable frame write before loading the next replay page", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId: null,
+      agentTokenId: "10000000-0000-4000-8000-000000000015",
+    };
+    repository.syncResponses.push(
+      {
+        events: [replayEvent],
+        nextCursor: "10",
+        highWaterCursor: "11",
+        hasMore: true,
+      },
+      {
+        events: [secondReplayEvent],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    );
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const firstSendAttempt = Promise.withResolvers<void>();
+    let releaseFirstSend: (() => void) | undefined;
+    app.websocketServer.once("connection", (serverSocket: WebSocket) => {
+      const originalSend = serverSocket.send.bind(serverSocket);
+      let intercepted = false;
+      serverSocket.send = ((
+        data: Parameters<WebSocket["send"]>[0],
+        callback?: (error?: Error) => void,
+      ): void => {
+        if (!intercepted && callback !== undefined) {
+          intercepted = true;
+          firstSendAttempt.resolve();
+          releaseFirstSend = () => {
+            serverSocket.send = originalSend;
+            callback?.();
+          };
+          return;
+        }
+        originalSend(data, callback);
+      }) as WebSocket["send"];
+    });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    await once(socket, "open");
+
+    try {
+      await firstSendAttempt.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(repository.syncedCursors).toEqual(["9"]);
+    } finally {
+      releaseFirstSend?.();
+    }
+    await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9", "10"]));
   });
 
   it("sends only the body-free recovery control when the replay cursor has expired", async () => {
@@ -927,6 +1060,85 @@ describe("realtime socket teardown", () => {
 });
 
 describe("realtime ephemeral activity", () => {
+  it("registers activity without waiting for a plain replay frame to drain", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.consumedPrincipal = {
+      workspaceId,
+      userId,
+      deviceSessionId,
+      agentTokenId: null,
+      ephemeralActivity: true,
+    };
+    repository.syncResponse = {
+      events: [replayEvent],
+      nextCursor: "10",
+      highWaterCursor: "10",
+      hasMore: false,
+    };
+    const setTypingConversations: string[] = [];
+    const activityHub = {
+      register(): void {},
+      setPresence(): void {},
+      async setTyping(_connectionId: string, conversationId: string): Promise<void> {
+        setTypingConversations.push(conversationId);
+      },
+      disconnect(): void {},
+      close(): void {},
+    };
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+        activityHub: activityHub as unknown as EphemeralActivityHub,
+      },
+    });
+    apps.push(app);
+    const firstSendAttempt = Promise.withResolvers<void>();
+    let releaseFirstSend: (() => void) | undefined;
+    app.websocketServer.once("connection", (serverSocket: WebSocket) => {
+      const originalSend = serverSocket.send.bind(serverSocket);
+      let intercepted = false;
+      serverSocket.send = ((
+        data: Parameters<WebSocket["send"]>[0],
+        callback?: (error?: Error) => void,
+      ): void => {
+        if (!intercepted) {
+          intercepted = true;
+          firstSendAttempt.resolve();
+          releaseFirstSend = () => {
+            serverSocket.send = originalSend;
+            callback?.();
+          };
+          return;
+        }
+        originalSend(data, callback);
+      }) as WebSocket["send"];
+    });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      { origin: "app://bundle" },
+    );
+    sockets.push(socket);
+    await once(socket, "open");
+
+    try {
+      await firstSendAttempt.promise;
+      socket.send(
+        JSON.stringify({
+          version: 1,
+          type: "activity.typing.set",
+          conversationId: "10000000-0000-4000-8000-000000000010",
+          typing: true,
+        }),
+      );
+      await vi.waitFor(() => expect(setTypingConversations).toHaveLength(1));
+    } finally {
+      releaseFirstSend?.();
+    }
+  });
+
   it("keeps draining activity frames after a typing authorization check rejects", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {

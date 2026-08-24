@@ -160,6 +160,14 @@ export async function wakeCommand(
         throw contractError("Realtime connected with the wrong agent identity");
       }
     },
+    async onScanCheckpoint(checkpoint) {
+      if (checkpoint.agentUserId !== agentUserId) {
+        throw contractError("Realtime checkpointed the wrong agent identity");
+      }
+      const nextCheckpointCursor = laterCursor(checkpointCursor, checkpoint.cursor);
+      await emitRecord(context, { ...checkpoint, cursor: nextCheckpointCursor });
+      checkpointCursor = nextCheckpointCursor;
+    },
     async onEvent(event) {
       const nextCheckpointCursor = laterCursor(checkpointCursor, event.workspaceSequence);
       if (event.type === "system.connected") {

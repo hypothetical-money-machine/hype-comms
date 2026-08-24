@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AGENT_WAKE_REALTIME_PREAMBLE,
+  agentWakeCheckpointSchema,
   clientEphemeralActivityFrameSchema,
   realtimeTicketSchema,
   sequenceSchema,
@@ -126,6 +127,28 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       let activityProcessing = false;
       let pendingActivity: ClientEphemeralActivityFrame | null = null;
 
+      const sendDurableFrame = (serialized: string): Promise<boolean> => {
+        if (closed || socket.readyState !== 1) return Promise.resolve(false);
+        return new Promise<boolean>((resolve, reject) => {
+          try {
+            socket.send(serialized, (error) => {
+              // ws forwards net.Socket's successful write callback as null at runtime even though
+              // its public TypeScript declaration documents only Error | undefined.
+              if (error === undefined || error === null) {
+                resolve(!closed && socket.readyState === 1);
+              } else if (closed || socket.readyState !== 1) {
+                resolve(false);
+              } else {
+                reject(error);
+              }
+            });
+          } catch (error) {
+            if (closed || socket.readyState !== 1) resolve(false);
+            else reject(error);
+          }
+        });
+      };
+
       const sendActivity = (frame: EphemeralActivityFrame): boolean => {
         if (
           closed ||
@@ -169,8 +192,9 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           });
       };
 
-      const sendConnected = (): void => {
-        if (connectedSent || socket.readyState !== 1) return;
+      const sendConnected = (): boolean => {
+        if (connectedSent) return !closed && socket.readyState === 1;
+        if (closed || socket.readyState !== 1) return false;
         connectedSent = true;
         const event: SystemConnectedEvent = {
           version: 1,
@@ -200,6 +224,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           );
           activityRegistered = true;
         }
+        return true;
       };
 
       const revalidatePrincipal = async (): Promise<boolean> => {
@@ -295,10 +320,33 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
                 if (authorizedResponse === null) return;
                 response = authorizedResponse;
               }
-              if (sendAgentWakePreamble) sendConnected();
+              const pageStartCursor = cursor;
+              if (sendAgentWakePreamble && !sendConnected()) return;
               for (const event of response.events) {
-                if (socket.readyState !== 1) return;
-                socket.send(JSON.stringify(event));
+                const serialized = JSON.stringify(event);
+                if (sendAgentWakePreamble) {
+                  if (!(await sendDurableFrame(serialized))) return;
+                } else {
+                  // Preserve the existing desktop/plain-watch replay and activity timing. Wake is
+                  // opted in because its bounded provider queue can deliberately pause the source.
+                  if (socket.readyState !== 1) return;
+                  socket.send(serialized);
+                }
+              }
+              const lastVisibleCursor =
+                response.events.at(-1)?.workspaceSequence ?? pageStartCursor;
+              if (
+                sendAgentWakePreamble &&
+                BigInt(response.nextCursor) > BigInt(lastVisibleCursor)
+              ) {
+                const checkpoint = agentWakeCheckpointSchema.parse({
+                  version: 1,
+                  type: "agent.wake.checkpoint",
+                  workspaceId: principal.workspaceId,
+                  agentUserId: principal.userId,
+                  cursor: response.nextCursor,
+                });
+                if (!(await sendDurableFrame(JSON.stringify(checkpoint)))) return;
               }
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);

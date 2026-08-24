@@ -7,11 +7,13 @@ import {
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
+  agentWakeCheckpointSchema,
   productRealtimeEventSchema,
   realtimeTicketResponseSchema,
   sequenceSchema,
   workspaceBootstrapResponseSchema,
   type AGENT_WAKE_REALTIME_PREAMBLE,
+  type AgentWakeCheckpoint,
   type ProductRealtimeEvent,
   type SystemConnectedEvent,
 } from "@hype-comms/contracts";
@@ -105,6 +107,8 @@ export interface ProductRealtimeWatchOptions {
   readonly preamble?: typeof AGENT_WAKE_REALTIME_PREAMBLE;
   /** Validates the user-bound handshake before any buffered replay is exposed to the projection. */
   readonly validateConnected?: (event: SystemConnectedEvent) => void;
+  /** Durably accepts Wake-only scan progress that has no visible product event. */
+  readonly onScanCheckpoint?: (checkpoint: AgentWakeCheckpoint) => void | Promise<void>;
   readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
 }
 
@@ -198,6 +202,13 @@ export async function watchProductRealtime(
           workspaceId: input.workspaceId,
           preamble: input.preamble,
           validateConnected: input.validateConnected,
+          onScanCheckpoint:
+            input.onScanCheckpoint === undefined
+              ? undefined
+              : async (checkpoint) => {
+                  await input.onScanCheckpoint?.(checkpoint);
+                  cursor = laterCursor(cursor, checkpoint.cursor);
+                },
           async write(event) {
             await input.onEvent(event);
             cursor = laterCursor(cursor, event.workspaceSequence);
@@ -236,6 +247,8 @@ async function streamOneConnection(input: {
   readonly workspaceId: string;
   readonly preamble: typeof AGENT_WAKE_REALTIME_PREAMBLE | undefined;
   readonly validateConnected: ((event: SystemConnectedEvent) => void) | undefined;
+  readonly onScanCheckpoint:
+    ((checkpoint: AgentWakeCheckpoint) => void | Promise<void>) | undefined;
   readonly write: (event: ProductRealtimeEvent) => void | Promise<void>;
   readonly stopped: () => boolean;
   readonly registerSocket: (socket: WebSocket | undefined) => void;
@@ -292,6 +305,18 @@ async function streamOneConnection(input: {
         return false;
       }
     };
+    const deliverScanCheckpoint = async (checkpoint: AgentWakeCheckpoint): Promise<boolean> => {
+      try {
+        await input.onScanCheckpoint?.(checkpoint);
+        delivered = true;
+        cursor = laterCursor(cursor, checkpoint.cursor);
+        return true;
+      } catch (error) {
+        socket.terminate();
+        settle(error);
+        return false;
+      }
+    };
     const handleMessage = async (data: RawData, isBinary: boolean): Promise<void> => {
       if (settled) return;
       if (isBinary) {
@@ -305,6 +330,23 @@ async function streamOneConnection(input: {
         value = JSON.parse(serialized) as unknown;
       } catch (error) {
         rejectContract("The realtime server sent malformed JSON", error);
+        return;
+      }
+      const scanCheckpoint = agentWakeCheckpointSchema.safeParse(value);
+      if (scanCheckpoint.success) {
+        if (input.onScanCheckpoint === undefined || input.preamble === undefined) {
+          rejectContract("Realtime sent a Wake checkpoint without the Wake capability");
+          return;
+        }
+        if (!connected) {
+          rejectContract("Realtime sent a Wake checkpoint before the connection event");
+          return;
+        }
+        if (scanCheckpoint.data.workspaceId !== input.workspaceId) {
+          rejectContract("Realtime sent a Wake checkpoint for the wrong workspace");
+          return;
+        }
+        await deliverScanCheckpoint(scanCheckpoint.data);
         return;
       }
       const parsed = productRealtimeEventSchema.safeParse(value);
