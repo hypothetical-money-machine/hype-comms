@@ -10,6 +10,10 @@ import {
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   THREADS_CAPABILITY,
+  agentWakeBootstrapResponseSchema,
+  apiErrorEnvelopeSchema,
+  type AgentCurrentPrincipal,
+  type AgentScope,
   type BotScope,
   type CurrentUser,
 } from "@hype-comms/contracts";
@@ -31,7 +35,10 @@ const reactionId = "10000000-0000-4000-8000-000000000005";
 const taskId = "10000000-0000-4000-8000-000000000006";
 const conversationId = "10000000-0000-4000-8000-000000000007";
 const replyId = "10000000-0000-4000-8000-000000000008";
+const agentUserId = "10000000-0000-4000-8000-000000000009";
+const agentTokenId = "10000000-0000-4000-8000-000000000010";
 const sessionToken = "a".repeat(43);
+const agentToken = `hype_comms_agent_${"c".repeat(43)}`;
 const botToken = `hype_comms_bot_${"b".repeat(43)}`;
 
 const currentUser: CurrentUser = {
@@ -53,13 +60,40 @@ const currentUser: CurrentUser = {
 class FakeIdentityService {
   readonly defaultAgentAgencyEnabled: boolean | undefined;
   readonly authenticateContext: ReturnType<typeof vi.fn>;
+  readonly authenticateAgentContext: ReturnType<typeof vi.fn>;
 
-  constructor(role: "owner" | "member" = "owner", defaultAgentAgencyEnabled?: boolean) {
+  constructor(
+    role: "owner" | "member" = "owner",
+    defaultAgentAgencyEnabled?: boolean,
+    scopes: readonly AgentScope[] = ["workspace:read"],
+  ) {
     this.defaultAgentAgencyEnabled = defaultAgentAgencyEnabled;
     this.authenticateContext = vi.fn(async () => ({
       currentUser: { ...currentUser, role },
       sessionId,
       principalKind: "human" as const,
+    }));
+    const currentAgent: AgentCurrentPrincipal = {
+      type: "agent",
+      user: {
+        id: agentUserId,
+        kind: "agent",
+        username: "wake-agent",
+        displayName: "Wake Agent",
+        avatarUrl: null,
+        title: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      workspaceId,
+      role: "member",
+      scopes: [...scopes],
+    };
+    this.authenticateAgentContext = vi.fn(async () => ({
+      currentUser: currentAgent,
+      authorizationScopes: [...scopes],
+      agentTokenId,
+      principalKind: "agent" as const,
     }));
   }
 
@@ -148,6 +182,12 @@ class FakeWorkspaceRepository {
       mentions: true,
       announcementChannels: true,
     },
+  }));
+  readonly agentWakeBootstrap = vi.fn(async () => ({
+    agentUserId,
+    workspaceId,
+    highWaterCursor: "0",
+    conversations: [{ conversationId, kind: "channel" as const }],
   }));
   readonly listConversations = vi.fn(async () => {
     const bootstrap = await this.bootstrap();
@@ -445,6 +485,61 @@ async function appWithRole(
   apps.push(app);
   return app;
 }
+
+async function agentWakeApp(
+  repository: FakeWorkspaceRepository,
+  scopes: readonly AgentScope[],
+): Promise<Awaited<ReturnType<typeof buildApp>>> {
+  const app = await buildApp({
+    identity: { service: new FakeIdentityService("owner", undefined, scopes).asService() },
+    workspace: {
+      repository: repository.asRepository(),
+      realtimeHub: new FakeRealtimeEventHub().asHub(),
+    },
+  });
+  apps.push(app);
+  return app;
+}
+
+describe("agent wake bootstrap route", () => {
+  it("is agent-only, requires workspace:read, and returns the strict body-free projection", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await agentWakeApp(repository, ["workspace:read"]);
+    const human = await app.inject({
+      method: "GET",
+      url: "/v1/agent-wake/bootstrap",
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+    const agent = await app.inject({
+      method: "GET",
+      url: "/v1/agent-wake/bootstrap",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(human.statusCode).toBe(403);
+    expect(apiErrorEnvelopeSchema.parse(human.json()).error.code).toBe("FORBIDDEN");
+    expect(agent.statusCode).toBe(200);
+    expect(agentWakeBootstrapResponseSchema.parse(agent.json())).toEqual({
+      agentUserId,
+      workspaceId,
+      highWaterCursor: "0",
+      conversations: [{ conversationId, kind: "channel" }],
+    });
+    expect(agent.body).not.toContain("body");
+    expect(repository.agentWakeBootstrap).toHaveBeenCalledTimes(1);
+
+    const noScopeRepository = new FakeWorkspaceRepository();
+    const noScopeApp = await agentWakeApp(noScopeRepository, ["messages:write"]);
+    const noScope = await noScopeApp.inject({
+      method: "GET",
+      url: "/v1/agent-wake/bootstrap",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(noScope.statusCode).toBe(403);
+    expect(apiErrorEnvelopeSchema.parse(noScope.json()).error.code).toBe("FORBIDDEN");
+    expect(noScopeRepository.agentWakeBootstrap).not.toHaveBeenCalled();
+  });
+});
 
 describe("event capability routes", () => {
   it("rejects legacy group attachment reads before loading bytes and serves capable clients", async () => {

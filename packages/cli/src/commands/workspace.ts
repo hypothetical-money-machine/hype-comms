@@ -22,6 +22,7 @@ import {
   listConversationsResponseSchema,
   listMembersResponseSchema,
   listPublicChannelsResponseSchema,
+  messageByIdResponseSchema,
   messageHistoryResponseSchema,
   paginationCursorSchema,
   sendConversationMessageRequestSchema,
@@ -283,6 +284,21 @@ export async function messagesCommand(
   args: readonly string[],
 ): Promise<void> {
   const client = await clientFromContext(context);
+  if (subcommand === "get") {
+    const parsed = parseCommandArguments(args, {});
+    const [messageValue] = requirePositionals(parsed, 1);
+    const messageId = entityIdSchema.safeParse(messageValue);
+    if (!messageId.success) {
+      throw new UsageError("The message ID must be a UUID", "INVALID_MESSAGE_ID");
+    }
+    const response = await client.request({
+      path: `/v1/messages/${messageId.data}`,
+      responseSchema: messageByIdResponseSchema,
+    });
+    writeResult(context.runtime.io, response, context.options.json);
+    return;
+  }
+
   if (subcommand === "history") {
     const parsed = parseCommandArguments(args, {
       before: { kind: "string" },
@@ -401,7 +417,7 @@ export async function messagesCommand(
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
-  throw new UsageError("Usage: hype-comms-cli messages <history|send>");
+  throw new UsageError("Usage: hype-comms-cli messages <get|history|send>");
 }
 
 export async function readCursorsCommand(

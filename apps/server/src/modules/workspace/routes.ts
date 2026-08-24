@@ -325,6 +325,15 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     );
   });
 
+  app.get("/agent-wake/bootstrap", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    if (identity.credentialType !== "agent") {
+      throw new ApiError(403, "FORBIDDEN", "An agent token is required for wake bootstrap");
+    }
+    requireAgentScope(identity, "workspace:read");
+    return repository.agentWakeBootstrap(identity);
+  });
+
   app.get("/members", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");

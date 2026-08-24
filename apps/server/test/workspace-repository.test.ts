@@ -13,6 +13,7 @@ import {
   CONVERSATION_PAGE_MAX_LIMIT,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
+  type AgentCurrentPrincipal,
   agentContextHistoryResponseSchema,
   injectionSafeCompactJsonByteLength,
   type CreateTaskRequest,
@@ -23,7 +24,10 @@ import {
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import { ApiError } from "../src/errors.js";
-import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
+import type {
+  AuthenticatedAgentIdentity,
+  AuthenticatedIdentity,
+} from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
   LocalAttachmentStore,
@@ -237,7 +241,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await pool.query(
       `INSERT INTO device_sessions
          (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+        VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
       [ownerSessionId, ownerId, Buffer.alloc(32, 7), now],
     );
   });
@@ -376,6 +380,89 @@ describeWithPostgres("WorkspaceRepository", () => {
         payload: expect.objectContaining({
           message: expect.objectContaining({ id: sent.message.id }),
         }),
+      }),
+    );
+  });
+
+  it("bootstraps wake cursor and body-free conversation kinds from one snapshot", async () => {
+    const wakeAgentId = randomUUID();
+    const wakeAgentTokenId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, kind, email, username, display_name)
+       VALUES ($1, 'agent', NULL, 'wake-agent', 'Wake Agent')`,
+      [wakeAgentId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, wakeAgentId],
+    );
+    await pool.query(
+      `INSERT INTO agents (user_id, workspace_id, created_by)
+       VALUES ($1, $2, $3)`,
+      [wakeAgentId, workspaceId, ownerId],
+    );
+    const currentAgent: AgentCurrentPrincipal = {
+      type: "agent",
+      user: {
+        id: wakeAgentId,
+        kind: "agent",
+        username: "wake-agent",
+        displayName: "Wake Agent",
+        avatarUrl: null,
+        title: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      workspaceId,
+      role: "member",
+      scopes: ["workspace:read"],
+    };
+    const wakeAgent: AuthenticatedAgentIdentity = {
+      currentUser: currentAgent,
+      authorizationScopes: ["workspace:read"],
+      principalKind: "agent",
+      agentTokenId: wakeAgentTokenId,
+    };
+    const cursorRead = Promise.withResolvers<void>();
+    const continueBootstrap = Promise.withResolvers<void>();
+    const racingRepository = new WorkspaceRepository(pool, {
+      afterAgentWakeBootstrapCursorRead: async () => {
+        cursorRead.resolve();
+        await continueBootstrap.promise;
+      },
+    });
+
+    const bootstrapping = racingRepository.agentWakeBootstrap(wakeAgent);
+    await cursorRead.promise;
+    let created: Awaited<ReturnType<WorkspaceRepository["createChannel"]>>;
+    let joined: Awaited<ReturnType<WorkspaceRepository["joinPublicChannel"]>>;
+    try {
+      created = await repository.createChannel(owner, {
+        name: "After Wake Snapshot",
+        slug: "after-wake-snapshot",
+        topic: null,
+        access: "workspace",
+      });
+      joined = await repository.joinPublicChannel(wakeAgent, created.conversation.conversation.id);
+    } finally {
+      continueBootstrap.resolve();
+    }
+    const bootstrap = await bootstrapping;
+    expect(bootstrap).toEqual({
+      agentUserId: wakeAgentId,
+      workspaceId,
+      highWaterCursor: "0",
+      conversations: [{ conversationId: generalId, kind: "channel" }],
+    });
+
+    const replay = await repository.sync(wakeAgent, bootstrap.highWaterCursor, 100);
+    expect(replay.events).toContainEqual(
+      expect.objectContaining({
+        type: "channel.membership_changed",
+        workspaceSequence: joined.syncCursor,
+        conversationId: created.conversation.conversation.id,
+        payload: { memberId: wakeAgentId, action: "added" },
       }),
     );
   });
@@ -2981,7 +3068,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       await client.query(
         `INSERT INTO device_sessions
            (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+          VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
         [member.sessionId, memberId, Buffer.alloc(32, 8), now],
       );
       await client.query(

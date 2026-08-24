@@ -10,8 +10,9 @@ Product strategy and delivery work are tracked in
 [GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
 See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
 contracts, [integrations/hermes-hype-comms/README.md](integrations/hermes-hype-comms/README.md) for
-the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
-SQLite-to-PostgreSQL cutover boundary.
+the Hermes gateway adapter, [docs/agent-wake.md](docs/agent-wake.md) for the default-off agent wake
+pilot, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the SQLite-to-PostgreSQL cutover
+boundary.
 
 ## Joining a workspace
 

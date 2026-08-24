@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./wake-node": {
+      "types": "./dist/wake-node.d.ts",
+      "default": "./dist/wake-node.js"
     }
   },
   "scripts": {

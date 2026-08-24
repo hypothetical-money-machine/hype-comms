@@ -27,6 +27,7 @@
     "test:watch": "vitest",
     "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --publish never",
     "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac --publish never",
+    "package:mac:arm64": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac dmg:arm64 zip:arm64 --publish never",
     "package:win": "npm run build && electron-builder --config electron-builder.config.mjs --win --x64 --arm64 --publish never",
     "package:win:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --win nsis:arm64 --publish never",
     "package:linux": "npm run build && electron-builder --config electron-builder.config.mjs --linux --x64 --arm64 --publish never",
@@ -60,6 +61,7 @@
     "electron-updater": "6.8.9",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "zod": "4.4.3"
   }
 }

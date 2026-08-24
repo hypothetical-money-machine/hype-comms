@@ -1131,6 +1131,7 @@ describeWithPostgres("agent identity and owner administration", () => {
 
     const readRequests = [
       { method: "GET", url: "/v1/bootstrap" },
+      { method: "GET", url: "/v1/agent-wake/bootstrap" },
       { method: "GET", url: "/v1/members" },
       { method: "GET", url: "/v1/conversations" },
       { method: "GET", url: `/v1/conversations/${generalId}/messages` },
