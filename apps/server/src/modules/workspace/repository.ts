@@ -1083,12 +1083,15 @@ export class WorkspaceRepository {
   /**
    * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
    * workspace-membership join makes each best-effort authorization reflect revocation immediately
-   * instead of waiting for the socket heartbeat to close the connection.
+   * instead of waiting for the socket heartbeat to close the connection. The capability argument
+   * is bound into the realtime ticket, so an older device cannot discover a group conversation
+   * through typing frames merely because another device for the same user supports groups.
    */
   async canViewConversation(
     workspaceId: string,
     userId: string,
     conversationId: string,
+    includeGroupDirectMessages: boolean,
   ): Promise<boolean> {
     const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
       `SELECT EXISTS (
@@ -1101,8 +1104,9 @@ export class WorkspaceRepository {
           WHERE conversation.id = $3
             AND conversation.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
+            AND ($4::boolean OR conversation.kind <> 'group_direct_message')
        ) AS visible`,
-      [workspaceId, userId, conversationId],
+      [workspaceId, userId, conversationId, includeGroupDirectMessages],
     );
     return result.rows[0]?.visible ?? false;
   }

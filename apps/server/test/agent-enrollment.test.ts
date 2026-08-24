@@ -1287,6 +1287,88 @@ describeWithPostgres("AgentEnrollmentModule", () => {
     expect(withoutBody.statusCode).toBe(200);
   });
 
+  it("authenticates redemption credentials before reporting rollout availability", async () => {
+    await enrollment.setPolicy(ownerActor(), "automatic");
+    const candidate = candidateInput("credential-gate-child");
+    const requested = await enrollment.request(
+      ownerActor(),
+      candidate.request,
+      "credential-gate-request",
+    );
+    const wrongCandidate = candidateInput("credential-gate-wrong-child");
+    const disabledIdentityService = new IdentityService(
+      new IdentityRepository(pool),
+      new NoopEmailSender(),
+      new SignInThrottle(),
+      () => now,
+      "http://127.0.0.1:3000",
+      undefined,
+      false,
+    );
+    const enabled = await buildApp({
+      cookieSecure: false,
+      identity: {
+        service: identityService,
+        agentEnrollment: enrollment,
+        agentProvisioningEnabled: true,
+      },
+    });
+    const disabled = await buildApp({
+      cookieSecure: false,
+      identity: {
+        service: disabledIdentityService,
+        agentEnrollment: enrollment,
+        agentProvisioningEnabled: true,
+      },
+    });
+    apps.push(enabled, disabled);
+    const url = `/v1/agent-enrollments/${requested.id}/redeem`;
+    const unauthenticatedRequests = [
+      {},
+      { headers: { authorization: "Enrollment invalid" } },
+      { headers: { authorization: `Enrollment ${wrongCandidate.token}` } },
+    ] as const;
+
+    for (const request of unauthenticatedRequests) {
+      const enabledResponse = await enabled.inject({ method: "POST", url, ...request });
+      const disabledResponse = await disabled.inject({ method: "POST", url, ...request });
+
+      expect(enabledResponse.statusCode).toBe(401);
+      expect(disabledResponse.statusCode).toBe(401);
+      expect(disabledResponse.json()).toEqual(enabledResponse.json());
+    }
+
+    const missingUrl = `/v1/agent-enrollments/${randomUUID()}/redeem`;
+    const enabledMissing = await enabled.inject({
+      method: "POST",
+      url: missingUrl,
+      headers: { authorization: `Enrollment ${wrongCandidate.token}` },
+    });
+    const disabledMissing = await disabled.inject({
+      method: "POST",
+      url: missingUrl,
+      headers: { authorization: `Enrollment ${wrongCandidate.token}` },
+    });
+    expect(enabledMissing.statusCode).toBe(404);
+    expect(disabledMissing.statusCode).toBe(404);
+    expect(disabledMissing.json()).toEqual(enabledMissing.json());
+
+    const blocked = await disabled.inject({
+      method: "POST",
+      url,
+      headers: { authorization: `Enrollment ${candidate.token}` },
+    });
+    expect(blocked.statusCode).toBe(503);
+    expect(apiErrorEnvelopeSchema.parse(blocked.json()).error.code).toBe("SERVICE_UNAVAILABLE");
+
+    const redeemed = await enabled.inject({
+      method: "POST",
+      url,
+      headers: { authorization: `Enrollment ${candidate.token}` },
+    });
+    expect(redeemed.statusCode).toBe(200);
+  });
+
   it("exposes private redemption over Authorization and honors the rollback gate", async () => {
     const app = await buildApp({
       cookieSecure: false,

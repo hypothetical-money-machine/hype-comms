@@ -10,6 +10,7 @@ export type CanViewConversation = (
   workspaceId: string,
   userId: string,
   conversationId: string,
+  includeGroupDirectMessages: boolean,
 ) => Promise<boolean>;
 
 export interface EphemeralActivityConnection {
@@ -132,6 +133,7 @@ export class EphemeralActivityHub {
         connection.principal.workspaceId,
         connection.principal.userId,
         conversationId,
+        connection.principal.groupDirectMessages ?? false,
       );
       if (!authorized || this.#connections.get(connectionId) !== connection) {
         await this.#removeTypingDevice(connection, conversationId);
@@ -310,23 +312,34 @@ export class EphemeralActivityHub {
     userId: string,
     typing: boolean,
   ): Promise<void> {
-    const recipients = new Map<string, RegisteredConnection[]>();
+    // One user can have an older and an upgraded device connected at once. Keep their tickets in
+    // separate authorization buckets so a decision for the upgraded device never covers the old
+    // device as well.
+    const recipients = new Map<string, Map<boolean, RegisteredConnection[]>>();
     for (const connection of this.#connections.values()) {
       if (connection.principal.workspaceId !== workspaceId) continue;
-      const devices = recipients.get(connection.principal.userId) ?? [];
+      const capabilityGroups = recipients.get(connection.principal.userId) ?? new Map();
+      recipients.set(connection.principal.userId, capabilityGroups);
+      const includeGroupDirectMessages = connection.principal.groupDirectMessages ?? false;
+      const devices = capabilityGroups.get(includeGroupDirectMessages) ?? [];
       devices.push(connection);
-      recipients.set(connection.principal.userId, devices);
+      capabilityGroups.set(includeGroupDirectMessages, devices);
     }
     // A failed authorization read fails closed for that recipient only. Broadcasts run from the
     // maintenance timer and disconnect paths that cannot surface a rejection, so this method must
     // never reject.
     const decisions = await Promise.all(
-      [...recipients].map(async ([recipientUserId, devices]) => ({
-        devices,
-        visible: await this.canViewConversation(workspaceId, recipientUserId, conversationId).catch(
-          () => false,
-        ),
-      })),
+      [...recipients].flatMap(([recipientUserId, capabilityGroups]) =>
+        [...capabilityGroups].map(async ([includeGroupDirectMessages, devices]) => ({
+          devices,
+          visible: await this.canViewConversation(
+            workspaceId,
+            recipientUserId,
+            conversationId,
+            includeGroupDirectMessages,
+          ).catch(() => false),
+        })),
+      ),
     );
     const frame = {
       version: 1,

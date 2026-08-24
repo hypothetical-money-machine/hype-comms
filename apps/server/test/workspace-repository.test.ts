@@ -2482,6 +2482,23 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
   });
 
+  it("excludes group conversations from realtime visibility for legacy tickets only", async () => {
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const authorize = repository.canViewConversation.bind(repository);
+
+    await expect(
+      authorize(workspaceId, ownerId, group.conversation.conversation.id, false),
+    ).resolves.toBe(false);
+    await expect(
+      authorize(workspaceId, ownerId, group.conversation.conversation.id, true),
+    ).resolves.toBe(true);
+    await expect(authorize(workspaceId, ownerId, generalId, false)).resolves.toBe(true);
+  });
+
   it("consumes realtime tickets exactly once", async () => {
     const issued = await repository.issueRealtimeTicket(owner);
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toEqual({

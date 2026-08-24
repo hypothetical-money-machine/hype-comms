@@ -578,16 +578,16 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
   });
 
   app.post("/agent-enrollments/:id/redeem", async (request, reply) => {
-    requireEnrollmentIssuanceEnabled();
     const { id } = enrollmentParameters(request.params);
     const credential = requiredEnrollmentCredential(request);
     if (!agentEnrollmentNoBodyRequestSchema.safeParse(request.body).success) {
       throw new ApiError(400, "BAD_REQUEST", "Enrollment redemption does not accept a body");
     }
+    const enrollmentModule = requireEnrollmentModule();
+    await enrollmentModule.authenticateRedemptionCredential(id, credential);
+    requireEnrollmentIssuanceEnabled();
     void reply.header("cache-control", "no-store");
-    return redeemAgentEnrollmentResponseSchema.parse(
-      await requireEnrollmentModule().redeem(id, credential),
-    );
+    return redeemAgentEnrollmentResponseSchema.parse(await enrollmentModule.redeem(id, credential));
   });
 
   app.get("/agents", async (request) => {

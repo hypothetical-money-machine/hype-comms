@@ -86,6 +86,10 @@ interface ExistingTokenRow extends QueryResultRow {
   readonly id: string;
 }
 
+interface EnrollmentCredentialRow extends QueryResultRow {
+  readonly credential_verifier: unknown;
+}
+
 const enrollmentCredentialVerifierBufferSchema = z
   .instanceof(Buffer)
   .refine((value) => value.byteLength === 32, "Expected a SHA-256 credential verifier");
@@ -845,6 +849,29 @@ export class AgentEnrollmentModule {
       throw new ApiError(401, "UNAUTHORIZED", "Enrollment credential is invalid");
     }
     throw new ApiError(409, "CONFLICT", outcome.message);
+  }
+
+  async authenticateRedemptionCredential(
+    enrollmentId: EntityId,
+    candidateCredential: AgentTokenSecret,
+  ): Promise<void> {
+    // This read-only preflight prevents the rollout gate from becoming an authentication oracle.
+    // redeem() repeats the comparison while holding its transaction lock before making any write.
+    const result = await this.#pool.query<EnrollmentCredentialRow>(
+      `SELECT credential_verifier
+         FROM agent_enrollments
+        WHERE id = $1`,
+      [enrollmentId],
+    );
+    const found = result.rows[0];
+    if (found === undefined) {
+      throw new ApiError(404, "NOT_FOUND", "Agent enrollment not found");
+    }
+    const candidateHash = credentialHash(candidateCredential);
+    const verifier = enrollmentCredentialVerifierBufferSchema.parse(found.credential_verifier);
+    if (!sameHash(verifier, candidateHash)) {
+      throw new ApiError(401, "UNAUTHORIZED", "Enrollment credential is invalid");
+    }
   }
 
   async #requireRequester(

@@ -67,8 +67,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
     options.workspace === undefined
       ? undefined
       : (options.workspace.activityHub ??
-        new EphemeralActivityHub((workspaceId, userId, conversationId) =>
-          options.workspace!.repository.canViewConversation(workspaceId, userId, conversationId),
+        new EphemeralActivityHub(
+          (workspaceId, userId, conversationId, includeGroupDirectMessages) =>
+            options.workspace!.repository.canViewConversation(
+              workspaceId,
+              userId,
+              conversationId,
+              includeGroupDirectMessages,
+            ),
         ));
 
   registerErrorHandling(app);
