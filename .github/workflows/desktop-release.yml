@@ -21,10 +21,8 @@ env:
 jobs:
   validate:
     name: Validate release version
-    # This job uses only the read-only token, so it can run on the self-hosted CI pool.
-    runs-on:
-      group: hmm-linux-x64-ci
-      labels: hmm-ci
+    # Validation needs no native hardware or release credentials.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 5
@@ -80,10 +78,9 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    # GitHub-hosted jobs are unavailable while organization billing is blocked. This job writes
-    # GitHub Release metadata, so it stays on the isolated ARM64 release runner rather than the
-    # self-hosted CI pool, which executes collaborator pull-request code.
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    # Metadata publication runs on disposable hosted infrastructure behind release approval.
+    runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 5
     permissions:
       contents: write
@@ -158,6 +155,7 @@ jobs:
   package:
     name: Release ${{ matrix.platform }}
     needs: [validate, prepare-github-release]
+    environment: release
     permissions:
       contents: write
     strategy:
@@ -554,8 +552,9 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    # Publishing uses a contents:write token. Keep it off the self-hosted CI pool.
-    runs-on: [self-hosted, Linux, ARM64, hype-comms-release, docker]
+    # Final publication uses a short-lived write token on disposable hosted infrastructure.
+    runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 10
     permissions:
       contents: write
