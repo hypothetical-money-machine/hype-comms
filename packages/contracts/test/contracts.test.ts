@@ -17,6 +17,8 @@ import {
   agentUserSchema,
   botAccessTokenSchema,
   botScopesSchema,
+  incomingWebhookIdempotencyKeySchema,
+  incomingWebhookMessageRequestSchema,
   channelSlugFromName,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
@@ -420,14 +422,26 @@ describe("entity contracts", () => {
     ).toMatchObject({ emoji: "❤️" });
   });
 
-  it("accepts only prefixed 256-bit bot tokens and unique task scopes", () => {
+  it("accepts only prefixed 256-bit bot tokens and unique least-privilege scopes", () => {
     expect(botAccessTokenSchema.parse(`hype_comms_bot_${"a".repeat(43)}`)).toHaveLength(58);
     expect(() => botAccessTokenSchema.parse("a".repeat(43))).toThrow();
     expect(botScopesSchema.parse(["tasks:read", "tasks:write"])).toEqual([
       "tasks:read",
       "tasks:write",
     ]);
+    expect(botScopesSchema.parse(["messages:write"])).toEqual(["messages:write"]);
     expect(() => botScopesSchema.parse(["tasks:read", "tasks:read"])).toThrow();
+  });
+
+  it("accepts only strict plain webhook messages with a UUID idempotency key", () => {
+    expect(incomingWebhookMessageRequestSchema.parse({ body: "Build passed" })).toEqual({
+      body: "Build passed",
+    });
+    expect(() =>
+      incomingWebhookMessageRequestSchema.parse({ body: "Build passed", attachments: [] }),
+    ).toThrow();
+    expect(incomingWebhookIdempotencyKeySchema.parse(MESSAGE_ID)).toBe(MESSAGE_ID);
+    expect(() => incomingWebhookIdempotencyKeySchema.parse("build-123")).toThrow();
   });
 
   it("keeps bot principals out of the human desktop-session contract", () => {

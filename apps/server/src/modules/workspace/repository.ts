@@ -244,7 +244,7 @@ interface MessageAuthorizationRow extends QueryResultRow {
 interface WorkspaceMembershipAuthorizationRow extends QueryResultRow {
   workspace_active: boolean;
   role: "owner" | "member";
-  kind: "human" | "agent";
+  kind: "human" | "bot" | "agent";
 }
 
 interface SearchMessageRow extends MessageRow {
@@ -2684,7 +2684,7 @@ export class WorkspaceRepository {
   }
 
   async sendMessage(
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversationId: string,
     input: SendConversationMessageRequest,
     correlationId?: string,
@@ -2726,7 +2726,7 @@ export class WorkspaceRepository {
       // share lock also prevents an active membership from being revoked before delivery commits.
       const workspaceAuthorization = await client.query<WorkspaceMembershipAuthorizationRow>(
         `SELECT membership.status = 'active'
-                  AND actor.kind IN ('human', 'agent') AS workspace_active,
+                  AND actor.kind IN ('human', 'bot', 'agent') AS workspace_active,
                 membership.role,
                 actor.kind
            FROM workspace_memberships AS membership
@@ -2741,9 +2741,49 @@ export class WorkspaceRepository {
         throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
       }
 
+      if (principal.kind === "bot") {
+        if (identity.principalKind !== "bot") {
+          throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
+        }
+        const credential = await client.query(
+          `SELECT 1
+             FROM bot_credentials AS credential
+             JOIN channel_webhooks AS webhook
+               ON webhook.current_credential_id = credential.id
+              AND webhook.workspace_id = credential.workspace_id
+              AND webhook.bot_user_id = credential.bot_user_id
+            WHERE credential.id = $1
+              AND credential.workspace_id = $2
+              AND credential.bot_user_id = $3
+              AND credential.revoked_at IS NULL
+              AND credential.expires_at > clock_timestamp()
+              AND 'messages:write' = ANY(credential.scopes)
+              AND webhook.conversation_id = $4
+              AND webhook.disabled_at IS NULL
+            FOR SHARE OF credential, webhook`,
+          [
+            identity.credentialId,
+            identity.currentUser.workspaceId,
+            identity.currentUser.user.id,
+            conversationId,
+          ],
+        );
+        if (credential.rowCount !== 1) {
+          throw new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled");
+        }
+      }
+
       const authorized = await client.query<MessageAuthorizationRow>(
         `SELECT conversation.is_archived,
                 CASE
+                  WHEN $4::text = 'bot' THEN
+                    conversation.kind = 'channel' AND EXISTS (
+                      SELECT 1
+                        FROM bot_channel_grants AS grant_record
+                       WHERE grant_record.conversation_id = conversation.id
+                         AND grant_record.workspace_id = conversation.workspace_id
+                         AND grant_record.bot_user_id = $2
+                    )
                   WHEN conversation.kind = 'direct_message' THEN
                     conversation.dm_user_low_id = $2 OR conversation.dm_user_high_id = $2
                   WHEN conversation.channel_access = 'workspace' THEN true
@@ -2759,7 +2799,12 @@ export class WorkspaceRepository {
            FROM conversations AS conversation
           WHERE conversation.id = $1
             AND conversation.workspace_id = $3`,
-        [conversationId, identity.currentUser.user.id, identity.currentUser.workspaceId],
+        [
+          conversationId,
+          identity.currentUser.user.id,
+          identity.currentUser.workspaceId,
+          principal.kind,
+        ],
       );
       const access = authorized.rows[0];
       if (access === undefined) {
@@ -4129,7 +4174,7 @@ export class WorkspaceRepository {
 
   async #claimAttachments(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversationId: string,
     attachmentIds: readonly string[],
   ): Promise<Attachment[]> {
@@ -4226,7 +4271,7 @@ export class WorkspaceRepository {
 
   async #validateMentions(
     client: PoolClient,
-    identity: AuthenticatedIdentity,
+    identity: AuthenticatedTaskIdentity,
     conversation: ConversationRow,
     input: SendConversationMessageRequest,
   ): Promise<void> {
