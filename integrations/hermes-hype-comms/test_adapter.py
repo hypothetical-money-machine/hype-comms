@@ -2377,6 +2377,61 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(adapter._pending_read_cursors, {})
 
+    async def test_pending_read_cursor_flush_caps_concurrent_cli_children(self) -> None:
+        conversation_ids = [
+            f"00000000-0000-4000-8000-{index:012d}" for index in range(100, 105)
+        ]
+        message_ids = [
+            f"00000000-0000-4000-8000-{index:012d}" for index in range(200, 205)
+        ]
+        processes = [FakeControlledCommandProcess() for _ in conversation_ids]
+        factory = FakeProcessFactory(
+            [
+                read_cursor_spec(conversation_id, message_id, process)
+                for conversation_id, message_id, process in zip(
+                    conversation_ids,
+                    message_ids,
+                    processes,
+                )
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter._agent_scopes = frozenset(
+            ["workspace:read", "messages:write", "read-cursors:write"]
+        )
+        for index, (conversation_id, message_id) in enumerate(
+            zip(conversation_ids, message_ids),
+            start=1,
+        ):
+            adapter._queue_read_cursor(
+                workspace_cursor=str(100 + index),
+                conversation_id=conversation_id,
+                message_id=message_id,
+                conversation_sequence=str(index),
+            )
+
+        flush = asyncio.create_task(adapter._flush_pending_read_cursors())
+        try:
+            await asyncio.gather(
+                *(
+                    asyncio.wait_for(process.started.wait(), timeout=0.5)
+                    for process in processes[:4]
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(len(factory.calls), 4)
+            self.assertFalse(processes[4].started.is_set())
+
+            processes[0].release.set()
+            await asyncio.wait_for(processes[4].started.wait(), timeout=0.5)
+        finally:
+            for process in processes:
+                process.release.set()
+            await flush
+
+        self.assertEqual(adapter._pending_read_cursors, {})
+
     async def test_read_cursor_targets_for_one_conversation_remain_ordered(self) -> None:
         first_message_id = message_id_for("101")
         second_message_id = message_id_for("102")
