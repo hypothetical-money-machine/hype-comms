@@ -46,6 +46,7 @@ test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", asy
   assert.match(postgresJob, /^ {10}POSTGRES_USER: hype_comms$/mu);
   assert.match(postgresJob, /^ {10}- 55432:5432$/mu);
   assert.match(postgresJob, /HYPE_COMMS_TEST_DATABASE_URL: postgresql:\/\//u);
+  assert.match(postgresJob, /npm ci --no-audit --prefer-offline/u);
   assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
   assert.doesNotMatch(
     postgresJob,

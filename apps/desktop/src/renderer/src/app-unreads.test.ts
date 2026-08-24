@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AiChannelState,
   ChatSessionState,
@@ -8,7 +8,9 @@ import type {
   Message,
   NotificationContext,
   NotificationState,
+  ProductRealtimeEvent,
   RealtimeSessionScope,
+  ScopedProductRealtimeEvent,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -66,6 +68,11 @@ const danMessage = message(
   DAN_DM_ID,
   "30000000-0000-4000-8000-000000000008",
   "Dogfood notes from standup",
+);
+const horseMessage = message(
+  LAUNCH_ID,
+  "30000000-0000-4000-8000-000000000009",
+  "Horse in the private channel yada-yada",
 );
 
 const bootstrap = {
@@ -181,6 +188,25 @@ const bootstrap = {
   },
 } as unknown as HumanWorkspaceBootstrapResponse;
 
+const horseUnreadBootstrap: HumanWorkspaceBootstrapResponse = {
+  ...bootstrap,
+  conversations: [
+    bootstrap.conversations[0]!,
+    {
+      ...bootstrap.conversations[1]!,
+      conversation: {
+        ...bootstrap.conversations[1]!.conversation,
+        name: "Yolo",
+        slug: "yolo",
+        access: "members",
+      },
+      lastMessage: horseMessage,
+      unreadCount: 1,
+      mentionCount: 0,
+    },
+  ],
+};
+
 const notificationState: NotificationState = {
   version: 1,
   devicePreference: "enabled",
@@ -209,9 +235,18 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
   workspaceId: WORKSPACE_ID,
 };
 
-function createClient(): DesktopApi {
+interface ClientHarness {
+  readonly client: DesktopApi;
+  readonly emitWorkspaceEvent: (event: ProductRealtimeEvent) => void;
+}
+
+function createClient(
+  bootstrapResponse: HumanWorkspaceBootstrapResponse = bootstrap,
+): ClientHarness {
   let realtimeStarts = 0;
-  return {
+  let realtimeScope: RealtimeSessionScope | null = null;
+  const eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
+  const client = {
     platform: "linux",
     isHeadless: true,
     getSessionState: async () => session,
@@ -229,10 +264,10 @@ function createClient(): DesktopApi {
         scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
         reason: "credential_store_unavailable",
       }) as const,
-    getWorkspaceBootstrap: async () => bootstrap,
-    listWorkspaceMembers: async () => ({ members: bootstrap.members }),
+    getWorkspaceBootstrap: async () => bootstrapResponse,
+    listWorkspaceMembers: async () => ({ members: bootstrapResponse.members }),
     listConversations: async () => ({
-      conversations: bootstrap.conversations,
+      conversations: bootstrapResponse.conversations,
       nextCursor: null,
       hasMore: false,
     }),
@@ -262,18 +297,22 @@ function createClient(): DesktopApi {
       }) as const,
     startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
       realtimeStarts += 1;
-      return Object.freeze({
+      realtimeScope = Object.freeze({
         userId: session.userId,
         workspaceId: session.workspaceId,
         epoch: realtimeStarts,
       });
+      return realtimeScope;
     },
     activateWorkspaceRealtime: async () => undefined,
     stopWorkspaceRealtime: async () => undefined,
     acknowledgeWorkspaceEvent: async () => undefined,
     getRealtimeState: async () => "offline",
     onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: () => () => undefined,
+    onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    },
     getNotificationContext: async (): Promise<NotificationContext> => activeContext,
     reportNotificationActivity: async () => undefined,
     drainNotificationActions: async (ready: unknown) => ({
@@ -295,6 +334,13 @@ function createClient(): DesktopApi {
     respondAiChannelPermission: async () => aiChannelState,
     onAiChannelStateChanged: () => () => undefined,
   } as unknown as DesktopApi;
+  return {
+    client,
+    emitWorkspaceEvent: (event: ProductRealtimeEvent): void => {
+      if (realtimeScope === null) return;
+      for (const listener of eventListeners) listener({ scope: realtimeScope, event });
+    },
+  };
 }
 
 function createTheme(): ThemeRuntime {
@@ -326,10 +372,13 @@ function createSidebarPosition(): SidebarPositionRuntime {
   } as unknown as SidebarPositionRuntime;
 }
 
-async function renderWorkspace(): Promise<void> {
+async function renderWorkspace(
+  bootstrapResponse: HumanWorkspaceBootstrapResponse = bootstrap,
+): Promise<ClientHarness> {
+  const client = createClient(bootstrapResponse);
   render(
     createElement(App, {
-      client: createClient(),
+      client: client.client,
       theme: createTheme(),
       compactMode: createCompactMode(),
       fencedBlockquotes: new FencedBlockquoteRuntime(null),
@@ -337,6 +386,7 @@ async function renderWorkspace(): Promise<void> {
     }),
   );
   await screen.findByTestId("workspace-ready");
+  return client;
 }
 
 afterEach(() => cleanup());
@@ -364,5 +414,36 @@ describe("in-app Unreads destination", () => {
     expect(screen.getByTestId("unreads-view").hidden).toBe(true);
     expect(document.querySelector(".conversation-pane")?.hasAttribute("hidden")).toBe(false);
     expect(screen.getByRole("heading", { name: "Dan" })).toBeTruthy();
+  });
+
+  it("removes a retracted unread message from Unreads", async () => {
+    const { emitWorkspaceEvent } = await renderWorkspace(horseUnreadBootstrap);
+
+    fireEvent.click(screen.getByRole("button", { name: /Unreads.*1 unread message/u }));
+
+    const unreadsView = screen.getByTestId("unreads-view");
+    expect(within(unreadsView).getByRole("button", { name: /Yolo.*Channel/u })).toBeTruthy();
+    expect(screen.getByText(horseMessage.body)).toBeTruthy();
+
+    emitWorkspaceEvent({
+      version: 1,
+      id: "30000000-0000-4000-8000-000000000009",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: LAUNCH_ID,
+      workspaceSequence: "11",
+      conversationSequence: horseMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: horseMessage.id, deletedAt: NOW },
+    });
+
+    await waitFor(() => {
+      expect(within(unreadsView).queryByRole("button", { name: /Yolo.*Channel/u })).toBeNull();
+      expect(screen.queryByText(horseMessage.body)).toBeNull();
+      expect(screen.getByRole("heading", { name: "You're caught up" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Unreads" })).toBeTruthy();
+    });
   });
 });

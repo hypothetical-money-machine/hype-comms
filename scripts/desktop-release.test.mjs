@@ -171,24 +171,37 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(packageSmokeWorkflow, /^permissions:\n {2}contents: read$/mu);
   assert.match(
     matrixEntry(smokePackageJob, "macOS"),
-    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "macOS", "ARM64", "notarize"\]' \|\| '\["macos-15"\]' \}\}/u,
+    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "macOS", "ARM64", "notarize"\]' \|\| '\["macos-15"\]' \}\}/u,
   );
   assert.match(
     matrixEntry(smokePackageJob, "Windows"),
-    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "Windows", "ARM64", "windows-release"\]' \|\| '\["windows-11-arm"\]' \}\}/u,
+    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "Windows", "ARM64", "windows-release"\]' \|\| '\["windows-11-arm"\]' \}\}/u,
   );
   assert.match(
     matrixEntry(smokePackageJob, "Linux"),
-    /runner: \$\{\{ \(github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'\) && '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]' \|\| '\["ubuntu-24\.04-arm"\]' \}\}/u,
+    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]' \|\| '\["ubuntu-24\.04-arm"\]' \}\}/u,
   );
   assert.equal(
-    smokePackageJob.match(
-      /self_hosted: \$\{\{ github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch' \}\}/gu,
-    )?.length,
+    smokePackageJob.match(/self_hosted: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/gu)
+      ?.length,
     3,
   );
   assert.doesNotMatch(smokePackageJob, /head\.repo\.full_name/u);
   assert.doesNotMatch(smokePackageJob, /secrets\.|^ {4}environment:/mu);
+  assert.match(
+    smokePackageJob,
+    /uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
+  );
+  assert.match(smokePackageJob, /if: matrix\.platform == 'Windows' && !matrix\.self_hosted/u);
+  assert.match(
+    smokePackageJob,
+    /key: desktop-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
+  );
+  assert.match(smokePackageJob, /~\/AppData\/Local\/electron-builder\/Cache/u);
+  assert.doesNotMatch(smokePackageJob, /node_modules\s*$/mu);
+  assert.equal(smokePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
+  assert.equal(nativeEvidenceJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 1);
+  assert.equal(releasePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
   assert.equal(
     packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
     2,
