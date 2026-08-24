@@ -69,6 +69,7 @@ describeWithPostgres("AuthKitRepository", () => {
       username,
       displayName: "Workspace Owner",
       avatarUrl: null,
+      title: null,
     });
     await identityRepository.insertWorkspace({
       id: workspaceId,
@@ -473,6 +474,7 @@ describeWithPostgres("AuthKitRepository", () => {
         username: `member-${String(index)}`,
         displayName: `Member ${String(index)}`,
         avatarUrl: null,
+        title: null,
       });
       await identityRepository.upsertMembership({
         workspaceId,

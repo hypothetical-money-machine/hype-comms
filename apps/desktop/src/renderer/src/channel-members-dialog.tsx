@@ -136,6 +136,9 @@ export function ChannelMembersDialog({
                   availableMembers.map((member) => (
                     <option key={member.id} value={member.id}>
                       {member.displayName}
+                      {member.title !== null && member.title !== undefined
+                        ? ` · ${member.title}`
+                        : ""}
                     </option>
                   ))
                 )}
@@ -162,6 +165,9 @@ export function ChannelMembersDialog({
                 <div>
                   <strong>{member.user.displayName}</strong>
                   <span>@{member.user.username}</span>
+                  {member.user.title !== null && member.user.title !== undefined && (
+                    <span className="channel-member-title">{member.user.title}</span>
+                  )}
                 </div>
                 {details.access === "members" && (
                   <span className={`channel-role ${member.role}`}>{member.role}</span>

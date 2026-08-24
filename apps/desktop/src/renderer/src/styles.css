@@ -2285,6 +2285,109 @@ html[data-member-list-resizing] * {
   line-height: 1.35;
 }
 
+.preferences-dialog .profile-section {
+  margin-top: 10px;
+}
+
+.preferences-dialog .profile-section-edit {
+  display: grid;
+  gap: 8px;
+}
+
+.preferences-dialog .profile-section-edit > label {
+  color: var(--theme-text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.preferences-dialog .profile-section-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preferences-dialog .profile-section-field input {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 8px;
+  background: var(--theme-surface-input);
+  color: var(--theme-text-strong);
+}
+
+.preferences-dialog .profile-section-field input:focus {
+  outline: 2px solid var(--theme-border-accent);
+  outline-offset: 1px;
+}
+
+.preferences-dialog .profile-section-field button {
+  padding: 7px 10px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--theme-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.preferences-dialog .profile-section-field button:hover {
+  background: var(--theme-surface-hover);
+  color: var(--theme-text-strong);
+}
+
+.preferences-dialog .profile-section-field button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.preferences-dialog .profile-section-read {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.preferences-dialog .profile-section-read p {
+  margin: 0;
+  color: var(--theme-text-secondary);
+  font-size: 13px;
+}
+
+.preferences-dialog .profile-section-read button {
+  padding: 5px 9px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--theme-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.preferences-dialog .profile-section-read button:hover {
+  background: var(--theme-surface-hover);
+  color: var(--theme-text-strong);
+}
+
+.preferences-dialog .profile-section-label {
+  color: var(--theme-text-subtle);
+}
+
+.preferences-dialog .profile-section-error {
+  margin: 0;
+  color: var(--theme-text-danger);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.preferences-dialog .profile-section-success {
+  margin: 0;
+  color: var(--theme-text-secondary);
+  font-size: 11px;
+}
+
 .preferences-trigger {
   width: 100%;
   margin-bottom: 9px;
@@ -2738,6 +2841,24 @@ html[data-member-list-resizing] * {
 .message header span {
   color: var(--theme-text-subtle);
   font-size: 11px;
+}
+
+.member-title {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--theme-text-muted);
+}
+
+.message header .message-author-title {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .message .message-body {

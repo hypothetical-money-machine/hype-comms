@@ -212,6 +212,40 @@ describe("preload listWorkspaceMembers", () => {
   });
 });
 
+describe("preload updateProfile", () => {
+  it("invokes the profile-update channel and returns the updated user", async () => {
+    invoke.mockResolvedValueOnce({ user: MEMBER });
+
+    await expect(desktopApi.updateProfile("Engineering Lead")).resolves.toEqual(MEMBER);
+    expect(invoke).toHaveBeenCalledWith(
+      DESKTOP_CHANNELS.workspaceProfileUpdate,
+      "Engineering Lead",
+    );
+  });
+
+  it("rejects a profile response that does not match the wire contract", async () => {
+    invoke.mockResolvedValueOnce({ user: { ...MEMBER, status: "revoked" } });
+
+    await expect(desktopApi.updateProfile("Engineering Lead")).rejects.toThrow();
+  });
+
+  it("passes null to clear the title", async () => {
+    const cleared = { ...MEMBER, title: null };
+    invoke.mockResolvedValueOnce({ user: cleared });
+
+    await expect(desktopApi.updateProfile(null)).resolves.toEqual(cleared);
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.workspaceProfileUpdate, null);
+  });
+
+  it("rejects transport failures from main", async () => {
+    invoke.mockRejectedValueOnce(new Error("IPC transport failed"));
+
+    await expect(desktopApi.updateProfile("Engineering Lead")).rejects.toThrow(
+      "IPC transport failed",
+    );
+  });
+});
+
 describe("preload AI Channel boundary", () => {
   it("exposes the complete local AI transport and validates returned snapshots", async () => {
     expect(desktopApi).toMatchObject({

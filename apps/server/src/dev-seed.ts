@@ -36,6 +36,7 @@ const DEMO_MEMBERS = [
     email: emailSchema.parse("claire@example.test"),
     username: "claire",
     displayName: "Claire",
+    title: "Product Engineer",
     sessionId: DEMO_SESSION_IDS.claire,
   },
   {
@@ -43,6 +44,7 @@ const DEMO_MEMBERS = [
     email: emailSchema.parse("woots@example.test"),
     username: "woots",
     displayName: "Woots",
+    title: "Design Lead",
     sessionId: DEMO_SESSION_IDS.woots,
   },
 ] as const;
@@ -227,6 +229,7 @@ async function ensureDemoMember(
       username: fixture.username,
       displayName: fixture.displayName,
       avatarUrl: null,
+      title: fixture.title,
     });
   } else if (user.username !== fixture.username || user.displayName !== fixture.displayName) {
     throw new Error(
@@ -343,6 +346,7 @@ export async function seedDevelopmentDemo(
       username: claireFixture.username,
       displayName: claireFixture.displayName,
       avatarUrl: null,
+      title: claireFixture.title,
     });
   } else if (
     existingClaire.username !== claireFixture.username ||

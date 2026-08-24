@@ -606,6 +606,7 @@ export class IdentityService {
           username,
           displayName: displayName(email),
           avatarUrl: null,
+          title: null,
         });
       }
       suffix += 1;

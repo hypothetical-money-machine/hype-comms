@@ -64,6 +64,7 @@ import type {
   UpdateState,
   HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
+  User,
 } from "@hype-comms/contracts";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
@@ -195,6 +196,8 @@ export interface DesktopApi
    * message volume. The server rejects non-owners, so callers must gate the UI on the role.
    */
   readonly getCommunicationPaths: () => Promise<CommunicationPathsResponse>;
+  /** Updates the current member's profile title. Passing null clears the title. */
+  readonly updateProfile: (title: string | null) => Promise<User>;
   /**
    * Fetches one page of conversation summaries. Bootstrap returns the first page; callers page
    * with `after` until `hasMore` is false so a large workspace cannot exceed the wire contract.

@@ -82,6 +82,7 @@ import {
   themeDesignSchema,
   themePreferenceSchema,
   updateStateSchema,
+  updateProfileResponseSchema,
   updateTaskOperationSchema,
   upsertChannelMemberRequestSchema,
   upsertChannelMemberOperationSchema,
@@ -118,6 +119,7 @@ import {
   type TaskListQuery,
   type UpdateState,
   type UpdateTaskOperation,
+  type User,
 } from "@hype-comms/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -514,6 +516,10 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       communicationPathsResponseSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths),
       ),
+    updateProfile: async (title: string | null): Promise<User> =>
+      updateProfileResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceProfileUpdate, title),
+      ).user,
     listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
       listConversationsResponseSchema.parse(
         await ipcRenderer.invoke(

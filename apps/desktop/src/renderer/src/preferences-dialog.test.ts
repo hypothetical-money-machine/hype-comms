@@ -9,6 +9,7 @@ import type {
   ThemeDesign,
   ThemePreference,
   ThemeState,
+  User,
 } from "@hype-comms/contracts";
 import { createElement, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -173,6 +174,8 @@ interface PreferencesHarnessProps {
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
+  readonly currentUser: User;
+  readonly onUpdateProfile: (title: string | null) => Promise<void>;
   readonly onOpenChange: (open: boolean) => void;
 }
 
@@ -183,6 +186,8 @@ function PreferencesHarness({
   sidebarPosition,
   notifications,
   platform,
+  currentUser,
+  onUpdateProfile,
   onOpenChange,
 }: PreferencesHarnessProps) {
   const [open, setOpen] = useState(false);
@@ -209,6 +214,8 @@ function PreferencesHarness({
       sidebarPosition,
       notifications,
       platform,
+      currentUser,
+      onUpdateProfile,
       triggerRef,
       onClose: () => setOpen(false),
       onOpenChange,
@@ -216,7 +223,30 @@ function PreferencesHarness({
   );
 }
 
-async function renderPreferences(notifications?: NotificationTransport) {
+function makeUser(title: string | null = null): User {
+  return {
+    id: "user-1",
+    kind: "human",
+    username: "alice",
+    displayName: "Alice",
+    avatarUrl: null,
+    title,
+    createdAt: "2024-01-01T00:00:00Z",
+    updatedAt: "2024-01-01T00:00:00Z",
+  };
+}
+
+interface RenderPreferencesOptions {
+  readonly notifications?: NotificationTransport;
+  readonly currentUser?: User;
+  readonly onUpdateProfile?: (title: string | null) => Promise<void>;
+}
+
+async function renderPreferences({
+  notifications,
+  currentUser = makeUser(),
+  onUpdateProfile = vi.fn().mockResolvedValue(undefined),
+}: RenderPreferencesOptions = {}) {
   const themeClient = new PreferencesThemeTransport();
   const compactModeClient = new PreferencesCompactModeTransport();
   const theme = new ThemeRuntime(themeClient, document.documentElement);
@@ -234,6 +264,8 @@ async function renderPreferences(notifications?: NotificationTransport) {
       sidebarPosition,
       notifications,
       platform: "linux",
+      currentUser,
+      onUpdateProfile,
       onOpenChange,
     }),
   );
@@ -457,6 +489,7 @@ describe("PreferencesDialog", () => {
       await renderPreferences();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
 
+    expect(screen.getByRole("heading", { name: "Profile", level: 3 })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Appearance", level: 3 })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Layout", level: 3 })).toBeTruthy();
@@ -495,7 +528,7 @@ describe("PreferencesDialog", () => {
 
   it("includes notification controls in the dialog focus trap when the bridge is available", async () => {
     const notifications = new PreferencesNotificationTransport();
-    await renderPreferences(notifications);
+    await renderPreferences({ notifications });
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
     const dialog = screen.getByRole("dialog", { name: "Preferences" });
     const first = screen.getByRole("button", { name: "Close preferences" });
@@ -510,5 +543,66 @@ describe("PreferencesDialog", () => {
     first.focus();
     fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
+  });
+
+  it("renders the profile section and current title", async () => {
+    await renderPreferences({ currentUser: makeUser("Engineering Lead") });
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    expect(screen.getByRole("heading", { name: "Profile", level: 3 })).toBeTruthy();
+    expect(screen.getByText("Engineering Lead")).toBeTruthy();
+  });
+
+  it("saves a trimmed title", async () => {
+    const onUpdateProfile = vi.fn().mockResolvedValue(undefined);
+    await renderPreferences({ currentUser: makeUser(), onUpdateProfile });
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const input = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(input, { target: { value: "  Engineering Lead  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onUpdateProfile).toHaveBeenCalledWith("Engineering Lead"));
+    expect(screen.getByText("Saved.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+  });
+
+  it("clears a title", async () => {
+    const onUpdateProfile = vi.fn().mockResolvedValue(undefined);
+    await renderPreferences({ currentUser: makeUser("Engineering Lead"), onUpdateProfile });
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(onUpdateProfile).toHaveBeenCalledWith(null));
+    expect(screen.getByText("Saved.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+  });
+
+  it("surfaces validation errors for invalid titles", async () => {
+    await renderPreferences({ currentUser: makeUser() });
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const input = screen.getByRole("textbox", { name: "Title" });
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Title must be 1–160 characters",
+    );
+
+    fireEvent.change(input, { target: { value: "a".repeat(161) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("Title must be 1–160 characters"),
+    );
+  });
+
+  it("surfaces server errors when saving fails", async () => {
+    const onUpdateProfile = vi.fn().mockRejectedValue(new Error("Network error"));
+    await renderPreferences({ currentUser: makeUser(), onUpdateProfile });
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const input = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(input, { target: { value: "Engineering Lead" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Network error");
   });
 });

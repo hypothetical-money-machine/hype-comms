@@ -131,6 +131,7 @@ describeWithPostgres("owner CLI", () => {
       username,
       displayName: username,
       avatarUrl: null,
+      title: null,
     });
     await repository.upsertMembership({
       workspaceId: workspace.id,

@@ -108,4 +108,26 @@ describe("ChannelMembersDialog", () => {
     expect(await screen.findByText("Open to everyone")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
   });
+
+  it("renders member titles in the member list and available-member select", async () => {
+    const titledOwner: User = { ...owner, title: "Boss" };
+    const titledMember: User = { ...member, title: "Helper" };
+    render(
+      createElement(ChannelMembersDialog, {
+        channelName: "leadership",
+        conversationId: CONVERSATION_ID,
+        workspaceMembers: [titledOwner, titledMember],
+        onClose: vi.fn(),
+        load: vi.fn().mockResolvedValue({
+          ...initial,
+          members: [{ user: titledOwner, role: "owner", joinedAt: NOW }],
+        }),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+      }),
+    );
+
+    expect(await screen.findByText("Boss")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Member · Helper" })).toBeTruthy();
+  });
 });

@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -11,6 +12,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   addReactionResponseSchema,
+  updateProfileResponseSchema,
   advanceReadCursorResponseSchema,
   attachmentSchema,
   completeFileUploadResponseSchema,
@@ -80,6 +82,7 @@ import {
   type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
   type HumanWorkspaceBootstrapResponse,
+  type User,
 } from "@hype-comms/contracts";
 
 import type { ChatSession } from "./chat-session";
@@ -93,6 +96,7 @@ const CLIENT_CAPABILITIES = [
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
 ].join(",");
 
 function retryAfter(response: Response): number | null {
@@ -214,13 +218,29 @@ export class WorkspaceTransport {
   }
 
   async members(): Promise<ListMembersResponse> {
-    const response = await this.session.fetch(this.#url("/v1/members").href, { method: "GET" });
+    const response = await this.session.fetch(this.#url("/v1/members").href, {
+      method: "GET",
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
+    });
     return listMembersResponseSchema.parse(await this.#payload(response));
+  }
+
+  async updateProfile(title: string | null): Promise<User> {
+    const response = await this.session.fetch(this.#url("/v1/profile").href, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
+      },
+      body: JSON.stringify({ title }),
+    });
+    return updateProfileResponseSchema.parse(await this.#payload(response)).user;
   }
 
   async communicationPaths(): Promise<CommunicationPathsResponse> {
     const response = await this.session.fetch(this.#url("/v1/admin/communication-paths").href, {
       method: "GET",
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return communicationPathsResponseSchema.parse(await this.#payload(response));
   }
@@ -275,7 +295,10 @@ export class WorkspaceTransport {
   async channelMembers(conversationId: string): Promise<ChannelMembersResponse> {
     const response = await this.session.fetch(
       this.#url(`/v1/channels/${encodeURIComponent(conversationId)}/members`).href,
-      { method: "GET" },
+      {
+        method: "GET",
+        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
+      },
     );
     return channelMembersResponseSchema.parse(await this.#payload(response));
   }

@@ -34,6 +34,7 @@ import {
   conversationFilesQuerySchema,
   listMessageAttachmentsRequestSchema,
   listMessageReactionsRequestSchema,
+  memberTitleSchema,
   messageThreadRequestSchema,
   messageReactionTargetSchema,
   messageSearchQuerySchema,
@@ -1579,6 +1580,13 @@ function registerIpcHandlers(): void {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace members sender");
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.members();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceProfileUpdate);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceProfileUpdate, async (event, title: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace profile update sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.updateProfile(memberTitleSchema.nullable().parse(title));
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths);

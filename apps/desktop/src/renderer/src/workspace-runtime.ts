@@ -1966,6 +1966,20 @@ export class WorkspaceRuntime {
     return result;
   }
 
+  async updateProfileTitle(title: string | null): Promise<void> {
+    const generation = this.#generation;
+    const updated = await this.#client.updateProfile(title);
+    if (generation !== this.#generation || this.#state.bootstrap === null) return;
+    // The desktop only edits human profiles; cast the returned public user back to the human-only
+    // current-user shape the snapshot expects.
+    const updatedUser = { ...updated, kind: "human" as const };
+    const currentUser = { ...this.#state.bootstrap.currentUser, user: updatedUser };
+    const members = this.#state.bootstrap.members
+      .map((member) => (member.id === updated.id ? updated : member))
+      .sort(compareMembers);
+    this.#setState({ bootstrap: { ...this.#state.bootstrap, currentUser, members } });
+  }
+
   async loadOlder(conversationId: string): Promise<void> {
     const cache = this.#cache;
     const before = this.#historyCursors.get(conversationId);
