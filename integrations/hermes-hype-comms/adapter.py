@@ -117,6 +117,14 @@ SUPPORTED_EVENT_TYPES = frozenset(
 )
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _DECIMAL_CURSOR = re.compile(r"^(?:0|[1-9][0-9]*)$")
+# ECMAScript WhiteSpace and LineTerminator code points, matching the trim
+# projection used by the shared Zod schemas. In particular, Python's broader
+# default strip set must not remove U+001C or U+0085.
+_ECMASCRIPT_TRIM_CHARACTERS = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 _PAGINATION_CURSOR = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 _TOKEN_PATTERN = re.compile(r"\bhype_comms_agent_[A-Za-z0-9_-]+\b")
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+\b")
@@ -127,6 +135,7 @@ _TRACEBACK_PATTERN = re.compile(
     r"(?i)^(?:Traceback \(most recent call last\):|File \".*\", line \d+|"
     r"During handling of the above exception|[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):)"
 )
+_POSTGRES_BIGINT_MAX_TEXT = str(POSTGRES_BIGINT_MAX)
 
 ProcessFactory = Callable[..., Awaitable[Any]]
 # Conversation ID and resolved thread root recorded for one observed message
@@ -284,6 +293,12 @@ def _safe_username(value: object) -> Optional[str]:
     return cleaned
 
 
+def _ecmascript_trim(value: str) -> str:
+    """Trim exactly the code points removed by JavaScript ``String.trim``."""
+
+    return value.strip(_ECMASCRIPT_TRIM_CHARACTERS)
+
+
 def _is_entity_id(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -294,11 +309,21 @@ def _is_entity_id(value: object) -> bool:
 
 
 def _is_sequence(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and _DECIMAL_CURSOR.fullmatch(value) is not None
-        and int(value) <= POSTGRES_BIGINT_MAX
+    return isinstance(value, str) and _DECIMAL_CURSOR.fullmatch(value) is not None and (
+        _compare_decimal_strings(value, _POSTGRES_BIGINT_MAX_TEXT) <= 0
     )
+
+
+def _compare_decimal_strings(left: str, right: str) -> int:
+    """Compare canonical non-negative decimal strings without integer conversion."""
+
+    normalized_left = left.lstrip("0") or "0"
+    normalized_right = right.lstrip("0") or "0"
+    if len(normalized_left) != len(normalized_right):
+        return 1 if len(normalized_left) > len(normalized_right) else -1
+    if normalized_left == normalized_right:
+        return 0
+    return 1 if normalized_left > normalized_right else -1
 
 
 def _is_iso_datetime(value: object) -> bool:
@@ -321,15 +346,20 @@ def _valid_context_author(value: object) -> bool:
         return False
     username = value.get("username")
     display_name = value.get("displayName")
+    if not isinstance(username, str) or not isinstance(display_name, str):
+        return False
+    try:
+        username_length = _utf16_length(username)
+        display_name_length = _utf16_length(display_name)
+    except UnicodeEncodeError:
+        return False
     return (
         _is_entity_id(value.get("id"))
         and value.get("kind") in {"human", "bot", "agent"}
-        and isinstance(username, str)
-        and username == username.strip()
-        and 1 <= len(username) <= 80
-        and isinstance(display_name, str)
-        and display_name == display_name.strip()
-        and 1 <= len(display_name) <= 120
+        and username == _ecmascript_trim(username)
+        and 1 <= username_length <= 80
+        and display_name == _ecmascript_trim(display_name)
+        and 1 <= display_name_length <= 120
     )
 
 
@@ -469,11 +499,14 @@ def _validate_context_pack(
         # empty response is an invalid mismatch rather than a useful result.
         raise invalid
     ids: set[str] = set()
-    previous_sequence = -1
+    previous_sequence: Optional[str] = None
     for message in messages:
         message_id = str(message["id"])
-        sequence = int(message["conversationSequence"])
-        if message_id in ids or sequence <= previous_sequence:
+        sequence = str(message["conversationSequence"])
+        if message_id in ids or (
+            previous_sequence is not None
+            and _compare_decimal_strings(sequence, previous_sequence) <= 0
+        ):
             raise invalid
         ids.add(message_id)
         previous_sequence = sequence
@@ -1109,7 +1142,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _checked_cursor(value: object) -> str:
-        if not isinstance(value, str) or not _DECIMAL_CURSOR.fullmatch(value):
+        if not _is_sequence(value):
             raise CliFailure(
                 6,
                 "INVALID_CURSOR",
@@ -1251,6 +1284,13 @@ class HypeCommsAdapter(BasePlatformAdapter):
             False,
             error_kind="bad_format",
         )
+
+        def checked_state_cursor(value: object) -> str:
+            try:
+                return self._checked_cursor(value)
+            except CliFailure as exc:
+                raise unsupported from exc
+
         if not isinstance(payload, dict):
             raise unsupported
         version = payload.get("version")
@@ -1260,7 +1300,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             if set(payload) != {"version", "cursor"}:
                 raise unsupported
             self._state_needs_migration = True
-            return self._checked_cursor(payload.get("cursor"))
+            return checked_state_cursor(payload.get("cursor"))
         if version != CURSOR_FILE_VERSION or set(payload) != {
             "version",
             "cursor",
@@ -1285,7 +1325,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 conversation_sequence=str(target["conversationSequence"]),
             )
         self._pending_read_cursors = next_pending
-        return self._checked_cursor(payload.get("cursor"))
+        return checked_state_cursor(payload.get("cursor"))
 
     def _persist_cursor(self, cursor: str) -> None:
         cursor = self._checked_cursor(cursor)
@@ -1382,9 +1422,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
             )
         previous = self._pending_read_cursors.get(conversation_id)
         previous_parked = self._parked_read_cursors.get(conversation_id)
-        if previous is None or int(conversation_sequence) > int(
-            previous.conversation_sequence
-        ):
+        if previous is None or _compare_decimal_strings(
+            conversation_sequence, previous.conversation_sequence
+        ) > 0:
             self._pending_read_cursors[conversation_id] = PendingReadCursor(
                 message_id=message_id,
                 conversation_sequence=conversation_sequence,
@@ -2727,7 +2767,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # the behavior.
             self._thread_roots.clear()
             return "resync"
-        if self._cursor is not None and int(cursor) <= int(self._cursor):
+        if self._cursor is not None and _compare_decimal_strings(cursor, self._cursor) <= 0:
             return "duplicate"
         if event_type == "member.updated":
             payload = event.get("payload")

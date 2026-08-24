@@ -1186,6 +1186,162 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(malicious, dispatched.channel_prompt or "")
         self.assertEqual(len(context_calls(factory)), 1)
 
+    async def test_context_author_metadata_matches_ecmascript_trim_projection(self) -> None:
+        anchor_id = message_id_for("101")
+        trigger = message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+
+        valid_response = context_pack_result(anchor_id)
+        valid_author = valid_response["contextPack"]["messages"][0]["author"]
+        # ECMAScript trim does not remove either of these code points. They
+        # are therefore contract-canonical when they occur at an edge.
+        valid_author["username"] = "morgan\u001c"
+        valid_author["displayName"] = "Morgan\u0085"
+        valid_factory = FakeProcessFactory(
+            [ProcessSpec(context_args(CHANNEL_ID, anchor_id), json_process(valid_response))],
+            auto_context=False,
+        )
+        valid_adapter = self.new_adapter(valid_factory)
+        self.prepare_adapter(valid_adapter)
+
+        await valid_adapter._accept_event(trigger)
+
+        self.assertEqual(len(valid_adapter.handled_events), 1)
+
+        noncanonical_response = context_pack_result(anchor_id)
+        noncanonical_author = noncanonical_response["contextPack"]["messages"][0]["author"]
+        # FEFF is part of ECMAScript trim. A server response containing it at
+        # an edge is not the canonical z.string().trim() projection.
+        noncanonical_author["username"] = "\ufeffmorgan"
+        noncanonical_factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    context_args(CHANNEL_ID, anchor_id),
+                    json_process(noncanonical_response),
+                )
+            ],
+            auto_context=False,
+        )
+        noncanonical_adapter = self.new_adapter(noncanonical_factory)
+        self.prepare_adapter(noncanonical_adapter)
+
+        with self.assertRaises(adapter_module.CliFailure) as caught:
+            await noncanonical_adapter._accept_event(trigger)
+
+        self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
+        self.assertEqual(noncanonical_adapter.handled_events, [])
+
+    async def test_context_author_metadata_uses_utf16_lengths(self) -> None:
+        anchor_id = message_id_for("101")
+        trigger = message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+
+        valid_response = context_pack_result(anchor_id)
+        valid_author = valid_response["contextPack"]["messages"][0]["author"]
+        valid_author["username"] = "😀" * 40  # 80 UTF-16 code units
+        valid_author["displayName"] = "😀" * 60  # 120 UTF-16 code units
+        valid_factory = FakeProcessFactory(
+            [ProcessSpec(context_args(CHANNEL_ID, anchor_id), json_process(valid_response))],
+            auto_context=False,
+        )
+        valid_adapter = self.new_adapter(valid_factory)
+        self.prepare_adapter(valid_adapter)
+
+        await valid_adapter._accept_event(trigger)
+
+        self.assertEqual(len(valid_adapter.handled_events), 1)
+
+        for field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
+            with self.subTest(field=field):
+                response = context_pack_result(anchor_id)
+                response["contextPack"]["messages"][0]["author"][field] = value
+                factory = FakeProcessFactory(
+                    [
+                        ProcessSpec(
+                            context_args(CHANNEL_ID, anchor_id),
+                            json_process(response),
+                        )
+                    ],
+                    auto_context=False,
+                )
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+
+                with self.assertRaises(adapter_module.CliFailure) as caught:
+                    await adapter._accept_event(trigger)
+
+                self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
+
+    async def test_context_pack_rejects_oversized_sequence_as_typed_failure(self) -> None:
+        anchor_id = message_id_for("101")
+        trigger = message_event("101", DM_ID, USER_ID)
+        response = context_pack_result(anchor_id)
+        response["contextPack"]["messages"][0]["conversationSequence"] = "1" + "0" * 4_300
+        factory = FakeProcessFactory(
+            [ProcessSpec(context_args(DM_ID, anchor_id), json_process(response))],
+            auto_context=False,
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        with self.assertRaises(adapter_module.CliFailure) as caught:
+            await adapter._accept_event(trigger)
+
+        self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
+        self.assertEqual(adapter._cursor, "100")
+
+    async def test_watch_rejects_oversized_sequence_as_invalid_cursor(self) -> None:
+        oversized = "1" + "0" * 4_300
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+
+        with self.assertRaises(adapter_module.CliFailure) as caught:
+            await adapter._accept_event(
+                event("member.updated", oversized, {"member": {"id": USER_ID}})
+            )
+
+        self.assertEqual(caught.exception.code, "INVALID_CURSOR")
+        self.assertEqual(adapter._cursor, "100")
+
+    async def test_watch_sequence_boundary_matches_postgres_bigint_contract(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        bigint_max = "9223372036854775807"
+
+        self.assertEqual(
+            await adapter._accept_event(event("system.resync_required", bigint_max, {})),
+            "resync",
+        )
+        self.assertEqual(
+            await adapter._accept_event(event("system.resync_required", "0", {})),
+            "resync",
+        )
+
+        for invalid in ("9223372036854775808", "01", None, 1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(adapter_module.CliFailure) as caught:
+                    await adapter._accept_event(
+                        event("system.resync_required", invalid, {})  # type: ignore[arg-type]
+                    )
+                self.assertEqual(caught.exception.code, "INVALID_CURSOR")
+
+    async def test_cursor_load_rejects_oversized_sequence_as_typed_failure(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter._cursor_path.write_text(
+            json.dumps(
+                {
+                    "version": adapter_module.CURSOR_FILE_VERSION,
+                    "cursor": "1" + "0" * 4_300,
+                    "pendingReadCursors": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(adapter_module.CliFailure) as caught:
+            adapter._load_cursor()
+
+        self.assertEqual(caught.exception.code, "CURSOR_STATE_INVALID")
+
     async def test_injection_safe_context_json_enforces_the_exact_utf8_byte_cap(self) -> None:
         anchor_id = message_id_for("101")
         trigger = message_event("101", DM_ID, USER_ID, body="bounded anchor")
