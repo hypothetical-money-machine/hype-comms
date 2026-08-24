@@ -592,6 +592,9 @@ resolves authors from the member records, and derives `mentionedYou` from verifi
 It returns a canonical `#slug` or `@peer` selector, the anchor's one-level-thread reply target, and
 an optional root outside the tail. The pack is capped at 64 KiB by dropping whole oldest messages;
 ordinary history and clients that do not negotiate the capability keep their previous wire shape.
+An anchored context `NOT_FOUND` covers both an unavailable trigger and a conversation that is no
+longer visible. The adapter checkpoints that event without inference or read-state mutation, keeping
+the privacy-preserving 404 and preventing one unavailable wake from poisoning every reconnect.
 
 This deliberately widens model-visible content for an eligible wake: nearby messages from the
 already-authorized conversation—including messages by authors who cannot independently wake

@@ -84,10 +84,11 @@ hype-comms-cli read-cursors advance CONVERSATION MESSAGE --json
 If context history is malformed, transiently unavailable, or does not match
 the triggering conversation and message, the wake is not handed to Hermes and
 its workspace cursor is not checkpointed. The adapter never silently falls
-back to trigger-only inference. One race is permanently skippable: if history
-returns `NOT_FOUND` because the trigger was retracted after its realtime event,
+back to trigger-only inference. Anchored history `NOT_FOUND` is the permanently
+skippable exception. The server deliberately uses that private response for
+both an unavailable trigger and a conversation that is no longer visible, so
 the adapter logs only the safe error code, performs no inference or read
-mutation, and checkpoints that event so it cannot poison every reconnect.
+mutation, and checkpoints the event so it cannot poison every reconnect.
 
 Threaded replies depend on the three anchor items. Treat them as review items
 when bumping the pin: if the anchor stops matching, or the chunk chain re-sends
