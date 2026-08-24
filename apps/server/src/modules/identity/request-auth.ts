@@ -111,7 +111,6 @@ export function requireAgentScope(identity: AuthenticatedRequestIdentity, scope:
     throw new ApiError(403, "FORBIDDEN", `Agent token requires the ${scope} scope`);
   }
 }
-
 export function requireAnyAgentScope(
   identity: AuthenticatedRequestIdentity,
   scopes: readonly AgentScope[],

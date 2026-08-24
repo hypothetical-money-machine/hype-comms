@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  AGENT_CONTEXT_PACK_MAX_BYTES,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENTS_PER_MESSAGE_MAX,
   CONVERSATION_FILES_MAX_LIMIT,
@@ -13,6 +14,7 @@ import {
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
+  agentContextHistoryResponseSchema,
   attachmentSchema,
   completeFileUploadResponseSchema,
   conversationFilesResponseSchema,
@@ -54,9 +56,14 @@ import {
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
+  injectionSafeCompactJsonByteLength,
   isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type AgentContextAuthor,
+  type AgentContextHistoryResponse,
+  type AgentContextLocation,
+  type AgentContextMessage,
   type Attachment,
   type CompleteFileUploadRequest,
   type CompleteFileUploadResponse,
@@ -225,6 +232,13 @@ interface MessageRow extends QueryResultRow {
   deleted_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface AgentContextMessageRow extends MessageRow {
+  author_kind: "human" | "bot" | "agent";
+  author_username: string;
+  author_display_name: string;
+  mentioned_you: boolean;
 }
 
 interface AttachmentRow extends QueryResultRow {
@@ -535,6 +549,39 @@ function conversationVisibilitySql(
   )`;
 }
 
+/**
+ * The projection every `AgentContextMessageRow` is read through.
+ *
+ * `mapAgentContextMessage` depends on this exact column set, so both the page query and the
+ * thread-root lookup select it from here rather than repeating it.
+ */
+function agentContextMessageSql(mentionParameter: string): string {
+  return `SELECT message.*,
+                 author.kind AS author_kind,
+                 author.username AS author_username,
+                 author.display_name AS author_display_name,
+                 EXISTS (
+                   SELECT 1
+                     FROM message_mentions AS mention
+                    WHERE mention.message_id = message.id
+                      AND mention.mentioned_user_id = ${mentionParameter}
+                 ) AS mentioned_you
+            FROM messages AS message
+            JOIN users AS author ON author.id = message.author_id`;
+}
+
+/**
+ * The canonical low/high ordering behind the `(workspace_id, dm_user_low_id, dm_user_high_id)`
+ * unique index. Every DM lookup and insert derives its pair here so the two cannot drift.
+ */
+function directMessagePair(actorId: string, memberId: string): { low: string; high: string } {
+  const pair = [actorId, memberId].sort();
+  const low = pair[0];
+  const high = pair[1];
+  if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+  return { low, high };
+}
+
 function participants(row: ConversationRow): string[] {
   if (row.dm_user_low_id === null || row.dm_user_high_id === null) return [];
   return row.dm_user_low_id === row.dm_user_high_id
@@ -558,6 +605,32 @@ function mapMessage(row: MessageRow): Message {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+function mapAgentContextAuthor(row: UserRow): AgentContextAuthor {
+  return {
+    id: row.id,
+    kind: row.kind,
+    username: row.username,
+    displayName: row.display_name,
+  };
+}
+
+function mapAgentContextMessage(row: AgentContextMessageRow): AgentContextMessage {
+  return {
+    id: row.id,
+    conversationSequence: row.conversation_sequence,
+    createdAt: iso(row.created_at),
+    body: row.body,
+    author: {
+      id: row.author_id,
+      kind: row.author_kind,
+      username: row.author_username,
+      displayName: row.author_display_name,
+    },
+    mentionedYou: row.mentioned_you,
+    threadRootId: row.thread_root_id,
+  };
 }
 
 function mapAttachment(row: AttachmentRow): Attachment {
@@ -1782,10 +1855,7 @@ export class WorkspaceRepository {
   ): Promise<ConversationMutationResponse> {
     return this.#transaction(async (client) => {
       await this.#requireActiveConversationParticipants(client, identity, [input.memberId]);
-      const pair = [identity.currentUser.user.id, input.memberId].sort();
-      const low = pair[0];
-      const high = pair[1];
-      if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+      const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
       const inserted = await client.query<ConversationRow>(
         `INSERT INTO conversations
            (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
@@ -1900,6 +1970,57 @@ export class WorkspaceRepository {
     });
   }
 
+  async findDirectConversation(
+    identity: AuthenticatedIdentity,
+    input: DirectConversationRequest,
+  ): Promise<ConversationMutationResponse | null> {
+    return this.#transaction(
+      async (client) => {
+        const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
+        const existing = await client.query<ConversationRow>(
+          `SELECT conversation.*
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND conversation.kind = 'direct_message'
+              AND conversation.dm_user_low_id = $2
+              AND conversation.dm_user_high_id = $3
+              AND EXISTS (
+                SELECT 1
+                  FROM workspace_memberships AS actor_membership
+                  JOIN users AS actor ON actor.id = actor_membership.user_id
+                 WHERE actor_membership.workspace_id = conversation.workspace_id
+                   AND actor_membership.user_id = $4
+                   AND actor_membership.status = 'active'
+                   AND actor.kind IN ('human', 'agent')
+              )
+              AND EXISTS (
+                SELECT 1
+                  FROM workspace_memberships AS target_membership
+                  JOIN users AS target ON target.id = target_membership.user_id
+                 WHERE target_membership.workspace_id = conversation.workspace_id
+                   AND target_membership.user_id = $5
+                   AND target_membership.status = 'active'
+                   AND target.kind IN ('human', 'agent')
+              )`,
+          [
+            identity.currentUser.workspaceId,
+            low,
+            high,
+            identity.currentUser.user.id,
+            input.memberId,
+          ],
+        );
+        const row = existing.rows[0];
+        if (row === undefined) return null;
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, row),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
+  }
+
   async history(
     identity: AuthenticatedIdentity,
     conversationId: string,
@@ -1948,6 +2069,129 @@ export class WorkspaceRepository {
     } finally {
       client.release();
     }
+  }
+
+  async contextHistory(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    before: string | undefined,
+    throughMessageId: string | undefined,
+    limit: number,
+  ): Promise<AgentContextHistoryResponse> {
+    return this.#transaction(
+      async (client) => {
+        const conversation = await this.#requireVisibleConversation(
+          client,
+          identity,
+          conversationId,
+          false,
+        );
+        const beforeSequence = decodeHistoryCursor(before);
+        let throughSequence: string | null = null;
+        if (throughMessageId !== undefined) {
+          const through = await client.query<{ conversation_sequence: string } & QueryResultRow>(
+            `SELECT conversation_sequence
+               FROM messages
+              WHERE id = $1
+                AND conversation_id = $2
+                AND workspace_id = $3
+                AND deleted_at IS NULL`,
+            [throughMessageId, conversation.id, identity.currentUser.workspaceId],
+          );
+          throughSequence = through.rows[0]?.conversation_sequence ?? null;
+          if (throughSequence === null) {
+            // Missing, unauthorized, wrong-conversation, and retracted anchors share one response.
+            throw new ApiError(404, "NOT_FOUND", "Message not found");
+          }
+        }
+
+        const result = await client.query<AgentContextMessageRow>(
+          `${agentContextMessageSql("$4")}
+            WHERE message.conversation_id = $1
+              AND message.deleted_at IS NULL
+              AND ($2::bigint IS NULL OR message.conversation_sequence < $2::bigint)
+              AND ($3::bigint IS NULL OR message.conversation_sequence <= $3::bigint)
+            ORDER BY message.conversation_sequence DESC, message.id DESC
+            LIMIT $5`,
+          [
+            conversation.id,
+            beforeSequence,
+            throughSequence,
+            identity.currentUser.user.id,
+            limit + 1,
+          ],
+        );
+        const queryTruncated = result.rows.length > limit;
+        const messages = result.rows.slice(0, limit).reverse().map(mapAgentContextMessage);
+        const location = await this.#contextLocation(client, identity, conversation);
+        // Trimming only ever drops from the front, so the newest message is the anchor for the
+        // whole pass and everything derived from it is computed once here.
+        const anchor = messages.at(-1);
+        let canonicalThreadRoot: AgentContextMessage | null = null;
+        if (
+          location.kind === "channel" &&
+          anchor?.threadRootId !== null &&
+          anchor?.threadRootId !== undefined
+        ) {
+          canonicalThreadRoot = await this.#contextMessageById(
+            client,
+            identity.currentUser.user.id,
+            conversation.id,
+            anchor.threadRootId,
+          );
+        }
+
+        const anchorMessageId = anchor?.id ?? null;
+        const replyTarget =
+          anchor === undefined
+            ? null
+            : location.kind === "direct_message"
+              ? { kind: "flat" as const, conversationId: conversation.id }
+              : {
+                  kind: "thread" as const,
+                  conversationId: conversation.id,
+                  rootMessageId: anchor.threadRootId ?? anchor.id,
+                };
+        // The root is only carried separately once it has fallen out of the page. Membership can
+        // only go selected -> dropped, so it is tracked incrementally instead of rebuilt per pass.
+        const canonicalThreadRootId = canonicalThreadRoot?.id ?? null;
+        let threadRootSelected =
+          canonicalThreadRootId !== null &&
+          messages.some((message) => message.id === canonicalThreadRootId);
+
+        let droppedForSize = false;
+        while (true) {
+          const oldest = messages.at(0);
+          const hasEarlier = anchor !== undefined && (queryTruncated || droppedForSize);
+          const contextPack = {
+            version: 1 as const,
+            conversation: location,
+            anchorMessageId,
+            messages,
+            threadRoot: threadRootSelected ? null : canonicalThreadRoot,
+            replyTarget,
+            readThroughMessageId: anchorMessageId,
+            truncatedBefore: hasEarlier,
+            nextCursor:
+              hasEarlier && oldest !== undefined
+                ? encodeHistoryCursor(oldest.conversationSequence)
+                : null,
+          };
+          if (injectionSafeCompactJsonByteLength(contextPack) <= AGENT_CONTEXT_PACK_MAX_BYTES) {
+            return agentContextHistoryResponseSchema.parse({ contextPack });
+          }
+          if (messages.length <= 1) {
+            throw new Error("A single context message exceeded the context-pack byte cap");
+          }
+          const dropped = messages.shift();
+          if (dropped !== undefined && dropped.id === canonicalThreadRootId) {
+            threadRootSelected = false;
+          }
+          droppedForSize = true;
+        }
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async thread(
@@ -4071,6 +4315,59 @@ export class WorkspaceRepository {
       [workspaceId],
     );
     return result.rows.map(mapUser);
+  }
+
+  async #contextLocation(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
+  ): Promise<AgentContextLocation> {
+    if (conversation.kind === "channel") {
+      if (conversation.slug === null) throw new Error("Channel is missing its canonical slug");
+      return {
+        id: conversation.id,
+        kind: "channel",
+        slug: conversation.slug,
+        selector: `#${conversation.slug}`,
+      };
+    }
+
+    const actorId = identity.currentUser.user.id;
+    const low = conversation.dm_user_low_id;
+    const high = conversation.dm_user_high_id;
+    if (low === null || high === null) {
+      throw new Error("Direct conversation is missing a participant");
+    }
+    const peerId = low === actorId ? high : high === actorId ? low : null;
+    if (peerId === null) throw new Error("Visible direct conversation does not include its actor");
+    const result = await client.query<UserRow>(`SELECT * FROM users WHERE id = $1`, [peerId]);
+    const peer = result.rows[0];
+    if (peer === undefined) throw new Error("Direct-conversation peer does not exist");
+    const author = mapAgentContextAuthor(peer);
+    return {
+      id: conversation.id,
+      kind: "direct_message",
+      selector: `@${author.username}`,
+      peer: author,
+      self: peerId === actorId,
+    };
+  }
+
+  async #contextMessageById(
+    client: PoolClient,
+    actorId: string,
+    conversationId: string,
+    messageId: string,
+  ): Promise<AgentContextMessage | null> {
+    const result = await client.query<AgentContextMessageRow>(
+      `${agentContextMessageSql("$3")}
+        WHERE message.id = $1
+          AND message.conversation_id = $2
+          AND message.deleted_at IS NULL`,
+      [messageId, conversationId, actorId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapAgentContextMessage(row);
   }
 
   /**

@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+  AGENT_CONTEXT_PACK_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   advanceReadCursorRequestSchema,
   advanceReadCursorResponseSchema,
+  agentContextHistoryQuerySchema,
+  agentContextHistoryResponseSchema,
   archiveChannelRequestSchema,
   channelSlugFromName,
   clientMessageIdSchema,
@@ -281,7 +286,9 @@ export async function messagesCommand(
   if (subcommand === "history") {
     const parsed = parseCommandArguments(args, {
       before: { kind: "string" },
+      "context-pack": { kind: "boolean" },
       limit: { kind: "string" },
+      "through-message-id": { kind: "string" },
     });
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolveConversationSelector(client, selector!);
@@ -292,6 +299,44 @@ export async function messagesCommand(
       throw new UsageError("--before is not a valid pagination cursor", "INVALID_CURSOR");
     }
     const before = parsedBefore?.data;
+    const contextPack = booleanOption(parsed, "context-pack");
+    const throughMessageValue = stringOption(parsed, "through-message-id");
+    if (!contextPack && throughMessageValue !== undefined) {
+      throw new UsageError("--through-message-id requires --context-pack");
+    }
+    if (before !== undefined && throughMessageValue !== undefined) {
+      throw new UsageError("--before cannot be combined with --through-message-id");
+    }
+    const throughMessageId =
+      throughMessageValue === undefined ? undefined : entityIdSchema.safeParse(throughMessageValue);
+    if (throughMessageId !== undefined && !throughMessageId.success) {
+      throw new UsageError("--through-message-id must be a UUID", "INVALID_MESSAGE_ID");
+    }
+    if (contextPack) {
+      const query = agentContextHistoryQuerySchema.safeParse({
+        contextPack: true,
+        throughMessageId: throughMessageId?.data,
+        before,
+        limit: integerOption(
+          parsed,
+          "limit",
+          AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+          AGENT_CONTEXT_PACK_MAX_LIMIT,
+        ),
+      });
+      if (!query.success) {
+        throw new UsageError("The context-pack history options are invalid");
+      }
+      const response = await client.request({
+        path: `/v1/conversations/${id}/messages`,
+        query: query.data,
+        responseSchema: agentContextHistoryResponseSchema,
+        headers: { "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY },
+      });
+      writeResult(context.runtime.io, response, context.options.json);
+      return;
+    }
+
     const response = await client.request({
       path: `/v1/conversations/${id}/messages`,
       query: { before, limit: integerOption(parsed, "limit", 50, 100) },

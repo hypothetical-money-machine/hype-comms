@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
   EPHEMERAL_ACTIVITY_CAPABILITY,
@@ -212,6 +213,43 @@ class FakeWorkspaceRepository {
     ],
     threadsSupported: true,
     nextCursor: null,
+  }));
+  readonly contextHistory = vi.fn(async () => ({
+    contextPack: {
+      version: 1 as const,
+      conversation: {
+        id: conversationId,
+        kind: "channel" as const,
+        slug: "company-news",
+        selector: "#company-news",
+      },
+      anchorMessageId: messageId,
+      messages: [
+        {
+          id: messageId,
+          conversationSequence: "1",
+          createdAt: now,
+          body: "Root",
+          author: {
+            id: userId,
+            kind: "human" as const,
+            username: "owner",
+            displayName: "Owner",
+          },
+          mentionedYou: false,
+          threadRootId: null,
+        },
+      ],
+      threadRoot: null,
+      replyTarget: {
+        kind: "thread" as const,
+        conversationId,
+        rootMessageId: messageId,
+      },
+      readThroughMessageId: messageId,
+      truncatedBefore: false,
+      nextCursor: null,
+    },
   }));
   readonly thread = vi.fn(async () => ({
     root: {
@@ -1224,6 +1262,92 @@ describe("message thread routes", () => {
       undefined,
       50,
       false,
+    );
+  });
+
+  it("serves context history only to clients that negotiated the context-pack capability", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const sessionHeaders = { cookie: `hype_comms_session=${sessionToken}` };
+
+    const missingCapability = await app.inject({
+      method: "GET",
+      url:
+        `/v1/conversations/${conversationId}/messages?contextPack=true` +
+        `&throughMessageId=${messageId}&limit=4`,
+      headers: sessionHeaders,
+    });
+    expect(missingCapability.statusCode).toBe(400);
+    expect(missingCapability.json()).toMatchObject({
+      error: {
+        code: "BAD_REQUEST",
+        message: "Context pack capability is required",
+      },
+    });
+    expect(repository.history).not.toHaveBeenCalled();
+    expect(repository.contextHistory).not.toHaveBeenCalled();
+
+    const capable = await app.inject({
+      method: "GET",
+      url:
+        `/v1/conversations/${conversationId}/messages?contextPack=true` +
+        `&throughMessageId=${messageId}&limit=4`,
+      headers: {
+        ...sessionHeaders,
+        "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+      },
+    });
+    expect(capable.statusCode).toBe(200);
+    expect(capable.json()).toEqual(await repository.contextHistory.mock.results[0]?.value);
+    expect(repository.contextHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      conversationId,
+      undefined,
+      messageId,
+      4,
+    );
+    expect(repository.history).not.toHaveBeenCalled();
+  });
+
+  it("validates bounded context-history paging before repository access", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await reactionApp(repository);
+    const headers = {
+      cookie: `hype_comms_session=${sessionToken}`,
+      "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+    };
+
+    for (const query of [
+      `contextPack=true&throughMessageId=${messageId}&before=cursor`,
+      "contextPack=true&limit=21",
+      "contextPack=true&limit=0",
+      "contextPack=false",
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/v1/conversations/${conversationId}/messages?${query}`,
+        headers,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        error: { code: "BAD_REQUEST" },
+      });
+    }
+    expect(repository.contextHistory).not.toHaveBeenCalled();
+    expect(repository.history).not.toHaveBeenCalled();
+
+    const page = await app.inject({
+      method: "GET",
+      url: `/v1/conversations/${conversationId}/messages?contextPack=true&before=cursor`,
+      headers,
+    });
+    expect(page.statusCode).toBe(200);
+    expect(repository.contextHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      conversationId,
+      "cursor",
+      undefined,
+      8,
     );
   });
 
