@@ -795,10 +795,9 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const file = await repository.readFileContent(identity, id);
-    await repository.requireGroupDirectMessagesForAttachments(
+    const file = await repository.readFileContent(
       identity,
-      [id],
+      id,
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     );
     return reply

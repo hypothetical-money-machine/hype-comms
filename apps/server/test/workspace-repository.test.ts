@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import {
@@ -22,7 +22,11 @@ import { createPool } from "../src/db/pool.js";
 import { ApiError } from "../src/errors.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
-import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
+import {
+  LocalAttachmentStore,
+  sha256Hex,
+  type AttachmentStore,
+} from "../src/modules/workspace/file-store.js";
 import {
   type AnnouncementAuditRecord,
   type WorkspaceRepositoryHooks,
@@ -2794,6 +2798,86 @@ describeWithPostgres("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it("decides group attachment read capability before loading stored bytes", async () => {
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const conversationId = group.conversation.conversation.id;
+    const bytes = Buffer.from("group evidence");
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId,
+        fileName: "group.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    const read = vi.fn(attachmentStore.read.bind(attachmentStore));
+    const trackedStore: AttachmentStore = {
+      write: attachmentStore.write.bind(attachmentStore),
+      read,
+      remove: attachmentStore.remove.bind(attachmentStore),
+    };
+    repository = new WorkspaceRepository(pool, { attachmentStore: trackedStore });
+
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).not.toHaveBeenCalled();
+
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await repository.completeFileUpload(
+      owner,
+      staged.attachment.id,
+      { sizeBytes: bytes.byteLength, contentSha256 },
+      randomUUID(),
+    );
+    read.mockClear();
+
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    expect(read).not.toHaveBeenCalled();
+
+    const capable = await repository.readFileContent(owner, staged.attachment.id, true);
+    expect(capable.bytes).toEqual(bytes);
+    expect(read).toHaveBeenCalledOnce();
+
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "Group attachment"),
+      mentionedUserIds: [],
+      attachmentIds: [staged.attachment.id],
+    });
+    const outsiderId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, email, username, display_name)
+       VALUES ($1, 'outsider@example.com', 'outsider', 'Outsider')`,
+      [outsiderId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, outsiderId],
+    );
+    const outsider = identity(currentUser(outsiderId, "outsider", "Outsider", "member"));
+    await expect(
+      repository.readFileContent(outsider, staged.attachment.id, true),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).toHaveBeenCalledOnce();
+
+    await repository.retractMessage(owner, sent.message.id);
+    await expect(
+      repository.readFileContent(owner, staged.attachment.id, false),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   it("attaches a ready file to a channel message and lists it for the conversation", async () => {
     const attachmentId = await stageReadyFile(generalId, "brief.txt", "channel notes");
     const sent = await repository.sendMessage(owner, generalId, {
@@ -2818,7 +2902,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(files.files.map((file) => file.fileName)).toEqual(["brief.txt"]);
     expect(files.hasMore).toBe(false);
 
-    const downloaded = await repository.readFileContent(member, attachmentId);
+    const downloaded = await repository.readFileContent(member, attachmentId, false);
     expect(downloaded.bytes.toString()).toBe("channel notes");
   });
 
@@ -2828,7 +2912,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       mode: 0o600,
     });
 
-    await expect(repository.readFileContent(owner, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(owner, attachmentId, false)).rejects.toMatchObject({
       statusCode: 500,
       code: "INTERNAL_ERROR",
       message: "Stored file failed its integrity check",
@@ -2863,7 +2947,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       statusCode: 404,
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
-    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(member, attachmentId, false)).rejects.toMatchObject({
       statusCode: 404,
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
@@ -2894,7 +2978,7 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       repository.listConversationFiles(observer, conversationId, undefined, 50),
     ).rejects.toMatchObject({ statusCode: 404 });
-    await expect(repository.readFileContent(observer, attachmentId)).rejects.toMatchObject({
+    await expect(repository.readFileContent(observer, attachmentId, false)).rejects.toMatchObject({
       statusCode: 404,
     });
   });

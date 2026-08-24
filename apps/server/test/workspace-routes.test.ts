@@ -18,6 +18,7 @@ import { buildApp } from "../src/app.js";
 import type { AuthenticatedBotIdentity, BotService } from "../src/modules/bots/service.js";
 import type { IdentityService } from "../src/modules/identity/service.js";
 import type { RealtimeEventHub } from "../src/modules/realtime/hub.js";
+import { GroupDirectClientUpgradeRequiredError } from "../src/modules/workspace/group-direct-capability.js";
 import type { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 
 const now = "2026-07-27T18:00:00.000Z";
@@ -408,6 +409,46 @@ async function appWithRole(
 }
 
 describe("event capability routes", () => {
+  it("rejects legacy group attachment reads before loading bytes and serves capable clients", async () => {
+    const repository = new FakeWorkspaceRepository();
+    repository.readFileContent.mockRejectedValueOnce(new GroupDirectClientUpgradeRequiredError());
+    const app = await reactionApp(repository);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/files/${messageId}/content`,
+      headers: { cookie: `hype_comms_session=${sessionToken}` },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatchObject({ code: "CONFLICT" });
+    expect(repository.requireGroupDirectMessagesForAttachments).not.toHaveBeenCalled();
+    expect(repository.readFileContent).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+      false,
+    );
+
+    const capable = await app.inject({
+      method: "GET",
+      url: `/v1/files/${messageId}/content`,
+      headers: {
+        cookie: `hype_comms_session=${sessionToken}`,
+        "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+      },
+    });
+
+    expect(capable.statusCode).toBe(200);
+    expect(capable.body).toBe("payload");
+    expect(repository.requireGroupDirectMessagesForAttachments).not.toHaveBeenCalled();
+    expect(repository.readFileContent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ currentUser }),
+      messageId,
+      true,
+    );
+    expect(repository.readFileContent).toHaveBeenCalledTimes(2);
+  });
+
   it("serves authoritative length and SHA-256 headers with attachment bytes", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
@@ -426,6 +467,7 @@ describe("event capability routes", () => {
     expect(repository.readFileContent).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       messageId,
+      false,
     );
   });
 

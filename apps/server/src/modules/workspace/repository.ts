@@ -244,6 +244,10 @@ interface AttachmentRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
+interface ReadableAttachmentRow extends AttachmentRow {
+  conversation_kind: Conversation["kind"];
+}
+
 interface MessageAuthorizationRow extends QueryResultRow {
   conversation_visible: boolean;
   is_archived: boolean;
@@ -2339,6 +2343,7 @@ export class WorkspaceRepository {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
+    supportsGroupDirectMessages: boolean,
   ): Promise<{
     readonly attachment: Attachment;
     readonly bytes: Buffer;
@@ -2347,8 +2352,8 @@ export class WorkspaceRepository {
     const store = this.#attachmentStore();
     const client = await this.pool.connect();
     try {
-      const result = await client.query<AttachmentRow>(
-        `SELECT attachment.*
+      const result = await client.query<ReadableAttachmentRow>(
+        `SELECT attachment.*, conversation.kind AS conversation_kind
            FROM attachments AS attachment
            JOIN conversations AS conversation
              ON conversation.id = attachment.conversation_id
@@ -2383,6 +2388,9 @@ export class WorkspaceRepository {
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      if (!supportsGroupDirectMessages && row.conversation_kind === "group_direct_message") {
+        throw new GroupDirectClientUpgradeRequiredError();
+      }
       const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
       const contentSha256 = row.content_sha256.toString("hex");
       if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {

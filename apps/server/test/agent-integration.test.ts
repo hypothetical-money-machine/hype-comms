@@ -2234,6 +2234,15 @@ describeWithPostgres("agent identity and owner administration", () => {
     });
     expect(stagedResponse.statusCode).toBe(201);
     const stagedAttachment = createFileUploadResponseSchema.parse(stagedResponse.json()).attachment;
+    const legacyOwnerPendingRead = await app.inject({
+      method: "GET",
+      url: `/v1/files/${stagedAttachment.id}/content`,
+      headers: { authorization: `Bearer ${second.token}` },
+    });
+    expect(legacyOwnerPendingRead.statusCode).toBe(404);
+    expect(apiErrorEnvelopeSchema.parse(legacyOwnerPendingRead.json()).error.code).toBe(
+      "NOT_FOUND",
+    );
     for (const headers of [
       { authorization: `Bearer ${first.token}` },
       { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
