@@ -121,7 +121,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     /^concurrency:\n[ ]{2}# [^\n]+\n[ ]{2}# [^\n]+\n[ ]{2}group: desktop-release-publish\n[ ]{2}cancel-in-progress: false$/mu,
   );
   assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
-  assert.match(releaseWorkflow, /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production$/mu);
+  assert.match(
+    releaseWorkflow,
+    /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production\n {2}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com$/mu,
+  );
   assert.match(
     releaseWorkflow,
     /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
@@ -251,11 +254,11 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     smokePackageJob,
-    /name: Package production desktop application on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {8}shell: sh\n {8}run: npm run package:desktop:linux/u,
+    /name: Package production desktop application on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {10}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {8}shell: sh\n {8}run: npm run package:desktop:linux/u,
   );
   assert.match(
     smokePackageJob,
-    /name: Verify production desktop package on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {8}shell: sh\n {8}run: npm run verify:desktop-package/u,
+    /name: Verify production desktop package on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {10}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {8}shell: sh\n {8}run: npm run verify:desktop-package/u,
   );
   assert.match(
     packageSmokeWorkflow,
@@ -272,7 +275,7 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     nativeEvidenceJob,
-    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}$/mu,
+    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}$/mu,
   );
   assert.match(
     smokePackageJob,
