@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -637,6 +637,20 @@ test("parses strict body-free NDJSON", () => {
   );
 });
 
+test("the composed manifest validator does not revalidate parsed records", async () => {
+  const source = await readFile(
+    new URL("./validate-agent-wake-evidence-manifest.mjs", import.meta.url),
+    "utf8",
+  );
+  const entryPointStart = source.indexOf("export async function validateAgentWakeEvidenceManifest");
+  const entryPointEnd = source.indexOf("\nfunction parseArguments", entryPointStart);
+  const entryPoint = source.slice(entryPointStart, entryPointEnd);
+
+  assert.ok(entryPointStart >= 0 && entryPointEnd > entryPointStart);
+  assert.doesNotMatch(entryPoint, /validateAgentWakeEvidenceRecords\(records\)/u);
+  assert.match(entryPoint, /validateParsedAgentWakeEvidenceRecords\(records\)/u);
+});
+
 test("rejects placeholder identities and non-authoritative accepted receipts", () => {
   const placeholder = makeFixture();
   placeholder[0].agentIdentityLabel = "grok-bot-pilot";
@@ -1064,6 +1078,18 @@ test("validates a private manifest and its artifact digests", async () => {
     const summary = await validateAgentWakeEvidenceManifest(evidencePath, artifactDirectory);
     assert.equal(summary.recordCount, records.length);
     assert.equal(summary.artifactCount, records.length);
+
+    const failedRecords = structuredClone(records);
+    failedRecords.find((record) => record.caseId === "package-notarization").result = "fail";
+    await writeFile(
+      evidencePath,
+      `${failedRecords.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+    await assert.rejects(
+      validateAgentWakeEvidenceManifest(evidencePath, artifactDirectory),
+      expectCode("case-failed"),
+    );
 
     await writeFile(evidencePath, Buffer.from([0xff]));
     await assert.rejects(

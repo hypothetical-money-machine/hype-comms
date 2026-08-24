@@ -1508,12 +1508,19 @@ export function validateAgentWakeEvidenceRecords(records) {
   if (!Array.isArray(records) || records.length === 0) fail("evidence-empty");
   if (records.length > MAX_RECORDS) fail("evidence-record-limit");
 
-  const recordsByCase = new Map();
-  let priorRecordedAt = -Infinity;
   for (const [index, record] of records.entries()) {
     const lineNumber = index + 1;
     validateRecord(record, lineNumber);
     validateCaseSemantics(record, lineNumber);
+  }
+  return validateParsedAgentWakeEvidenceRecords(records);
+}
+
+function validateParsedAgentWakeEvidenceRecords(records) {
+  const recordsByCase = new Map();
+  let priorRecordedAt = -Infinity;
+  for (const [index, record] of records.entries()) {
+    const lineNumber = index + 1;
     if (record.result !== "pass") fail("case-failed", lineNumber);
     if (recordsByCase.has(record.caseId)) fail("case-id-duplicate", lineNumber);
     recordsByCase.set(record.caseId, record);
@@ -1991,7 +1998,7 @@ export async function validateAgentWakeEvidenceManifest(evidencePath, artifactDi
     const metadataAfter = await handle.stat({ bigint: true });
     if (!sameArtifactMetadata(metadataBefore, metadataAfter)) fail("evidence-file-changed");
     const records = parseAgentWakeEvidenceManifest(source);
-    const summary = validateAgentWakeEvidenceRecords(records);
+    const summary = validateParsedAgentWakeEvidenceRecords(records);
     const artifactCount = await validateReferencedArtifacts(records, artifactDirectory);
     result = { ...summary, artifactCount };
   } finally {
