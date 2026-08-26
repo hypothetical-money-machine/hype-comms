@@ -47,6 +47,16 @@ test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", asy
   assert.match(postgresJob, /^ {10}- 55432:5432$/mu);
   assert.match(postgresJob, /HYPE_COMMS_TEST_DATABASE_URL: postgresql:\/\//u);
   assert.match(postgresJob, /npm ci --no-audit --prefer-offline/u);
+  // Cache dependency downloads only; node_modules is rebuilt from the verified lockfile each run.
+  assert.match(
+    postgresJob,
+    /uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
+  );
+  assert.match(
+    postgresJob,
+    /key: ci-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
+  );
+  assert.match(postgresJob, /^ {10}path: \|\n {12}~\/\.npm\n {12}~\/\.cache\/electron$/mu);
   assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
   assert.doesNotMatch(
     postgresJob,
