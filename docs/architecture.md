@@ -76,8 +76,8 @@ The server image build is implemented by `.woodpecker.yml`; it receives no GitOp
 not promote deployments. Runtime manifests, ingress, PostgreSQL, secret injection, backup policy,
 and rollback controls live in the separate `hypothetical-money-machine/homelab-deploy-kit`
 repository; they must be verified there and cannot
-be inferred from this checkout. Desktop releases use native self-hosted runners and a public
-S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
+be inferred from this checkout. Desktop releases use disposable GitHub-hosted ARM64 runners and a
+public S3-compatible storage-backed generic update feed. See `docs/operations.md` for the current operational contract
 and the controls that still need external evidence.
 
 ### Hosted target
@@ -722,11 +722,12 @@ service and reported alongside error rates rather than inferred from anecdotes.
 
 ## Signing, distribution, and compatibility
 
-Pull requests build DEV smoke packages on disposable GitHub-hosted ARM64 macOS, Windows, and Linux
-runners: macOS packages are ad-hoc signed, while Windows and Linux packages remain unsigned.
-Pushes to `main` and manual smoke dispatches retain coverage on the isolated native self-hosted
-runners. Only a version tag on `main` whose name matches the desktop package version may invoke
-release jobs and credentials, which are protected by the `release` environment.
+Pull requests and pushes to `main` build DEV smoke packages on disposable GitHub-hosted ARM64
+macOS, Windows, and Linux runners: macOS packages are ad-hoc signed, while Windows and Linux
+packages remain unsigned. Manual smoke dispatches retain coverage on the isolated native
+self-hosted runners. Only a version tag on `main` whose name matches the desktop package version
+may invoke release jobs and credentials, which are protected by the `release` environment and
+delivered only to disposable GitHub-hosted runners.
 The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
 feed. Its platform-signature status is:
 

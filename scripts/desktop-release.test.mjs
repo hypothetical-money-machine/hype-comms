@@ -125,10 +125,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     releaseWorkflow,
     /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production\n {2}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com$/mu,
   );
-  assert.match(
-    releaseWorkflow,
-    /runner: '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
-  );
+  assert.match(matrixEntry(releasePackageJob, "macOS"), /runner: '\["macos-15"\]'/u);
+  assert.match(matrixEntry(releasePackageJob, "Windows"), /runner: '\["windows-11-arm"\]'/u);
+  assert.match(matrixEntry(releasePackageJob, "Linux"), /runner: '\["ubuntu-24\.04-arm"\]'/u);
+  assert.doesNotMatch(releasePackageJob, /self-hosted/u);
   assert.match(releaseValidationJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
   assert.match(releaseValidationJob, /^ {4}permissions:\n {6}contents: read$/mu);
   assert.match(releasePrepareJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
@@ -199,13 +199,30 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     smokePackageJob,
     /uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
   );
-  assert.match(smokePackageJob, /if: matrix\.platform == 'Windows' && !matrix\.self_hosted/u);
+  assert.match(
+    smokePackageJob,
+    /name: Restore desktop dependency downloads\n {8}if: \$\{\{ !matrix\.self_hosted \}\}/u,
+  );
   assert.match(
     smokePackageJob,
     /key: desktop-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
   );
   assert.match(smokePackageJob, /~\/AppData\/Local\/electron-builder\/Cache/u);
+  assert.match(smokePackageJob, /~\/Library\/Caches\/electron-builder/u);
+  assert.match(smokePackageJob, /~\/\.cache\/electron-builder/u);
   assert.doesNotMatch(smokePackageJob, /node_modules\s*$/mu);
+  // Release lanes only restore the caches that trusted pushes to main populate; a tag ref cannot
+  // save a cache any other run could restore, so a plain actions/cache step would be dead weight.
+  assert.match(
+    releasePackageJob,
+    /uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
+  );
+  assert.doesNotMatch(releasePackageJob, /uses: actions\/cache@/u);
+  assert.match(
+    releasePackageJob,
+    /key: desktop-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
+  );
+  assert.doesNotMatch(releasePackageJob, /node_modules\s*$/mu);
   assert.equal(smokePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
   assert.equal(nativeEvidenceJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 1);
   assert.equal(releasePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
