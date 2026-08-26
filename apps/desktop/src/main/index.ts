@@ -228,7 +228,6 @@ const WINDOW_MIN_WIDTH = 960;
  */
 const COMPACT_WINDOW_MIN_WIDTH = 640;
 const IS_PRODUCTION_BUILD = __HYPE_COMMS_BUILD_FLAVOR__ === "production";
-const COMPILED_API_ORIGIN = __HYPE_COMMS_API_ORIGIN__;
 
 configureApplicationIdentity(app, process.platform, {
   appId: __HYPE_COMMS_APPLICATION_ID__,
@@ -457,7 +456,7 @@ async function initializeAgentWakeRuntime(): Promise<void> {
   try {
     const configuration = await loadAgentWakeConfiguration({
       filePath,
-      expectedApiOrigin: COMPILED_API_ORIGIN,
+      expectedApiOrigin: __HYPE_COMMS_API_ORIGIN__,
     });
     const runtime = await startAgentWakeRuntime({
       configuration,
@@ -1074,7 +1073,7 @@ function registerIpcHandlers(): void {
     }
 
     const request = net
-      .fetch(createServerHealthUrl(COMPILED_API_ORIGIN), {
+      .fetch(createServerHealthUrl(__HYPE_COMMS_API_ORIGIN__), {
         method: "GET",
         cache: "no-store",
         credentials: "omit",
@@ -2570,26 +2569,26 @@ if (!hasSingleInstanceLock) {
       }
 
       chatSession = new ChatSession({
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         cookies: session.defaultSession.cookies,
         request: (url, init) => net.fetch(url, init),
         contexts: new AuthenticatedSessionContextStore({
-          apiOrigin: COMPILED_API_ORIGIN,
+          apiOrigin: __HYPE_COMMS_API_ORIGIN__,
           platform: process.platform,
           safeStorage,
           userDataPath: app.getPath("userData"),
         }),
       });
       authKitPendingStore = new SafeStorageAuthKitPendingStore({
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         safeStorage,
         userDataPath: app.getPath("userData"),
       });
       authKitFlow = new AuthKitFlow({
         api: chatSession,
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         authVariant: __HYPE_COMMS_BUILD_FLAVOR__,
         openExternal: (url) => shell.openExternal(url),
         store: authKitPendingStore,
@@ -2611,7 +2610,7 @@ if (!hasSingleInstanceLock) {
         authKitCancellationFenced = true;
         scheduleAuthKitCancellationRetry();
       }
-      workspaceTransport = new WorkspaceTransport(COMPILED_API_ORIGIN, chatSession);
+      workspaceTransport = new WorkspaceTransport(__HYPE_COMMS_API_ORIGIN__, chatSession);
       if (notificationController !== null) {
         notificationProjectionRepairCoordinator = new NotificationProjectionRepairCoordinator({
           transport: workspaceTransport,
@@ -2621,7 +2620,7 @@ if (!hasSingleInstanceLock) {
         });
       }
       workspaceRealtime = new WorkspaceRealtime({
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
         transport: workspaceTransport,
         onEvent: deliverWorkspaceEvent,
@@ -2643,7 +2642,7 @@ if (!hasSingleInstanceLock) {
       };
       presenceController.start();
       cacheCrypto = new CacheCrypto({
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         safeStorage,
         userDataPath: app.getPath("userData"),
@@ -2656,7 +2655,7 @@ if (!hasSingleInstanceLock) {
         updatesAllowed: __HYPE_COMMS_UPDATES_ALLOWED__,
         isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
-        apiOrigin: COMPILED_API_ORIGIN,
+        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         ...(process.env.APPIMAGE === undefined ? {} : { appImagePath: process.env.APPIMAGE }),
         hasMacDeveloperIdSignature:

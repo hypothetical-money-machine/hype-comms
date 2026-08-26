@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { extractFile, listPackage } from "@electron/asar";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
+import { isReservedInvalidHostname } from "../apps/desktop/api-origin-policy.mjs";
 import {
   resolveAgentWakePackageEvidence as resolveExpectedAgentWakePackageEvidence,
   resolveAgentWakeRollout as resolveExpectedAgentWakeBuild,
@@ -19,8 +20,8 @@ const agentWakeOperatorCall =
 // Vite substitutes a dedicated updates-allowed define directly. Accept the equivalent boolean
 // spellings Rolldown may retain or minify without depending on constant folding.
 const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
-const compiledApiOriginMarker = /\b(?:const|var) COMPILED_API_ORIGIN = ("(?:[^"\\]|\\.)*");/gu;
 const requiredAsarEntries = [
+  "/dist/main/build-metadata.json",
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
   "/dist/main/codex-app-server-worker.js",
@@ -244,7 +245,7 @@ export function resolveExpectedProductionApiOrigin(value) {
     url.pathname !== "/" ||
     url.search !== "" ||
     url.hash !== "" ||
-    url.hostname.endsWith(".invalid")
+    isReservedInvalidHostname(url.hostname)
   ) {
     throw new Error(
       "HYPE_COMMS_API_ORIGIN must be a deployed HTTPS origin without credentials, a path, or a .invalid hostname",
@@ -258,28 +259,32 @@ export function verifyPackagedApiOrigin(
   expectedApiOrigin,
   extractFileImplementation = extractFile,
 ) {
-  const mainPath = path.join("dist", "main", "index.js");
-  let source;
+  const metadataPath = path.join("dist", "main", "build-metadata.json");
+  let metadataSource;
   try {
-    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
+    metadataSource = extractFileImplementation(asarPath, metadataPath).toString("utf8");
   } catch (error) {
-    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
+    throw new Error(`${asarPath} contains unreadable desktop build metadata`, { cause: error });
   }
 
-  const matches = [...source.matchAll(compiledApiOriginMarker)];
-  if (matches.length !== 1) {
-    throw new Error(`${asarPath} has an ambiguous or missing compiled API origin marker`);
-  }
-
-  let compiledApiOrigin;
+  let metadata;
   try {
-    compiledApiOrigin = JSON.parse(matches[0][1]);
+    metadata = JSON.parse(metadataSource);
   } catch (error) {
-    throw new Error(`${asarPath} has an invalid compiled API origin marker`, { cause: error });
+    throw new Error(`${asarPath} has invalid desktop build metadata`, { cause: error });
   }
-  if (compiledApiOrigin !== expectedApiOrigin) {
+  if (
+    metadata === null ||
+    typeof metadata !== "object" ||
+    Array.isArray(metadata) ||
+    Object.keys(metadata).length !== 1 ||
+    typeof metadata.apiOrigin !== "string"
+  ) {
+    throw new Error(`${asarPath} has invalid desktop build metadata`);
+  }
+  if (metadata.apiOrigin !== expectedApiOrigin) {
     throw new Error(
-      `${asarPath} API origin must be ${expectedApiOrigin}; found ${String(compiledApiOrigin)}`,
+      `${asarPath} API origin must be ${expectedApiOrigin}; found ${metadata.apiOrigin}`,
     );
   }
 }

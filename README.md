@@ -320,9 +320,11 @@ To cut a release:
 2. Review the generated notes scaffold, replace its instructional text, and remove its review
    marker, following the [release-notes guide](docs/releases/README.md). Re-running the command for
    the same version preserves the edited notes.
-3. Run `npm run check`. On a packaging machine, explicitly select the release identity for both
-   commands: `HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop`, then
-   `HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`.
+3. Run `npm run check`. On a packaging machine, explicitly select the deployed API and release
+   identity for both commands:
+   `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop`,
+   then
+   `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`.
 4. Land that focused version change, then create and push `v<version>` at the exact revision. The
    release workflow rejects a tag whose value does not exactly match the desktop package version or
    whose release notes still contain the review marker.
@@ -457,9 +459,10 @@ npm run package:desktop:appimage
 npm run verify:desktop-package
 ```
 
-Tagged release jobs set `HYPE_COMMS_BUILD_FLAVOR=production` at the job level. That explicit flavor
-retains the existing `Hype Comms` identity, `hype-comms-*` artifact names, release directory, and
-update feed. Do not set the production flavor for an ordinary preview build.
+Tagged release jobs set `HYPE_COMMS_BUILD_FLAVOR=production` and
+`HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com` at the job level. The explicit flavor retains
+the existing `Hype Comms` identity, `hype-comms-*` artifact names, release directory, and update
+feed. Do not set the production flavor for an ordinary preview build.
 
 Generated `dist/`, `release/`, coverage, databases, credentials, and installers are never
 committed.
