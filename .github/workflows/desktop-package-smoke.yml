@@ -77,6 +77,10 @@ jobs:
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "1"
+            cache_paths: |
+              ~/.npm
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
           - platform: Windows
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
@@ -89,6 +93,10 @@ jobs:
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/.cache/electron
+              ~/.cache/electron-builder
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
@@ -106,10 +114,11 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      # Hosted Windows dependency installation is several minutes slower than the Unix lanes.
-      # Cache downloads there, but rebuild node_modules and the application from source.
-      - name: Restore Windows desktop dependency downloads
-        if: matrix.platform == 'Windows' && !matrix.self_hosted
+      # Cache downloads only, and rebuild node_modules and the application from source. Trusted
+      # pushes to main keep these caches warm for the desktop release workflow, which restores
+      # them under the same key without saving.
+      - name: Restore desktop dependency downloads
+        if: ${{ !matrix.self_hosted }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ matrix.cache_paths }}

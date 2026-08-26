@@ -164,23 +164,35 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            runner: '["macos-15"]'
             artifact_os: mac
             manifest: latest-mac.yml
             package_script: package:desktop:mac
             native_notifications_enabled: "1"
+            cache_paths: |
+              ~/.npm
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
           - platform: Windows
-            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+            runner: '["windows-11-arm"]'
             artifact_os: win
             manifest: latest.yml
             package_script: package:desktop:win
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
           - platform: Linux
-            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
+            runner: '["ubuntu-24.04-arm"]'
             artifact_os: linux
             manifest: latest-linux.yml
             package_script: package:desktop:linux
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/.cache/electron
+              ~/.cache/electron-builder
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
@@ -209,19 +221,17 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
-      # Its PowerShell execution policy also rejects the generated scripts used by Actions.
-      - name: Expose MinGit sh on Windows
-        if: matrix.platform == 'Windows'
-        shell: cmd
-        run: |
-          if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
-          if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
-          if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
-          where tar.exe >NUL 2>&1 || (echo tar.exe is required to install the pinned GitHub CLI. & exit /b 1)
-          where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
-          aws --version
-          echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
+      # Restore the download caches that trusted pushes to main populate through the desktop
+      # package smoke workflow under this same key. Tag refs cannot save a cache other runs could
+      # restore, and npm and electron-builder verify download integrity against the lockfile and
+      # published checksums, so release lanes restore only and rebuild everything from source.
+      - name: Restore desktop dependency downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            desktop-downloads-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install verified GitHub CLI
         if: matrix.platform != 'Windows'
@@ -238,8 +248,7 @@ jobs:
         shell: sh
         run: npm ci --no-audit --prefer-offline
 
-      # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
-      # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
+      # Invoke npm.cmd through cmd.exe, matching the smoke workflow's hosted Windows lane.
       - name: Install dependencies on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
@@ -289,7 +298,7 @@ jobs:
 
           # electron-builder's implicit keychain setup can pass the PKCS#12 password to
           # set-key-partition-list instead of its generated keychain password. Own the keychain
-          # lifecycle here so signing works consistently on a clean self-hosted runner.
+          # lifecycle here so signing works consistently on a clean runner.
           printf '%s' "${HYPE_COMMS_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
           printf '%s' "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
@@ -423,8 +432,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         shell: sh
-        # Node is already pinned on every release host. Polling there avoids depending on optional
-        # MinGit shell utilities such as seq and sleep on Windows.
+        # Node is already pinned on every release lane; polling in Node keeps this step portable
+        # across the Windows cmd shell and the Unix lanes.
         run: node scripts/desktop-release.mjs wait-github-assets
 
       - name: Address the update bucket by path
