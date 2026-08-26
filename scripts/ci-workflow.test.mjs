@@ -57,6 +57,15 @@ test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", asy
     /key: ci-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
   );
   assert.match(postgresJob, /^ {10}path: \|\n {12}~\/\.npm\n {12}~\/\.cache\/electron$/mu);
+  assert.match(
+    postgresJob,
+    /^ {10}restore-keys: \|\n {12}ci-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-$/mu,
+  );
+  // Downloads must be restored before npm ci runs, or the cache never serves the install.
+  assert.match(
+    postgresJob,
+    /name: Restore dependency downloads[\s\S]*npm ci --no-audit --prefer-offline/u,
+  );
   assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
   assert.doesNotMatch(
     postgresJob,
