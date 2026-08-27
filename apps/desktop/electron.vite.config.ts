@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "electron-vite";
 import type { Plugin } from "vite";
 
+import { isReservedInvalidHostname } from "./api-origin-policy.mjs";
 import { resolveAgentWakePackageEvidence, resolveAgentWakeRollout } from "./agent-wake-rollout.mjs";
 import { resolveDesktopBuildFlavor } from "./build-flavor.mjs";
 import {
@@ -34,6 +35,17 @@ const rendererDocumentMetadata = (isDevelopment: boolean, productName: string): 
     return html
       .replace("__HYPE_COMMS_CONTENT_SECURITY_POLICY__", policy)
       .replace("__HYPE_COMMS_PRODUCT_NAME__", productName);
+  },
+});
+
+const desktopBuildMetadata = (apiOrigin: string): Plugin => ({
+  name: "hype-comms-desktop-build-metadata",
+  generateBundle() {
+    this.emitFile({
+      type: "asset",
+      fileName: "build-metadata.json",
+      source: `${JSON.stringify({ apiOrigin })}\n`,
+    });
   },
 });
 
@@ -67,9 +79,15 @@ export default defineConfig(({ command }) => {
       : "a credential-free HTTPS origin without a path";
     throw new Error(`HYPE_COMMS_API_ORIGIN must be ${requirement}`);
   }
+  if (buildFlavor.isProduction && isReservedInvalidHostname(new URL(apiOrigin).hostname)) {
+    throw new Error(
+      "Production packages require HYPE_COMMS_API_ORIGIN to name the deployed API, not a .invalid placeholder",
+    );
+  }
 
   return {
     main: {
+      plugins: [desktopBuildMetadata(apiOrigin)],
       define: {
         __HYPE_COMMS_APPLICATION_ID__: JSON.stringify(buildFlavor.appId),
         __HYPE_COMMS_AGENT_WAKE_ENABLED__: JSON.stringify(agentWakeEnabled),

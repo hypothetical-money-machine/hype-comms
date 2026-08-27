@@ -11,12 +11,14 @@ import {
 import {
   collectPackageFiles,
   excludedPackageDirectories,
+  resolveExpectedProductionApiOrigin,
   resolveExpectedAgentWakeBuild,
   resolveExpectedAgentWakePackageEvidence,
   verifyAgentWakeBuild,
   verifyAgentWakeUpdateIsolation,
   verifyPackageEntries,
   verifyPackageMetadata,
+  verifyPackagedApiOrigin,
   verifyUpdateConfiguration,
 } from "./verify-desktop-package.mjs";
 
@@ -26,6 +28,7 @@ const missingFile = async () => {
 
 const baselinePackageEntries = () =>
   new Set([
+    "/dist/main/build-metadata.json",
     "/dist/main/index.js",
     "/dist/main/claude-acp-worker.js",
     "/dist/main/codex-app-server-worker.js",
@@ -82,6 +85,8 @@ updateController = new UpdateController({
 });
 `);
 
+const desktopBuildMetadata = (apiOrigin) => Buffer.from(JSON.stringify({ apiOrigin }, null, 2));
+
 test("requires the Codex worker without allowing bundled Codex packages or executables", () => {
   const asarPath = "/tmp/hype-comms/resources/app.asar";
   assert.doesNotThrow(() => verifyPackageEntries(asarPath, baselinePackageEntries()));
@@ -108,6 +113,48 @@ test("requires the Codex worker without allowing bundled Codex packages or execu
       /contains a bundled Codex executable/u,
     );
   }
+});
+
+test("binds production packages to the configured deployed API origin", () => {
+  const asarPath = "/tmp/hype-comms/resources/app.asar";
+  const deployedOrigin = "https://chat.example.com";
+  assert.equal(resolveExpectedProductionApiOrigin(`${deployedOrigin}/`), deployedOrigin);
+  for (const invalidOrigin of [
+    undefined,
+    "",
+    "http://chat.example.com",
+    "https://chat.example.com/v1",
+    "https://chat-api.example.invalid",
+    "https://chat-api.example.invalid.",
+    "https://chat-api.example.invalid:8443",
+  ]) {
+    assert.throws(
+      () => resolveExpectedProductionApiOrigin(invalidOrigin),
+      /HYPE_COMMS_API_ORIGIN/u,
+    );
+  }
+
+  assert.doesNotThrow(() =>
+    verifyPackagedApiOrigin(asarPath, deployedOrigin, () => desktopBuildMetadata(deployedOrigin)),
+  );
+  assert.throws(
+    () =>
+      verifyPackagedApiOrigin(asarPath, deployedOrigin, () =>
+        desktopBuildMetadata("https://chat-api.example.invalid"),
+      ),
+    /API origin must be https:\/\/chat\.example\.com/u,
+  );
+  assert.throws(
+    () => verifyPackagedApiOrigin(asarPath, deployedOrigin, () => Buffer.from("not JSON")),
+    /invalid desktop build metadata/u,
+  );
+  assert.throws(
+    () =>
+      verifyPackagedApiOrigin(asarPath, deployedOrigin, () =>
+        Buffer.from(JSON.stringify({ apiOrigin: deployedOrigin, unexpected: true })),
+      ),
+    /invalid desktop build metadata/u,
+  );
 });
 
 test("binds packaged Agent Wake code to the explicit build switch", () => {

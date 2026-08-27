@@ -821,11 +821,11 @@ artifacts alone are not rollout proof.
 
 - `npm run check` passes from a clean install using the repository-pinned Node and npm versions.
 - Build the pilot with
-  `HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run package:desktop:mac:arm64`,
+  `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run package:desktop:mac:arm64`,
   then pass
-  `HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run verify:desktop-package`
+  `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run verify:desktop-package`
   and
-  `HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run verify:desktop-package:macos-release`
+  `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production HYPE_COMMS_AGENT_WAKE_ENABLED=1 HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=1 npm run verify:desktop-package:macos-release`
   on the signed macOS arm64 evidence host.
 - The manual `desktop-package-smoke.yml` workflow input `agent_wake_package_evidence` is default-off.
   Setting it to `true` builds the signed/notarized arm64-only pilot package, verifies the packaged

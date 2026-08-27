@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { extractFile, listPackage } from "@electron/asar";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
+import { isReservedInvalidHostname } from "../apps/desktop/api-origin-policy.mjs";
 import {
   resolveAgentWakePackageEvidence as resolveExpectedAgentWakePackageEvidence,
   resolveAgentWakeRollout as resolveExpectedAgentWakeBuild,
@@ -20,6 +21,7 @@ const agentWakeOperatorCall =
 // spellings Rolldown may retain or minify without depending on constant folding.
 const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
 const requiredAsarEntries = [
+  "/dist/main/build-metadata.json",
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
   "/dist/main/codex-app-server-worker.js",
@@ -223,6 +225,70 @@ export function verifyPackageMetadata(asarPath, flavor, extractFileImplementatio
   }
 }
 
+export function resolveExpectedProductionApiOrigin(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      "HYPE_COMMS_API_ORIGIN must name the deployed HTTPS API when verifying a production package",
+    );
+  }
+
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("HYPE_COMMS_API_ORIGIN must be a valid URL");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    isReservedInvalidHostname(url.hostname)
+  ) {
+    throw new Error(
+      "HYPE_COMMS_API_ORIGIN must be a deployed HTTPS origin without credentials, a path, or a .invalid hostname",
+    );
+  }
+  return url.origin;
+}
+
+export function verifyPackagedApiOrigin(
+  asarPath,
+  expectedApiOrigin,
+  extractFileImplementation = extractFile,
+) {
+  const metadataPath = path.join("dist", "main", "build-metadata.json");
+  let metadataSource;
+  try {
+    metadataSource = extractFileImplementation(asarPath, metadataPath).toString("utf8");
+  } catch (error) {
+    throw new Error(`${asarPath} contains unreadable desktop build metadata`, { cause: error });
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(metadataSource);
+  } catch (error) {
+    throw new Error(`${asarPath} has invalid desktop build metadata`, { cause: error });
+  }
+  if (
+    metadata === null ||
+    typeof metadata !== "object" ||
+    Array.isArray(metadata) ||
+    Object.keys(metadata).length !== 1 ||
+    typeof metadata.apiOrigin !== "string"
+  ) {
+    throw new Error(`${asarPath} has invalid desktop build metadata`);
+  }
+  if (metadata.apiOrigin !== expectedApiOrigin) {
+    throw new Error(
+      `${asarPath} API origin must be ${expectedApiOrigin}; found ${metadata.apiOrigin}`,
+    );
+  }
+}
+
 export { resolveExpectedAgentWakeBuild, resolveExpectedAgentWakePackageEvidence };
 
 export function verifyAgentWakeBuild(
@@ -283,6 +349,9 @@ export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
 ) {
+  const expectedApiOrigin = flavor.isProduction
+    ? resolveExpectedProductionApiOrigin(process.env.HYPE_COMMS_API_ORIGIN)
+    : null;
   const expectedAgentWakeBuild = resolveExpectedAgentWakeBuild(
     process.env.HYPE_COMMS_AGENT_WAKE_ENABLED,
   );
@@ -300,6 +369,9 @@ export async function verifyDesktopPackages(
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
     verifyPackageMetadata(asarPath, flavor);
+    if (expectedApiOrigin !== null) {
+      verifyPackagedApiOrigin(asarPath, expectedApiOrigin);
+    }
     verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
     verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
@@ -315,8 +387,9 @@ export async function verifyDesktopPackages(
     }
   }
 
+  const apiOriginCheck = expectedApiOrigin === null ? "" : "the API origin, ";
   console.log(
-    `Verified Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
+    `Verified ${apiOriginCheck}Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
   );
 }
 
