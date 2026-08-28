@@ -2,8 +2,6 @@ import { spawnSync } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import semver from "semver";
-
 const defaultReleaseDirectory = path.join("apps", "desktop", "release");
 const githubReleaseManifests = [
   "latest-mac.yml",
@@ -201,6 +199,28 @@ export function selectArtifactNames(entries, desktopVersion, artifactOs) {
     .sort();
 }
 
+// The publish job runs on a fresh runner without node_modules, so version comparison cannot come
+// from a dependency. Desktop releases are plain x.y.z; anything else, prereleases included, is
+// rejected outright rather than compared loosely.
+function parseVersionTriple(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
+  if (match === null) {
+    throw new Error(`Unsupported desktop version "${version}"; expected x.y.z`);
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+export function isVersionGreater(candidate, published) {
+  const candidateTriple = parseVersionTriple(candidate);
+  const publishedTriple = parseVersionTriple(published);
+  for (let index = 0; index < 3; index += 1) {
+    if (candidateTriple[index] !== publishedTriple[index]) {
+      return candidateTriple[index] > publishedTriple[index];
+    }
+  }
+  return false;
+}
+
 export async function assertVersionCanPublish({
   environment = process.env,
   fetchImplementation = fetch,
@@ -238,7 +258,7 @@ export async function assertVersionCanPublish({
         "Bump the version rather than replacing it.",
     );
   }
-  if (!semver.gt(desktopVersion, publishedVersion)) {
+  if (!isVersionGreater(desktopVersion, publishedVersion)) {
     throw new Error(
       `Refusing to move ${updateManifest} backward from ` +
         `${publishedVersion} to ${desktopVersion}.`,

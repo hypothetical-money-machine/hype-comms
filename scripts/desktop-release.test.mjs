@@ -10,6 +10,7 @@ import {
   addArtifactCacheKeys,
   assertVersionCanPublish,
   cacheKeyPlatformManifest,
+  isVersionGreater,
   missingGithubReleaseAssets,
   parseManifestVersion,
   runAws,
@@ -424,6 +425,50 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     releaseWorkflow.match(/^ {10}UPDATE_MANIFEST: latest-linux-arm64\.yml$/gmu)?.length,
     2,
   );
+  const overwriteGuardStep = releaseWorkflow.slice(
+    releaseWorkflow.indexOf("Refuse to overwrite published platform versions"),
+    releaseWorkflow.indexOf("Upload platform artifacts to the update bucket"),
+  );
+  // latest-linux.yml is the single release marker: everything published before it is retryable,
+  // and the marker itself never carries ALLOW_REPUBLISH.
+  assert.match(
+    overwriteGuardStep,
+    /for target in mac:latest-mac\.yml win:latest\.yml linux:latest-linux-arm64\.yml[\s\S]*ALLOW_REPUBLISH=true UPDATE_ARTIFACT_OS="\$artifact_os"/u,
+  );
+  assert.match(
+    overwriteGuardStep,
+    /UPDATE_ARTIFACT_OS=linux UPDATE_MANIFEST=latest-linux\.yml \\\n\s*node scripts\/desktop-release\.mjs assert-unpublished/u,
+  );
+  assert.doesNotMatch(
+    overwriteGuardStep,
+    /ALLOW_REPUBLISH=true[^\n]*latest-linux\.yml|latest-linux\.yml[^\n]*ALLOW_REPUBLISH=true/u,
+  );
+  const publishedReleaseGuardIndex = releaseWorkflow.indexOf(
+    "Refuse to modify a published release",
+  );
+  const attestIndex = releaseWorkflow.indexOf("Attest staged release assets");
+  const provenanceVerifyIndex = releaseWorkflow.indexOf("Verify staged asset provenance");
+  assert.ok(
+    publishedReleaseGuardIndex >= 0 &&
+      publishedReleaseGuardIndex < releaseWorkflow.indexOf("Stage GitHub Release assets"),
+    "the package job must refuse to clobber a published release before staging assets",
+  );
+  assert.match(releaseWorkflow, /gh release view "\$GITHUB_REF_NAME"[\s\S]*--json isDraft/u);
+  assert.ok(
+    attestIndex >= 0 && attestIndex < releaseWorkflow.indexOf("Stage GitHub Release assets"),
+    "staged assets must be attested before upload",
+  );
+  assert.match(releaseWorkflow, /actions\/attest-build-provenance@[0-9a-f]{40}/u);
+  assert.ok(
+    provenanceVerifyIndex >= 0 &&
+      provenanceVerifyIndex < releaseWorkflow.indexOf("Address the update bucket by path"),
+    "downloaded assets must be provenance-verified before any update-bucket write",
+  );
+  assert.match(releaseWorkflow, /gh attestation verify "\$asset" --repo "\$GITHUB_REPOSITORY"/u);
+  assert.match(
+    releaseWorkflow,
+    /name: Release \$\{\{ matrix\.platform \}\}[\s\S]*id-token: write\n {6}attestations: write/u,
+  );
   assert.doesNotMatch(releaseWorkflow, /actions\/(?:upload|download)-artifact/u);
   assert.match(releaseWorkflow, /name: Prepare GitHub Release[\s\S]*contents: write/u);
   const stagingIndex = releaseWorkflow.indexOf("Stage GitHub Release assets");
@@ -772,6 +817,26 @@ test("allows a missing or older feed and rejects replacement or rollback", async
       fetchImplementation: async () => new Response("version: 2.0.0\n"),
     }),
     /Refusing to move latest\.yml backward/,
+  );
+});
+
+test("compares release versions numerically without a dependency", async () => {
+  assert.equal(isVersionGreater("1.10.0", "1.9.0"), true);
+  assert.equal(isVersionGreater("2.0.0", "1.99.99"), true);
+  assert.equal(isVersionGreater("1.2.3", "1.2.3"), false);
+  assert.equal(isVersionGreater("1.2.3", "1.2.4"), false);
+  for (const prerelease of ["1.2.3-beta.1", "1.2", "v1.2.3", "1.2.3.4", ""]) {
+    assert.throws(() => isVersionGreater(prerelease, "1.0.0"), /expected x\.y\.z/u);
+    assert.throws(() => isVersionGreater("9.9.9", prerelease), /expected x\.y\.z/u);
+  }
+
+  // The publish-path guard must reject rather than misorder a prerelease it finds in the feed.
+  await assert.rejects(
+    assertVersionCanPublish({
+      environment,
+      fetchImplementation: async () => new Response("version: 1.2.2-rc.1\n"),
+    }),
+    /expected x\.y\.z/u,
   );
 });
 

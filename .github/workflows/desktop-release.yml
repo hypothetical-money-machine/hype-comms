@@ -157,6 +157,9 @@ jobs:
     needs: [validate, prepare-github-release]
     permissions:
       contents: write
+      # Staged assets are attested here and verified by the publish job before any feed write.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -401,6 +404,30 @@ jobs:
           UPDATE_MANIFEST: latest-linux-arm64.yml
         run: node scripts/desktop-release.mjs cache-key-manifest
 
+      # Re-dispatching this workflow at a published tag must not rebuild and replace public
+      # assets. Staging is only allowed while the GitHub Release is still a draft.
+      - name: Refuse to modify a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: sh
+        run: |
+          set -eu
+          is_draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "true" ]; then
+            echo "Release $GITHUB_REF_NAME is already published; refusing to replace its assets." >&2
+            exit 1
+          fi
+
+      # Bind the staged assets to this workflow run. The publish job verifies these attestations
+      # after re-downloading from the draft release, so an asset swapped in the draft between
+      # staging and the human approval cannot reach the update feed.
+      - name: Attest staged release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            apps/desktop/release/hype-comms-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-*
+            apps/desktop/release/latest*.yml
+
       # Stage directly in the draft release before any update-bucket write. This avoids consuming
       # the repository's Actions artifact quota and keeps a staging failure from touching the feed.
       - name: Stage GitHub Release assets
@@ -468,7 +495,9 @@ jobs:
     # This is the one human gate: the only job allowed to make staged assets public to clients.
     runs-on: ubuntu-24.04
     environment: release
-    timeout-minutes: 10
+    # This one job serially downloads, verifies, uploads, and re-hashes every platform's assets;
+    # the per-platform lanes it replaced each had 60 minutes for a third of this work.
+    timeout-minutes: 30
     permissions:
       contents: write
     env:
@@ -504,27 +533,41 @@ jobs:
             --dir apps/desktop/release \
             --clobber
 
+      # Every downloaded asset must carry provenance from this repository's workflows. An asset
+      # swapped in the draft release between staging and the human approval fails here, before
+      # any update-feed write.
+      - name: Verify staged asset provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for asset in apps/desktop/release/*; do
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
+          done
+
       - name: Address the update bucket by path
         shell: bash
         # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
         # under RUNNER_TEMP so every publication command reuses this setting.
         run: node scripts/desktop-release.mjs configure-s3
 
-      # Artifacts are immutable; all three platform guards run before any write. Linux ARM64 can
-      # be replaced only to finish a run interrupted before latest-linux.yml commits the release.
+      # latest-linux.yml is this job's single release marker: it is published last, so every other
+      # manifest may be replaced to finish a run interrupted mid-publish. Once the marker commits,
+      # the version is immutable and a forward fix must bump instead.
       - name: Refuse to overwrite published platform versions
         env:
           DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
         shell: bash
         run: |
           set -euo pipefail
-          for target in mac:latest-mac.yml win:latest.yml linux:latest-linux.yml; do
+          for target in mac:latest-mac.yml win:latest.yml linux:latest-linux-arm64.yml; do
             artifact_os="${target%%:*}"
             manifest="${target#*:}"
-            UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
+            ALLOW_REPUBLISH=true UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
               node scripts/desktop-release.mjs assert-unpublished
           done
-          ALLOW_REPUBLISH=true UPDATE_ARTIFACT_OS=linux UPDATE_MANIFEST=latest-linux-arm64.yml \
+          UPDATE_ARTIFACT_OS=linux UPDATE_MANIFEST=latest-linux.yml \
             node scripts/desktop-release.mjs assert-unpublished
 
       - name: Upload platform artifacts to the update bucket
@@ -542,7 +585,8 @@ jobs:
               node scripts/desktop-release.mjs upload-artifacts
           done
 
-      # latest-linux.yml is Linux's commit marker. Publish ARM64 and verify it before that marker.
+      # Publish and verify ARM64 before the platform loop; latest-linux.yml, published last in
+      # that loop, is the run's release marker.
       - name: Publish and verify Linux ARM64 update manifest
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}

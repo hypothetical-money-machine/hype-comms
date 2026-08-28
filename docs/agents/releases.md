@@ -126,6 +126,15 @@ Then verify:
 Installed clients on the previous version auto-update from that feed. GitHub Release assets are
 the manual-download archive.
 
+## Retrying an interrupted publish
+
+If the **Publish GitHub Release** job fails partway (network fault, timeout), re-run that job at
+the same tag and re-approve the `release` environment. `latest-linux.yml` is the run's release
+marker: it is published last, and every other manifest may be replaced until it commits. Once
+`https://updates.hypemm.com/desktop/latest-linux.yml` names the version, the release is immutable
+and the only way forward is a new version. Do not re-dispatch the whole workflow at a published
+tag; the package jobs refuse to replace assets of a published release.
+
 ## Do not
 
 - Leave the review marker in the notes.
