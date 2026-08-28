@@ -379,6 +379,18 @@ export function verifyDesktopEntryMimeType(desktopEntrySource, flavor) {
   }
 }
 
+export async function findDesktopEntryPath(releaseRoot, desktopEntryName, excludedDirectories) {
+  const desktopEntryPaths = await collectPackageFiles(
+    releaseRoot,
+    `${desktopEntryName}`,
+    excludedDirectories,
+  );
+  if (desktopEntryPaths.length === 0) {
+    throw new Error(`No packaged ${desktopEntryName} desktop entry found under ${releaseRoot}`);
+  }
+  return desktopEntryPaths[0];
+}
+
 export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
@@ -399,16 +411,11 @@ export async function verifyDesktopPackages(
     throw new Error(`No packaged app.asar found under ${releaseRoot}`);
   }
 
-  const desktopEntryPaths = await collectPackageFiles(
-    releaseRoot,
-    `${flavor.desktopName}`,
-    excludedDirectories,
-  );
-  if (desktopEntryPaths.length === 0) {
-    throw new Error(`No packaged ${flavor.desktopName} desktop entry found under ${releaseRoot}`);
-  }
+  const desktopEntryPath =
+    process.platform === "linux"
+      ? await findDesktopEntryPath(releaseRoot, flavor.desktopName, excludedDirectories)
+      : null;
 
-  const desktopEntrySource = await readFile(desktopEntryPaths[0]);
   for (const asarPath of asarPaths) {
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
@@ -419,11 +426,13 @@ export async function verifyDesktopPackages(
     verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
     verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
-    verifyProtocolHandlerDesktopEntry(
-      extractFile(asarPath, "/dist/main/index.js"),
-      desktopEntrySource,
-      flavor,
-    );
+    if (desktopEntryPath !== null) {
+      verifyProtocolHandlerDesktopEntry(
+        extractFile(asarPath, "/dist/main/index.js"),
+        desktopEntryPath,
+        flavor,
+      );
+    }
 
     const executablePath = await executableForAsar(asarPath, flavor);
     const fuseWire = await getCurrentFuseWire(executablePath);
