@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   agentCurrentPrincipalSchema,
+  agentScopeSchema,
+  agentScopesSchema,
   agentSchema,
   agentTokenSchema,
   authKitProviderSessionIdSchema,
@@ -68,6 +70,8 @@ interface AgentTokenRow extends QueryResultRow {
   readonly agent_user_id: unknown;
   readonly label: unknown;
   readonly scopes: unknown;
+  readonly inherited_channels_join: unknown;
+  readonly inherited_attachments_write: unknown;
   readonly created_by: unknown;
   readonly created_at: unknown;
   readonly last_used_at: unknown;
@@ -86,6 +90,8 @@ interface AuthenticatedAgentRow extends QueryResultRow {
   readonly user_updated_at: unknown;
   readonly role: unknown;
   readonly scopes: unknown;
+  readonly inherited_channels_join: unknown;
+  readonly inherited_attachments_write: unknown;
   readonly last_used_at: unknown;
 }
 
@@ -244,6 +250,8 @@ export interface InsertAgentTokenInput {
 
 export interface AuthenticatedAgent {
   readonly principal: AgentCurrentPrincipal;
+  /** Internal authorization includes additive compatibility markers hidden from old wire clients. */
+  readonly authorizationScopes: readonly AgentScope[];
   readonly tokenId: EntityId;
 }
 
@@ -326,17 +334,30 @@ function mapAgentDirectoryUser(user: Agent["user"]): User {
   return userSchema.parse({ ...user, kind: "human" });
 }
 
-function mapAgentToken(row: AgentTokenRow): AgentToken {
+function mapAgentToken(row: AgentTokenRow, includeEffectiveScopes = false): AgentToken {
   return agentTokenSchema.parse({
     id: row.id,
     agentUserId: row.agent_user_id,
     label: row.label,
+    // `scopes` remains the immutable list the owner minted. Current, capable clients receive the
+    // additive effective list so compatibility grants are visible without changing the legacy
+    // field's meaning or breaking previous strict clients.
     scopes: row.scopes,
+    ...(includeEffectiveScopes ? { effectiveScopes: effectiveAgentScopes(row) } : {}),
     createdBy: row.created_by,
     createdAt: timestamp(row.created_at),
     lastUsedAt: nullableTimestamp(row.last_used_at),
     revokedAt: nullableTimestamp(row.revoked_at),
   });
+}
+
+function effectiveAgentScopes(
+  row: Pick<AgentTokenRow, "scopes" | "inherited_channels_join" | "inherited_attachments_write">,
+): AgentScope[] {
+  const stored = new Set(agentScopesSchema.parse(row.scopes));
+  if (z.boolean().parse(row.inherited_channels_join)) stored.add("channels:join");
+  if (z.boolean().parse(row.inherited_attachments_write)) stored.add("attachments:write");
+  return agentScopeSchema.options.filter((scope) => stored.has(scope));
 }
 
 function mapWorkspace(row: WorkspaceRow): Workspace {
@@ -1041,8 +1062,9 @@ export class IdentityRepository {
       status: "active",
     });
     await this.#database.query(
-      `INSERT INTO agents (user_id, workspace_id, created_by)
-       VALUES ($1, $2, $3)`,
+      `INSERT INTO agents
+         (user_id, workspace_id, created_by, legacy_public_channel_access)
+       VALUES ($1, $2, $3, false)`,
       [input.id, input.workspaceId, input.createdBy],
     );
     const agent = await this.findAgent(input.workspaceId, input.id);
@@ -1161,13 +1183,18 @@ export class IdentityRepository {
     });
   }
 
-  async insertAgentToken(input: InsertAgentTokenInput): Promise<AgentToken> {
+  async insertAgentToken(
+    input: InsertAgentTokenInput,
+    includeEffectiveScopes = false,
+  ): Promise<AgentToken> {
     const result = await this.#database.query<AgentTokenRow>(
       `INSERT INTO agent_tokens (
-         id, workspace_id, agent_user_id, token_hash, label, scopes, created_by, created_at
+         id, workspace_id, agent_user_id, token_hash, label, scopes,
+         inherited_channels_join, inherited_attachments_write, created_by, created_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8)
-       RETURNING id, agent_user_id, label, scopes, created_by, created_at, last_used_at, revoked_at`,
+       VALUES ($1, $2, $3, $4, $5, $6::text[], false, false, $7, $8)
+       RETURNING id, agent_user_id, label, scopes, inherited_channels_join,
+                 inherited_attachments_write, created_by, created_at, last_used_at, revoked_at`,
       [
         input.id,
         input.workspaceId,
@@ -1179,19 +1206,24 @@ export class IdentityRepository {
         input.createdAt,
       ],
     );
-    return mapAgentToken(result.rows[0] as AgentTokenRow);
+    return mapAgentToken(result.rows[0] as AgentTokenRow, includeEffectiveScopes);
   }
 
-  async listAgentTokens(workspaceId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
+  async listAgentTokens(
+    workspaceId: EntityId,
+    agentUserId: EntityId,
+    includeEffectiveScopes = false,
+  ): Promise<AgentToken[]> {
     const result = await this.#database.query<AgentTokenRow>(
-      `SELECT id, agent_user_id, label, scopes, created_by, created_at, last_used_at, revoked_at
+      `SELECT id, agent_user_id, label, scopes, inherited_channels_join,
+              inherited_attachments_write, created_by, created_at, last_used_at, revoked_at
         FROM agent_tokens
         WHERE workspace_id = $1 AND agent_user_id = $2
         ORDER BY created_at, id
         LIMIT 1000`,
       [workspaceId, agentUserId],
     );
-    return result.rows.map(mapAgentToken);
+    return result.rows.map((row) => mapAgentToken(row, includeEffectiveScopes));
   }
 
   async revokeAgentToken(
@@ -1226,6 +1258,8 @@ export class IdentityRepository {
               user_account.updated_at AS user_updated_at,
               membership.role,
               token.scopes,
+              token.inherited_channels_join,
+              token.inherited_attachments_write,
               token.last_used_at
          FROM agent_tokens AS token
          JOIN agents AS agent
@@ -1265,8 +1299,10 @@ export class IdentityRepository {
       );
     }
 
+    const authorizationScopes = effectiveAgentScopes(row);
     return {
       tokenId: entityIdSchema.parse(row.token_id),
+      authorizationScopes,
       principal: agentCurrentPrincipalSchema.parse({
         type: "agent",
         user: {

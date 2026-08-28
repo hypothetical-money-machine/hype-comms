@@ -1,4 +1,6 @@
 import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   apiErrorEnvelopeSchema,
   authCapabilitiesSchema,
   authKitLogoutUrlHeaderName,
@@ -745,7 +747,17 @@ export class ChatSession {
     if (this.#state.status === "session-unavailable") {
       throw new ChatSessionError("Workspace requests require a validated session");
     }
-    return this.#fetch(url, init);
+    const headers = new Headers(init.headers);
+    const capabilities = new Set(
+      (headers.get("x-hype-comms-capabilities") ?? "")
+        .split(",")
+        .map((capability) => capability.trim())
+        .filter((capability) => capability.length > 0),
+    );
+    capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
+    capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
+    headers.set("x-hype-comms-capabilities", [...capabilities].join(","));
+    return this.#fetch(url, { ...init, headers });
   }
 
   async #fetch(url: string, init: RequestInit): Promise<Response> {

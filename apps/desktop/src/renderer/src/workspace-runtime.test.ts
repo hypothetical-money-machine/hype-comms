@@ -272,6 +272,43 @@ function directConversation(id: string, participantIds: readonly string[]): Conv
   };
 }
 
+function groupConversationCreated(
+  id: string,
+  eventId: string,
+  workspaceSequence: string,
+  createdBy: string,
+): WorkspaceEvent {
+  return {
+    version: 1,
+    id: eventId,
+    type: "direct_conversation.created",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId: id,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: {
+      conversation: {
+        id,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        channelMode: null,
+        isArchived: false,
+        createdBy,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    },
+  };
+}
+
 function catalogConversation(index: number): ConversationSummary {
   return channel(
     `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
@@ -1779,6 +1816,26 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("names a group conversation for all other participants", async () => {
+    const direct = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID, AGENT_ID]);
+    const group: ConversationSummary = {
+      ...direct,
+      conversation: { ...direct.conversation, kind: "group_direct_message" },
+    };
+    const snapshot = bootstrapAt("10", {
+      members: [user, peer, agent],
+      conversations: [group],
+    });
+    const api = new FakeDesktopApi(snapshot);
+    api.members = snapshot.members;
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+
+    expect(runtime.conversationName(group)).toBe("CPO, Hermes");
+    await runtime.stop();
+  });
+
   it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
@@ -2272,6 +2329,66 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).messages).toEqual(
       expect.arrayContaining([ownMessage, peerMessage]),
     );
+  });
+
+  it("applies another member's channel join during HTTP catch-up without a repair", async () => {
+    const initialSummary = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const joinedSummary = {
+      ...initialSummary,
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    };
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(
+      bootstrapAt("10", {
+        conversations: [initialSummary],
+      }),
+      [],
+    );
+    const api = new FakeDesktopApi(
+      bootstrapAt("11", {
+        conversations: [joinedSummary],
+      }),
+    );
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-000000000011",
+            type: "channel.membership_changed",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: null,
+            entityVersion: 1,
+            delivery: "at_least_once",
+            payload: { memberId: AGENT_ID, action: "added" },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.bootstrap?.conversations[0]?.participantIds).toEqual([
+      USER_ID,
+      PEER_ID,
+      AGENT_ID,
+    ]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(api.stopRequests).toBe(1);
+    expect(api.startedCursors).toEqual(["11"]);
+    expect(api.acknowledged).toContain("11");
+    expect((await cache.load()).repairMarker).toBeNull();
   });
 
   it("reconciles a closed-thread retract during the final HTTP catch-up", async () => {
@@ -5628,6 +5745,47 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).messages.map((item) => item.id)).toContain(PEER_MESSAGE_ID);
   });
 
+  it("projects creator and invitee roles from live group creation events", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const creatorGroupId = "20000000-0000-4000-8000-000000000081";
+    const inviteeGroupId = "20000000-0000-4000-8000-000000000082";
+
+    api.emitWorkspaceEvent(
+      groupConversationCreated(
+        creatorGroupId,
+        "20000000-0000-4000-8000-000000000083",
+        "11",
+        USER_ID,
+      ),
+    );
+    api.emitWorkspaceEvent(
+      groupConversationCreated(
+        inviteeGroupId,
+        "20000000-0000-4000-8000-000000000084",
+        "12",
+        PEER_ID,
+      ),
+    );
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations.some(
+          (summary) => summary.conversation.id === inviteeGroupId,
+        ) === true,
+      "live group projections",
+    );
+
+    const roles = new Map(
+      runtime.state.bootstrap?.conversations.map((summary) => [
+        summary.conversation.id,
+        summary.membershipRole,
+      ]) ?? [],
+    );
+    expect(roles.get(creatorGroupId)).toBe("owner");
+    expect(roles.get(inviteeGroupId)).toBe("member");
+  });
+
   it("opens a search hit in the main timeline and clears the focus on normal navigation", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -6112,6 +6270,52 @@ describe("WorkspaceRuntime", () => {
       "alpha",
       "general",
     ]);
+  });
+
+  it("applies another member's channel join without restarting realtime", async () => {
+    const initialSummary = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const joinedSummary = {
+      ...initialSummary,
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [initialSummary],
+      }),
+    );
+    const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+    await runtime.start(session);
+    const bootstrapRequests = api.bootstrapRequests;
+    const stopRequests = api.stopRequests;
+    const startedCursors = [...api.startedCursors];
+    api.bootstrap = bootstrapAt("11", { conversations: [joinedSummary] });
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000011",
+      type: "channel.membership_changed",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { memberId: AGENT_ID, action: "added" },
+    });
+
+    await settle(() => api.acknowledged.includes("11"), "peer membership acknowledgement");
+    expect(runtime.state.bootstrap?.conversations[0]?.participantIds).toEqual([
+      USER_ID,
+      PEER_ID,
+      AGENT_ID,
+    ]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequests);
+    expect(api.stopRequests).toBe(stopRequests);
+    expect(api.startedCursors).toEqual(startedCursors);
   });
 
   it("purges a removed member's private channel, history, and active selection", async () => {

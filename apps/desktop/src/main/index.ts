@@ -49,6 +49,7 @@ import {
   notificationStateSchema,
   realtimeAcknowledgementSchema,
   realtimeSessionScopeSchema,
+  scopedTypingActivityUpdateSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -64,6 +65,7 @@ import {
   type NotificationState,
   type ProductRealtimeEvent,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
   type ThemeState,
   type UpdateState,
 } from "@hype-comms/contracts";
@@ -77,6 +79,7 @@ import {
   net,
   Notification,
   protocol,
+  powerMonitor,
   safeStorage,
   screen,
   session,
@@ -110,6 +113,17 @@ import {
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import {
+  loadAgentWakeConfiguration,
+  resolveAgentWakeConfigurationPath,
+} from "./agent-wake-configuration";
+import {
+  applyAgentWakeOperatorRequest,
+  loadAgentWakeOperatorRequest,
+  resolveAgentWakeOperatorRequestPath,
+  writeAgentWakeOperatorResponse,
+} from "./agent-wake-operator";
+import { startAgentWakeRuntime, type AgentWakeRuntimeSession } from "./agent-wake-runtime";
 import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
 import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
 import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
@@ -178,6 +192,7 @@ import { authCapabilitiesForSession } from "./session-auth-lifecycle";
 import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import { WorkspaceRealtime } from "./workspace-realtime";
 import { WorkspaceTransport } from "./workspace-transport";
+import { PresenceController } from "./presence-controller";
 import {
   BeforeQuitCoordinator,
   FinalQuitCoordinator,
@@ -333,6 +348,8 @@ let authKitPendingIntentGeneration: number | null = null;
 let authKitStartPromise: Promise<void> | null = null;
 let workspaceTransport: WorkspaceTransport | null = null;
 let workspaceRealtime: WorkspaceRealtime | null = null;
+let presenceController: PresenceController | null = null;
+let stopPowerMonitorPresence: (() => void) | null = null;
 let macWindowlessRealtimeActive = false;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
@@ -344,6 +361,10 @@ let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
 let aiChannelController: AiChannelController | null = null;
 let stopAiChannelSubscription: (() => void) | null = null;
+let agentWakeRuntime: AgentWakeRuntimeSession | null = null;
+let agentWakeStartup: Promise<void> | null = null;
+let agentWakeStartupAbort: AbortController | null = null;
+let agentWakeStopping = false;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
 let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
@@ -406,6 +427,105 @@ function createNotificationPresenter(): NotificationPresenter {
     },
   });
   return captureNotificationPresenter;
+}
+
+async function initializeAgentWakeRuntime(): Promise<void> {
+  let filePath: string | null;
+  let operatorRequestPath: string | null;
+  try {
+    filePath = resolveAgentWakeConfigurationPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+    operatorRequestPath = resolveAgentWakeOperatorRequestPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+  } catch {
+    reportMainProcessError("Agent wake startup configuration is invalid");
+    return;
+  }
+  if (filePath === null) {
+    if (operatorRequestPath !== null) {
+      reportMainProcessError("Agent wake operator request has no configured enrollment");
+    }
+    return;
+  }
+  const startupAbort = new AbortController();
+  agentWakeStartupAbort = startupAbort;
+  try {
+    const configuration = await loadAgentWakeConfiguration({
+      filePath,
+      expectedApiOrigin: __HYPE_COMMS_API_ORIGIN__,
+    });
+    const runtime = await startAgentWakeRuntime({
+      configuration,
+      userDataPath: app.getPath("userData"),
+      environment: process.env,
+      startupSignal: startupAbort.signal,
+      onStartupRetry: (notice) => {
+        reportMainProcessEvent("agent_wake_startup_retry", {
+          enrollmentId: notice.enrollmentId,
+          code: notice.code,
+          attempt: String(notice.attempt),
+          delayMs: String(notice.delayMs),
+        });
+      },
+      onNotice: (notice) => {
+        reportMainProcessEvent("agent_wake_notice", {
+          enrollmentId: notice.enrollmentId,
+          code: notice.code,
+          ...(notice.wakeId === null ? {} : { wakeId: notice.wakeId }),
+        });
+      },
+    });
+    let startedStatus = runtime.initialStatus;
+    if (operatorRequestPath !== null) {
+      try {
+        const request = await loadAgentWakeOperatorRequest({
+          filePath: operatorRequestPath,
+        });
+        const response = await applyAgentWakeOperatorRequest({
+          broker: runtime.broker,
+          enrollmentId: configuration.enrollmentId,
+          request,
+        });
+        await writeAgentWakeOperatorResponse(
+          path.join(app.getPath("userData"), "agent-wake-operator"),
+          response,
+        );
+        startedStatus = response.status ?? startedStatus;
+        reportMainProcessEvent("agent_wake_operator_request", {
+          enrollmentId: configuration.enrollmentId,
+          requestId: request.requestId,
+          action: request.action,
+          ok: response.ok ? "true" : "false",
+          ...(response.errorCode === null ? {} : { code: response.errorCode }),
+          phase: response.status?.phase ?? "unavailable",
+        });
+      } catch {
+        reportMainProcessError("Agent wake operator request failed");
+      }
+    }
+    if (agentWakeStopping) {
+      await runtime.dispose();
+      return;
+    }
+    agentWakeRuntime = runtime;
+    reportMainProcessEvent("agent_wake_started", {
+      enrollmentId: startedStatus.enrollmentId,
+      adapterId: startedStatus.adapterId,
+      phase: startedStatus.phase,
+      cursor: startedStatus.cursor,
+    });
+  } catch {
+    // Wake configuration and adapters may fail while resolving credential-backed bindings.
+    // Keep startup diagnostics body- and credential-free; detailed repair is represented by
+    // stable broker notices and the durable enrollment state.
+    if (!agentWakeStopping) reportMainProcessError("Agent wake runtime failed to initialize");
+  } finally {
+    if (agentWakeStartupAbort === startupAbort) agentWakeStartupAbort = null;
+  }
 }
 
 function createUpdateSource(): UpdateSource {
@@ -548,6 +668,10 @@ function evaluateWorkspaceNotification(event: ProductRealtimeEvent): void {
 function deliverWorkspaceEvent(frame: ScopedProductRealtimeEvent): boolean {
   evaluateWorkspaceNotification(frame.event);
   return sendToRenderer(DESKTOP_CHANNELS.workspaceEvent, frame);
+}
+
+function deliverWorkspaceActivity(frame: ScopedEphemeralActivityFrame): boolean {
+  return sendToRenderer(DESKTOP_CHANNELS.workspaceActivity, frame);
 }
 
 function observeWindowlessWorkspaceEvent(event: ProductRealtimeEvent): void {
@@ -1911,6 +2035,12 @@ function registerIpcHandlers(): void {
     workspaceRealtime?.acknowledge(realtimeAcknowledgementSchema.parse(value));
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceActivityTypingSet);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceActivityTypingSet, (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace activity sender");
+    workspaceRealtime?.setTyping(scopedTypingActivityUpdateSchema.parse(value));
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.realtimeStateGet);
   ipcMain.handle(DESKTOP_CHANNELS.realtimeStateGet, (event) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime state sender");
@@ -2494,9 +2624,23 @@ if (!hasSingleInstanceLock) {
         rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
         transport: workspaceTransport,
         onEvent: deliverWorkspaceEvent,
+        onActivity: deliverWorkspaceActivity,
         onWindowlessEvent: observeWindowlessWorkspaceEvent,
         onState: deliverRealtimeState,
       });
+      presenceController = new PresenceController({
+        getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+        publish: (state) => workspaceRealtime?.setPresence(state),
+      });
+      const handleSuspend = (): void => presenceController?.suspend();
+      const handleResume = (): void => presenceController?.resume();
+      powerMonitor.on("suspend", handleSuspend);
+      powerMonitor.on("resume", handleResume);
+      stopPowerMonitorPresence = () => {
+        powerMonitor.removeListener("suspend", handleSuspend);
+        powerMonitor.removeListener("resume", handleResume);
+      };
+      presenceController.start();
       cacheCrypto = new CacheCrypto({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
@@ -2506,6 +2650,9 @@ if (!hasSingleInstanceLock) {
       chatSession.subscribe(deliverSessionState);
       updateController = new UpdateController({
         updater: createUpdateSource(),
+        // A signed Wake evidence artifact must remain byte-for-byte stable throughout its soak.
+        // Ordinary production builds compile this to true and retain automatic updates.
+        updatesAllowed: __HYPE_COMMS_UPDATES_ALLOWED__,
         isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
@@ -2559,6 +2706,10 @@ if (!hasSingleInstanceLock) {
       }
 
       await createMainWindow();
+
+      // Agent wake has its own agent-authenticated source and durable main-process inbox. It starts
+      // beside human session restore so an unavailable provider cannot delay the interactive UI.
+      agentWakeStartup = initializeAgentWakeRuntime();
 
       // Show the window before an upgraded enabled preference can prompt. The request runs beside
       // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
@@ -2675,21 +2826,38 @@ if (!hasSingleInstanceLock) {
   });
 
   let quittingAiChannel: AiChannelController | null = null;
+  let quittingAgentWakeRuntime: AgentWakeRuntimeSession | null = null;
   const beforeQuitCoordinator = new BeforeQuitCoordinator({
     cleanup: () => {
+      agentWakeStopping = true;
+      agentWakeStartupAbort?.abort();
+      agentWakeStartupAbort = null;
+      quittingAgentWakeRuntime = agentWakeRuntime;
+      agentWakeRuntime = null;
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
     },
     teardown: async () => {
       const localAiChannel = quittingAiChannel;
+      const localAgentWakeRuntime = quittingAgentWakeRuntime;
+      const pendingAgentWakeStartup = agentWakeStartup;
       quittingAiChannel = null;
-      await localAiChannel?.dispose();
+      quittingAgentWakeRuntime = null;
+      agentWakeStartup = null;
+      await pendingAgentWakeStartup;
+      const lateAgentWakeRuntime = agentWakeRuntime;
+      agentWakeRuntime = null;
+      await Promise.all([
+        localAiChannel?.dispose(),
+        localAgentWakeRuntime?.dispose(),
+        lateAgentWakeRuntime?.dispose(),
+      ]);
     },
     reportCleanupFailure: () => {
       reportMainProcessError("Failed to prepare application cleanup before quitting");
     },
     reportTeardownFailure: () => {
-      reportMainProcessError("Failed to stop the local AI Channel");
+      reportMainProcessError("Failed to stop privileged local services");
     },
     quit: () => app.quit(),
   });
@@ -2716,6 +2884,10 @@ if (!hasSingleInstanceLock) {
     },
     cleanup: () => {
       macWindowlessRealtimeActive = false;
+      stopPowerMonitorPresence?.();
+      stopPowerMonitorPresence = null;
+      presenceController?.stop();
+      presenceController = null;
       workspaceRealtime?.resetSession();
       notificationScope = null;
       notificationActiveGeneration = null;

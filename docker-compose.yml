@@ -35,8 +35,10 @@ services:
       HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED: ${HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED:-false}
       HYPE_COMMS_DATABASE_URL: ${HYPE_COMMS_DATABASE_URL:?set HYPE_COMMS_DATABASE_URL in .env}
       HYPE_COMMS_DATABASE_POOL_SIZE: ${HYPE_COMMS_DATABASE_POOL_SIZE:-10}
+      HYPE_COMMS_ATTACHMENT_DIR: /var/lib/hype-comms/attachments
       HYPE_COMMS_EMAIL_DELIVERY: ${HYPE_COMMS_EMAIL_DELIVERY:-manual}
       HYPE_COMMS_AGENT_PROVISIONING_ENABLED: ${HYPE_COMMS_AGENT_PROVISIONING_ENABLED:-false}
+      HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED: ${HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED:-false}
       HYPE_COMMS_SMTP_URL: ${HYPE_COMMS_SMTP_URL:-}
       HYPE_COMMS_EMAIL_FROM: ${HYPE_COMMS_EMAIL_FROM:-}
       HYPE_COMMS_OWNER_EMAIL: ${HYPE_COMMS_OWNER_EMAIL:-}
@@ -54,6 +56,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - attachment-data:/var/lib/hype-comms/attachments
     cap_drop:
       - ALL
     security_opt:
@@ -84,4 +88,5 @@ services:
       - "127.0.0.1:${HYPE_COMMS_POSTGRES_BIND_PORT:-5432}:5432"
 
 volumes:
+  attachment-data:
   postgres-data:

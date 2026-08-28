@@ -16,7 +16,7 @@
     "prebuild": "npm run build --workspace @hype-comms/contracts",
     "build": "tsc -p tsconfig.json --noEmit && node build.mjs",
     "prepack": "npm run build",
-    "pretest": "npm run build --workspace @hype-comms/contracts",
+    "pretest": "npm run build",
     "test": "vitest run",
     "pretypecheck": "npm run build --workspace @hype-comms/contracts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"

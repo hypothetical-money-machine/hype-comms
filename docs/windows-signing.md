@@ -34,7 +34,7 @@ On `v*` tags, `.github/workflows/desktop-release.yml` Windows lane:
    All blank → unsigned publish (`HYPE_COMMS_WINDOWS_SIGNING_ENABLED=false`). Some but not all
    set → fail. All set → map the three Azure secrets to `AZURE_TENANT_ID` /
    `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` and disable `CSC_IDENTITY_AUTO_DISCOVERY`.
-2. When enabled, packages `HYPE_COMMS_BUILD_FLAVOR=production` with
+2. When enabled, packages `HYPE_COMMS_BUILD_FLAVOR=production` against the deployed API with
    `win.azureSignOptions` + `win.forceCodeSigning: true` + `verifyUpdateCodeSignature: true`.
    The publisher subject is written into the **packaged** `app-update.yml` so later Windows
    updates verify Authenticode. `latest.yml` stays a version/path/sha512 pointer and does not
@@ -120,10 +120,17 @@ accumulates clean volume.
 After the secrets and variables exist, do not invent a local certificate. Verify on the Windows
 release runner or a Windows host with the same env:
 
-1. `HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop:win`
-2. `HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`
-3. `npm run verify:desktop-package:windows-release`
-4. Manually, for one installer and one unpacked exe:
+1. In PowerShell, set the production package configuration:
+
+   ```powershell
+   $env:HYPE_COMMS_API_ORIGIN = "https://chat-api.hypemm.com"
+   $env:HYPE_COMMS_BUILD_FLAVOR = "production"
+   ```
+
+2. `npm run package:desktop:win`
+3. `npm run verify:desktop-package`
+4. `npm run verify:desktop-package:windows-release`
+5. Manually, for one installer and one unpacked exe:
 
    ```powershell
    Get-AuthenticodeSignature -LiteralPath .\hype-comms-<version>-win-arm64.exe |
@@ -131,13 +138,13 @@ release runner or a Windows host with the same env:
    ```
 
    Expect `Status = Valid` and `Subject` identical to `HYPE_COMMS_WINDOWS_PUBLISHER_NAME`.
-5. On a Windows dogfood machine still running an **unsigned** 0.1.x build, install or auto-update
+6. On a Windows dogfood machine still running an **unsigned** 0.1.x build, install or auto-update
    to the first signed build. electron-updater skips Authenticode when the running app recorded no
    publisher; that first hop is HTTPS + manifest checksum only. Confirm the new `app-update.yml`
    now contains `publisherName`.
-6. Cut the **next** signed release and confirm the already-signed client rejects a tampered
+7. Cut the **next** signed release and confirm the already-signed client rejects a tampered
    installer (wrong publisher or stripped signature) and accepts the real artifact.
-7. Watch the Desktop release Windows job: configure → package → `verify:desktop-package` →
+8. Watch the Desktop release Windows job: configure → package → `verify:desktop-package` →
    optional Authenticode verify → stage assets. All-blank config must stay green and unsigned.
    A partial set must fail at configure. A full set that fails to sign must publish nothing.
 

@@ -15,6 +15,7 @@ import type { WorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
 import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
+import { EphemeralActivityHub } from "./modules/realtime/activity-hub.js";
 import type { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
@@ -49,6 +50,7 @@ export interface BuildAppOptions {
   readonly workspace?: {
     readonly repository: WorkspaceRepository;
     readonly realtimeHub: RealtimeEventHub;
+    readonly activityHub?: EphemeralActivityHub;
   };
   readonly webRoot?: string;
 }
@@ -61,6 +63,19 @@ export async function buildApp(options: BuildAppOptions = {}) {
     logger: options.logger ?? false,
     ...(trustProxy === undefined ? {} : { trustProxy }),
   });
+  const activityHub =
+    options.workspace === undefined
+      ? undefined
+      : (options.workspace.activityHub ??
+        new EphemeralActivityHub(
+          (workspaceId, userId, conversationId, includeGroupDirectMessages) =>
+            options.workspace!.repository.canViewConversation(
+              workspaceId,
+              userId,
+              conversationId,
+              includeGroupDirectMessages,
+            ),
+        ));
 
   registerErrorHandling(app);
   app.addHook("onRequest", async (request, reply) => {
@@ -121,6 +136,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
           }
           return principal;
         };
+  if (
+    options.identity !== undefined &&
+    options.workspace !== undefined &&
+    options.identity.service.defaultAgentAgencyEnabled
+  ) {
+    await options.workspace.repository.enableDefaultAgentAgency();
+  }
   await app.register(
     async (v1) => {
       await v1.register(realtimeRoutes, {
@@ -136,6 +158,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
                 options.workspace!.realtimeHub.subscribe(workspaceId, listener),
               revalidate: (principal) =>
                 options.workspace!.repository.revalidateRealtimePrincipal(principal),
+              ...(activityHub === undefined ? {} : { activityHub }),
               ...(options.metrics === undefined ? {} : { metrics: options.metrics.registry }),
             }),
       });
@@ -151,6 +174,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           cookieSecure: options.cookieSecure ?? true,
           selfServiceMagicLink: options.identity.selfServiceMagicLink ?? true,
           agentProvisioningEnabled: options.identity.agentProvisioningEnabled ?? true,
+          defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
         await v1.register(authKitRoutes, {
           identityService: options.identity.service,
@@ -174,6 +198,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             ? {}
             : { botService: options.identity.botService }),
           repository: options.workspace.repository,
+          defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
       }
     },
@@ -185,6 +210,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   }
 
   if (options.workspace !== undefined) {
+    app.addHook("onClose", async () => activityHub?.close());
     app.addHook("onClose", async () => options.workspace?.realtimeHub.close());
   }
 

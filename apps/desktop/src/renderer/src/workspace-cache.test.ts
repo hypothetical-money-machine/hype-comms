@@ -18,11 +18,13 @@ import {
 import {
   clearPersistentWorkspaceCache,
   clearPersistentWorkspaceCaches,
+  MemoryWorkspaceCache,
   PersistentWorkspaceCache,
 } from "./workspace-cache";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const OTHER_USER_ID = "10000000-0000-4000-8000-000000000008";
+const THIRD_USER_ID = "10000000-0000-4000-8000-000000000009";
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
@@ -128,6 +130,43 @@ const reaction: Reaction = {
   createdAt: NOW,
 };
 
+function groupCreatedEvent(
+  id: string,
+  eventId: string,
+  sequence: string,
+  createdBy: string,
+): WorkspaceEvent {
+  return {
+    version: 1,
+    id: eventId,
+    type: "direct_conversation.created",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId: id,
+    workspaceSequence: sequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: {
+      conversation: {
+        id,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        channelMode: null,
+        isArchived: false,
+        createdBy,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, OTHER_USER_ID, THIRD_USER_ID],
+    },
+  };
+}
+
 class FakeCrypto {
   async encryptCacheRecords(input: CacheEncryptBatchRequest) {
     return cacheEncryptBatchResponseSchema.parse({
@@ -176,6 +215,30 @@ afterEach(async () => {
 });
 
 describe("PersistentWorkspaceCache", () => {
+  it("derives personalized roles for group creation events in both cache implementations", async () => {
+    const creatorGroupId = "10000000-0000-4000-8000-00000000000a";
+    const inviteeGroupId = "10000000-0000-4000-8000-00000000000b";
+    const events = [
+      groupCreatedEvent(creatorGroupId, "10000000-0000-4000-8000-00000000000c", "1", USER_ID),
+      groupCreatedEvent(inviteeGroupId, "10000000-0000-4000-8000-00000000000d", "2", OTHER_USER_ID),
+    ];
+    const caches = [
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+      new MemoryWorkspaceCache(),
+    ];
+
+    for (const cache of caches) {
+      await cache.replaceSnapshot(bootstrap, []);
+      for (const event of events) await cache.applyEvent(event);
+      const conversations = (await cache.load()).bootstrap?.conversations ?? [];
+      const roles = new Map(
+        conversations.map((summary) => [summary.conversation.id, summary.membershipRole]),
+      );
+      expect(roles.get(creatorGroupId)).toBe("owner");
+      expect(roles.get(inviteeGroupId)).toBe("member");
+    }
+  });
+
   it("survives restart and reconciles a committed retry by client message ID", async () => {
     const crypto = new FakeCrypto();
     const first = new PersistentWorkspaceCache({ crypto, scope });

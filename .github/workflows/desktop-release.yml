@@ -17,6 +17,7 @@ permissions:
 
 env:
   HYPE_COMMS_BUILD_FLAVOR: production
+  HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
 
 jobs:
   validate:
@@ -78,9 +79,8 @@ jobs:
   prepare-github-release:
     name: Prepare GitHub Release
     needs: validate
-    # Metadata publication runs on disposable hosted infrastructure behind release approval.
+    # The draft is private staging. The protected publish job is the one public release gate.
     runs-on: ubuntu-24.04
-    environment: release
     timeout-minutes: 5
     permissions:
       contents: write
@@ -155,7 +155,6 @@ jobs:
   package:
     name: Release ${{ matrix.platform }}
     needs: [validate, prepare-github-release]
-    environment: release
     permissions:
       contents: write
     strategy:
@@ -163,39 +162,45 @@ jobs:
       matrix:
         include:
           - platform: macOS
-            runner: '["self-hosted", "macOS", "ARM64", "notarize"]'
+            runner: '["macos-15"]'
             artifact_os: mac
             manifest: latest-mac.yml
             package_script: package:desktop:mac
             native_notifications_enabled: "1"
+            cache_paths: |
+              ~/.npm
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
           - platform: Windows
-            runner: '["self-hosted", "Windows", "ARM64", "windows-release"]'
+            runner: '["windows-11-arm"]'
             artifact_os: win
             manifest: latest.yml
             package_script: package:desktop:win
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
           - platform: Linux
-            runner: '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]'
+            runner: '["ubuntu-24.04-arm"]'
             artifact_os: linux
             manifest: latest-linux.yml
             package_script: package:desktop:linux
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/.cache/electron
+              ~/.cache/electron-builder
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
-      # Endpoint, bucket, and region are not secret and live as repository variables. Only the
-      # key pair is a secret, and it is scoped to write this one bucket.
-      HYPE_COMMS_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
-      HYPE_COMMS_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
-      HYPE_COMMS_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
       # Platform pilots advance independently. macOS is signed/notarized and available behind the
       # default-off device preference; Windows and Linux remain compiled off pending their gates.
+      HYPE_COMMS_AGENT_WAKE_ENABLED: "0"
+      HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: ${{ matrix.native_notifications_enabled }}
       UPDATE_ARTIFACT_OS: ${{ matrix.artifact_os }}
       UPDATE_MANIFEST: ${{ matrix.manifest }}
-      AWS_REGION: ${{ vars.GARAGE_S3_REGION }}
-      AWS_DEFAULT_REGION: ${{ vars.GARAGE_S3_REGION }}
-      AWS_EC2_METADATA_DISABLED: "true"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -206,19 +211,17 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      # This runner uses the official ARM64 MinGit archive, which ships sh.exe but not bash.exe.
-      # Its PowerShell execution policy also rejects the generated scripts used by Actions.
-      - name: Expose MinGit sh on Windows
-        if: matrix.platform == 'Windows'
-        shell: cmd
-        run: |
-          if not exist "C:\Actions\tools\mingit\usr\bin\sh.exe" exit /b 1
-          if not exist "%WINDIR%\System32\vcruntime140.dll" echo The Microsoft Visual C++ 2015-2022 ARM64 runtime is required on the Windows runner.
-          if not exist "%WINDIR%\System32\vcruntime140.dll" exit /b 1
-          where tar.exe >NUL 2>&1 || (echo tar.exe is required to install the pinned GitHub CLI. & exit /b 1)
-          where aws.exe >NUL 2>&1 || (echo AWS CLI is required on the Windows runner. & exit /b 1)
-          aws --version
-          echo C:\Actions\tools\mingit\usr\bin>>"%GITHUB_PATH%"
+      # Restore the download caches that trusted pushes to main populate through the desktop
+      # package smoke workflow under this same key. Tag refs cannot save a cache other runs could
+      # restore, and npm and electron-builder verify download integrity against the lockfile and
+      # published checksums, so release lanes restore only and rebuild everything from source.
+      - name: Restore desktop dependency downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            desktop-downloads-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install verified GitHub CLI
         if: matrix.platform != 'Windows'
@@ -235,8 +238,7 @@ jobs:
         shell: sh
         run: npm ci --no-audit --prefer-offline
 
-      # MinGit omits bash.exe, but Windows npm's extensionless shim requires it. Invoke npm.cmd
-      # through cmd.exe so this lane also avoids the VM's generated-PowerShell policy.
+      # Invoke npm.cmd through cmd.exe, matching the smoke workflow's hosted Windows lane.
       - name: Install dependencies on Windows
         if: matrix.platform == 'Windows'
         shell: cmd
@@ -286,7 +288,7 @@ jobs:
 
           # electron-builder's implicit keychain setup can pass the PKCS#12 password to
           # set-key-partition-list instead of its generated keychain password. Own the keychain
-          # lifecycle here so signing works consistently on a clean self-hosted runner.
+          # lifecycle here so signing works consistently on a clean runner.
           printf '%s' "${HYPE_COMMS_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
           printf '%s' "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
@@ -413,95 +415,6 @@ jobs:
             apps/desktop/release/hype-comms-${{ needs.validate.outputs.desktop-version }}-${{ matrix.artifact_os }}-* \
             apps/desktop/release/latest*.yml
 
-      # All package lanes must stage before any lane can publish its platform feed. Otherwise a
-      # failed lane could leave a partial release that cannot be retried at the same tag.
-      - name: Wait for all GitHub Release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        shell: sh
-        # Node is already pinned on every release host. Polling there avoids depending on optional
-        # MinGit shell utilities such as seq and sleep on Windows.
-        run: node scripts/desktop-release.mjs wait-github-assets
-
-      - name: Address the update bucket by path
-        shell: sh
-        # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
-        # under RUNNER_TEMP so every platform reuses this setting without shell-specific exports.
-        run: node scripts/desktop-release.mjs configure-s3
-
-      # Artifacts are served with a one-year immutable cache while the manifests are no-cache.
-      # The platform manifest is the commit marker: an orphan artifact from a failed run was never
-      # advertised to clients and may be replaced on retry, but a manifested version is immutable.
-      - name: Refuse to overwrite a published platform version
-        shell: sh
-        env:
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: node scripts/desktop-release.mjs assert-unpublished
-
-      # Only one manifest per lane can be the commit marker, and on Linux that is latest-linux.yml
-      # below. The ARM64 manifest is published before it, so a run interrupted between the two must
-      # be able to replace the ARM64 manifest on retry; refusing here would strand ARM64 clients on
-      # the previous release until someone cut an entirely new version.
-      - name: Refuse to roll back the published Linux ARM64 version
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          ALLOW_REPUBLISH: "true"
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-          UPDATE_MANIFEST: latest-linux-arm64.yml
-        run: node scripts/desktop-release.mjs assert-unpublished
-
-      - name: Upload platform artifacts to the update bucket
-        shell: sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: node scripts/desktop-release.mjs upload-artifacts
-
-      - name: Upload the Linux ARM64 manifest before the commit marker
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-          UPDATE_MANIFEST: latest-linux-arm64.yml
-        run: node scripts/desktop-release.mjs upload-manifest
-
-      - name: Verify the public Linux ARM64 release
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-          UPDATE_MANIFEST: latest-linux-arm64.yml
-        run: node scripts/verify-published-desktop-release.mjs
-
-      - name: Upload the platform manifest last
-        shell: sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: node scripts/desktop-release.mjs upload-manifest
-
-      - name: Verify the public platform release
-        shell: sh
-        env:
-          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
-        run: node scripts/verify-published-desktop-release.mjs
-
-      # The page reads the manifests at load time, so it does not go stale between releases and
-      # one runner publishing it is enough.
-      - name: Publish the download page
-        if: matrix.platform == 'Linux'
-        shell: sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
-        run: node scripts/desktop-release.mjs publish-download-page
-
       - name: Remove temporary macOS signing keychain
         if: always() && matrix.platform == 'macOS'
         shell: bash
@@ -552,12 +465,19 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [validate, package]
-    # Final publication uses a short-lived write token on disposable hosted infrastructure.
+    # This is the one human gate: the only job allowed to make staged assets public to clients.
     runs-on: ubuntu-24.04
     environment: release
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      HYPE_COMMS_UPDATE_S3_ENDPOINT: ${{ vars.GARAGE_S3_ENDPOINT }}
+      HYPE_COMMS_UPDATE_S3_BUCKET: ${{ vars.GARAGE_S3_BUCKET }}
+      HYPE_COMMS_UPDATE_PUBLIC_ROOT: https://updates.hypemm.com/desktop
+      AWS_REGION: ${{ vars.GARAGE_S3_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.GARAGE_S3_REGION }}
+      AWS_EC2_METADATA_DISABLED: "true"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -571,6 +491,94 @@ jobs:
       - name: Install verified GitHub CLI
         shell: bash
         run: node scripts/install-github-cli.mjs
+
+      - name: Download staged release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/release
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir apps/desktop/release \
+            --clobber
+
+      - name: Address the update bucket by path
+        shell: bash
+        # Self-hosted S3-compatible stores are addressed by path. The helper pins AWS_CONFIG_FILE
+        # under RUNNER_TEMP so every publication command reuses this setting.
+        run: node scripts/desktop-release.mjs configure-s3
+
+      # Artifacts are immutable; all three platform guards run before any write. Linux ARM64 can
+      # be replaced only to finish a run interrupted before latest-linux.yml commits the release.
+      - name: Refuse to overwrite published platform versions
+        env:
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in mac:latest-mac.yml win:latest.yml linux:latest-linux.yml; do
+            artifact_os="${target%%:*}"
+            manifest="${target#*:}"
+            UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
+              node scripts/desktop-release.mjs assert-unpublished
+          done
+          ALLOW_REPUBLISH=true UPDATE_ARTIFACT_OS=linux UPDATE_MANIFEST=latest-linux-arm64.yml \
+            node scripts/desktop-release.mjs assert-unpublished
+
+      - name: Upload platform artifacts to the update bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in mac:latest-mac.yml win:latest.yml linux:latest-linux.yml; do
+            artifact_os="${target%%:*}"
+            manifest="${target#*:}"
+            UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
+              node scripts/desktop-release.mjs upload-artifacts
+          done
+
+      # latest-linux.yml is Linux's commit marker. Publish ARM64 and verify it before that marker.
+      - name: Publish and verify Linux ARM64 update manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+          UPDATE_ARTIFACT_OS: linux
+          UPDATE_MANIFEST: latest-linux-arm64.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/desktop-release.mjs upload-manifest
+          node scripts/verify-published-desktop-release.mjs
+
+      - name: Publish and verify platform update manifests
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+          DESKTOP_VERSION: ${{ needs.validate.outputs.desktop-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in mac:latest-mac.yml win:latest.yml linux:latest-linux.yml; do
+            artifact_os="${target%%:*}"
+            manifest="${target#*:}"
+            UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
+              node scripts/desktop-release.mjs upload-manifest
+            UPDATE_ARTIFACT_OS="$artifact_os" UPDATE_MANIFEST="$manifest" \
+              node scripts/verify-published-desktop-release.mjs
+          done
+
+      - name: Publish the download page
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.GARAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.GARAGE_SECRET_ACCESS_KEY }}
+        shell: bash
+        run: node scripts/desktop-release.mjs publish-download-page
 
       - name: Verify and publish GitHub Release
         env:
