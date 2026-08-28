@@ -3325,6 +3325,107 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.threadSummaries).toEqual([]);
   });
 
+  it("refreshes a thread summary dropped over a partial page instead of recounting from one", async () => {
+    const retainedEarlierReply: Message = {
+      ...threadReply,
+      id: PEER_MESSAGE_ID,
+      clientMessageId: PEER_CLIENT_MESSAGE_ID,
+      conversationSequence: "3",
+      body: "Retained earlier reply",
+    };
+    const unretainedReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000f2",
+      clientMessageId: "20000000-0000-4000-8000-0000000000f3",
+      conversationSequence: "4",
+      body: "Newer reply outside the retained page",
+    };
+    const latestReply: Message = {
+      ...threadReply,
+      conversationSequence: "5",
+      body: "Latest reply",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [{ ...channel(CONVERSATION_ID, "general"), lastMessage: latestReply }],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({
+      root: ownMessage,
+      replies: [retainedEarlierReply],
+      nextCursor: unretainedReply.id,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    // The server's post-retract truth; the refresh owed by the partial-page drop reads this.
+    api.bootstrap = bootstrapAt("11", {
+      conversations: [{ ...channel(CONVERSATION_ID, "general"), lastMessage: ownMessage }],
+    });
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, unretainedReply],
+      threadSummaries: [
+        { threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply: unretainedReply },
+      ],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000f4",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: latestReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: latestReply.id, deletedAt: NOW },
+    });
+    await settle(
+      () => runtime.state.threadSummaries[0]?.latestReply.id === unretainedReply.id,
+      "partial-page retract refresh",
+    );
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply: unretainedReply },
+    ]);
+
+    const followUpReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000f5",
+      clientMessageId: "20000000-0000-4000-8000-0000000000f6",
+      conversationSequence: "6",
+      body: "Follow-up reply",
+    };
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000f7",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: followUpReply.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: followUpReply, mentionedUserIds: [] },
+    });
+    await settle(() => api.acknowledged.includes("12"), "follow-up reply projection");
+
+    // The refreshed total keeps counting; the drop must not have reset the summary to one.
+    expect(runtime.state.threadSummaries).toEqual([
+      { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: followUpReply },
+    ]);
+  });
+
   it("does not reconcile a locally retracted reply twice when its realtime echo arrives", async () => {
     const ownThreadReply: Message = {
       ...threadReply,

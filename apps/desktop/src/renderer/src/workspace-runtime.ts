@@ -449,27 +449,46 @@ function newestLiveReply(messages: readonly Message[], threadRootId: string): Me
   return newest;
 }
 
+type RetractReplySummaryResult = {
+  summaries: readonly MessageThreadSummary[];
+  /**
+   * Roots whose summary was dropped because local pages cannot prove the surviving latest reply.
+   * The caller owes the conversation an invalidation and a server refresh; without one the next
+   * projected reply would recreate the summary at replyCount 1 and discard the true total.
+   */
+  staleThreadRootIds: readonly string[];
+};
+
 function retractReplySummary(
   summaries: readonly MessageThreadSummary[],
   messages: readonly Message[],
   tombstone: Message,
-): readonly MessageThreadSummary[] {
+): RetractReplySummaryResult {
   // Deleted roots are omitted from fresh history, so their summaries must disappear with them.
   if (tombstone.threadRootId === null) {
-    return summaries.filter((summary) => summary.threadRootId !== tombstone.id);
+    return {
+      summaries: summaries.filter((summary) => summary.threadRootId !== tombstone.id),
+      staleThreadRootIds: [],
+    };
   }
   const summary = summaries.find((candidate) => candidate.threadRootId === tombstone.threadRootId);
-  if (summary === undefined) return summaries;
+  if (summary === undefined) return { summaries, staleThreadRootIds: [] };
   if (summary.latestReply.id !== tombstone.id) {
-    return summaries.map((candidate) =>
-      candidate.threadRootId === tombstone.threadRootId
-        ? { ...candidate, replyCount: Math.max(1, candidate.replyCount - 1) }
-        : candidate,
-    );
+    return {
+      summaries: summaries.map((candidate) =>
+        candidate.threadRootId === tombstone.threadRootId
+          ? { ...candidate, replyCount: Math.max(1, candidate.replyCount - 1) }
+          : candidate,
+      ),
+      staleThreadRootIds: [],
+    };
   }
   const remainingReplyCount = summary.replyCount - 1;
   if (remainingReplyCount === 0) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+    return {
+      summaries: summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId),
+      staleThreadRootIds: [],
+    };
   }
   const retainedLiveReplyCount = messages.filter(
     (message) => message.threadRootId === tombstone.threadRootId && message.deletedAt === null,
@@ -477,21 +496,30 @@ function retractReplySummary(
   // A partial page cannot prove which surviving server reply is latest. Drop its summary until a
   // refresh can replace it instead of promoting a reply that is known to be incomplete.
   if (retainedLiveReplyCount !== remainingReplyCount) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+    return {
+      summaries: summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId),
+      staleThreadRootIds: [tombstone.threadRootId],
+    };
   }
   const latestReply = newestLiveReply(messages, tombstone.threadRootId);
   if (latestReply === null) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+    return {
+      summaries: summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId),
+      staleThreadRootIds: [tombstone.threadRootId],
+    };
   }
-  return summaries.map((candidate) =>
-    candidate.threadRootId === tombstone.threadRootId
-      ? {
-          ...candidate,
-          replyCount: remainingReplyCount,
-          latestReply,
-        }
-      : candidate,
-  );
+  return {
+    summaries: summaries.map((candidate) =>
+      candidate.threadRootId === tombstone.threadRootId
+        ? {
+            ...candidate,
+            replyCount: remainingReplyCount,
+            latestReply,
+          }
+        : candidate,
+    ),
+    staleThreadRootIds: [],
+  };
 }
 
 function syncFailureMessage(
@@ -4017,13 +4045,21 @@ export class WorkspaceRuntime {
         ? []
         : mentionedMemberIds(tombstone.body, snapshot.members, summary.participantIds));
     this.#createdMessageMentions.delete(tombstone.id);
+    const retraction =
+      applyRetractEffects &&
+      !this.#invalidatedThreadSummaryConversationIds.has(tombstone.conversationId)
+        ? retractReplySummary(this.#state.threadSummaries, messages, tombstone)
+        : null;
+    const staleSummaryDropped = retraction !== null && retraction.staleThreadRootIds.length > 0;
+    const threadSummaries =
+      retraction === null
+        ? this.#state.threadSummaries
+        : staleSummaryDropped
+          ? this.#invalidateConversationThreadSummaries(tombstone.conversationId)
+          : retraction.summaries;
     this.#setState({
       messages,
-      threadSummaries:
-        applyRetractEffects &&
-        !this.#invalidatedThreadSummaryConversationIds.has(tombstone.conversationId)
-          ? retractReplySummary(this.#state.threadSummaries, messages, tombstone)
-          : this.#state.threadSummaries,
+      threadSummaries,
       reactions: this.#state.reactions.filter((reaction) => reaction.messageId !== tombstone.id),
       attachments: replaceMessageAttachments(this.#state.attachments, [tombstone.id], []),
       conversationFiles: this.#state.conversationFiles.filter(
@@ -4056,6 +4092,11 @@ export class WorkspaceRuntime {
                 };
               }),
     });
+    if (staleSummaryDropped) {
+      // Only the server can replace the dropped summary. Join the projection queue like the
+      // source-less retract path so the refresh cannot race an in-flight projection.
+      void this.#serialize(() => this.#refreshSourceLessRetractMetadata(this.#generation));
+    }
   }
 
   #projectEvent(event: WorkspaceEvent): void {
@@ -4473,6 +4514,7 @@ export class WorkspaceRuntime {
     const liveMessageIds = new Set(
       loaded.messages.filter((message) => message.deletedAt === null).map((message) => message.id),
     );
+    let summariesInvalidated = false;
     for (const message of loaded.messages) {
       const previous = currentMessages.get(message.id);
       if (this.#invalidatedThreadSummaryConversationIds.has(message.conversationId)) {
@@ -4481,7 +4523,16 @@ export class WorkspaceRuntime {
       }
       if (message.deletedAt !== null) {
         if (previous === undefined || previous.deletedAt === null) {
-          threadSummaries = retractReplySummary(threadSummaries, loaded.messages, message);
+          const retraction = retractReplySummary(threadSummaries, loaded.messages, message);
+          if (retraction.staleThreadRootIds.length > 0) {
+            this.#invalidateConversationThreadSummaries(message.conversationId);
+            summariesInvalidated = true;
+            threadSummaries = threadSummaries.filter(
+              (summary) => summary.latestReply.conversationId !== message.conversationId,
+            );
+          } else {
+            threadSummaries = retraction.summaries;
+          }
         }
       } else if (message.threadRootId !== null) {
         threadSummaries = projectReplySummary(threadSummaries, message, previous === undefined);
@@ -4504,6 +4555,11 @@ export class WorkspaceRuntime {
       tasks: loaded.tasks,
       outbox: loaded.outbox,
     });
+    if (summariesInvalidated) {
+      // Only the server can replace summaries dropped over incomplete pages; refresh through the
+      // projection queue like the source-less retract path.
+      void this.#serialize(() => this.#refreshSourceLessRetractMetadata(generation));
+    }
     return true;
   }
 
