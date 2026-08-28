@@ -486,9 +486,10 @@ roll directly into the gatorlunch cluster.
   dispatch retains native self-hosted coverage. macOS DEV artifacts are ad-hoc signed; the Windows
   and Ubuntu artifacts remain unsigned. Its signed macOS notification-evidence job selects the
   production identity because that evidence applies to a release candidate.
-- `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release on
-  disposable GitHub-hosted ARM64 runners. Signing and notarization material arrives only through
-  the `release` environment's secrets, so no persistent host holds release credentials.
+- `desktop-release.yml` builds, signs, notarizes, and verifies a tagged release on disposable
+  GitHub-hosted ARM64 runners, then stages its files in a draft GitHub Release. The protected
+  `release` environment has one final approval before it publishes update manifests, the download
+  page, and the GitHub Release. No persistent host holds release credentials.
 
 The desktop half cannot move to the homelab: macOS artifacts must be built and signed on macOS,
 and Windows installers on Windows. GitHub provides those runners; the homelab does not.

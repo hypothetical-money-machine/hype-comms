@@ -26,6 +26,9 @@ publishes installers to `https://updates.hypemm.com/desktop`, and creates the Gi
    exists. The next patch is current + 1 unless the user named a different stable version.
 5. Confirm that the release workflow's `HYPE_COMMS_API_ORIGIN` names the deployed HTTPS API.
    Production packaging rejects a missing value or a `.invalid` host.
+6. Confirm macOS/Windows signing secrets are repository or organization secrets available to the
+   package jobs. Keep the Garage update-bucket key pair in the protected `release` environment:
+   the final publisher is the only job that needs it.
 
 ## Prepare
 

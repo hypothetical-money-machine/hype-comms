@@ -726,8 +726,9 @@ Pull requests and pushes to `main` build DEV smoke packages on disposable GitHub
 macOS, Windows, and Linux runners: macOS packages are ad-hoc signed, while Windows and Linux
 packages remain unsigned. Manual smoke dispatches retain coverage on the isolated native
 self-hosted runners. Only a version tag on `main` whose name matches the desktop package version
-may invoke release jobs and credentials, which are protected by the `release` environment and
-delivered only to disposable GitHub-hosted runners.
+may invoke release jobs. Those jobs build, sign, notarize, verify, and stage files in a draft
+GitHub Release on disposable GitHub-hosted runners. The protected `release` environment gates the
+single final job that publishes the update feed, download page, and public GitHub Release.
 The current release path publishes immutable artifacts and manifests to the S3-compatible storage-backed generic
 feed. Its platform-signature status is:
 
