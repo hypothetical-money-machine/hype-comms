@@ -16,6 +16,8 @@ import {
   resolveExpectedAgentWakePackageEvidence,
   verifyAgentWakeBuild,
   verifyAgentWakeUpdateIsolation,
+  verifyProtocolHandlerDesktopEntry,
+  verifyDesktopEntryMimeType,
   verifyPackageEntries,
   verifyPackageMetadata,
   verifyPackagedApiOrigin,
@@ -301,6 +303,92 @@ test("requires publisherName in production update config when Windows signing is
       process.env.HYPE_COMMS_WINDOWS_PUBLISHER_NAME = previousPublisher;
     }
   }
+});
+
+const protocolIdentityMain = (desktopName) =>
+  Buffer.from(
+    [
+      "configureApplicationIdentity(electron.app, process.platform, {",
+      `  appId: "${PRODUCTION_DESKTOP_BUILD_FLAVOR.appId}",`,
+      `  desktopName: "${desktopName}",`,
+      "  isProductionBuild: true",
+      "});",
+    ].join("\n"),
+  );
+
+const desktopEntrySource = (mimeType) =>
+  Buffer.from(["[Desktop Entry]", "Type=Application", `MimeType=${mimeType};`, ""].join("\n"));
+
+test("requires the packaged Linux desktop entry to name the application identity", () => {
+  const productionEntry = desktopEntrySource(
+    `x-scheme-handler/${PRODUCTION_DESKTOP_BUILD_FLAVOR.protocolScheme}`,
+  );
+  const developmentEntry = desktopEntrySource(
+    `x-scheme-handler/${DEVELOPMENT_DESKTOP_BUILD_FLAVOR.protocolScheme}`,
+  );
+
+  assert.doesNotThrow(() =>
+    verifyProtocolHandlerDesktopEntry(
+      protocolIdentityMain(PRODUCTION_DESKTOP_BUILD_FLAVOR.desktopName),
+      productionEntry,
+      PRODUCTION_DESKTOP_BUILD_FLAVOR,
+    ),
+  );
+  assert.doesNotThrow(() =>
+    verifyProtocolHandlerDesktopEntry(
+      protocolIdentityMain(DEVELOPMENT_DESKTOP_BUILD_FLAVOR.desktopName),
+      developmentEntry,
+      DEVELOPMENT_DESKTOP_BUILD_FLAVOR,
+    ),
+  );
+  assert.throws(
+    () =>
+      verifyProtocolHandlerDesktopEntry(
+        Buffer.from("no identity").toString("utf8"),
+        productionEntry,
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+      ),
+    /desktop main has no application identity/u,
+  );
+  assert.throws(
+    () =>
+      verifyProtocolHandlerDesktopEntry(
+        protocolIdentityMain(DEVELOPMENT_DESKTOP_BUILD_FLAVOR.desktopName),
+        productionEntry,
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+      ),
+    /application identity must be com\.hypemm\.hypecomms\.desktop/u,
+  );
+});
+
+test("requires the packaged Linux desktop entry to declare the scheme", () => {
+  const { desktopName, protocolScheme } = PRODUCTION_DESKTOP_BUILD_FLAVOR;
+  const missingSchemeEntry = desktopEntrySource("");
+  const wrongSchemeEntry = desktopEntrySource(
+    `x-scheme-handler/${DEVELOPMENT_DESKTOP_BUILD_FLAVOR.protocolScheme}`,
+  );
+  const expectedError = `${desktopName} must declare MimeType=x-scheme-handler/${protocolScheme}; extract-launched AppImages rely on an installed desktop entry for Xfce`;
+
+  assert.doesNotThrow(() =>
+    verifyDesktopEntryMimeType(
+      desktopEntrySource(`x-scheme-handler/${protocolScheme}`),
+      PRODUCTION_DESKTOP_BUILD_FLAVOR,
+    ),
+  );
+  assert.doesNotThrow(() =>
+    verifyDesktopEntryMimeType(
+      desktopEntrySource(`x-scheme-handler/${DEVELOPMENT_DESKTOP_BUILD_FLAVOR.protocolScheme}`),
+      DEVELOPMENT_DESKTOP_BUILD_FLAVOR,
+    ),
+  );
+  assert.throws(
+    () => verifyDesktopEntryMimeType(missingSchemeEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
+    expectedError,
+  );
+  assert.throws(
+    () => verifyDesktopEntryMimeType(wrongSchemeEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
+    /found x-scheme-handler\/hype-comms-dev/u,
+  );
 });
 
 test("requires packaged metadata to carry the selected native identity", () => {

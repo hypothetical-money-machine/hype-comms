@@ -20,6 +20,9 @@ const agentWakeOperatorCall =
 // Vite substitutes a dedicated updates-allowed define directly. Accept the equivalent boolean
 // spellings Rolldown may retain or minify without depending on constant folding.
 const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
+const desktopNamePolicy =
+  /configureApplicationIdentity\([^,]+,\s*process\.platform,\s*\{\s*appId:\s*"([^"]+)",\s*desktopName:\s*"([^"]+)",/gu;
+const mimeTypePolicy = /MimeType=([^;\n]*);/u;
 const requiredAsarEntries = [
   "/dist/main/build-metadata.json",
   "/dist/main/index.js",
@@ -345,6 +348,37 @@ export function verifyAgentWakeUpdateIsolation(
   }
 }
 
+export function verifyProtocolHandlerDesktopEntry(mainSource, desktopEntrySource, flavor) {
+  const source = mainSource.toString("utf8");
+  const identityMatches = [...source.matchAll(desktopNamePolicy)];
+  if (identityMatches.length === 0) {
+    throw new Error("desktop main has no application identity");
+  }
+  const identities = new Set(identityMatches.map((match) => match[2]));
+  if (identities.size !== 1 || !identities.has(flavor.desktopName)) {
+    throw new Error(
+      `desktop main application identity must be ${flavor.desktopName}; found ${[...identities].join(", ") || "none"}`,
+    );
+  }
+
+  verifyDesktopEntryMimeType(desktopEntrySource, flavor);
+}
+
+export function verifyDesktopEntryMimeType(desktopEntrySource, flavor) {
+  const mimeTypeMatch = mimeTypePolicy.exec(desktopEntrySource.toString("utf8"));
+  mimeTypePolicy.lastIndex = 0;
+  if (mimeTypeMatch === null) {
+    throw new Error(
+      `${flavor.desktopName} must declare MimeType=x-scheme-handler/${flavor.protocolScheme}; extract-launched AppImages rely on an installed desktop entry for Xfce`,
+    );
+  }
+  if (mimeTypeMatch[1] !== `x-scheme-handler/${flavor.protocolScheme}`) {
+    throw new Error(
+      `${flavor.desktopName} MimeType must be x-scheme-handler/${flavor.protocolScheme}; found ${mimeTypeMatch[1]}`,
+    );
+  }
+}
+
 export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
@@ -365,6 +399,16 @@ export async function verifyDesktopPackages(
     throw new Error(`No packaged app.asar found under ${releaseRoot}`);
   }
 
+  const desktopEntryPaths = await collectPackageFiles(
+    releaseRoot,
+    `${flavor.desktopName}`,
+    excludedDirectories,
+  );
+  if (desktopEntryPaths.length === 0) {
+    throw new Error(`No packaged ${flavor.desktopName} desktop entry found under ${releaseRoot}`);
+  }
+
+  const desktopEntrySource = await readFile(desktopEntryPaths[0]);
   for (const asarPath of asarPaths) {
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
@@ -375,6 +419,11 @@ export async function verifyDesktopPackages(
     verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
     verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
+    verifyProtocolHandlerDesktopEntry(
+      extractFile(asarPath, "/dist/main/index.js"),
+      desktopEntrySource,
+      flavor,
+    );
 
     const executablePath = await executableForAsar(asarPath, flavor);
     const fuseWire = await getCurrentFuseWire(executablePath);
