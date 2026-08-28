@@ -17,10 +17,12 @@ import {
   type NotificationAction,
   type NotificationContext,
   type ProductRealtimeEvent,
+  type PresenceState,
   type Reaction,
   type ReactionEmoji,
   type RealtimeSessionScope,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
   type SyncAttemptResult,
   type Task,
   type TaskPriority,
@@ -40,9 +42,11 @@ import {
   MemoryWorkspaceCache,
   newestLiveMessage,
   PersistentWorkspaceCache,
+  projectConversationMembershipChange,
   applyRetractReservation,
   preferRetainedMessage,
   retractedMessageIds,
+  membershipRoleForConversationEvent,
   retractReservationMap,
   rememberCreatedMessageMentions,
   tombstoneMessage,
@@ -79,6 +83,9 @@ export interface WorkspaceRuntimeState {
   readonly threadLoading: boolean;
   readonly threadError: string | null;
   readonly connection: RealtimeConnectionState;
+  /** Ephemeral only: absent members are offline, and neither map is written to the cache. */
+  readonly presenceByUser: Readonly<Record<string, PresenceState>>;
+  readonly typingByConversation: Readonly<Record<string, readonly string[]>>;
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly cacheFallbackReason: CacheFallbackReason | null;
   readonly stale: boolean;
@@ -165,6 +172,8 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   threadLoading: false,
   threadError: null,
   connection: "offline",
+  presenceByUser: {},
+  typingByConversation: {},
   cacheMode: null,
   cacheFallbackReason: null,
   stale: true,
@@ -223,6 +232,16 @@ function compareSequence(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
   return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+function isSelfMembershipChange(
+  event: ProductRealtimeEvent,
+  userId: string | null,
+): event is Extract<WorkspaceEvent, { type: "channel.membership_changed" }> {
+  return (
+    event.type === "channel.membership_changed" &&
+    (userId === null || event.payload.memberId === userId)
+  );
 }
 
 /**
@@ -636,6 +655,9 @@ export class WorkspaceRuntime {
   readonly #locallyProjectedRetracts = new Set<string>();
   #unsubscribeEvent: (() => void) | null = null;
   #unsubscribeConnection: (() => void) | null = null;
+  #unsubscribeActivity: (() => void) | null = null;
+  readonly #presenceExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(client: DesktopApi, options: WorkspaceRuntimeOptions = {}) {
     this.#client = client;
@@ -723,6 +745,7 @@ export class WorkspaceRuntime {
     this.#realtimeEpoch += 1;
     this.#startupReplicaCatchUpPending = false;
     this.#startupRealtimePending = false;
+    this.#clearActivity(true);
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
     this.#membersDirty = false;
     this.#clearReadTargets();
@@ -747,6 +770,7 @@ export class WorkspaceRuntime {
     }
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
+    this.#unsubscribeActivity?.();
     this.#eventQueue = Promise.resolve();
     this.#realtimeScope = null;
     // A session restart can reuse the same privileged main process. Stop any socket created by
@@ -766,7 +790,7 @@ export class WorkspaceRuntime {
       }
       const event = frame.event;
       const realtimeEpoch = this.#realtimeEpoch;
-      if (event.type === "channel.membership_changed") {
+      if (isSelfMembershipChange(event, frame.scope.userId)) {
         // Abort cache transactions synchronously, before the event queue can wait behind the
         // projection they must roll back. The repair itself receives the fresh signal.
         this.#rotateProjectionBarrier();
@@ -801,8 +825,19 @@ export class WorkspaceRuntime {
     });
     this.#unsubscribeConnection = this.#client.onRealtimeStateChanged((connection) => {
       if (generation !== this.#generation || this.#realtimeScope === null) return;
+      if (connection !== "live") this.#clearActivity(true);
       this.#setState({ connection });
     });
+    this.#unsubscribeActivity =
+      this.#client.onWorkspaceActivity?.((frame: ScopedEphemeralActivityFrame) => {
+        if (
+          !this.#isActiveRealtimeScope(frame.scope, generation) ||
+          frame.activity.workspaceId !== frame.scope.workspaceId
+        ) {
+          return;
+        }
+        this.#applyActivity(frame, generation);
+      }) ?? null;
 
     // Kept on the runtime, not just in this call: `stop()` runs before the reset a sign-out does,
     // and that reset has to know which member's database it is allowed to delete.
@@ -929,8 +964,11 @@ export class WorkspaceRuntime {
     this.#startupRealtimePending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
+    this.#unsubscribeActivity?.();
     this.#unsubscribeEvent = null;
     this.#unsubscribeConnection = null;
+    this.#unsubscribeActivity = null;
+    this.#clearActivity(false);
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
     if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
@@ -959,6 +997,85 @@ export class WorkspaceRuntime {
       this.#realtimeScope !== null &&
       sameRealtimeScope(candidate, this.#realtimeScope)
     );
+  }
+
+  /** Best-effort renderer command; main owns throttling, coalescing, and local expiry. */
+  setTyping(conversationId: string, typing: boolean): void {
+    const scope = this.#realtimeScope;
+    if (scope === null || this.#client.setWorkspaceTyping === undefined) return;
+    void this.#client.setWorkspaceTyping({ scope, conversationId, typing }).catch(() => undefined);
+  }
+
+  #applyActivity(frame: ScopedEphemeralActivityFrame, generation: number): void {
+    const activity = frame.activity;
+    if (activity.type === "activity.presence") {
+      const existing = this.#presenceExpiryTimers.get(activity.userId);
+      if (existing !== undefined) clearTimeout(existing);
+      const presenceByUser = { ...this.#state.presenceByUser };
+      if (activity.state === "offline") {
+        delete presenceByUser[activity.userId];
+        this.#presenceExpiryTimers.delete(activity.userId);
+      } else {
+        presenceByUser[activity.userId] = activity.state;
+        const timer = setTimeout(() => {
+          if (
+            generation !== this.#generation ||
+            this.#presenceExpiryTimers.get(activity.userId) !== timer
+          ) {
+            return;
+          }
+          this.#presenceExpiryTimers.delete(activity.userId);
+          const next = { ...this.#state.presenceByUser };
+          delete next[activity.userId];
+          this.#setState({ presenceByUser: next });
+        }, 45_000);
+        this.#presenceExpiryTimers.set(activity.userId, timer);
+      }
+      this.#setState({ presenceByUser });
+      return;
+    }
+
+    const key = `${activity.conversationId}:${activity.userId}`;
+    const existing = this.#typingExpiryTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+    this.#setTypingMember(activity.conversationId, activity.userId, activity.typing);
+    if (!activity.typing) {
+      this.#typingExpiryTimers.delete(key);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (generation !== this.#generation || this.#typingExpiryTimers.get(key) !== timer) {
+        return;
+      }
+      this.#typingExpiryTimers.delete(key);
+      this.#setTypingMember(activity.conversationId, activity.userId, false);
+    }, 8_000);
+    this.#typingExpiryTimers.set(key, timer);
+  }
+
+  #setTypingMember(conversationId: string, userId: string, typing: boolean): void {
+    const current = this.#state.typingByConversation[conversationId] ?? [];
+    const members = new Set(current);
+    if (typing) members.add(userId);
+    else members.delete(userId);
+    const typingByConversation = { ...this.#state.typingByConversation };
+    if (members.size === 0) delete typingByConversation[conversationId];
+    else typingByConversation[conversationId] = [...members].sort();
+    this.#setState({ typingByConversation });
+  }
+
+  #clearActivity(publish: boolean): void {
+    for (const timer of this.#presenceExpiryTimers.values()) clearTimeout(timer);
+    for (const timer of this.#typingExpiryTimers.values()) clearTimeout(timer);
+    this.#presenceExpiryTimers.clear();
+    this.#typingExpiryTimers.clear();
+    if (
+      publish &&
+      (Object.keys(this.#state.presenceByUser).length > 0 ||
+        Object.keys(this.#state.typingByConversation).length > 0)
+    ) {
+      this.#setState({ presenceByUser: {}, typingByConversation: {} });
+    }
   }
 
   async #acknowledgeCurrentScope(cursor: string, generation: number): Promise<void> {
@@ -2261,6 +2378,7 @@ export class WorkspaceRuntime {
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
     this.#clearReadTargets();
+    this.#clearActivity(false);
     const scope = this.#scope;
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
@@ -2290,9 +2408,20 @@ export class WorkspaceRuntime {
       const icon = summary.conversation.channelMode === "announcement" ? "📣" : "#";
       return `${icon} ${summary.conversation.name ?? summary.conversation.slug ?? "channel"}`;
     }
-    const otherId = summary.participantIds.find(
-      (id) => id !== this.#state.bootstrap?.currentUser.user.id,
-    );
+    const currentUserId = this.#state.bootstrap?.currentUser.user.id;
+    const otherIds = summary.participantIds.filter((id) => id !== currentUserId);
+    if (summary.conversation.kind === "group_direct_message") {
+      if (otherIds.length === 0) return "Group conversation";
+      const names = otherIds.map(
+        (id) =>
+          this.#state.bootstrap?.members.find((member) => member.id === id)?.displayName ??
+          "Former member",
+      );
+      const visibleNames = names.slice(0, 3);
+      const remaining = names.length - visibleNames.length;
+      return `${visibleNames.join(", ")}${remaining > 0 ? ` +${String(remaining)}` : ""}`;
+    }
+    const otherId = otherIds[0];
     if (otherId === undefined) {
       return this.#state.bootstrap?.currentUser.user.displayName ?? "Direct message";
     }
@@ -2855,7 +2984,7 @@ export class WorkspaceRuntime {
         // here and drained once below. Without this the fix would only work while the app is
         // online, and a disable that landed during a backfill would survive the catch-up.
         if (event.type === "member.updated") this.#membersDirty = true;
-        if (event.type === "channel.membership_changed") {
+        if (isSelfMembershipChange(event, this.#scope?.userId ?? null)) {
           const repaired = await this.#repairMembershipEvent(event, generation, false);
           if (generation !== this.#generation || cache !== this.#cache) return;
           if (repaired) {
@@ -3732,7 +3861,7 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    if (event.type === "channel.membership_changed") {
+    if (isSelfMembershipChange(event, realtimeScope.userId)) {
       await this.#repairMembershipEvent(event, generation, true);
       return;
     }
@@ -4038,18 +4167,29 @@ export class WorkspaceRuntime {
       });
       return;
     }
-    // Both are invalidation signals rather than deltas: `#applyWorkspaceEvent` answers them with a
-    // server re-read and never reaches this projection. `member.updated` in particular must have
-    // no upsert path here — that is the whole reason a disable used to re-assert the disabled
-    // member instead of removing it.
-    if (event.type === "channel.membership_changed" || event.type === "member.updated") {
+    if (event.type === "channel.membership_changed") {
+      this.#setState({
+        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
+          current === undefined ? null : projectConversationMembershipChange(current, event),
+        ),
+      });
+      return;
+    }
+    // `member.updated` is an invalidation signal rather than a delta: `#applyWorkspaceEvent`
+    // answers it with a server re-read and never reaches this projection. It must have no upsert
+    // path here because the payload cannot say that a member was disabled.
+    if (event.type === "member.updated") {
       return;
     }
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,
         participantIds: [...event.payload.participantIds],
-        membershipRole: current?.membershipRole ?? null,
+        membershipRole: membershipRoleForConversationEvent(
+          event.payload.conversation,
+          current?.membershipRole,
+          snapshot.currentUser.user.id,
+        ),
         lastMessage: current?.lastMessage ?? null,
         unreadCount: current?.unreadCount ?? 0,
         mentionCount: current?.mentionCount ?? 0,

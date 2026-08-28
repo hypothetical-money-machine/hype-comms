@@ -9,6 +9,7 @@
     "declarationMap": true,
     "sourceMap": true,
     "composite": true,
+    "rewriteRelativeImportExtensions": true,
     "exactOptionalPropertyTypes": true
   },
   "include": ["src/**/*.ts"],

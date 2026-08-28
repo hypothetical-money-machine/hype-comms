@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      agent_wake_package_evidence:
+        description: Build a signed, notarized macOS arm64 Agent Wake pilot package
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
     paths:
@@ -72,6 +77,10 @@ jobs:
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "macOS", "ARM64", "notarize"]' || '["macos-15"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "1"
+            cache_paths: |
+              ~/.npm
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
           - platform: Windows
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Windows", "ARM64", "windows-release"]' || '["windows-11-arm"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
@@ -84,10 +93,16 @@ jobs:
             runner: ${{ github.event_name == 'workflow_dispatch' && '["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"]' || '["ubuntu-24.04-arm"]' }}
             self_hosted: ${{ github.event_name == 'workflow_dispatch' }}
             native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/.cache/electron
+              ~/.cache/electron-builder
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 60
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      HYPE_COMMS_AGENT_WAKE_ENABLED: "0"
+      HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: ${{ matrix.native_notifications_enabled }}
     steps:
       - name: Check out source
@@ -99,10 +114,11 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      # Hosted Windows dependency installation is several minutes slower than the Unix lanes.
-      # Cache downloads there, but rebuild node_modules and the application from source.
-      - name: Restore Windows desktop dependency downloads
-        if: matrix.platform == 'Windows' && !matrix.self_hosted
+      # Cache downloads only, and rebuild node_modules and the application from source. Trusted
+      # pushes to main keep these caches warm for the desktop release workflow, which restores
+      # them under the same key without saving.
+      - name: Restore desktop dependency downloads
+        if: ${{ !matrix.self_hosted }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ matrix.cache_paths }}
@@ -172,6 +188,7 @@ jobs:
         if: matrix.platform == 'Linux'
         env:
           HYPE_COMMS_BUILD_FLAVOR: production
+          HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
         shell: sh
         run: npm run package:desktop:linux
 
@@ -179,19 +196,25 @@ jobs:
         if: matrix.platform == 'Linux'
         env:
           HYPE_COMMS_BUILD_FLAVOR: production
+          HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
         shell: sh
         run: npm run verify:desktop-package
 
   macos-native-notification-evidence:
-    name: Capture signed macOS native notification evidence
-    if: github.event_name == 'workflow_dispatch' && inputs.native_notification_evidence
+    name: Build signed macOS evidence package
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.native_notification_evidence || inputs.agent_wake_package_evidence)
     runs-on: [self-hosted, macOS, ARM64, notarize]
     environment: release
     timeout-minutes: 60
     env:
       HYPE_COMMS_BUILD_FLAVOR: production
+      HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
       HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"
-      HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: "1"
+      HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: ${{ inputs.native_notification_evidence && '1' || '0' }}
+      HYPE_COMMS_AGENT_WAKE_ENABLED: ${{ inputs.agent_wake_package_evidence && '1' || '0' }}
+      HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: ${{ inputs.agent_wake_package_evidence && '1' || '0' }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -303,6 +326,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build signed macOS capture helper
+        if: inputs.native_notification_evidence
         shell: bash
         run: |
           helper_bundle="${RUNNER_TEMP}/Hype Comms Evidence.app"
@@ -342,13 +366,18 @@ jobs:
 
       - name: Package signed and notarized macOS application
         shell: sh
-        run: npm run package:desktop:mac
+        run: npm run package:desktop:mac:arm64
+
+      - name: Verify packaged application contents, updater, and fuses
+        shell: sh
+        run: npm run verify:desktop-package
 
       - name: Verify macOS release signing and notarization
         shell: bash
         run: npm run verify:desktop-package:macos-release
 
       - name: Await unlocked console and authorize macOS capture helper
+        if: inputs.native_notification_evidence
         shell: bash
         run: |
           helper_bundle="$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"
@@ -392,6 +421,7 @@ jobs:
           fi
 
       - name: Capture installed notification and click callback
+        if: inputs.native_notification_evidence
         shell: bash
         run: |
           evidence_directory="${RUNNER_TEMP}/hmm-macos-native-notification-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -430,6 +460,20 @@ jobs:
             ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/failed.json
             ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/macos-native-notification.png
             ${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/macos-native-notification-clicked.png
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signed Agent Wake pilot package
+        if: inputs.agent_wake_package_evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-arm64-agent-wake-package
+          path: |
+            apps/desktop/release/hype-comms-*-mac-arm64.dmg
+            apps/desktop/release/hype-comms-*-mac-arm64.dmg.blockmap
+            apps/desktop/release/hype-comms-*-mac-arm64.zip
+            apps/desktop/release/hype-comms-*-mac-arm64.zip.blockmap
+            apps/desktop/release/latest-mac.yml
           if-no-files-found: error
           retention-days: 7
 

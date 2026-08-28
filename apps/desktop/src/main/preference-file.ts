@@ -1,8 +1,116 @@
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { chmod, mkdir, open, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 export type SyncDirectory = (directory: string) => Promise<void>;
+
+export interface PrivateReadableFileHandle {
+  stat(): Promise<{
+    readonly uid: number;
+    readonly mode: number;
+    readonly size: number;
+    isFile(): boolean;
+  }>;
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): Promise<{ readonly bytesRead: number }>;
+  close(): Promise<void>;
+}
+
+export type PrivateFileOpen = (
+  filePath: string,
+  flags: number,
+) => Promise<PrivateReadableFileHandle>;
+
+export type PrivateFileReadResult =
+  | { readonly status: "ok"; readonly value: string }
+  | { readonly status: "invalid" }
+  | { readonly status: "unavailable" };
+
+export interface PrivateFileReadOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly currentUid?: number | undefined;
+  readonly openFile?: PrivateFileOpen;
+}
+
+const defaultPrivateFileOpen: PrivateFileOpen = (filePath, flags) => open(filePath, flags);
+
+function noFollowRejected(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ELOOP" || code === "EMLINK";
+}
+
+/**
+ * Opens and validates a private file through one descriptor, then performs a capped read from that
+ * same descriptor. On POSIX, `O_NOFOLLOW`, owner matching, and private mode checks prevent a
+ * checked pathname from being replaced with a different file before it is read.
+ */
+export async function readPrivateBoundedUtf8File(
+  filePath: string,
+  maxBytes: number,
+  options: PrivateFileReadOptions = {},
+): Promise<PrivateFileReadResult> {
+  const platform = options.platform ?? process.platform;
+  const flags =
+    platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
+  let file: PrivateReadableFileHandle;
+  try {
+    file = await (options.openFile ?? defaultPrivateFileOpen)(filePath, flags);
+  } catch (error) {
+    return { status: noFollowRejected(error) ? "invalid" : "unavailable" };
+  }
+
+  let result: PrivateFileReadResult;
+  try {
+    const metadata = await file.stat();
+    const currentUid =
+      options.currentUid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+    if (
+      !metadata.isFile() ||
+      metadata.size <= 0 ||
+      metadata.size > maxBytes ||
+      (platform !== "win32" &&
+        ((metadata.mode & 0o077) !== 0 || currentUid === undefined || metadata.uid !== currentUid))
+    ) {
+      result = { status: "invalid" };
+    } else {
+      const bytes = Buffer.alloc(maxBytes + 1);
+      let totalBytesRead = 0;
+      while (totalBytesRead < bytes.length) {
+        const next = await file.read(bytes, totalBytesRead, bytes.length - totalBytesRead, null);
+        if (next.bytesRead === 0) break;
+        totalBytesRead += next.bytesRead;
+      }
+      if (totalBytesRead === 0 || totalBytesRead > maxBytes) {
+        result = { status: "invalid" };
+      } else {
+        try {
+          result = {
+            status: "ok",
+            value: new TextDecoder("utf-8", { fatal: true }).decode(
+              bytes.subarray(0, totalBytesRead),
+            ),
+          };
+        } catch {
+          result = { status: "invalid" };
+        }
+      }
+    }
+  } catch {
+    result = { status: "unavailable" };
+  }
+
+  try {
+    await file.close();
+  } catch {
+    return { status: "unavailable" };
+  }
+  return result;
+}
 
 export async function syncDirectoryStrict(directory: string): Promise<void> {
   const directoryHandle = await open(directory, "r");

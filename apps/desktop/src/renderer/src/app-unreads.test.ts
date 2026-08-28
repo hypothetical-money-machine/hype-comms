@@ -30,6 +30,8 @@ const GENERAL_ID = "30000000-0000-4000-8000-000000000003";
 const LAUNCH_ID = "30000000-0000-4000-8000-000000000004";
 const DAN_ID = "30000000-0000-4000-8000-000000000005";
 const DAN_DM_ID = "30000000-0000-4000-8000-000000000006";
+const ATHENA_ID = "30000000-0000-4000-8000-000000000009";
+const GROUP_DM_ID = "30000000-0000-4000-8000-00000000000a";
 const NOW = "2026-08-20T12:00:00.000Z";
 
 const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }> = {
@@ -108,6 +110,15 @@ const bootstrap = {
       createdAt: NOW,
       updatedAt: NOW,
     },
+    {
+      id: ATHENA_ID,
+      kind: "agent",
+      username: "athena",
+      displayName: "Athena",
+      avatarUrl: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
   ],
   conversations: [
     {
@@ -173,6 +184,28 @@ const bootstrap = {
       membershipRole: null,
       lastMessage: danMessage,
       unreadCount: 2,
+      mentionCount: 0,
+      readCursor: null,
+    },
+    {
+      conversation: {
+        id: GROUP_DM_ID,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        channelMode: null,
+        isArchived: false,
+        createdBy: USER_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, DAN_ID, ATHENA_ID],
+      membershipRole: "owner",
+      lastMessage: null,
+      unreadCount: 0,
       mentionCount: 0,
       readCursor: null,
     },
@@ -392,6 +425,16 @@ async function renderWorkspace(
 afterEach(() => cleanup());
 
 describe("in-app Unreads destination", () => {
+  it("shows and opens a group conversation under direct messages", async () => {
+    await renderWorkspace();
+
+    const group = screen.getByRole("button", { name: "Dan, Athena" });
+    expect(group.querySelector(".group-direct-message-avatar")).toBeTruthy();
+    fireEvent.click(group);
+
+    expect(screen.getByRole("heading", { name: "Dan, Athena" })).toBeTruthy();
+  });
+
   it("opens the Unreads list from the sidebar and jumps to a conversation", async () => {
     await renderWorkspace();
 

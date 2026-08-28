@@ -4,9 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { workspaceEventSchema } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool } from "pg";
+import {
+  agentCurrentPrincipalSchema,
+  agentTokenSchema,
+  listAgentTokensResponseSchema,
+  workspaceEventSchema,
+} from "@hype-comms/contracts";
+import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
@@ -73,7 +79,15 @@ async function withoutMigration(
 }
 
 async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
-  await withoutMigrations(["0013_agents.sql", "0023_default_agent_agency.sql"], fn);
+  await withoutMigrations(
+    [
+      "0013_agents.sql",
+      "0023_default_agent_agency.sql",
+      "0025_public_channel_membership.sql",
+      "0027_read_only_agent_attachments.sql",
+    ],
+    fn,
+  );
 }
 
 async function withoutTokenLineageMigration(fn: (migrationsDirectory: URL) => Promise<void>) {
@@ -117,6 +131,10 @@ describeWithPostgres("runMigrations", () => {
           "0021_message_retract.sql",
           "0022_member_title.sql",
           "0023_default_agent_agency.sql",
+          "0024_ephemeral_activity_capability.sql",
+          "0025_public_channel_membership.sql",
+          "0026_group_direct_messages.sql",
+          "0027_read_only_agent_attachments.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -149,6 +167,10 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0021_message_retract.sql" },
         { filename: "0022_member_title.sql" },
         { filename: "0023_default_agent_agency.sql" },
+        { filename: "0024_ephemeral_activity_capability.sql" },
+        { filename: "0025_public_channel_membership.sql" },
+        { filename: "0026_group_direct_messages.sql" },
+        { filename: "0027_read_only_agent_attachments.sql" },
       ]);
 
       const userId = randomUUID();
@@ -210,7 +232,6 @@ describeWithPostgres("runMigrations", () => {
           [randomUUID(), workspaceId, userId],
         ),
       ).resolves.toMatchObject({ rowCount: 1 });
-
       const threadRootId = randomUUID();
       await pool.query(
         `INSERT INTO messages (
@@ -372,6 +393,15 @@ describeWithPostgres("runMigrations", () => {
               AND column_name = 'member_profiles'`,
         ),
       ).resolves.toMatchObject({ rows: [{ column_name: "member_profiles" }] });
+      await expect(
+        pool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'realtime_tickets'
+              AND column_name = 'group_direct_messages'`,
+        ),
+      ).resolves.toMatchObject({ rows: [{ column_name: "group_direct_messages" }] });
     });
   });
 
@@ -1060,103 +1090,419 @@ describeWithPostgres("runMigrations", () => {
     });
   });
 
-  it("preserves and authenticates pre-0023 agents with their exact legacy scopes", async () => {
+  it("preserves pre-0023 agents while adding explicit equivalents for their old access", async () => {
     await withFreshSchema(async (pool) => {
-      await withoutMigration("0023_default_agent_agency.sql", async (migrationsDirectory) => {
-        await runMigrations(pool, migrationsDirectory);
+      await withoutMigrations(
+        [
+          "0023_default_agent_agency.sql",
+          "0025_public_channel_membership.sql",
+          "0026_group_direct_messages.sql",
+          "0027_read_only_agent_attachments.sql",
+        ],
+        async (migrationsDirectory) => {
+          await runMigrations(pool, migrationsDirectory);
 
-        const ownerId = randomUUID();
-        const workspaceId = randomUUID();
-        const agentId = randomUUID();
-        const tokenId = randomUUID();
-        const legacyToken = `hype_comms_agent_${"l".repeat(43)}`;
-        const legacyTokenHash = hashToken(legacyToken);
-        const createdAt = "2026-08-22T12:00:00.000Z";
-        const legacyScopes = [
-          "workspace:read",
-          "messages:write",
-          "conversations:write",
-          "read-cursors:write",
-        ] as const;
+          const ownerId = randomUUID();
+          const workspaceId = randomUUID();
+          const agentId = randomUUID();
+          const tokenId = randomUUID();
+          const publicChannelId = randomUUID();
+          const archivedPublicChannelId = randomUUID();
+          const legacyToken = `hype_comms_agent_${"l".repeat(43)}`;
+          const legacyTokenHash = hashToken(legacyToken);
+          const createdAt = "2026-08-22T12:00:00.000Z";
+          const legacyScopes = [
+            "workspace:read",
+            "messages:write",
+            "conversations:write",
+            "read-cursors:write",
+          ] as const;
+          const migratedScopes = [...legacyScopes, "channels:join", "attachments:write"] as const;
 
-        await pool.query(
-          `INSERT INTO users (id, email, kind, username, display_name, created_at, updated_at)
+          await pool.query(
+            `INSERT INTO users (id, email, kind, username, display_name, created_at, updated_at)
            VALUES
              ($1, 'legacy-owner@example.test', 'human', 'legacy-owner', 'Legacy owner', $3, $3),
              ($2, NULL, 'agent', 'legacy_agent', 'Legacy agent', $3, $3)`,
-          [ownerId, agentId, createdAt],
-        );
-        await pool.query(
-          `INSERT INTO workspaces (id, name, slug, created_by, created_at, updated_at)
+            [ownerId, agentId, createdAt],
+          );
+          await pool.query(
+            `INSERT INTO workspaces (id, name, slug, created_by, created_at, updated_at)
            VALUES ($1, 'Legacy agents', 'legacy-agents', $2, $3, $3)`,
-          [workspaceId, ownerId, createdAt],
-        );
-        await pool.query(
-          `INSERT INTO workspace_memberships
+            [workspaceId, ownerId, createdAt],
+          );
+          await pool.query(
+            `INSERT INTO workspace_memberships
              (workspace_id, user_id, role, status, created_at, updated_at)
            VALUES
              ($1, $2, 'owner', 'active', $4, $4),
              ($1, $3, 'member', 'active', $4, $4)`,
-          [workspaceId, ownerId, agentId, createdAt],
-        );
-        await pool.query(
-          `INSERT INTO agents
+            [workspaceId, ownerId, agentId, createdAt],
+          );
+          await pool.query(
+            `INSERT INTO agents
              (user_id, workspace_id, created_by, created_at)
            VALUES ($1, $2, $3, $4)`,
-          [agentId, workspaceId, ownerId, createdAt],
-        );
-        await pool.query(
-          `INSERT INTO agent_tokens
+            [agentId, workspaceId, ownerId, createdAt],
+          );
+          await pool.query(
+            `INSERT INTO conversations
+             (id, workspace_id, kind, name, slug, channel_access, is_archived, created_by)
+           VALUES
+             ($1, $2, 'channel', 'Public', 'public', 'workspace', false, $4),
+             ($3, $2, 'channel', 'Archived public', 'archived-public', 'workspace', true, $4)`,
+            [publicChannelId, workspaceId, archivedPublicChannelId, ownerId],
+          );
+          await pool.query(
+            `INSERT INTO agent_tokens
              (id, workspace_id, agent_user_id, token_hash, label, scopes,
               created_by, created_at, last_used_at)
            VALUES ($1, $2, $3, $4, 'Legacy runtime', $5::text[], $6, $7, $7)`,
-          [tokenId, workspaceId, agentId, legacyTokenHash, [...legacyScopes], ownerId, createdAt],
-        );
+            [tokenId, workspaceId, agentId, legacyTokenHash, [...legacyScopes], ownerId, createdAt],
+          );
 
-        const repository = new IdentityRepository(pool);
-        const agentBefore = await repository.findAgent(workspaceId, agentId);
-        const tokensBefore = await repository.listAgentTokens(workspaceId, agentId);
-        expect(agentBefore).not.toBeNull();
-        expect(tokensBefore).toEqual([
-          expect.objectContaining({
-            id: tokenId,
-            agentUserId: agentId,
-            scopes: [...legacyScopes],
-            revokedAt: null,
-          }),
-        ]);
+          const preMigrationRepository = new IdentityRepository(pool);
+          const agentBefore = await preMigrationRepository.findAgent(workspaceId, agentId);
+          expect(agentBefore).not.toBeNull();
+          await expect(
+            pool.query<{ scopes: string[] }>("SELECT scopes FROM agent_tokens WHERE id = $1", [
+              tokenId,
+            ]),
+          ).resolves.toMatchObject({ rows: [{ scopes: [...legacyScopes] }] });
 
-        await expect(runMigrations(pool)).resolves.toEqual({
-          applied: ["0023_default_agent_agency.sql"],
-        });
+          await expect(runMigrations(pool)).resolves.toEqual({
+            applied: [
+              "0023_default_agent_agency.sql",
+              "0025_public_channel_membership.sql",
+              "0026_group_direct_messages.sql",
+              "0027_read_only_agent_attachments.sql",
+            ],
+          });
 
-        await expect(repository.findAgent(workspaceId, agentId)).resolves.toEqual(agentBefore);
-        await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual(
-          tokensBefore,
-        );
+          const repository = new IdentityRepository(pool);
+          await expect(repository.findAgent(workspaceId, agentId)).resolves.toEqual(agentBefore);
+          await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual([
+            expect.objectContaining({
+              id: tokenId,
+              agentUserId: agentId,
+              scopes: [...legacyScopes],
+              revokedAt: null,
+            }),
+          ]);
+          await expect(repository.listAgentTokens(workspaceId, agentId, true)).resolves.toEqual([
+            expect.objectContaining({
+              id: tokenId,
+              scopes: [...legacyScopes],
+              effectiveScopes: [...migratedScopes],
+            }),
+          ]);
+          await expect(
+            pool.query<{
+              scopes: string[];
+              inherited_channels_join: boolean;
+              inherited_attachments_write: boolean;
+            }>(
+              `SELECT scopes, inherited_channels_join, inherited_attachments_write
+                 FROM agent_tokens
+                WHERE id = $1`,
+              [tokenId],
+            ),
+          ).resolves.toMatchObject({
+            rows: [
+              {
+                scopes: [...legacyScopes],
+                inherited_channels_join: true,
+                inherited_attachments_write: true,
+              },
+            ],
+          });
+          await expect(
+            pool.query<{ conversation_id: string; left_at: Date | null; role: string }>(
+              `SELECT conversation_id, left_at, role
+               FROM conversation_memberships
+              WHERE user_id = $1`,
+              [agentId],
+            ),
+          ).resolves.toMatchObject({
+            rows: expect.arrayContaining([
+              { conversation_id: publicChannelId, left_at: null, role: "member" },
+              { conversation_id: archivedPublicChannelId, left_at: null, role: "member" },
+            ]),
+            rowCount: 2,
+          });
 
-        const service = new IdentityService(
-          repository,
-          { async sendMagicLink() {} },
-          new SignInThrottle(),
-          () => new Date(createdAt),
-          "http://127.0.0.1:3000",
+          const service = new IdentityService(
+            repository,
+            { async sendMagicLink() {} },
+            new SignInThrottle(),
+            () => new Date(createdAt),
+            "http://127.0.0.1:3000",
+          );
+          await expect(service.authenticateAgentContext(legacyToken)).resolves.toMatchObject({
+            principalKind: "agent",
+            agentTokenId: tokenId,
+            currentUser: {
+              type: "agent",
+              user: { id: agentId, kind: "agent", username: "legacy_agent" },
+              workspaceId,
+              role: "member",
+              scopes: [...legacyScopes],
+            },
+            authorizationScopes: [...migratedScopes],
+          });
+          const rollbackCompatibleService = new IdentityService(
+            repository,
+            { async sendMagicLink() {} },
+            new SignInThrottle(),
+            () => new Date(createdAt),
+            "http://127.0.0.1:3000",
+            undefined,
+            false,
+          );
+          await expect(
+            rollbackCompatibleService.authenticateAgentContext(legacyToken),
+          ).resolves.toMatchObject({
+            currentUser: { scopes: [...legacyScopes] },
+            authorizationScopes: [...migratedScopes],
+          });
+          const legacyScopeSchema = z.enum([
+            "workspace:read",
+            "messages:write",
+            "conversations:write",
+            "read-cursors:write",
+            "direct-conversations:write",
+            "agents:invite",
+          ]);
+          const legacyPrincipalSchema = agentCurrentPrincipalSchema.safeExtend({
+            scopes: z.array(legacyScopeSchema),
+          });
+          const enabledIdentity = await service.authenticateAgentContext(legacyToken);
+          if (enabledIdentity === null) throw new Error("Legacy token did not authenticate");
+          expect(() => legacyPrincipalSchema.parse(enabledIdentity.currentUser)).not.toThrow();
+          const legacyTokenListSchema = listAgentTokensResponseSchema.extend({
+            tokens: z.array(agentTokenSchema.safeExtend({ scopes: z.array(legacyScopeSchema) })),
+          });
+          const rollbackTokenList = await service.listAgentTokens(ownerId, agentId);
+          expect(() =>
+            legacyTokenListSchema.parse({
+              tokens: rollbackTokenList,
+            }),
+          ).not.toThrow();
+          await expect(service.listAgentTokens(ownerId, agentId, true)).resolves.toEqual([
+            expect.objectContaining({
+              id: tokenId,
+              scopes: [...legacyScopes],
+              effectiveScopes: [...migratedScopes],
+            }),
+          ]);
+        },
+      );
+    });
+  });
+
+  it("enforces the stored shape of group direct conversations", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const ownerId = randomUUID();
+      const firstMemberId = randomUUID();
+      const secondMemberId = randomUUID();
+      const extraMemberId = randomUUID();
+      const botId = randomUUID();
+      const workspaceId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'group-owner@example.test', 'group-owner', 'Group Owner'),
+                ($2, 'group-first@example.test', 'group-first', 'Group First'),
+                ($3, 'group-second@example.test', 'group-second', 'Group Second'),
+                ($4, 'group-extra@example.test', 'group-extra', 'Group Extra')`,
+        [ownerId, firstMemberId, secondMemberId, extraMemberId],
+      );
+      await pool.query(
+        `INSERT INTO users (id, kind, username, display_name)
+         VALUES ($1, 'bot', 'group-task-bot', 'Group Task Bot')`,
+        [botId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Group constraints', 'group-constraints', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active'),
+                ($1, $3, 'member', 'active'),
+                ($1, $4, 'member', 'active'),
+                ($1, $5, 'member', 'active'),
+                ($1, $6, 'member', 'active')`,
+        [workspaceId, ownerId, firstMemberId, secondMemberId, extraMemberId, botId],
+      );
+
+      const validGroupId = randomUUID();
+      const creation = await pool.connect();
+      try {
+        await creation.query("BEGIN");
+        await creation.query(
+          `INSERT INTO conversations (id, workspace_id, kind, created_by)
+           VALUES ($1, $2, 'group_direct_message', $3)`,
+          [validGroupId, workspaceId, ownerId],
         );
-        await expect(service.authenticateAgentContext(legacyToken)).resolves.toMatchObject({
-          principalKind: "agent",
-          agentTokenId: tokenId,
-          currentUser: {
-            type: "agent",
-            user: { id: agentId, kind: "agent", username: "legacy_agent" },
-            workspaceId,
-            role: "member",
-            scopes: [...legacyScopes],
-          },
-        });
-        await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual(
-          tokensBefore,
+        await creation.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'owner'),
+                  ($1, $2, $4, 'member'),
+                  ($1, $2, $5, 'member')`,
+          [validGroupId, workspaceId, ownerId, firstMemberId, secondMemberId],
         );
-      });
+        await creation.query(
+          `UPDATE conversations
+              SET group_memberships_locked = true
+            WHERE id = $1`,
+          [validGroupId],
+        );
+        await creation.query("COMMIT");
+      } finally {
+        creation.release();
+      }
+      await expect(
+        pool.query(
+          `SELECT 1
+             FROM conversations
+            WHERE id = $1
+              AND kind = 'group_direct_message'
+              AND group_memberships_locked`,
+          [validGroupId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      const ordinaryChannelId = randomUUID();
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by)
+         VALUES ($1, $2, 'channel', 'Ordinary channel', 'ordinary-channel', 'workspace', $3)`,
+        [ordinaryChannelId, workspaceId, ownerId],
+      );
+
+      await expect(
+        pool.query(
+          `INSERT INTO conversations (id, workspace_id, kind, created_by)
+           VALUES ($1, $2, 'group_direct_message', $3)`,
+          [randomUUID(), workspaceId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'member')`,
+          [validGroupId, workspaceId, extraMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `UPDATE conversation_memberships
+              SET left_at = clock_timestamp()
+            WHERE conversation_id = $1 AND user_id = $2`,
+          [validGroupId, firstMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `UPDATE conversation_memberships
+              SET conversation_id = $1
+            WHERE conversation_id = $2 AND user_id = $3`,
+          [ordinaryChannelId, validGroupId, firstMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      expect(
+        (
+          await pool.query(
+            `SELECT 1
+               FROM conversation_memberships
+              WHERE conversation_id = $1`,
+            [validGroupId],
+          )
+        ).rowCount,
+      ).toBe(3);
+      await expect(
+        pool.query("UPDATE conversations SET created_by = $1 WHERE id = $2", [
+          firstMemberId,
+          validGroupId,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query("UPDATE conversations SET created_by = $1 WHERE id = $2", [
+          extraMemberId,
+          validGroupId,
+        ]),
+      ).rejects.toMatchObject({ code: "23514" });
+      expect(
+        (
+          await pool.query<{ created_by: string } & QueryResultRow>(
+            "SELECT created_by FROM conversations WHERE id = $1",
+            [validGroupId],
+          )
+        ).rows[0]?.created_by,
+      ).toBe(ownerId);
+      await expect(
+        pool.query(
+          `DELETE FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2`,
+          [validGroupId, firstMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+
+      const botGroup = await pool.connect();
+      try {
+        await botGroup.query("BEGIN");
+        const botGroupId = randomUUID();
+        await botGroup.query(
+          `INSERT INTO conversations (id, workspace_id, kind, created_by)
+           VALUES ($1, $2, 'group_direct_message', $3)`,
+          [botGroupId, workspaceId, ownerId],
+        );
+        await botGroup.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'owner'),
+                  ($1, $2, $4, 'member'),
+                  ($1, $2, $5, 'member')`,
+          [botGroupId, workspaceId, ownerId, firstMemberId, botId],
+        );
+        await botGroup.query(
+          "UPDATE conversations SET group_memberships_locked = true WHERE id = $1",
+          [botGroupId],
+        );
+        await expect(botGroup.query("COMMIT")).rejects.toMatchObject({ code: "23514" });
+        await botGroup.query("ROLLBACK");
+      } finally {
+        botGroup.release();
+      }
+      await expect(
+        pool.query(
+          `INSERT INTO conversations
+             (id, workspace_id, kind, channel_access, created_by)
+           VALUES ($1, $2, 'group_direct_message', 'workspace', $3)`,
+          [randomUUID(), workspaceId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversations
+             (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
+           VALUES ($1, $2, 'group_direct_message', $3, $3, $3)`,
+          [randomUUID(), workspaceId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversations (id, workspace_id, kind, name, created_by)
+           VALUES ($1, $2, 'group_direct_message', 'Malformed group', $3)`,
+          [randomUUID(), workspaceId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query("DELETE FROM conversations WHERE id = $1", [validGroupId]),
+      ).resolves.toMatchObject({ rowCount: 1 });
     });
   });
 

@@ -1,6 +1,12 @@
+import { Buffer } from "node:buffer";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+  AGENT_CONTEXT_PACK_MAX_BYTES,
+  AGENT_CONTEXT_PACK_MAX_LIMIT,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
@@ -14,6 +20,8 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   apiErrorEnvelopeSchema,
+  agentContextHistoryQuerySchema,
+  agentContextHistoryResponseSchema,
   agentTokenMetadataSchema,
   agentTokenSecretSchema,
   agentEnrollmentCredentialVerifierSchema,
@@ -37,6 +45,7 @@ import {
   displayNameSchema,
   entityVersionSchema,
   chatSessionStateSchema,
+  injectionSafeCompactJsonByteLength,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMessageReactionsRequestSchema,
@@ -553,6 +562,18 @@ describe("agent contracts", () => {
       revokedAt: null,
     };
     expect(agentTokenMetadataSchema.parse(metadata)).toEqual(metadata);
+    expect(
+      agentTokenMetadataSchema.parse({
+        ...metadata,
+        effectiveScopes: ["workspace:read", "messages:write", "channels:join"],
+      }),
+    ).toMatchObject({ effectiveScopes: ["workspace:read", "messages:write", "channels:join"] });
+    expect(() =>
+      agentTokenMetadataSchema.parse({
+        ...metadata,
+        effectiveScopes: ["workspace:read"],
+      }),
+    ).toThrow();
     expect(() => agentTokenMetadataSchema.parse({ ...metadata, token: secret })).toThrow();
   });
 
@@ -570,6 +591,7 @@ describe("agent contracts", () => {
       "workspace:read",
       "messages:write",
       "direct-conversations:write",
+      "channels:join",
       "agents:invite",
     ]);
     expect(DEFAULT_AGENT_AGENCY_PROFILE).toBe("default-agency-v1");
@@ -690,6 +712,65 @@ describe("transport contracts", () => {
         readCursor: null,
       }),
     ).toMatchObject({ conversation: { slug: "general" } });
+  });
+
+  it("requires unique participants and a complete direct-conversation audience", () => {
+    const base = {
+      conversation: {
+        id: CONVERSATION_ID,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        isArchived: false,
+        createdBy: USER_ID,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, MESSAGE_ID, REACTION_ID],
+      membershipRole: "owner",
+      lastMessage: null,
+      unreadCount: 0,
+      mentionCount: 0,
+      readCursor: null,
+    } as const;
+    expect(conversationSummarySchema.parse(base).participantIds).toHaveLength(3);
+    expect(() =>
+      conversationSummarySchema.parse({ ...base, participantIds: [USER_ID, MESSAGE_ID] }),
+    ).toThrow();
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        participantIds: [USER_ID, MESSAGE_ID, MESSAGE_ID],
+      }),
+    ).toThrow();
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        conversation: { ...base.conversation, kind: "direct_message" },
+        participantIds: [],
+      }),
+    ).toThrow();
+    for (const conversation of [
+      { ...base.conversation, name: "Hidden title" },
+      { ...base.conversation, slug: "hidden-title" },
+      { ...base.conversation, topic: "Hidden topic" },
+      { ...base.conversation, access: "members" as const },
+      { ...base.conversation, channelMode: "chat" as const },
+      { ...base.conversation, isArchived: true },
+      { ...base.conversation, createdBy: null },
+    ]) {
+      expect(() => conversationSummarySchema.parse({ ...base, conversation })).toThrow();
+    }
+    expect(() =>
+      conversationSummarySchema.parse({
+        ...base,
+        conversation: { ...base.conversation, createdBy: TASK_ID },
+      }),
+    ).toThrow();
+    expect(() => conversationSummarySchema.parse({ ...base, membershipRole: null })).toThrow();
   });
 
   it("upgrades legacy workspace-channel cache records without relaxing strict fields", () => {
@@ -856,6 +937,272 @@ describe("transport contracts", () => {
     ).toThrow();
     expect(() => taskListQuerySchema.parse({ assignee: "someone" })).toThrow();
     expect(() => syncQuerySchema.parse({ after: "4", limit: "101" })).toThrow();
+  });
+
+  it("validates the distinct bounded context-pack history query", () => {
+    expect(agentContextHistoryQuerySchema.parse({ contextPack: "true" })).toEqual({
+      contextPack: true,
+      limit: AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+    });
+    expect(
+      agentContextHistoryQuerySchema.parse({
+        contextPack: true,
+        throughMessageId: MESSAGE_ID,
+        limit: String(AGENT_CONTEXT_PACK_MAX_LIMIT),
+      }),
+    ).toEqual({
+      contextPack: true,
+      throughMessageId: MESSAGE_ID,
+      limit: AGENT_CONTEXT_PACK_MAX_LIMIT,
+    });
+    expect(() =>
+      agentContextHistoryQuerySchema.parse({
+        contextPack: "true",
+        throughMessageId: MESSAGE_ID,
+        before: "cursor",
+      }),
+    ).toThrow();
+    expect(() =>
+      agentContextHistoryQuerySchema.parse({
+        contextPack: "true",
+        limit: AGENT_CONTEXT_PACK_MAX_LIMIT + 1,
+      }),
+    ).toThrow();
+    expect(() => agentContextHistoryQuerySchema.parse({ contextPack: "false" })).toThrow();
+  });
+
+  it("rejects pagination metadata on an empty context pack", () => {
+    const emptyPack = {
+      version: 1,
+      conversation: {
+        id: CONVERSATION_ID,
+        kind: "channel",
+        slug: "general",
+        selector: "#general",
+      },
+      anchorMessageId: null,
+      messages: [],
+      threadRoot: null,
+      replyTarget: null,
+      readThroughMessageId: null,
+      truncatedBefore: false,
+      nextCursor: null,
+    } as const;
+
+    expect(agentContextHistoryResponseSchema.safeParse({ contextPack: emptyPack }).success).toBe(
+      true,
+    );
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: { ...emptyPack, truncatedBefore: true, nextCursor: "cursor" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates canonical chronological channel context packs", () => {
+    const author = {
+      id: USER_ID,
+      kind: "human",
+      username: "morgan",
+      displayName: "Morgan",
+    } as const;
+    const root = {
+      id: MESSAGE_ID,
+      conversationSequence: "1",
+      createdAt: NOW,
+      body: "Root",
+      author,
+      mentionedYou: false,
+      threadRootId: null,
+    } as const;
+    const reply = {
+      ...root,
+      id: REPLY_ID,
+      conversationSequence: "2",
+      body: "@helper take a look",
+      mentionedYou: true,
+      threadRootId: MESSAGE_ID,
+    } as const;
+    const response = {
+      contextPack: {
+        version: 1,
+        conversation: {
+          id: CONVERSATION_ID,
+          kind: "channel",
+          slug: "general",
+          selector: "#general",
+        },
+        anchorMessageId: REPLY_ID,
+        messages: [reply],
+        threadRoot: root,
+        replyTarget: {
+          kind: "thread",
+          conversationId: CONVERSATION_ID,
+          rootMessageId: MESSAGE_ID,
+        },
+        readThroughMessageId: REPLY_ID,
+        truncatedBefore: true,
+        nextCursor: "cursor",
+      },
+    } as const;
+
+    expect(agentContextHistoryResponseSchema.parse(response)).toEqual(response);
+    const astralSlug = "𐐨".repeat(51);
+    const astralResponse = {
+      contextPack: {
+        ...response.contextPack,
+        conversation: {
+          ...response.contextPack.conversation,
+          slug: astralSlug,
+          selector: `#${astralSlug}`,
+        },
+      },
+    } as const;
+    expect(agentContextHistoryResponseSchema.parse(astralResponse)).toEqual(astralResponse);
+    const edgeStringResponse = {
+      contextPack: {
+        ...response.contextPack,
+        messages: [
+          {
+            ...reply,
+            createdAt: "0000-02-29T23:59:59.123456789Z",
+            body: "\ud800",
+          },
+        ],
+      },
+    } as const;
+    expect(agentContextHistoryResponseSchema.parse(edgeStringResponse)).toEqual(edgeStringResponse);
+    expect(() =>
+      agentContextHistoryResponseSchema.parse({
+        ...response,
+        contextPack: {
+          ...response.contextPack,
+          conversation: { ...response.contextPack.conversation, selector: "#renamed" },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      agentContextHistoryResponseSchema.parse({
+        ...response,
+        contextPack: { ...response.contextPack, messages: [reply, root] },
+      }),
+    ).toThrow();
+  });
+
+  it("measures compact JSON with only injection-sensitive line separators escaped", () => {
+    const value = { body: "\u0084\u0085\u2028\u2029\u202a\n" };
+    const rawByteLength = Buffer.byteLength(JSON.stringify(value), "utf8");
+
+    expect(injectionSafeCompactJsonByteLength(value)).toBe(rawByteLength + 10);
+    expect(injectionSafeCompactJsonByteLength("\u0084\u202a\n")).toBe(
+      Buffer.byteLength(JSON.stringify("\u0084\u202a\n"), "utf8"),
+    );
+  });
+
+  it("validates derived direct-message context and enforces the serialized byte cap", () => {
+    const message = {
+      id: MESSAGE_ID,
+      conversationSequence: "1",
+      createdAt: NOW,
+      body: "Hello",
+      author: {
+        id: USER_ID,
+        kind: "human",
+        username: "morgan",
+        displayName: "Morgan",
+      },
+      mentionedYou: false,
+      threadRootId: null,
+    } as const;
+    const contextPack = {
+      version: 1,
+      conversation: {
+        id: CONVERSATION_ID,
+        kind: "direct_message",
+        selector: "@morgan",
+        peer: message.author,
+        self: false,
+      },
+      anchorMessageId: MESSAGE_ID,
+      messages: [message],
+      threadRoot: null,
+      replyTarget: { kind: "flat", conversationId: CONVERSATION_ID },
+      readThroughMessageId: MESSAGE_ID,
+      truncatedBefore: false,
+      nextCursor: null,
+    } as const;
+
+    expect(agentContextHistoryResponseSchema.parse({ contextPack })).toEqual({ contextPack });
+    const sentinelPeerPack = {
+      ...contextPack,
+      conversation: {
+        ...contextPack.conversation,
+        peer: {
+          ...contextPack.conversation.peer,
+          id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        },
+      },
+    } as const;
+    expect(agentContextHistoryResponseSchema.parse({ contextPack: sentinelPeerPack })).toEqual({
+      contextPack: sentinelPeerPack,
+    });
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: {
+          ...sentinelPeerPack,
+          conversation: {
+            ...sentinelPeerPack.conversation,
+            peer: {
+              ...sentinelPeerPack.conversation.peer,
+              id: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    const oversizedMessages = Array.from({ length: AGENT_CONTEXT_PACK_MAX_LIMIT }, (_, index) => ({
+      ...message,
+      id: `10000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`,
+      conversationSequence: String(index + 1),
+      body: "x".repeat(4_000),
+    }));
+    expect(JSON.stringify({ ...contextPack, messages: oversizedMessages }).length).toBeGreaterThan(
+      AGENT_CONTEXT_PACK_MAX_BYTES,
+    );
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: {
+          ...contextPack,
+          anchorMessageId: oversizedMessages.at(-1)?.id,
+          messages: oversizedMessages,
+          readThroughMessageId: oversizedMessages.at(-1)?.id,
+        },
+      }).success,
+    ).toBe(false);
+
+    const injectionSensitiveMessages = Array.from({ length: 7 }, (_, index) => ({
+      ...message,
+      id: `20000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`,
+      conversationSequence: String(index + 1),
+      body: "\u0085\u2028\u2029".repeat(1_000),
+    }));
+    const injectionSensitivePack = {
+      ...contextPack,
+      anchorMessageId: injectionSensitiveMessages.at(-1)?.id,
+      messages: injectionSensitiveMessages,
+      readThroughMessageId: injectionSensitiveMessages.at(-1)?.id,
+    };
+    expect(Buffer.byteLength(JSON.stringify(injectionSensitivePack), "utf8")).toBeLessThanOrEqual(
+      AGENT_CONTEXT_PACK_MAX_BYTES,
+    );
+    expect(injectionSafeCompactJsonByteLength(injectionSensitivePack)).toBeGreaterThan(
+      AGENT_CONTEXT_PACK_MAX_BYTES,
+    );
+    expect(
+      agentContextHistoryResponseSchema.safeParse({
+        contextPack: injectionSensitivePack,
+      }).success,
+    ).toBe(false);
   });
 
   it("keeps reactions separate from thread-aware history", () => {
@@ -1055,6 +1402,46 @@ describe("transport contracts", () => {
     ).toMatchObject({ type: "channel.archived" });
     expect(() =>
       workspaceEventSchema.parse({ ...event, type: "direct_conversation.created" }),
+    ).toThrow();
+    const groupEvent = {
+      ...event,
+      type: "direct_conversation.created",
+      payload: {
+        conversation: {
+          ...event.payload.conversation,
+          kind: "group_direct_message",
+          name: null,
+          slug: null,
+          topic: null,
+          access: null,
+        },
+        participantIds: [USER_ID, MESSAGE_ID, REACTION_ID],
+      },
+    } as const;
+    expect(workspaceEventSchema.parse(groupEvent)).toMatchObject({
+      type: "direct_conversation.created",
+      payload: { participantIds: [USER_ID, MESSAGE_ID, REACTION_ID] },
+    });
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: { ...groupEvent.payload, participantIds: [USER_ID, MESSAGE_ID] },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: { ...groupEvent.payload, participantIds: [USER_ID, MESSAGE_ID, MESSAGE_ID] },
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceEventSchema.parse({
+        ...groupEvent,
+        payload: {
+          ...groupEvent.payload,
+          conversation: { ...groupEvent.payload.conversation, createdBy: TASK_ID },
+        },
+      }),
     ).toThrow();
   });
 
@@ -1325,7 +1712,7 @@ describe("transport contracts", () => {
   it("validates bounded client capability headers", () => {
     expect(
       clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}`,
+        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ${AGENT_CONTEXT_PACK_CAPABILITY}`,
       ),
     ).toEqual([
       REACTION_EVENTS_CAPABILITY,
@@ -1335,6 +1722,7 @@ describe("transport contracts", () => {
       PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
       ATTACHMENTS_CAPABILITY,
       MESSAGE_RETRACT_EVENTS_CAPABILITY,
+      AGENT_CONTEXT_PACK_CAPABILITY,
     ]);
     for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
       expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();

@@ -127,6 +127,31 @@ export const conversationSchema = z
         message: "Channel mode is only valid for channels",
       });
     }
+    if (conversation.kind === "group_direct_message") {
+      for (const field of ["name", "slug", "topic", "access"] as const) {
+        if (conversation[field] !== null) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: `Group direct conversation ${field} must be null`,
+          });
+        }
+      }
+      if (conversation.isArchived) {
+        context.addIssue({
+          code: "custom",
+          path: ["isArchived"],
+          message: "A group direct conversation cannot be archived",
+        });
+      }
+      if (conversation.createdBy === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["createdBy"],
+          message: "A group direct conversation must identify its creator",
+        });
+      }
+    }
   })
   .transform((conversation) => ({
     ...conversation,

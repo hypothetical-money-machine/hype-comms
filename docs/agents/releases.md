@@ -24,6 +24,11 @@ publishes installers to `https://updates.hypemm.com/desktop`, and creates the Gi
 3. Use Node 24.18.x and npm 11.16.x. If `node_modules` is missing, `npm ci` from the lockfile.
 4. Confirm the current desktop version in `apps/desktop/package.json` and that `v<current>` already
    exists. The next patch is current + 1 unless the user named a different stable version.
+5. Confirm that the release workflow's `HYPE_COMMS_API_ORIGIN` names the deployed HTTPS API.
+   Production packaging rejects a missing value or a `.invalid` host.
+6. Confirm macOS/Windows signing secrets are repository or organization secrets available to the
+   package jobs. Keep the Garage update-bucket key pair in the protected `release` environment:
+   the final publisher is the only job that needs it.
 
 ## Prepare
 
@@ -72,8 +77,8 @@ Run `npm run check`. On a machine that can package, explicitly select the produc
 both the native package and its verification:
 
 ```bash
-HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop
-HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package
+HYPE_COMMS_API_ORIGIN="$production_api_origin" HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop
+HYPE_COMMS_API_ORIGIN="$production_api_origin" HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package
 ```
 
 Also run `npm run verify:desktop-package:macos-release` on a signed macOS host, and

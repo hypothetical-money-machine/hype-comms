@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  EPHEMERAL_ACTIVITY_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -33,6 +36,9 @@ const CLIENT_CAPABILITIES = [
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  EPHEMERAL_ACTIVITY_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -331,15 +337,14 @@ describe("WorkspaceTransport threads", () => {
 
     await transport.history({ conversationId: CONVERSATION_ID, before: "cursor-2", limit: 25 });
 
-    expect(requests).toEqual([
-      {
-        url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
-        init: expect.objectContaining({
-          method: "GET",
-          headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
-        }),
-      },
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
+      init: { method: "GET" },
+    });
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
+      CLIENT_CAPABILITIES,
+    );
   });
 
   it("detects the immediately previous server from an absent thread-support signal", async () => {
@@ -409,15 +414,14 @@ describe("WorkspaceTransport sync classification", () => {
 
     await transport.sync("41", 25);
 
-    expect(requests).toEqual([
-      {
-        url: "https://chat.example/v1/sync?after=41&limit=25",
-        init: expect.objectContaining({
-          method: "GET",
-          headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
-        }),
-      },
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://chat.example/v1/sync?after=41&limit=25",
+      init: { method: "GET" },
+    });
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
+      CLIENT_CAPABILITIES,
+    );
   });
 
   it("advertises supported event capabilities when issuing a realtime ticket", async () => {
@@ -429,12 +433,11 @@ describe("WorkspaceTransport sync classification", () => {
 
     await transport.ticket();
 
-    expect(requests).toEqual([
-      expect.objectContaining({
-        method: "POST",
-        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
-      }),
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ method: "POST" });
+    expect(new Headers(requests[0]?.headers).get("x-hype-comms-capabilities")).toBe(
+      CLIENT_CAPABILITIES,
+    );
   });
 
   it("reports a revoked membership (403) as permanent instead of retryable", async () => {
@@ -609,20 +612,15 @@ describe("WorkspaceTransport send classification", () => {
     };
 
     await expect(transport.send(operation)).resolves.toMatchObject({ status: "accepted" });
-    expect(requests).toEqual([
-      {
-        url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages`,
-        init: expect.objectContaining({
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": THREAD_REPLY_CLIENT_ID,
-            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
-          },
-          body: JSON.stringify(operation.message),
-        }),
-      },
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages`,
+      init: { method: "POST", body: JSON.stringify(operation.message) },
+    });
+    const headers = new Headers(requests[0]?.init.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("idempotency-key")).toBe(THREAD_REPLY_CLIENT_ID);
+    expect(headers.get("x-hype-comms-capabilities")).toBe(CLIENT_CAPABILITIES);
   });
 
   it("treats 408 Request Timeout as retryable instead of permanently blocking the outbox", async () => {
@@ -838,7 +836,7 @@ describe("WorkspaceTransport tasks", () => {
       ["POST", `https://chat.example/v1/tasks/${TASK.id}/move`],
     ]);
     for (const request of requests.slice(2)) {
-      expect(request.init.headers).toMatchObject({ "idempotency-key": CLIENT_MESSAGE_ID });
+      expect(new Headers(request.init.headers).get("idempotency-key")).toBe(CLIENT_MESSAGE_ID);
       expect(JSON.parse(String(request.init.body))).not.toHaveProperty("idempotencyKey");
     }
   });

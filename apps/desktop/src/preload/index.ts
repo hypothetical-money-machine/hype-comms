@@ -70,6 +70,8 @@ import {
   realtimeConnectionStateSchema,
   realtimeAcknowledgementSchema,
   realtimeSessionScopeSchema,
+  scopedEphemeralActivityFrameSchema,
+  scopedTypingActivityUpdateSchema,
   requestMagicLinkSchema,
   removeReactionResponseSchema,
   sendAttemptResultSchema,
@@ -111,6 +113,8 @@ import {
   type RealtimeAcknowledgement,
   type RealtimeSessionScope,
   type ScopedProductRealtimeEvent,
+  type ScopedEphemeralActivityFrame,
+  type ScopedTypingActivityUpdate,
   type SendMessageOperation,
   type ThemeDesign,
   type ThemePreference,
@@ -752,6 +756,19 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         listener,
         (value): value is ScopedProductRealtimeEvent =>
           scopedProductRealtimeEventSchema.safeParse(value).success,
+      ),
+    setWorkspaceTyping: async (input: ScopedTypingActivityUpdate) => {
+      await ipcRenderer.invoke(
+        DESKTOP_CHANNELS.workspaceActivityTypingSet,
+        scopedTypingActivityUpdateSchema.parse(input),
+      );
+    },
+    onWorkspaceActivity: (listener: (frame: ScopedEphemeralActivityFrame) => void) =>
+      subscribe(
+        DESKTOP_CHANNELS.workspaceActivity,
+        listener,
+        (value): value is ScopedEphemeralActivityFrame =>
+          scopedEphemeralActivityFrameSchema.safeParse(value).success,
       ),
   },
 );

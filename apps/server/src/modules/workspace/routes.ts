@@ -1,7 +1,11 @@
 import {
+  AGENT_CONTEXT_PACK_CAPABILITY,
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
   ATTACHMENTS_CAPABILITY,
+  EPHEMERAL_ACTIVITY_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -10,6 +14,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   advanceReadCursorRequestSchema,
+  agentContextHistoryQuerySchema,
   archiveChannelRequestSchema,
   channelSlugSchema,
   clientCapabilitiesHeaderSchema,
@@ -20,7 +25,9 @@ import {
   createTaskRequestSchema,
   directConversationRequestSchema,
   entityIdSchema,
+  groupDirectConversationRequestSchema,
   idempotencyKeySchema,
+  joinPublicChannelRequestSchema,
   listConversationsQuerySchema,
   listMessageAttachmentsRequestSchema,
   listMessageReactionsRequestSchema,
@@ -38,6 +45,7 @@ import {
 import type {
   ConversationMutationResponse,
   ConversationSummary,
+  AgentScope,
   ListConversationsResponse,
   User,
   WorkspaceBootstrapResponse,
@@ -53,12 +61,14 @@ import {
   requireAuthenticatedIdentity,
 } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
-import type { WorkspaceRepository } from "./repository.js";
+import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
+import type { WorkspaceClientCapabilities, WorkspaceRepository } from "./repository.js";
 
 interface WorkspaceRoutesOptions {
   readonly identityService: IdentityService;
   readonly botService?: BotService;
   readonly repository: WorkspaceRepository;
+  readonly defaultAgentAgencyEnabled?: boolean;
 }
 
 function optionalIdempotencyKey(value: string | string[] | undefined): string | undefined {
@@ -136,10 +146,48 @@ function capabilities(value: string | string[] | undefined): readonly string[] {
   return parsed.data;
 }
 
-function withoutChannelMode(summary: ConversationSummary) {
+function workspaceClientCapabilities(
+  value: string | string[] | undefined,
+): WorkspaceClientCapabilities {
+  const supported = capabilities(value);
+  return {
+    reactionEvents: supported.includes(REACTION_EVENTS_CAPABILITY),
+    readStateEvents: supported.includes(READ_STATE_EVENTS_CAPABILITY),
+    taskEvents: supported.includes(TASK_EVENTS_CAPABILITY),
+    announcementChannels: supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+    participatedThreadNotifications: supported.includes(
+      PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
+    ),
+    messageRetractEvents: supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
+    memberProfiles: supported.includes(MEMBER_PROFILES_CAPABILITY),
+    ephemeralActivity: supported.includes(EPHEMERAL_ACTIVITY_CAPABILITY),
+    groupDirectMessages: supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+  };
+}
+
+function missingDirectConversationWriteScope(): ApiError {
+  return new ApiError(403, "FORBIDDEN", "Agent token requires the conversations:write scope");
+}
+
+function projectConversationSummary(summary: ConversationSummary, supportsAnnouncements: boolean) {
+  if (supportsAnnouncements) return summary;
   const conversation: Partial<ConversationSummary["conversation"]> = { ...summary.conversation };
   delete conversation.channelMode;
   return { ...summary, conversation };
+}
+
+function projectConversationSummaries(
+  summaries: readonly ConversationSummary[],
+  supportsAnnouncements: boolean,
+  supportsGroupDirectMessages: boolean,
+) {
+  if (
+    !supportsGroupDirectMessages &&
+    summaries.some((summary) => summary.conversation.kind === "group_direct_message")
+  ) {
+    throw new GroupDirectClientUpgradeRequiredError();
+  }
+  return summaries.map((summary) => projectConversationSummary(summary, supportsAnnouncements));
 }
 
 function withoutTitle(user: User): Omit<User, "title"> {
@@ -187,29 +235,57 @@ function projectBootstrap(
   response: WorkspaceBootstrapResponse,
   supportsAnnouncements: boolean,
   supportsMemberProfiles: boolean,
+  supportsGroupDirectMessages: boolean,
+  effectiveAgentScopes: readonly AgentScope[] | null,
 ) {
+  const currentUser =
+    effectiveAgentScopes === null || !("type" in response.currentUser)
+      ? response.currentUser
+      : { ...response.currentUser, effectiveScopes: effectiveAgentScopes };
   const members = supportsMemberProfiles ? response.members : response.members.map(withoutTitle);
-  if (supportsAnnouncements) return { ...response, members };
+  const conversations = projectConversationSummaries(
+    response.conversations,
+    supportsAnnouncements,
+    supportsGroupDirectMessages,
+  );
+  if (supportsAnnouncements) return { ...response, currentUser, members, conversations };
   const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
     ...response.featureFlags,
   };
   delete featureFlags.announcementChannels;
   return {
     ...response,
+    currentUser,
     members,
-    conversations: response.conversations.map(withoutChannelMode),
+    conversations,
     featureFlags,
   };
 }
 
-function projectConversationList(response: ListConversationsResponse, capable: boolean) {
-  if (capable) return response;
-  return { ...response, conversations: response.conversations.map(withoutChannelMode) };
+function projectConversationList(
+  response: ListConversationsResponse,
+  supportsAnnouncements: boolean,
+  supportsGroupDirectMessages: boolean,
+) {
+  return {
+    ...response,
+    conversations: projectConversationSummaries(
+      response.conversations,
+      supportsAnnouncements,
+      supportsGroupDirectMessages,
+    ),
+  };
 }
 
-function projectConversationMutation(response: ConversationMutationResponse, capable: boolean) {
-  if (capable || response.conversation === undefined) return response;
-  return { ...response, conversation: withoutChannelMode(response.conversation) };
+function projectConversationMutation(
+  response: ConversationMutationResponse,
+  supportsAnnouncements: boolean,
+) {
+  if (response.conversation === undefined) return response;
+  return {
+    ...response,
+    conversation: projectConversationSummary(response.conversation, supportsAnnouncements),
+  };
 }
 
 function withoutAttachments<T extends { readonly attachments?: unknown }>(
@@ -224,16 +300,38 @@ function withoutAttachments<T extends { readonly attachments?: unknown }>(
 }
 
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (app, options) => {
-  const { identityService, botService, repository } = options;
+  const { identityService, botService, repository, defaultAgentAgencyEnabled = true } = options;
+  const requireDefaultAgentAgencyEnabled = (): void => {
+    if (!defaultAgentAgencyEnabled) {
+      throw new ApiError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Default agent agency is disabled during the server rollback window",
+      );
+    }
+  };
   app.get("/bootstrap", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectBootstrap(
-      await repository.bootstrap(identity),
+      await repository.bootstrap(identity, supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(MEMBER_PROFILES_CAPABILITY),
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      identity.credentialType === "agent" && supported.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY)
+        ? identity.authorizationScopes
+        : null,
     );
+  });
+
+  app.get("/agent-wake/bootstrap", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    if (identity.credentialType !== "agent") {
+      throw new ApiError(403, "FORBIDDEN", "An agent token is required for wake bootstrap");
+    }
+    requireAgentScope(identity, "workspace:read");
+    return repository.agentWakeBootstrap(identity);
   });
 
   app.get("/members", async (request) => {
@@ -276,9 +374,25 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectConversationList(
-      await repository.listConversations(identity, query.data.after, query.data.limit),
+      await repository.listConversations(
+        identity,
+        query.data.after,
+        query.data.limit,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      ),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     );
+  });
+
+  app.get("/channels", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireDefaultAgentAgencyEnabled();
+    requireAgentScope(identity, "workspace:read");
+    requireAnyAgentScope(identity, ["channels:join", "conversations:write"]);
+    const query = listConversationsQuerySchema.safeParse(request.query);
+    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel query");
+    return repository.listPublicChannels(identity, query.data.after, query.data.limit);
   });
 
   app.post("/channels", async (request, reply) => {
@@ -294,6 +408,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       optionalIdempotencyKey(request.headers["idempotency-key"]),
       capable,
       request.id,
+      defaultAgentAgencyEnabled,
     );
     return reply.code(201).send(projectConversationMutation(created, capable));
   });
@@ -338,21 +453,70 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return repository.removeChannelMember(identity, id, userId);
   });
 
+  app.put("/channels/:id/membership", async (request) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireDefaultAgentAgencyEnabled();
+    requireAnyAgentScope(identity, ["channels:join", "conversations:write"]);
+    requireAgentScope(identity, "workspace:read");
+    if (!joinPublicChannelRequestSchema.safeParse(request.body).success) {
+      throw new ApiError(400, "BAD_REQUEST", "Channel join does not accept a request body");
+    }
+    const { id } = parameters(request.params);
+    return repository.joinPublicChannel(identity, id);
+  });
+
   app.post("/direct-conversations", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     // Keep broad legacy credentials working while newly enrolled agents receive only the narrow
-    // permission needed to open a 1:1 conversation.
-    requireAnyAgentScope(identity, ["direct-conversations:write", "conversations:write"]);
+    // permission needed to open a 1:1 conversation. A read-only agent token may still look one up,
+    // so `workspace:read` alone reaches the read path below.
+    const canCreate =
+      identity.credentialType === "session" ||
+      identity.currentUser.scopes.includes("direct-conversations:write") ||
+      identity.currentUser.scopes.includes("conversations:write");
+    if (!canCreate && !identity.currentUser.scopes.includes("workspace:read")) {
+      throw missingDirectConversationWriteScope();
+    }
     const result = directConversationRequestSchema.safeParse(request.body);
     if (!result.success) {
       throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
     }
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const opened = canCreate
+      ? await repository.createDirectConversation(identity, result.data)
+      : await repository.findDirectConversation(identity, result.data);
+    if (opened === null) {
+      // Read-only lookup found nothing; opening it would need the write scope.
+      throw missingDirectConversationWriteScope();
+    }
+    return reply
+      .code(201)
+      .send(
+        projectConversationMutation(opened, supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY)),
+      );
+  });
+
+  app.post("/group-direct-conversations", async (request, reply) => {
+    const identity = await requireAuthenticatedIdentity(request, identityService);
+    requireDefaultAgentAgencyEnabled();
+    requireAnyAgentScope(identity, ["direct-conversations:write", "conversations:write"]);
+    const result = groupDirectConversationRequestSchema.safeParse(request.body);
+    if (!result.success) {
+      throw new ApiError(400, "BAD_REQUEST", "Invalid group direct-conversation request");
+    }
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    if (!supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)) {
+      throw new GroupDirectClientUpgradeRequiredError();
+    }
     return reply
       .code(201)
       .send(
         projectConversationMutation(
-          await repository.createDirectConversation(identity, result.data),
+          await repository.createGroupDirectConversation(
+            identity,
+            result.data,
+            requiredIdempotencyKey(request.headers["idempotency-key"]),
+          ),
           supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
         ),
       );
@@ -362,11 +526,35 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
+    if (
+      typeof request.query === "object" &&
+      request.query !== null &&
+      Object.hasOwn(request.query, "contextPack")
+    ) {
+      const query = agentContextHistoryQuerySchema.safeParse(request.query);
+      if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid context history query");
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
+        throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
+      }
+      return repository.contextHistory(
+        identity,
+        id,
+        query.data.before,
+        query.data.throughMessageId,
+        query.data.limit,
+      );
+    }
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     const supportsThreads = supported.includes(THREADS_CAPABILITY);
     const supportsAttachments = supported.includes(ATTACHMENTS_CAPABILITY);
+    await repository.requireGroupDirectMessagesForConversations(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     const history = await repository.history(
       identity,
       id,
@@ -389,10 +577,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const query = messageHistoryQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid thread query");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return withoutAttachments(
-      await repository.thread(identity, id, query.data.before, query.data.limit),
-      supported.includes(ATTACHMENTS_CAPABILITY),
+    const thread = await repository.thread(identity, id, query.data.before, query.data.limit);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     );
+    return withoutAttachments(thread, supported.includes(ATTACHMENTS_CAPABILITY));
   });
 
   app.get("/messages/:id", async (request) => {
@@ -400,16 +591,26 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return withoutAttachments(
-      await repository.messageById(identity, id),
-      supported.includes(ATTACHMENTS_CAPABILITY),
+    const message = await repository.messageById(identity, id);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     );
+    return withoutAttachments(message, supported.includes(ATTACHMENTS_CAPABILITY));
   });
 
   app.delete("/messages/:id", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "messages:write");
     const { id } = parameters(request.params);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      "retractable",
+    );
     return repository.retractMessage(identity, id);
   });
 
@@ -418,11 +619,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const query = messageSearchQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid search query");
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return repository.searchMessages(
       identity,
       query.data.query,
       query.data.after,
       query.data.limit,
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     );
   });
 
@@ -530,11 +733,19 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const body = sendConversationMessageRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid message");
+    if (body.data.attachmentIds.length > 0) {
+      requireAgentScope(identity, "attachments:write");
+    }
     const idempotencyKey = request.headers["idempotency-key"];
     if (typeof idempotencyKey !== "string" || idempotencyKey !== body.data.clientMessageId) {
       throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
     }
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForConversations(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     return reply
       .code(201)
       .send(
@@ -557,6 +768,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const query = conversationFilesQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid files query");
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForConversations(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     return repository.listConversationFiles(identity, id, query.data.before, query.data.limit);
   });
 
@@ -565,14 +782,27 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const body = listMessageAttachmentsRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid attachment query");
-    return repository.listMessageAttachments(identity, body.data.messageIds);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const attachments = await repository.listMessageAttachments(identity, body.data.messageIds);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      body.data.messageIds,
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
+    return attachments;
   });
 
   app.post("/files/uploads", async (request, reply) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
+    requireAgentScope(identity, "attachments:write");
     const body = createFileUploadRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file upload");
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForConversations(
+      identity,
+      [body.data.conversationId],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     return reply
       .code(201)
       .send(
@@ -586,10 +816,17 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
 
   app.post("/files/:id/complete", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
+    requireAgentScope(identity, "attachments:write");
     const { id } = parameters(request.params);
     const body = completeFileUploadRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file completion");
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForAttachments(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      "complete",
+    );
     return repository.completeFileUpload(
       identity,
       id,
@@ -602,7 +839,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
     const { id } = parameters(request.params);
-    const file = await repository.readFileContent(identity, id);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const file = await repository.readFileContent(
+      identity,
+      id,
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     return reply
       .header("content-type", file.attachment.contentType)
       .header("content-length", file.attachment.sizeBytes.toString())
@@ -629,7 +871,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     );
     files.put("/files/:id/content", { bodyLimit: 25 * 1024 * 1024 }, async (request, reply) => {
       const identity = await requireAuthenticatedIdentity(request, identityService);
-      requireAgentScope(identity, "messages:write");
+      requireAgentScope(identity, "attachments:write");
       const { id } = parameters(request.params);
       const contentType = request.headers["content-type"];
       if (typeof contentType !== "string" || contentType.trim() === "") {
@@ -638,6 +880,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       if (!Buffer.isBuffer(request.body)) {
         throw new ApiError(400, "BAD_REQUEST", "Expected raw file bytes");
       }
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForAttachments(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        "content-write",
+      );
       await repository.putFileContent(identity, id, contentType, request.body);
       return reply.code(204).send();
     });
@@ -648,13 +897,27 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const body = listMessageReactionsRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction query");
-    return repository.listMessageReactions(identity, body.data.messageIds);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const reactions = await repository.listMessageReactions(identity, body.data.messageIds);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      body.data.messageIds,
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
+    return reactions;
   });
 
   app.put("/messages/:id/reactions/:emoji", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "messages:write");
     const { id, emoji } = reactionParameters(request.params);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      "active",
+    );
     return repository.addReaction(identity, id, emoji);
   });
 
@@ -662,6 +925,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "messages:write");
     const { id, emoji } = reactionParameters(request.params);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForMessages(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      "active",
+    );
     return repository.removeReaction(identity, id, emoji);
   });
 
@@ -671,6 +941,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id } = parameters(request.params);
     const body = advanceReadCursorRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid read cursor");
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    await repository.requireGroupDirectMessagesForConversations(
+      identity,
+      [id],
+      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    );
     return repository.advanceReadCursor(identity, id, body.data.lastReadMessageId);
   });
 
@@ -679,37 +955,19 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const query = syncQuerySchema.safeParse(request.query);
     if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    const supported = workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]);
     return projectSyncMemberTitles(
-      await repository.sync(
-        identity,
-        query.data.after,
-        query.data.limit,
-        supported.includes(REACTION_EVENTS_CAPABILITY),
-        supported.includes(READ_STATE_EVENTS_CAPABILITY),
-        supported.includes(TASK_EVENTS_CAPABILITY),
-        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
-        supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-      ),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
+      await repository.sync(identity, query.data.after, query.data.limit, supported),
+      supported.memberProfiles === true,
     );
   });
 
   app.post("/realtime/tickets", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "workspace:read");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return repository.issueRealtimeTicket(
       identity,
-      supported.includes(REACTION_EVENTS_CAPABILITY),
-      supported.includes(READ_STATE_EVENTS_CAPABILITY),
-      supported.includes(TASK_EVENTS_CAPABILITY),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY),
-      supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
+      workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]),
     );
   });
 };

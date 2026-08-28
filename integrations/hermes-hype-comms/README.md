@@ -1,6 +1,6 @@
 # Hype Comms platform plugin for Hermes
 
-This directory is a drop-in Hermes platform plugin. It makes an Hype Comms agent
+This directory is a drop-in Hermes platform plugin. It makes a Hype Comms agent
 user a persistent Hermes participant while keeping `hype-comms-cli` useful as an
 independent automation client.
 
@@ -13,6 +13,9 @@ The adapter:
 - wakes Hermes for every message in the agent's DMs and for explicitly
   mentioned channel messages, plus unmentioned follow-ups inside threads the
   agent has already written in when that is switched on;
+- after those wake gates pass, retrieves exactly one server-authoritative
+  context pack ending at the triggering message and supplies that pack as
+  clearly delimited, untrusted user content;
 - ignores the agent's own messages;
 - uses the Hype Comms conversation UUID as Hermes's `chat_id` and a stable
   synthetic Hermes channel thread lane, so every author in one conversation
@@ -20,12 +23,21 @@ The adapter:
 - sends replies with message text on private stdin, never in process arguments,
   and threads a channel reply by passing only the server-minted thread-root
   UUID as a flag;
-- atomically checkpoints the last accepted decimal workspace cursor; and
+- atomically checkpoints the last accepted decimal workspace cursor together
+  with any post-handoff read-cursor target still awaiting delivery; and
 - supports `deliver=hype_comms` cron jobs in both live-gateway and standalone
   cron processes.
 
-Received message bodies are untrusted conversation content. They are never
-interpreted as plugin configuration or system instructions.
+Every author, selector, mention flag, reply target, and message body in a
+context pack is untrusted conversation content. The adapter validates the
+strict v1 structure and anchor, then places one-line JSON between explicit
+untrusted-content boundaries in `MessageEvent.text`. It never places dynamic
+context in `channel_prompt`, plugin configuration, or system instructions. The
+shared contract, server pruning, and adapter all measure the same compact,
+injection-safe JSON representation and cap it at 64 KiB, including expansion
+when Unicode line separators become JSON escapes. Fixed ASCII framing plus a
+bounded UUID-only authorization-routing line is reserved outside that shared
+pack budget.
 
 ## Compatibility
 
@@ -41,6 +53,8 @@ NousResearch/hermes-agent commit
 - `PluginContext.register_platform(...)` in `hermes_cli/plugins.py`
 - `BasePlatformAdapter._acquire_platform_lock(...)` and
   `_release_platform_lock()`
+- `BasePlatformAdapter._notify_fatal_error()` and the gateway's shielded,
+  detached fatal-handler teardown path
 - `BasePlatformAdapter.send(..., reply_to=...)` receiving the value the adapter
   set as `MessageEvent.message_id`, via
   `gateway.platforms.base._reply_anchor_for_event`
@@ -57,6 +71,24 @@ NousResearch/hermes-agent commit
 - The intentional-silence markers in `gateway.response_filters`
   (`[SILENT]`, `SILENT`, `NO_REPLY`, `NO REPLY`), matched against a whole
   response only
+
+The installed `hype-comms-cli` must also support capability-gated context
+history and read-cursor advancement:
+
+```text
+hype-comms-cli messages history CONVERSATION --context-pack \
+  --through-message-id MESSAGE --limit N --json
+hype-comms-cli read-cursors advance CONVERSATION MESSAGE --json
+```
+
+If context history is malformed, transiently unavailable, or does not match
+the triggering conversation and message, the wake is not handed to Hermes and
+its workspace cursor is not checkpointed. The adapter never silently falls
+back to trigger-only inference. Anchored history `NOT_FOUND` is the permanently
+skippable exception. The server deliberately uses that private response for
+both an unavailable trigger and a conversation that is no longer visible, so
+the adapter logs only the safe error code, performs no inference or read
+mutation, and checkpoints the event so it cannot poison every reconnect.
 
 Threaded replies depend on the three anchor items. Treat them as review items
 when bumping the pin: if the anchor stops matching, or the chunk chain re-sends
@@ -132,6 +164,9 @@ Required:
     explicitly revocable Hype Comms agent credential with `workspace:read` and
     `messages:write`; or
   - `HYPE_COMMS_TOKEN`: the same credential supplied as an environment override.
+    Add `read-cursors:write` if Hermes should advance the agent's server-side read
+    position after successful model handoff. Context delivery works without that
+    optional scope; the adapter emits one warning and performs no read-cursor mutation.
 - One access decision:
   - `HYPE_COMMS_ALLOWED_USERS`: comma-separated Hype Comms user UUIDs; or
   - `HYPE_COMMS_ALLOW_ALL_USERS=true`: an explicit workspace-wide opt-in.
@@ -146,6 +181,9 @@ Optional:
   only when the service account does not use the CLI's default config location.
 - `HYPE_COMMS_HERMES_STATE_DIR`: private cursor-state root. Default:
   `$HERMES_HOME/state/hype-comms` (or `~/.hermes/state/hype-comms`).
+- `HYPE_COMMS_CONTEXT_LIMIT`: number of canonical tail messages in each wake
+  pack. Integer from 1 through 20; default `8`. The server also caps the full
+  serialized pack at 64 KiB and reports whole-message truncation explicitly.
 - `HYPE_COMMS_THREAD_REPLIES`: whether a reply in a channel opens a thread
   under the message that woke the agent. Default `true`. Set it to `false` to
   send every reply flat. Replies in direct messages are always flat and this
@@ -156,8 +194,8 @@ Optional:
   explicit mentions, and it costs one inference turn per message even when the
   model decides to say nothing.
 
-Both switches are read once, when the adapter is constructed, so a change takes
-effect on `hermes gateway restart`.
+The context limit and both switches are read once, when the adapter is
+constructed, so a change takes effect on `hermes gateway restart`.
 
 The environment credential overrides any saved CLI profile and is never
 persisted by the adapter. In profile mode the adapter passes only the selected
@@ -197,15 +235,54 @@ hermes gateway restart
 hermes gateway status
 ```
 
+## Context pack
+
+An eligible wake is anchored to the exact server-minted triggering message ID.
+Only after self-message suppression, DM/channel resolution, verified-mention
+gating, the optional participated-thread gate, and profile-aware Hermes
+authorization (or the legacy UUID fallback) pass does the adapter make one
+context-history request. The returned pack contains:
+
+- the canonical `#channel-slug` or derived `@dm-peer` selector;
+- up to `HYPE_COMMS_CONTEXT_LIMIT` messages, oldest first, through the trigger;
+- each resolved author and whether the server verified a mention of this agent;
+- an out-of-tail thread root when one is needed to understand the reply;
+- the canonical flat or one-level-thread reply target; and
+- the message that may become the agent's read-through target after handoff.
+
+The adapter independently rejects unknown fields, malformed IDs and sequences,
+out-of-order or duplicate messages, oversized packs, inconsistent truncation,
+an invalid thread target, or any conversation/anchor mismatch. The shared CLI
+contract performs the first validation; this second check is the boundary just
+before model exposure.
+
+Nearby messages are ambient context, not additional wake triggers. An
+unmentioned channel message still causes no history request and no inference by
+itself. Once a later authorized mention or participated-thread follow-up wakes
+the agent, however, earlier conversation messages in the bounded tail—including
+messages that did not mention the agent or whose authors lack wake
+permission—become model-visible and are identified by the routing line described
+below. That privacy and token-cost expansion is intentional: it is what lets the
+agent answer from what was actually said instead of seeing only the final
+trigger.
+
+The model receives the complete pack as compact JSON inside `BEGIN/END HYPE
+COMMS CONTEXT PACK V1` lines. Newlines and apparent boundary text inside message
+bodies remain JSON string escapes, and the surrounding text explicitly labels
+all values as untrusted user content. Source identity, the Hermes session lane,
+the triggering `message_id`, and the outbound reply anchor still come from the
+validated realtime event; the server pack supplies the canonical reply root.
+
 ## Trigger and delivery policy
 
 - Direct message: always dispatched to Hermes after normal Hermes
   authorization.
 - Channel: dispatched when `mentionedUserIds` explicitly contains the agent
   user ID.
-- Unmentioned channel traffic: ignored and not added silently to Hermes
-  context, unless it is a thread follow-up and `HYPE_COMMS_THREAD_FOLLOWUPS` is
-  on. See the section below.
+- Unmentioned channel traffic: never wakes Hermes by itself, unless it is a
+  participated-thread follow-up and `HYPE_COMMS_THREAD_FOLLOWUPS` is on. It can
+  appear later as bounded ambient context when an eligible message does wake
+  Hermes; see the context-pack section above.
 - Self-authored message: ignored.
 - Reply in a channel: threaded under the message that woke the agent, in the
   same Hype Comms conversation. A reply whose anchor the adapter no longer
@@ -265,20 +342,65 @@ adapter breaks that cycle. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS`,
 or leave follow-ups off, unless you have a reason to want agents answering each
 other.
 
-Hermes's configured authorization remains the final inbound gate. The adapter
-provides validated author UUID and username metadata from the workspace
-directory; it never trusts display metadata from message text.
+Hermes's configured authorization remains the final inbound gate. Before
+fetching context, the adapter invokes Hermes's profile-aware sender callback
+with the validated author UUID, exact chat type, and conversation UUID, so
+profile pairing and group policy agree with normal inbound delivery. Callback
+denial or failure is fail-closed for context retrieval and is silently
+checkpointed without a Hermes handoff, inference, or read mutation. This means
+`pre_gateway_dispatch` hooks and unauthorized-DM pairing do not run for a denied
+Hype Comms trigger; pair or allow that user out of band. Pinned Hermes exposes
+no forced-denied auth-only dispatch seam, while its ordinary handler performs a
+second authorization check asynchronously. Passing raw trigger text through
+that path would allow a policy change between checks to infer without the
+required context pack. A raw UUID environment denial is silent for the same
+reason when a Hermes base has no callback API. The adapter applies the same
+decision once per unique author in the returned messages and optional thread
+root. Ambient content is preserved as canonical conversation history, while a
+bounded adapter-generated `deniedAuthorIds` routing line marks authors who lack
+wake permission; that marker is not a content-trust decision, and the entire
+conversation pack remains untrusted. Display metadata from message text is
+never used for authorization.
 
 ## Cursor, locking, and recovery
 
 State is scoped by SHA-256 of the credential-free API origin plus agent user
 ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
-mode `0600`.
+mode `0600`. Version 2 stores the decimal workspace checkpoint and, per
+conversation, a pending read target with its conversation sequence. A valid
+version 1 checkpoint is migrated in place before watch starts.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
 installations resume from their persisted cursor. At-least-once duplicate
 events at or below that cursor are ignored.
+
+When `read-cursors:write` is present, `handle_message` must return successfully
+before the adapter marks anything read. It then writes the triggering workspace
+cursor and the pack's newest message as one durable state transition, and only
+after that invokes `read-cursors advance`. A successful advance removes the
+pending target atomically. A failed advance is logged without message content,
+keeps the target, and does not fail or repeat the already-completed model turn.
+One adapter-owned task retries all pending targets with capped exponential
+backoff even while message traffic is idle; later wakes may also flush their
+conversation opportunistically, but never create a second retry task. The task
+does not fetch context or hand anything to Hermes. Rate-limit Retry-After is
+honored within the same bounded delay policy, including a longer delay learned
+while the task is already sleeping. Non-retryable failures are parked
+for the current connection instead of looping; the target remains durable and
+gets one fresh attempt after reconnect. Disconnect and fatal watch shutdown
+both cancel and await retry work without removing its durable targets. On
+restart, pending targets are retried before watch resumes; the server update is
+monotonic and idempotent. A newer target for the same conversation replaces an
+older pending one by conversation sequence.
+
+Without `read-cursors:write`, context packs and inference are unchanged. The
+adapter warns once per process, never queues a pending target, and never calls
+the mutation command. A failed context fetch is different from a failed read
+advance: no model handoff has occurred yet, so the workspace cursor stays put
+and normal watch replay retries the whole wake. The sole exception is an
+anchored history `NOT_FOUND`, which is permanent and is checkpointed without a
+handoff as described above.
 
 The adapter acquires Hermes's machine-local scoped lock using the API origin
 and agent user ID. A second local gateway cannot consume the same Hype Comms
@@ -331,11 +453,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s integrations/hermes-hype-comms -p 'test_*.py' -v
 ```
 
-Coverage includes startup/bootstrap, scoped locking, DM delivery, mention
-gating, self-message suppression, metadata cache updates, atomic cursor restart,
-equal-cursor resync, cursor-expiry recovery, malformed NDJSON cleanup,
-transient respawn recovery, private-stdin send, thread-root resolution for
-top-level and in-thread wakes, fallback delivery threading from the metadata
-anchor, chunked-reply root stability, bounded root eviction, cross-conversation
-and unknown-anchor flat fallback, resync root invalidation, flat retry after a
-refused root, retry classification, cron registration, and clean shutdown.
+Coverage includes startup/bootstrap, scoped locking, DM delivery, allowlist and
+mention gating before context retrieval, self-message suppression, exact
+context argv and limits, strict malformed/mismatch rejection, untrusted-content
+rendering and injection-safe byte accounting, transient context replay,
+post-handoff ordering, failed handoff, retracted-anchor poison-event skipping,
+read-scope warning/no-mutation behavior, durable pending read retry across
+idle uptime and restart, Retry-After propagation, permanent-failure parking,
+retry-task and in-flight child cancellation, fatal-handler teardown ownership,
+v1-to-v2 migration, metadata cache updates, equal-cursor resync,
+cursor-expiry recovery, malformed NDJSON cleanup, transient respawn recovery,
+private-stdin send, thread-root resolution for top-level and in-thread wakes,
+fallback delivery threading from the metadata anchor, chunked-reply root
+stability, bounded root eviction, cross-conversation and unknown-anchor flat
+fallback, resync root invalidation, flat retry after a refused root, retry
+classification, cron registration, and clean shutdown.

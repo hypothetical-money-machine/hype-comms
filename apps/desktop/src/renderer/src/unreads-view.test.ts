@@ -37,6 +37,13 @@ const unread: UnreadConversationItem = {
   section: "unread",
 };
 
+const groupUnread: UnreadConversationItem = {
+  ...unread,
+  conversationId: "group-dm",
+  name: "Dan, Athena",
+  kind: "group_direct_message",
+};
+
 describe("UnreadsView", () => {
   it("lists mentions and unreads and opens the selected conversation", () => {
     const onOpen = vi.fn();
@@ -53,6 +60,15 @@ describe("UnreadsView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Dan.*2 unread messages/u }));
     expect(onOpen).toHaveBeenCalledWith("dm");
+  });
+
+  it("identifies an unread group conversation before the user opens it", () => {
+    render(createElement(UnreadsView, { items: [groupUnread], active: true, onOpen: vi.fn() }));
+
+    const row = screen.getByRole("button", {
+      name: /Dan, Athena.*Group conversation.*2 unread messages/u,
+    });
+    expect(row.querySelector(".group-direct-message-avatar")).toBeTruthy();
   });
 
   it("shows an empty state when every conversation is caught up", () => {
