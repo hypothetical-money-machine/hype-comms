@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,8 @@ import {
 import {
   collectPackageFiles,
   excludedPackageDirectories,
+  findLinuxDebPaths,
+  readDesktopEntryFromDeb,
   resolveExpectedProductionApiOrigin,
   resolveExpectedAgentWakeBuild,
   resolveExpectedAgentWakePackageEvidence,
@@ -362,12 +365,12 @@ test("requires the packaged Linux desktop entry to name the application identity
 });
 
 test("requires the packaged Linux desktop entry to declare the scheme", () => {
-  const { desktopName, protocolScheme } = PRODUCTION_DESKTOP_BUILD_FLAVOR;
-  const missingSchemeEntry = desktopEntrySource("");
+  const { protocolScheme } = PRODUCTION_DESKTOP_BUILD_FLAVOR;
+  const noMimeTypeLineEntry = Buffer.from(["[Desktop Entry]", "Type=Application", ""].join("\n"));
+  const emptyMimeTypeEntry = desktopEntrySource("");
   const wrongSchemeEntry = desktopEntrySource(
     `x-scheme-handler/${DEVELOPMENT_DESKTOP_BUILD_FLAVOR.protocolScheme}`,
   );
-  const expectedError = `${desktopName} must declare MimeType=x-scheme-handler/${protocolScheme}; extract-launched AppImages rely on an installed desktop entry for Xfce`;
 
   assert.doesNotThrow(() =>
     verifyDesktopEntryMimeType(
@@ -381,14 +384,94 @@ test("requires the packaged Linux desktop entry to declare the scheme", () => {
       DEVELOPMENT_DESKTOP_BUILD_FLAVOR,
     ),
   );
+  // electron-builder appends the scheme handler after configured mime types, so it must be
+  // accepted anywhere in the list.
+  assert.doesNotThrow(() =>
+    verifyDesktopEntryMimeType(
+      desktopEntrySource(`application/x-hype-comms;x-scheme-handler/${protocolScheme}`),
+      PRODUCTION_DESKTOP_BUILD_FLAVOR,
+    ),
+  );
   assert.throws(
-    () => verifyDesktopEntryMimeType(missingSchemeEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
-    expectedError,
+    () => verifyDesktopEntryMimeType(noMimeTypeLineEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
+    /must declare MimeType=x-scheme-handler\/hype-comms;/u,
+  );
+  assert.throws(
+    () => verifyDesktopEntryMimeType(emptyMimeTypeEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
+    /must include x-scheme-handler\/hype-comms; found none/u,
   );
   assert.throws(
     () => verifyDesktopEntryMimeType(wrongSchemeEntry, PRODUCTION_DESKTOP_BUILD_FLAVOR),
     /found x-scheme-handler\/hype-comms-dev/u,
   );
+  assert.throws(
+    () =>
+      verifyDesktopEntryMimeType(
+        desktopEntrySource("application/x-foo;application/x-bar"),
+        PRODUCTION_DESKTOP_BUILD_FLAVOR,
+      ),
+    /must include x-scheme-handler\/hype-comms; found application\/x-foo, application\/x-bar/u,
+  );
+});
+
+const createDebFixture = async (directory, files) => {
+  const stage = path.join(directory, "stage");
+  await mkdir(path.join(stage, "usr", "share", "applications"), { recursive: true });
+  for (const [name, contents] of Object.entries(files)) {
+    await writeFile(path.join(stage, "usr", "share", "applications", name), contents);
+  }
+  const runOrFail = (command, args) => {
+    const result = spawnSync(command, args, { cwd: directory });
+    assert.equal(result.status, 0, result.stderr?.toString("utf8"));
+  };
+  runOrFail("tar", ["-czf", "data.tar.gz", "-C", "stage", "."]);
+  await writeFile(path.join(directory, "debian-binary"), "2.0\n");
+  runOrFail("tar", ["-czf", "control.tar.gz", "-T", "/dev/null"]);
+  const debPath = path.join(directory, "fixture.deb");
+  // -S keeps macOS ar from injecting a ranlib symbol table that hides the member names.
+  runOrFail("ar", ["rcS", "fixture.deb", "debian-binary", "control.tar.gz", "data.tar.gz"]);
+  return debPath;
+};
+
+test("reads the desktop entry out of a packaged deb", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-deb-"));
+  try {
+    const { desktopName, protocolScheme } = PRODUCTION_DESKTOP_BUILD_FLAVOR;
+    const entryContents = desktopEntrySource(`x-scheme-handler/${protocolScheme}`);
+    const debPath = await createDebFixture(directory, { [desktopName]: entryContents });
+
+    const extracted = readDesktopEntryFromDeb(debPath, desktopName);
+    assert.deepEqual(extracted, entryContents);
+    assert.doesNotThrow(() =>
+      verifyDesktopEntryMimeType(extracted, PRODUCTION_DESKTOP_BUILD_FLAVOR),
+    );
+
+    assert.throws(
+      () => readDesktopEntryFromDeb(debPath, DEVELOPMENT_DESKTOP_BUILD_FLAVOR.desktopName),
+      /does not package usr\/share\/applications\/hype-comms-dev\.desktop/u,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("requires a packaged deb before verifying the Linux desktop entry", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-release-"));
+  try {
+    await assert.rejects(findLinuxDebPaths(directory), /No packaged \.deb found under/u);
+
+    await writeFile(path.join(directory, "hype-comms-0.1.27-linux-x86_64.deb"), "stub");
+    await writeFile(path.join(directory, "hype-comms-0.1.27-linux-arm64.deb"), "stub");
+    await mkdir(path.join(directory, "dev"));
+    await writeFile(path.join(directory, "dev", "hype-comms-dev-0.1.27-linux-arm64.deb"), "stub");
+
+    assert.deepEqual(await findLinuxDebPaths(directory), [
+      path.join(directory, "hype-comms-0.1.27-linux-arm64.deb"),
+      path.join(directory, "hype-comms-0.1.27-linux-x86_64.deb"),
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("requires packaged metadata to carry the selected native identity", () => {

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +23,9 @@ const agentWakeOperatorCall =
 const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
 const desktopNamePolicy =
   /configureApplicationIdentity\([^,]+,\s*process\.platform,\s*\{\s*appId:\s*"([^"]+)",\s*desktopName:\s*"([^"]+)",/gu;
-const mimeTypePolicy = /MimeType=([^;\n]*);/u;
+// electron-builder appends x-scheme-handler/<scheme> after any configured mime types and file
+// associations, so the scheme handler must be matched as a member of the list, not as its head.
+const mimeTypeLinePolicy = /^MimeType=(.*)$/mu;
 const requiredAsarEntries = [
   "/dist/main/build-metadata.json",
   "/dist/main/index.js",
@@ -365,30 +368,66 @@ export function verifyProtocolHandlerDesktopEntry(mainSource, desktopEntrySource
 }
 
 export function verifyDesktopEntryMimeType(desktopEntrySource, flavor) {
-  const mimeTypeMatch = mimeTypePolicy.exec(desktopEntrySource.toString("utf8"));
-  mimeTypePolicy.lastIndex = 0;
+  const mimeTypeMatch = mimeTypeLinePolicy.exec(desktopEntrySource.toString("utf8"));
   if (mimeTypeMatch === null) {
     throw new Error(
       `${flavor.desktopName} must declare MimeType=x-scheme-handler/${flavor.protocolScheme}; extract-launched AppImages rely on an installed desktop entry for Xfce`,
     );
   }
-  if (mimeTypeMatch[1] !== `x-scheme-handler/${flavor.protocolScheme}`) {
+  const mimeTypes = mimeTypeMatch[1].split(";").filter((entry) => entry !== "");
+  if (!mimeTypes.includes(`x-scheme-handler/${flavor.protocolScheme}`)) {
     throw new Error(
-      `${flavor.desktopName} MimeType must be x-scheme-handler/${flavor.protocolScheme}; found ${mimeTypeMatch[1]}`,
+      `${flavor.desktopName} MimeType must include x-scheme-handler/${flavor.protocolScheme}; found ${mimeTypes.join(", ") || "none"}`,
     );
   }
 }
 
-export async function findDesktopEntryPath(releaseRoot, desktopEntryName, excludedDirectories) {
-  const desktopEntryPaths = await collectPackageFiles(
-    releaseRoot,
-    `${desktopEntryName}`,
-    excludedDirectories,
-  );
-  if (desktopEntryPaths.length === 0) {
-    throw new Error(`No packaged ${desktopEntryName} desktop entry found under ${releaseRoot}`);
+export async function findLinuxDebPaths(releaseRoot) {
+  const debPaths = [];
+  for (const entry of await readdir(releaseRoot, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".deb")) {
+      debPaths.push(path.join(releaseRoot, entry.name));
+    }
   }
-  return desktopEntryPaths[0];
+  if (debPaths.length === 0) {
+    throw new Error(
+      `No packaged .deb found under ${releaseRoot}; the desktop entry is read from the deb because electron-builder only stages it inside the packaged artifacts. Build with npm run package:desktop:linux.`,
+    );
+  }
+  return debPaths.sort();
+}
+
+export function readDesktopEntryFromDeb(debPath, desktopName, spawnImplementation = spawnSync) {
+  const archiveBudget = 1024 * 1024 * 1024;
+  const run = (command, args, input) => {
+    const result = spawnImplementation(command, args, { input, maxBuffer: archiveBudget });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `${command} ${args.join(" ")} failed for ${debPath}: ${result.stderr?.toString("utf8").trim() ?? ""}`,
+      );
+    }
+    return result.stdout;
+  };
+
+  const members = run("ar", ["t", debPath]).toString("utf8").split("\n");
+  const dataMember = members.find((member) => member.startsWith("data.tar"));
+  if (dataMember === undefined) {
+    throw new Error(`${debPath} has no data.tar member`);
+  }
+  const dataTar = run("ar", ["p", debPath, dataMember]);
+  const entryPath = `usr/share/applications/${desktopName}`;
+  for (const candidate of [`./${entryPath}`, entryPath]) {
+    const result = spawnImplementation("tar", ["-xOf", "-", candidate], {
+      input: dataTar,
+      maxBuffer: archiveBudget,
+    });
+    if (result.error) throw result.error;
+    if (result.status === 0 && result.stdout.length > 0) {
+      return result.stdout;
+    }
+  }
+  throw new Error(`${debPath} does not package ${entryPath}`);
 }
 
 export async function verifyDesktopPackages(
@@ -411,10 +450,13 @@ export async function verifyDesktopPackages(
     throw new Error(`No packaged app.asar found under ${releaseRoot}`);
   }
 
-  const desktopEntryPath =
-    process.platform === "linux"
-      ? await findDesktopEntryPath(releaseRoot, flavor.desktopName, excludedDirectories)
-      : null;
+  let desktopEntrySource = null;
+  if (process.platform === "linux") {
+    for (const debPath of await findLinuxDebPaths(releaseRoot)) {
+      desktopEntrySource = readDesktopEntryFromDeb(debPath, flavor.desktopName);
+      verifyDesktopEntryMimeType(desktopEntrySource, flavor);
+    }
+  }
 
   for (const asarPath of asarPaths) {
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
@@ -426,10 +468,10 @@ export async function verifyDesktopPackages(
     verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
     verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
-    if (desktopEntryPath !== null) {
+    if (desktopEntrySource !== null) {
       verifyProtocolHandlerDesktopEntry(
-        extractFile(asarPath, "/dist/main/index.js"),
-        desktopEntryPath,
+        extractFile(asarPath, path.join("dist", "main", "index.js")),
+        desktopEntrySource,
         flavor,
       );
     }
