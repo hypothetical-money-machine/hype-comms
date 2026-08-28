@@ -540,7 +540,7 @@ function matchingRetractSource(
   return parsed;
 }
 
-function retainLiveMessageMentions(
+export function retainLiveMessageMentions(
   mentions: Map<string, readonly string[]>,
   messages: readonly Message[],
   conversations: readonly ConversationSummary[] = [],

@@ -49,6 +49,7 @@ import {
   membershipRoleForConversationEvent,
   retractReservationMap,
   rememberCreatedMessageMentions,
+  retainLiveMessageMentions,
   tombstoneMessage,
   upsertRetractReservation,
   type CachedWorkspaceState,
@@ -717,14 +718,14 @@ export class WorkspaceRuntime {
     bootstrap: WorkspaceSnapshot | null,
     threadSummaries: readonly MessageThreadSummary[],
   ): void {
-    const retainedMessageIds = new Set(messages.map((message) => message.id));
-    for (const summary of bootstrap?.conversations ?? []) {
-      if (summary.lastMessage !== null) retainedMessageIds.add(summary.lastMessage.id);
-    }
-    for (const summary of threadSummaries) retainedMessageIds.add(summary.latestReply.id);
-    for (const messageId of this.#createdMessageMentions.keys()) {
-      if (!retainedMessageIds.has(messageId)) this.#createdMessageMentions.delete(messageId);
-    }
+    // Latest replies pass as retract sources on purpose: a summary's latest reply can still be
+    // retracted, so its exact mention IDs must survive even when the message itself is not loaded.
+    retainLiveMessageMentions(
+      this.#createdMessageMentions,
+      messages,
+      bootstrap?.conversations ?? [],
+      threadSummaries.map((summary) => summary.latestReply.id),
+    );
   }
 
   /**

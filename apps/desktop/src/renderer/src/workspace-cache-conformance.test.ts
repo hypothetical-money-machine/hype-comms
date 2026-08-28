@@ -722,6 +722,31 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
+  it("prunes exact mention IDs when the lastMessage is already a tombstone", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    // A tombstoned lastMessage can never be retracted again, so it must not keep its mention
+    // entry alive against the bounded map's eviction.
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: { ...messageSequence2, deletedAt: NOW, updatedAt: NOW },
+          },
+        ],
+        syncCursor: messageCreatedEvent.workspaceSequence,
+      },
+      [],
+    );
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
+  });
+
   it("prunes exact mention IDs after a message becomes unreachable", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);

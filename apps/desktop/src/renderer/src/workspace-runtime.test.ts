@@ -562,6 +562,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   readonly #events = new Set<string>();
   #repairMarker: MembershipRepairMarker | null = null;
   #retractReservations: RetractReservation[] = [];
+  readonly #createdMessageMentions = new Map<string, readonly string[]>();
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
   readonly loadBarriers: Promise<void>[] = [];
@@ -682,8 +683,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
-    void messageId;
-    return undefined;
+    return this.#createdMessageMentions.get(messageId);
   }
 
   async applyEvent(
@@ -741,6 +741,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
         retractReservationMap(this.#retractReservations),
       );
       this.#messages.set(created.id, created);
+      if (created.deletedAt === null) {
+        this.#createdMessageMentions.set(created.id, event.payload.mentionedUserIds);
+      } else {
+        this.#createdMessageMentions.delete(created.id);
+      }
       this.#outbox.delete(created.clientMessageId);
     } else if (event.type === "message.retracted") {
       this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
