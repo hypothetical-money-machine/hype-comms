@@ -549,6 +549,8 @@ class FakeWorkspaceCache implements WorkspaceCache {
   reactionUpsertFailures = 0;
   /** Ordered record of the calls whose relative order a test needs to pin, oldest first. */
   readonly operations: string[] = [];
+  /** Every replaceSnapshot invocation with its full argument list, oldest first. */
+  readonly replaceSnapshotCalls: ReplaceSnapshotArgs[] = [];
   readonly outboxMutations: {
     readonly type: "enqueue" | "remove";
     readonly clientMessageId: string;
@@ -597,6 +599,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<boolean> {
+    this.replaceSnapshotCalls.push(args);
     const [snapshot, messages, reactions = [], tasks = [], signal] = args;
     const authorizedConversationIds = new Set(
       snapshot.conversations.map((summary) => summary.conversation.id),
@@ -3429,6 +3432,23 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.threadSummaries).toEqual([
       { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: followUpReply },
     ]);
+  });
+
+  it("passes only visible conversations' latest replies as snapshot retract sources", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage, threadReply],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await settle(() => runtime.state.threadsSupported, "selected conversation hydration");
+
+    const lastReplace = cache.replaceSnapshotCalls.at(-1);
+    expect(lastReplace?.[5]).toEqual([threadReply.id]);
   });
 
   it("does not reconcile a locally retracted reply twice when its realtime echo arrives", async () => {

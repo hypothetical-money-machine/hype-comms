@@ -2715,7 +2715,9 @@ export class WorkspaceRuntime {
         refreshedReactions,
         tasks,
         signal,
-        threadSummaries.map((summary) => summary.latestReply.id),
+        threadSummaries
+          .filter((summary) => visibleConversationIds.has(summary.latestReply.conversationId))
+          .map((summary) => summary.latestReply.id),
       );
     } catch (error) {
       if (!isCurrent()) return false;
