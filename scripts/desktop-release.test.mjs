@@ -132,10 +132,12 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(releaseValidationJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
   assert.match(releaseValidationJob, /^ {4}permissions:\n {6}contents: read$/mu);
   assert.match(releasePrepareJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.match(releasePrepareJob, /^ {4}environment: release$/mu);
-  assert.match(releasePackageJob, /^ {4}environment: release$/mu);
+  assert.doesNotMatch(releasePrepareJob, /^ {4}environment: release$/mu);
+  assert.doesNotMatch(releasePackageJob, /^ {4}environment: release$/mu);
+  assert.doesNotMatch(releasePackageJob, /GARAGE_(?:ACCESS|SECRET)_/u);
   assert.match(releasePublishJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
   assert.match(releasePublishJob, /^ {4}environment: release$/mu);
+  assert.equal(releaseWorkflow.match(/^ {4}environment: release$/gmu)?.length, 1);
   assert.doesNotMatch(
     `${releaseValidationJob}${releasePrepareJob}${releasePublishJob}`,
     /self-hosted|hmm-linux-x64-ci|hmm-ci/u,
@@ -418,20 +420,32 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   assert.match(nativeEvidenceHelper, /owningApplication\?\.processID == processIdentifier/u);
   assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
   assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
-  assert.equal(releaseWorkflow.match(/UPDATE_MANIFEST: latest-linux-arm64\.yml/gu)?.length, 4);
+  assert.equal(
+    releaseWorkflow.match(/^ {10}UPDATE_MANIFEST: latest-linux-arm64\.yml$/gmu)?.length,
+    2,
+  );
   assert.doesNotMatch(releaseWorkflow, /actions\/(?:upload|download)-artifact/u);
   assert.match(releaseWorkflow, /name: Prepare GitHub Release[\s\S]*contents: write/u);
   const stagingIndex = releaseWorkflow.indexOf("Stage GitHub Release assets");
   const publicationGuardIndex = releaseWorkflow.indexOf(
-    "Refuse to overwrite a published platform version",
+    "Refuse to overwrite published platform versions",
   );
   assert.ok(
     stagingIndex >= 0 && stagingIndex < publicationGuardIndex,
     "GitHub Release assets must be staged before the public feed publication guard",
   );
+  assert.doesNotMatch(releaseWorkflow, /name: Wait for all GitHub Release assets/u);
   assert.match(
     releaseWorkflow,
-    /name: Wait for all GitHub Release assets[\s\S]*run: node scripts\/desktop-release\.mjs wait-github-assets/u,
+    /name: Download staged release assets[\s\S]*gh release download[\s\S]*--dir apps\/desktop\/release/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /name: Publish and verify Linux ARM64 update manifest[\s\S]*node scripts\/desktop-release\.mjs upload-manifest[\s\S]*node scripts\/verify-published-desktop-release\.mjs/u,
+  );
+  assert.match(
+    releaseWorkflow,
+    /name: Publish and verify platform update manifests[\s\S]*for target in mac:latest-mac\.yml win:latest\.yml linux:latest-linux\.yml/u,
   );
   assert.doesNotMatch(releaseWorkflow, /\$\(\s*seq\b/u);
   assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
