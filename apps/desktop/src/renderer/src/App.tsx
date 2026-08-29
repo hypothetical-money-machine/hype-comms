@@ -29,7 +29,12 @@ import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CommunicationPathsView } from "./communication-paths-view";
 import { ConversationHealth } from "./conversation-health";
-import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
+import {
+  ChannelIcon,
+  ConversationBadge,
+  DirectMessageIcon,
+  GroupDirectMessageIcon,
+} from "./conversation-indicators";
 import {
   AnnouncementPostingNotice,
   ArchivedConversationNotice,
@@ -428,6 +433,8 @@ export function MessageRow({
     replyCount === 0
       ? "Reply in thread"
       : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
+  const threadSummaryLabel = `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
+  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${author?.displayName ?? "Former member"}`;
   return (
     <article
       className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
@@ -535,6 +542,16 @@ export function MessageRow({
             )
           }
         />
+        {replyCount > 0 && onOpenThread !== undefined && (
+          <button
+            className="thread-summary"
+            type="button"
+            aria-label={threadSummaryAccessibilityLabel}
+            onClick={onOpenThread}
+          >
+            {threadSummaryLabel}
+          </button>
+        )}
         {retractError !== "" && (
           <p className="retract-error" role="alert">
             {retractError}
@@ -1814,7 +1831,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     (summary) => summary.conversation.kind === "channel",
   );
   const directMessages = bootstrap.conversations.filter(
-    (summary) => summary.conversation.kind === "direct_message",
+    (summary) =>
+      summary.conversation.kind === "direct_message" ||
+      summary.conversation.kind === "group_direct_message",
   );
   const channelReferences: ChannelReferenceTarget[] = channels.flatMap((summary) =>
     summary.conversation.slug === null
@@ -2049,10 +2068,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   className="conversation-label conversation-label-direct-message"
                   title={runtime.conversationName(summary)}
                 >
-                  <DirectMessageIcon />
-                  <PresenceIndicator
-                    state={runtimeState.presenceByUser[participantId] ?? "offline"}
-                  />
+                  {summary.conversation.kind === "group_direct_message" ? (
+                    <GroupDirectMessageIcon />
+                  ) : (
+                    <>
+                      <DirectMessageIcon />
+                      <PresenceIndicator
+                        state={runtimeState.presenceByUser[participantId] ?? "offline"}
+                      />
+                    </>
+                  )}
                   <span className="conversation-label-text">
                     {runtime.conversationName(summary)}
                   </span>

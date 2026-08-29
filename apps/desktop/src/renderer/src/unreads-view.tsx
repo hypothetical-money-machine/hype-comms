@@ -1,4 +1,9 @@
-import { ChannelIcon, ConversationBadge, DirectMessageIcon } from "./conversation-indicators";
+import {
+  ChannelIcon,
+  ConversationBadge,
+  DirectMessageIcon,
+  GroupDirectMessageIcon,
+} from "./conversation-indicators";
 import type { UnreadConversationItem } from "./unread-conversations";
 
 export function UnreadsIcon({ className = "unreads-nav-icon" }: { readonly className?: string }) {
@@ -38,6 +43,7 @@ function kindCaption(item: UnreadConversationItem): string {
     if (item.channelMode === "announcement") return "Announcement channel";
     return "Channel";
   }
+  if (item.kind === "group_direct_message") return "Group conversation";
   return "Direct message";
 }
 
@@ -53,6 +59,8 @@ function UnreadRow({
     <button type="button" className="unreads-item" onClick={() => onOpen(item.conversationId)}>
       {item.kind === "channel" ? (
         <ChannelIcon access={item.access} channelMode={item.channelMode} />
+      ) : item.kind === "group_direct_message" ? (
+        <GroupDirectMessageIcon />
       ) : (
         <DirectMessageIcon />
       )}

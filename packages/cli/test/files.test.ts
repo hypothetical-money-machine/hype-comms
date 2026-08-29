@@ -12,7 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ATTACHMENTS_CAPABILITY } from "@hype-comms/contracts";
+import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
+} from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli } from "../src/cli.js";
@@ -23,6 +27,11 @@ import { jsonResponse, testRuntime } from "./helpers.js";
 
 const ATTACHMENT_ID = "66666666-6666-4666-8666-666666666666";
 const TOKEN = `hype_comms_agent_${"a".repeat(43)}`;
+const FILE_CAPABILITIES = [
+  ATTACHMENTS_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+].join(",");
 
 async function directory(): Promise<string> {
   return mkdtemp(join(await realpath(tmpdir()), "hype-comms-cli-files-"));
@@ -62,6 +71,23 @@ describe("safe attachment files", () => {
     expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
     expect((await lstat(target)).mode & 0o777).toBe(0o600);
     expect(await readdir(cwd)).toEqual(["download.bin"]);
+  });
+
+  it("publishes to a valid deeply nested output path", async () => {
+    const cwd = await directory();
+    let nestedDirectory = cwd;
+    while (join(nestedDirectory, "d", "download.bin").length <= 1_011) {
+      nestedDirectory = join(nestedDirectory, "d");
+      await mkdir(nestedDirectory);
+    }
+    const target = join(nestedDirectory, "download.bin");
+    expect(target.length).toBeGreaterThan(1_000);
+
+    await expect(
+      savePrivateDownload(cwd, target, new TextEncoder().encode("deep attachment")),
+    ).resolves.toBe(target);
+    expect(await readFile(target, "utf8")).toBe("deep attachment");
+    expect((await lstat(target)).mode & 0o777).toBe(0o600);
   });
 
   it("refuses to overwrite an existing file and preserves its bytes", async () => {
@@ -118,9 +144,7 @@ describe("safe attachment files", () => {
       expect(String(url)).toBe(
         `https://chat.example.test/v1/conversations/${CONVERSATION_ID}/files?limit=50`,
       );
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        ATTACHMENTS_CAPABILITY,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
       return jsonResponse({ files: [attachment()], nextCursor: null, hasMore: false });
     });
     const value = runtime(homeDirectory, fetch);
@@ -139,9 +163,7 @@ describe("safe attachment files", () => {
       expect(String(url)).toBe("https://chat.example.test/v1/attachments/query");
       expect(init?.method).toBe("POST");
       expect(JSON.parse(String(init?.body))).toEqual({ messageIds: [MESSAGE_ID] });
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        ATTACHMENTS_CAPABILITY,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
       return jsonResponse({ attachments: [attachment()] });
     });
     const value = runtime(homeDirectory, fetch);
@@ -219,9 +241,7 @@ describe("safe attachment files", () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       const path = new URL(String(url)).pathname;
       paths.push(path);
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        ATTACHMENTS_CAPABILITY,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
       if (init?.method === "POST") {
         return jsonResponse({
           message: {

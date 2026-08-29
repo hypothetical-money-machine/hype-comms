@@ -42,9 +42,11 @@ import {
   MemoryWorkspaceCache,
   newestLiveMessage,
   PersistentWorkspaceCache,
+  projectConversationMembershipChange,
   applyRetractReservation,
   preferRetainedMessage,
   retractedMessageIds,
+  membershipRoleForConversationEvent,
   retractReservationMap,
   rememberCreatedMessageMentions,
   tombstoneMessage,
@@ -230,6 +232,16 @@ function compareSequence(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
   return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+}
+
+function isSelfMembershipChange(
+  event: ProductRealtimeEvent,
+  userId: string | null,
+): event is Extract<WorkspaceEvent, { type: "channel.membership_changed" }> {
+  return (
+    event.type === "channel.membership_changed" &&
+    (userId === null || event.payload.memberId === userId)
+  );
 }
 
 /**
@@ -455,9 +467,19 @@ function retractReplySummary(
         : candidate,
     );
   }
+  const remainingReplyCount = summary.replyCount - 1;
+  if (remainingReplyCount === 0) {
+    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+  }
+  const retainedLiveReplyCount = messages.filter(
+    (message) => message.threadRootId === tombstone.threadRootId && message.deletedAt === null,
+  ).length;
+  // A partial page cannot prove which surviving server reply is latest. Drop its summary until a
+  // refresh can replace it instead of promoting a reply that is known to be incomplete.
+  if (retainedLiveReplyCount !== remainingReplyCount) {
+    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
+  }
   const latestReply = newestLiveReply(messages, tombstone.threadRootId);
-  // A page can know the aggregate count while not retaining another reply locally. Removing this
-  // incomplete summary is more honest than advertising the tombstone or guessing its replacement.
   if (latestReply === null) {
     return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
   }
@@ -465,7 +487,7 @@ function retractReplySummary(
     candidate.threadRootId === tombstone.threadRootId
       ? {
           ...candidate,
-          replyCount: Math.max(1, candidate.replyCount - 1),
+          replyCount: remainingReplyCount,
           latestReply,
         }
       : candidate,
@@ -627,7 +649,7 @@ export class WorkspaceRuntime {
   readonly #invalidatedThreadSummaryConversationIds = new Set<string>();
   #retractReservations: RetractReservation[] = [];
   readonly #retractedMessageIds = new Set<string>();
-  /** Exact mention IDs from live creates, retained only until a matching retract arrives. */
+  /** Exact mention IDs from live creates, retained while retraction can still reach the message. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
   /** Local DELETE responses already changed the renderer before their realtime echo arrives. */
   readonly #locallyProjectedRetracts = new Set<string>();
@@ -660,6 +682,21 @@ export class WorkspaceRuntime {
   #setState(update: Partial<WorkspaceRuntimeState>): void {
     this.#state = { ...this.#state, ...update };
     for (const listener of this.#listeners) listener(this.#state);
+  }
+
+  #pruneCreatedMessageMentions(
+    messages: readonly Message[],
+    bootstrap: WorkspaceSnapshot | null,
+    threadSummaries: readonly MessageThreadSummary[],
+  ): void {
+    const retainedMessageIds = new Set(messages.map((message) => message.id));
+    for (const summary of bootstrap?.conversations ?? []) {
+      if (summary.lastMessage !== null) retainedMessageIds.add(summary.lastMessage.id);
+    }
+    for (const summary of threadSummaries) retainedMessageIds.add(summary.latestReply.id);
+    for (const messageId of this.#createdMessageMentions.keys()) {
+      if (!retainedMessageIds.has(messageId)) this.#createdMessageMentions.delete(messageId);
+    }
   }
 
   /**
@@ -753,7 +790,7 @@ export class WorkspaceRuntime {
       }
       const event = frame.event;
       const realtimeEpoch = this.#realtimeEpoch;
-      if (event.type === "channel.membership_changed") {
+      if (isSelfMembershipChange(event, frame.scope.userId)) {
         // Abort cache transactions synchronously, before the event queue can wait behind the
         // projection they must roll back. The repair itself receives the fresh signal.
         this.#rotateProjectionBarrier();
@@ -833,6 +870,11 @@ export class WorkspaceRuntime {
       this.#membershipRepairPending =
         cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
       this.#syncCursor = cached.syncCursor;
+      this.#pruneCreatedMessageMentions(
+        cached.messages,
+        cached.bootstrap,
+        this.#state.threadSummaries,
+      );
       this.#setState({
         bootstrap: cached.bootstrap,
         messages: cached.messages,
@@ -2366,9 +2408,20 @@ export class WorkspaceRuntime {
       const icon = summary.conversation.channelMode === "announcement" ? "📣" : "#";
       return `${icon} ${summary.conversation.name ?? summary.conversation.slug ?? "channel"}`;
     }
-    const otherId = summary.participantIds.find(
-      (id) => id !== this.#state.bootstrap?.currentUser.user.id,
-    );
+    const currentUserId = this.#state.bootstrap?.currentUser.user.id;
+    const otherIds = summary.participantIds.filter((id) => id !== currentUserId);
+    if (summary.conversation.kind === "group_direct_message") {
+      if (otherIds.length === 0) return "Group conversation";
+      const names = otherIds.map(
+        (id) =>
+          this.#state.bootstrap?.members.find((member) => member.id === id)?.displayName ??
+          "Former member",
+      );
+      const visibleNames = names.slice(0, 3);
+      const remaining = names.length - visibleNames.length;
+      return `${visibleNames.join(", ")}${remaining > 0 ? ` +${String(remaining)}` : ""}`;
+    }
+    const otherId = otherIds[0];
     if (otherId === undefined) {
       return this.#state.bootstrap?.currentUser.user.displayName ?? "Direct message";
     }
@@ -2633,6 +2686,7 @@ export class WorkspaceRuntime {
         refreshedReactions,
         tasks,
         signal,
+        threadSummaries.map((summary) => summary.latestReply.id),
       );
     } catch (error) {
       if (!isCurrent()) return false;
@@ -2731,6 +2785,7 @@ export class WorkspaceRuntime {
         : null;
     const focusedThreadMessageId =
       selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId;
+    this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
@@ -2929,7 +2984,7 @@ export class WorkspaceRuntime {
         // here and drained once below. Without this the fix would only work while the app is
         // online, and a disable that landed during a backfill would survive the catch-up.
         if (event.type === "member.updated") this.#membersDirty = true;
-        if (event.type === "channel.membership_changed") {
+        if (isSelfMembershipChange(event, this.#scope?.userId ?? null)) {
           const repaired = await this.#repairMembershipEvent(event, generation, false);
           if (generation !== this.#generation || cache !== this.#cache) return;
           if (repaired) {
@@ -3272,6 +3327,9 @@ export class WorkspaceRuntime {
       visibleMessageIds.has(reaction.messageId),
     );
     const tasks = loaded.tasks.filter((task) => visibleConversationIds.has(task.conversationId));
+    const retractSourceMessageIds = this.#state.threadSummaries
+      .filter((summary) => visibleConversationIds.has(summary.latestReply.conversationId))
+      .map((summary) => summary.latestReply.id);
     const signal = this.#projectionAbortController.signal;
     const replaced = await cache.replaceSnapshot(
       {
@@ -3286,6 +3344,7 @@ export class WorkspaceRuntime {
       reactions,
       tasks,
       signal,
+      retractSourceMessageIds,
     );
     if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
     if (!replaced) {
@@ -3680,12 +3739,14 @@ export class WorkspaceRuntime {
       if (!visibleMessageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
     this.#historyCursors.delete(conversationId);
+    const threadSummaries = this.#state.threadSummaries.filter((summary) =>
+      visibleMessageIds.has(summary.threadRootId),
+    );
+    this.#pruneCreatedMessageMentions(state.messages, state.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: state.bootstrap,
       messages: state.messages,
-      threadSummaries: this.#state.threadSummaries.filter((summary) =>
-        visibleMessageIds.has(summary.threadRootId),
-      ),
+      threadSummaries,
       reactions: state.reactions,
       attachments: this.#state.attachments.filter(
         (attachment) =>
@@ -3745,12 +3806,14 @@ export class WorkspaceRuntime {
     for (const [rootId] of this.#threadCursors) {
       if (!messageIds.has(rootId)) this.#threadCursors.delete(rootId);
     }
+    const threadSummaries = this.#state.threadSummaries.filter((summary) =>
+      messageIds.has(summary.threadRootId),
+    );
+    this.#pruneCreatedMessageMentions(messages, bootstrap, threadSummaries);
     this.#setState({
       bootstrap,
       messages,
-      threadSummaries: this.#state.threadSummaries.filter((summary) =>
-        messageIds.has(summary.threadRootId),
-      ),
+      threadSummaries,
       reactions: this.#state.reactions.filter((reaction) => messageIds.has(reaction.messageId)),
       attachments: this.#state.attachments.filter(
         (attachment) => attachment.messageId !== null && messageIds.has(attachment.messageId),
@@ -3798,7 +3861,7 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    if (event.type === "channel.membership_changed") {
+    if (isSelfMembershipChange(event, realtimeScope.userId)) {
       await this.#repairMembershipEvent(event, generation, true);
       return;
     }
@@ -4104,18 +4167,29 @@ export class WorkspaceRuntime {
       });
       return;
     }
-    // Both are invalidation signals rather than deltas: `#applyWorkspaceEvent` answers them with a
-    // server re-read and never reaches this projection. `member.updated` in particular must have
-    // no upsert path here — that is the whole reason a disable used to re-assert the disabled
-    // member instead of removing it.
-    if (event.type === "channel.membership_changed" || event.type === "member.updated") {
+    if (event.type === "channel.membership_changed") {
+      this.#setState({
+        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
+          current === undefined ? null : projectConversationMembershipChange(current, event),
+        ),
+      });
+      return;
+    }
+    // `member.updated` is an invalidation signal rather than a delta: `#applyWorkspaceEvent`
+    // answers it with a server re-read and never reaches this projection. It must have no upsert
+    // path here because the payload cannot say that a member was disabled.
+    if (event.type === "member.updated") {
       return;
     }
     this.#setState({
       bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
         conversation: event.payload.conversation,
         participantIds: [...event.payload.participantIds],
-        membershipRole: current?.membershipRole ?? null,
+        membershipRole: membershipRoleForConversationEvent(
+          event.payload.conversation,
+          current?.membershipRole,
+          snapshot.currentUser.user.id,
+        ),
         lastMessage: current?.lastMessage ?? null,
         unreadCount: current?.unreadCount ?? 0,
         mentionCount: current?.mentionCount ?? 0,
@@ -4415,6 +4489,7 @@ export class WorkspaceRuntime {
       currentMessages.set(message.id, message);
     }
     this.#syncCursor = loaded.syncCursor;
+    this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,

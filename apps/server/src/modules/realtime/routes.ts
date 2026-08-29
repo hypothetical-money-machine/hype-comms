@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_WAKE_REALTIME_PREAMBLE,
+  agentWakeCheckpointSchema,
   clientEphemeralActivityFrameSchema,
   realtimeTicketSchema,
   sequenceSchema,
@@ -25,11 +27,13 @@ export const REALTIME_SESSION_REVOKED_CLOSE_CODE = 4401;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVITY_MAX_PAYLOAD_BYTES = 1_024;
 const ACTIVITY_BACKPRESSURE_BYTES = 64 * 1_024;
+type RealtimePreamble = typeof AGENT_WAKE_REALTIME_PREAMBLE | null;
 
 declare module "fastify" {
   interface FastifyRequest {
     realtimePrincipal: RealtimePrincipal | null;
     realtimeCursor: string | null;
+    realtimePreamble: RealtimePreamble;
   }
 }
 
@@ -50,6 +54,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
 ) => {
   app.decorateRequest("realtimePrincipal", null);
   app.decorateRequest("realtimeCursor", null);
+  app.decorateRequest("realtimePreamble", null);
 
   app.get(
     "/realtime",
@@ -71,6 +76,10 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         if (!cursor.success) {
           throw new ApiError(400, "BAD_REQUEST", "A valid realtime cursor is required");
         }
+        const preamble = (request.query as { preamble?: unknown }).preamble;
+        if (preamble !== undefined && preamble !== AGENT_WAKE_REALTIME_PREAMBLE) {
+          throw new ApiError(400, "BAD_REQUEST", "Invalid realtime preamble capability");
+        }
 
         // An absent Origin is accepted for human and agent tickets alike. Requiring it here would
         // break every non-browser client that holds a human session -- `hype-comms-cli watch` opens
@@ -86,6 +95,7 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         });
         request.realtimePrincipal = principal;
         request.realtimeCursor = cursor.data;
+        request.realtimePreamble = preamble ?? null;
       },
     },
     (socket, request) => {
@@ -97,6 +107,12 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       }
       metrics?.realtimeConnected();
 
+      // This ordering is a Wake-only protocol capability. Desktop and plain-watch clients retain
+      // replay-before-connected freshness semantics, and human principals cannot opt themselves in.
+      const sendAgentWakePreamble =
+        request.realtimePreamble === AGENT_WAKE_REALTIME_PREAMBLE &&
+        principal.agentTokenId !== null;
+
       let cursor = initialCursor;
       let closed = false;
       let flushing = false;
@@ -104,11 +120,34 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       let connectedSent = false;
       let pongReceived = true;
       let initialRevalidationComplete = false;
+      let agentAuthorizationReadyForPage = false;
       const activityConnectionId = randomUUID();
       let activityRegistered = false;
       let desiredPresence: "online" | "away" = "online";
       let activityProcessing = false;
       let pendingActivity: ClientEphemeralActivityFrame | null = null;
+
+      const sendDurableFrame = (serialized: string): Promise<boolean> => {
+        if (closed || socket.readyState !== 1) return Promise.resolve(false);
+        return new Promise<boolean>((resolve, reject) => {
+          try {
+            socket.send(serialized, (error) => {
+              // ws forwards net.Socket's successful write callback as null at runtime even though
+              // its public TypeScript declaration documents only Error | undefined.
+              if (error === undefined || error === null) {
+                resolve(!closed && socket.readyState === 1);
+              } else if (closed || socket.readyState !== 1) {
+                resolve(false);
+              } else {
+                reject(error);
+              }
+            });
+          } catch (error) {
+            if (closed || socket.readyState !== 1) resolve(false);
+            else reject(error);
+          }
+        });
+      };
 
       const sendActivity = (frame: EphemeralActivityFrame): boolean => {
         if (
@@ -153,8 +192,9 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           });
       };
 
-      const sendConnected = (): void => {
-        if (connectedSent || socket.readyState !== 1) return;
+      const sendConnected = (): boolean => {
+        if (connectedSent) return !closed && socket.readyState === 1;
+        if (closed || socket.readyState !== 1) return false;
         connectedSent = true;
         const event: SystemConnectedEvent = {
           version: 1,
@@ -184,6 +224,75 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           );
           activityRegistered = true;
         }
+        return true;
+      };
+
+      const revalidatePrincipal = async (): Promise<boolean> => {
+        if (closed || socket.readyState !== 1) return false;
+        if (revalidate === undefined) {
+          if (principal.agentTokenId === null) return true;
+          request.log.error(
+            { userId: principal.userId },
+            "Closing an agent realtime socket because revalidation is unavailable",
+          );
+          socket.close(1011, "Authorization unavailable");
+          return false;
+        }
+        try {
+          const result = await revalidate(principal);
+          if (result.status === "valid") return true;
+          if (closed || socket.readyState !== 1) return false;
+          request.log.warn(
+            { reason: result.reason, userId: principal.userId },
+            "Closing a realtime socket whose session is no longer authorized",
+          );
+          socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
+          return false;
+        } catch (error) {
+          request.log.error({ err: error }, "Realtime session revalidation failed");
+          if (principal.agentTokenId === null) {
+            // Preserve the existing human-session availability tradeoff. Wake-bearing agent
+            // sockets instead fail closed because a stale credential must never receive work.
+            return true;
+          }
+          if (!closed && socket.readyState === 1) {
+            socket.close(1011, "Authorization unavailable");
+          }
+          return false;
+        }
+      };
+
+      // Heartbeats and deliveries share one queue, so their credential checks never overlap. A
+      // notified flush waits behind an active heartbeat check, and a coalesced follow-up flush
+      // performs its own later check.
+      let revalidationTail: Promise<void> = Promise.resolve();
+      const serializedRevalidatePrincipal = (): Promise<boolean> => {
+        const current = revalidationTail.then(revalidatePrincipal);
+        revalidationTail = current.then(
+          () => undefined,
+          () => undefined,
+        );
+        return current;
+      };
+
+      const loadAgentPage = async (): Promise<SyncResponse | null> => {
+        if (loadEvents === undefined) return null;
+        if (agentAuthorizationReadyForPage) {
+          agentAuthorizationReadyForPage = false;
+          return loadEvents(principal, cursor);
+        }
+
+        // Loading and authorization are independent database reads. Overlap them to avoid adding
+        // their latencies while still withholding every byte until this page's check resolves valid.
+        const authorization = serializedRevalidatePrincipal();
+        const loaded = loadEvents(principal, cursor).then(
+          (response) => ({ status: "loaded" as const, response }),
+          (error: unknown) => ({ status: "failed" as const, error }),
+        );
+        if (!(await authorization)) return null;
+        const outcome = await loaded;
+        if (outcome.status === "failed") throw outcome.error;
+        return outcome.response;
       };
 
       const flush = async (): Promise<void> => {
@@ -202,13 +311,50 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
             }
             let response: SyncResponse;
             do {
-              response = await loadEvents(principal, cursor);
+              if (principal.agentTokenId === null) {
+                response = await loadEvents(principal, cursor);
+              } else {
+                // The initial connection check authorizes page one. Every later page and notified
+                // flush performs its own check, concurrent with loading but complete before send.
+                const authorizedResponse = await loadAgentPage();
+                if (authorizedResponse === null) return;
+                response = authorizedResponse;
+              }
+              const pageStartCursor = cursor;
+              if (sendAgentWakePreamble && !sendConnected()) return;
               for (const event of response.events) {
-                if (socket.readyState !== 1) return;
-                socket.send(JSON.stringify(event));
+                const serialized = JSON.stringify(event);
+                if (sendAgentWakePreamble) {
+                  if (!(await sendDurableFrame(serialized))) return;
+                } else {
+                  // Preserve the existing desktop/plain-watch replay and activity timing. Wake is
+                  // opted in because its bounded provider queue can deliberately pause the source.
+                  if (socket.readyState !== 1) return;
+                  socket.send(serialized);
+                }
+              }
+              const lastVisibleCursor =
+                response.events.at(-1)?.workspaceSequence ?? pageStartCursor;
+              if (
+                sendAgentWakePreamble &&
+                BigInt(response.nextCursor) > BigInt(lastVisibleCursor)
+              ) {
+                const checkpoint = agentWakeCheckpointSchema.parse({
+                  version: 1,
+                  type: "agent.wake.checkpoint",
+                  workspaceId: principal.workspaceId,
+                  agentUserId: principal.userId,
+                  cursor: response.nextCursor,
+                });
+                if (!(await sendDurableFrame(JSON.stringify(checkpoint)))) return;
               }
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);
+
+            // In legacy ordering the desktop holds message-bearing replay until this user-bound
+            // handshake, then applies it while notifications are still disarmed. Every agent page
+            // remains withheld until its authorization resolves; the handshake position changes
+            // only client freshness classification, not delivery authorization.
             sendConnected();
           } while (flushAgain && !closed);
         } catch (error) {
@@ -243,31 +389,13 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       const unsubscribe = subscribe?.(principal.workspaceId, () => {
         void flush();
       });
-      const revalidatePrincipal = async (): Promise<boolean> => {
-        if (revalidate === undefined) return true;
-        try {
-          const result = await revalidate(principal);
-          if (result.status === "valid") return true;
-          if (closed || socket.readyState !== 1) return false;
-          request.log.warn(
-            { reason: result.reason, userId: principal.userId },
-            "Closing a realtime socket whose session is no longer authorized",
-          );
-          socket.close(REALTIME_SESSION_REVOKED_CLOSE_CODE, "Session revoked");
-          return false;
-        } catch (error) {
-          // A transient database failure must not sign a healthy device out.
-          request.log.error({ err: error }, "Realtime session revalidation failed");
-          return true;
-        }
-      };
 
       const heartbeat = setInterval(() => {
         if (!pongReceived) {
           socket.terminate();
           return;
         }
-        void revalidatePrincipal();
+        void serializedRevalidatePrincipal();
         pongReceived = false;
         socket.ping();
       }, HEARTBEAT_INTERVAL_MS);
@@ -314,9 +442,10 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       });
       socket.once("close", teardown);
       socket.once("error", teardown);
-      void revalidatePrincipal().then((mayReplay) => {
+      void serializedRevalidatePrincipal().then((mayReplay) => {
         if (!mayReplay || closed || socket.readyState !== 1) return;
         initialRevalidationComplete = true;
+        agentAuthorizationReadyForPage = principal.agentTokenId !== null;
         void flush();
       });
     },

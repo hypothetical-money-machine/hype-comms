@@ -1,8 +1,10 @@
-# Local Linux release runner
+# Local Linux runner
 
-The ARM64 runner handles trusted Linux release packaging and native smoke builds from `main` or a
-manual dispatch, natively on an Apple-silicon host. Public pull requests run only on disposable
-GitHub-hosted infrastructure and must never target this persistent release service. The optional
+The ARM64 runner handles native Linux smoke builds for a manual dispatch of the desktop package
+smoke workflow, natively on an Apple-silicon host. Tagged desktop releases and routine smoke runs
+use disposable GitHub-hosted ARM64 runners and do not depend on this service. Public pull requests
+run only on disposable GitHub-hosted infrastructure and must never target this persistent
+service. The optional
 x64 service remains available for ad hoc compatibility checks. Each service uses the matching
 official GitHub Actions runner and AWS CLI binaries, stores only runner state in its own named
 Docker volume, and does not mount the host filesystem or Docker socket.

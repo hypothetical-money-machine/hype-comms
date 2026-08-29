@@ -84,6 +84,7 @@ async function main(): Promise<void> {
         metricsRegistry === undefined
           ? undefined
           : { tokenReuseDetected: () => metricsRegistry?.refreshTokenReuseDetected() },
+        config.defaultAgentAgencyEnabled,
       );
       if (config.owner !== undefined) await service.seedOwner(config.owner);
       const authKitRepository =

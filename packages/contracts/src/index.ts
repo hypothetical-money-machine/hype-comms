@@ -17,4 +17,5 @@ export * from "./tasks.js";
 export * from "./theme.js";
 export * from "./update.js";
 export * from "./webhooks.js";
+export * from "./wake.js";
 export * from "./workspace.js";

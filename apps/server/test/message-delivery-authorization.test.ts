@@ -277,9 +277,15 @@ describeWithPostgres("message-delivery authorization", () => {
       [workspaceId, agentId],
     );
     await pool.query(
-      `INSERT INTO agents (user_id, workspace_id, created_by)
-       VALUES ($1, $2, $3)`,
+      `INSERT INTO agents
+         (user_id, workspace_id, created_by, legacy_public_channel_access)
+       VALUES ($1, $2, $3, false)`,
       [agentId, workspaceId, ownerId],
+    );
+    await pool.query(
+      `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+       VALUES ($1, $2, $3, 'member')`,
+      [generalId, workspaceId, agentId],
     );
   }
 
@@ -293,6 +299,12 @@ describeWithPostgres("message-delivery authorization", () => {
           SET status = 'active', updated_at = clock_timestamp()
         WHERE workspace_id = $1 AND user_id = $2`,
       [workspaceId, agentId],
+    );
+    await pool.query(
+      `UPDATE conversation_memberships
+          SET left_at = NULL, updated_at = clock_timestamp()
+        WHERE conversation_id = $1 AND user_id = $2`,
+      [generalId, agentId],
     );
   }
 

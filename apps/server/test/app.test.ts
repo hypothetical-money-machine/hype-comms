@@ -347,7 +347,7 @@ describe("realtime route", () => {
     expect(consumeTicket.mock.calls[0]?.[0]).toMatchObject({ origin: undefined });
   });
 
-  it("accepts an originless agent client, consumes its ticket, and emits the handshake", async () => {
+  it("fails closed when a custom agent ticket has no live revalidator", async () => {
     const consumeTicket = vi.fn().mockResolvedValue({
       userId: "10000000-0000-4000-8000-000000000001",
       workspaceId: "10000000-0000-4000-8000-000000000002",
@@ -363,13 +363,14 @@ describe("realtime route", () => {
     const socket = new WebSocket(
       `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
     );
+    const messages: string[] = [];
+    socket.on("message", (data) => messages.push(data.toString()));
 
-    const [data] = await once(socket, "message");
-    const event = systemConnectedEventSchema.parse(JSON.parse(data.toString()));
-    socket.close();
+    const [code, reason] = await once(socket, "close");
 
-    expect(event.workspaceSequence).toBe("9");
-    expect(event.delivery).toBe("at_least_once");
+    expect(code).toBe(1011);
+    expect(reason.toString()).toBe("Authorization unavailable");
+    expect(messages).toEqual([]);
     expect(consumeTicket).toHaveBeenCalledOnce();
     expect(consumeTicket.mock.calls[0]?.[0]).toMatchObject({ origin: undefined });
   });

@@ -7,7 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 import { executeCli } from "../src/cli.js";
 import { loadProfileStore, saveProfile } from "../src/config.js";
 import { EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
-import { agentPrincipal, CLIENT_MESSAGE_ID, CONVERSATION_ID } from "./fixtures.js";
+import {
+  agentPrincipal,
+  CLIENT_MESSAGE_ID,
+  CONVERSATION_ID,
+  MESSAGE_ID,
+  TIMESTAMP,
+  USER_ID,
+} from "./fixtures.js";
 import { jsonResponse, testRuntime } from "./helpers.js";
 
 async function home(): Promise<string> {
@@ -108,6 +115,62 @@ describe("CLI output and exit contracts", () => {
         retryable: true,
         clientMessageId: CLIENT_MESSAGE_ID,
       },
+    });
+  });
+
+  it("hydrates a wake by fetching exactly one authorized message", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      expect(String(url)).toBe(`https://chat.example.test/v1/messages/${MESSAGE_ID}`);
+      expect(init?.method).toBe("GET");
+      return jsonResponse({
+        message: {
+          id: MESSAGE_ID,
+          conversationId: CONVERSATION_ID,
+          conversationSequence: "8",
+          version: 1,
+          clientMessageId: CLIENT_MESSAGE_ID,
+          authorId: USER_ID,
+          threadRootId: null,
+          body: "one trigger only",
+          bodyFormat: "hype_comms_markdown_v1",
+          editedAt: null,
+          deletedAt: null,
+          createdAt: TIMESTAMP,
+          updatedAt: TIMESTAMP,
+        },
+        attachments: [],
+      });
+    });
+    const runtime = testRuntime({
+      homeDirectory: await home(),
+      env: {
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+      },
+      fetch,
+    });
+
+    expect(await executeCli(["messages", "get", MESSAGE_ID, "--json"], runtime)).toBe(EXIT_SUCCESS);
+    expect(JSON.parse(runtime.stdoutText())).toMatchObject({ message: { id: MESSAGE_ID } });
+    expect(runtime.stderrText()).toBe("");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid exact-message wake pointer before networking", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const runtime = testRuntime({
+      homeDirectory: await home(),
+      env: {
+        HYPE_COMMS_API_ORIGIN: "https://chat.example.test",
+        HYPE_COMMS_TOKEN: `hype_comms_agent_${"a".repeat(43)}`,
+      },
+      fetch,
+    });
+
+    expect(await executeCli(["messages", "get", "not-a-uuid", "--json"], runtime)).toBe(EXIT_USAGE);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: { code: "INVALID_MESSAGE_ID", retryable: false },
     });
   });
 

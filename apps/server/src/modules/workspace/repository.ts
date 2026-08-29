@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS,
+  AGENT_CONTEXT_PACK_MAX_BYTES,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENTS_PER_MESSAGE_MAX,
   CONVERSATION_FILES_MAX_LIMIT,
@@ -13,6 +15,8 @@ import {
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
+  agentWakeBootstrapResponseSchema,
+  agentContextHistoryResponseSchema,
   attachmentSchema,
   completeFileUploadResponseSchema,
   conversationFilesResponseSchema,
@@ -27,6 +31,7 @@ import {
   conversationSchema,
   conversationSummarySchema,
   listConversationsResponseSchema,
+  listPublicChannelsResponseSchema,
   listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
@@ -53,9 +58,15 @@ import {
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
+  injectionSafeCompactJsonByteLength,
   isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type AgentWakeBootstrapResponse,
+  type AgentContextAuthor,
+  type AgentContextHistoryResponse,
+  type AgentContextLocation,
+  type AgentContextMessage,
   type Attachment,
   type CompleteFileUploadRequest,
   type CompleteFileUploadResponse,
@@ -72,7 +83,9 @@ import {
   type CreateChannelRequest,
   type CreateTaskRequest,
   type DirectConversationRequest,
+  type GroupDirectConversationRequest,
   type ListConversationsResponse,
+  type ListPublicChannelsResponse,
   type ListMessageReactionsResponse,
   type ListMembersResponse,
   type Message,
@@ -116,8 +129,9 @@ import {
   type AttachmentStore,
 } from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
-import type { AuthenticatedIdentity } from "../identity/service.js";
+import type { AuthenticatedAgentIdentity, AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
+import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import {
   fingerprintApiRequest,
   lockIdempotencyScope,
@@ -162,7 +176,7 @@ interface UserRow extends QueryResultRow {
 interface ConversationRow extends QueryResultRow {
   id: string;
   workspace_id: string;
-  kind: "channel" | "direct_message";
+  kind: "channel" | "direct_message" | "group_direct_message";
   name: string | null;
   slug: string | null;
   topic: string | null;
@@ -177,6 +191,10 @@ interface ConversationRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
+interface PublicChannelRow extends ConversationRow {
+  joined: boolean;
+}
+
 interface ConversationMembershipRow extends QueryResultRow {
   conversation_id: string;
   workspace_id: string;
@@ -185,6 +203,11 @@ interface ConversationMembershipRow extends QueryResultRow {
   joined_at: Date | string;
   left_at: Date | string | null;
   updated_at: Date | string;
+}
+
+interface AgentWakeConversationRow extends QueryResultRow {
+  id: string;
+  kind: "channel" | "direct_message";
 }
 
 interface ChannelMemberRow extends UserRow {
@@ -219,6 +242,13 @@ interface MessageRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
+interface AgentContextMessageRow extends MessageRow {
+  author_kind: "human" | "bot" | "agent";
+  author_username: string;
+  author_display_name: string;
+  mentioned_you: boolean;
+}
+
 interface AttachmentRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -234,6 +264,10 @@ interface AttachmentRow extends QueryResultRow {
   content_received_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface ReadableAttachmentRow extends AttachmentRow {
+  conversation_kind: Conversation["kind"];
 }
 
 interface MessageAuthorizationRow extends QueryResultRow {
@@ -327,6 +361,7 @@ interface TicketRow extends QueryResultRow {
   message_retract_events: boolean;
   member_profiles: boolean;
   ephemeral_activity: boolean;
+  group_direct_messages: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -359,6 +394,8 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
+  /** Test seam after the wake bootstrap establishes its high-water snapshot. */
+  readonly afterAgentWakeBootstrapCursorRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
   /** Structured operational record; message bodies are deliberately never included. */
@@ -398,7 +435,10 @@ export interface WorkspacePrincipal {
   readonly messageRetractEvents?: boolean;
   readonly memberProfiles?: boolean;
   readonly ephemeralActivity?: boolean;
+  readonly groupDirectMessages?: boolean;
 }
+
+export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
 
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -463,25 +503,45 @@ function conversationVisibilitySql(
         SELECT 1 FROM users AS visible_actor
          WHERE visible_actor.id = ${userParameter}
            AND visible_actor.kind IN ('human', 'agent')
-      )
-      AND (
-        (
-          ${alias}.kind = 'channel'
-          AND ${alias}.channel_access = 'workspace'
-        )
-        OR (
-          ${alias}.kind = 'channel'
-          AND ${alias}.channel_access = 'members'
-          AND EXISTS (
-            SELECT 1
-              FROM conversation_memberships AS visible_membership
-             WHERE visible_membership.conversation_id = ${alias}.id
-               AND visible_membership.user_id = ${userParameter}
-               AND visible_membership.left_at IS NULL
+           AND (
+            (
+              ${alias}.kind = 'channel'
+              AND ${alias}.channel_access = 'workspace'
+              AND (
+                visible_actor.kind = 'human'
+                OR EXISTS (
+                  SELECT 1
+                    FROM conversation_memberships AS public_membership
+                   WHERE public_membership.conversation_id = ${alias}.id
+                     AND public_membership.user_id = ${userParameter}
+                     AND public_membership.left_at IS NULL
+                )
+              )
+            )
+            OR (
+              ${alias}.kind = 'channel'
+              AND ${alias}.channel_access = 'members'
+              AND EXISTS (
+                SELECT 1
+                  FROM conversation_memberships AS visible_membership
+                 WHERE visible_membership.conversation_id = ${alias}.id
+                   AND visible_membership.user_id = ${userParameter}
+                   AND visible_membership.left_at IS NULL
+              )
+            )
+            OR ${alias}.dm_user_low_id = ${userParameter}
+            OR ${alias}.dm_user_high_id = ${userParameter}
+            OR (
+              ${alias}.kind = 'group_direct_message'
+              AND EXISTS (
+                SELECT 1
+                  FROM conversation_memberships AS group_membership
+                 WHERE group_membership.conversation_id = ${alias}.id
+                   AND group_membership.user_id = ${userParameter}
+                   AND group_membership.left_at IS NULL
+              )
+            )
           )
-        )
-        OR ${alias}.dm_user_low_id = ${userParameter}
-        OR ${alias}.dm_user_high_id = ${userParameter}
       )
     )
     OR (
@@ -497,6 +557,39 @@ function conversationVisibilitySql(
       )
     )
   )`;
+}
+
+/**
+ * The projection every `AgentContextMessageRow` is read through.
+ *
+ * `mapAgentContextMessage` depends on this exact column set, so both the page query and the
+ * thread-root lookup select it from here rather than repeating it.
+ */
+function agentContextMessageSql(mentionParameter: string): string {
+  return `SELECT message.*,
+                 author.kind AS author_kind,
+                 author.username AS author_username,
+                 author.display_name AS author_display_name,
+                 EXISTS (
+                   SELECT 1
+                     FROM message_mentions AS mention
+                    WHERE mention.message_id = message.id
+                      AND mention.mentioned_user_id = ${mentionParameter}
+                 ) AS mentioned_you
+            FROM messages AS message
+            JOIN users AS author ON author.id = message.author_id`;
+}
+
+/**
+ * The canonical low/high ordering behind the `(workspace_id, dm_user_low_id, dm_user_high_id)`
+ * unique index. Every DM lookup and insert derives its pair here so the two cannot drift.
+ */
+function directMessagePair(actorId: string, memberId: string): { low: string; high: string } {
+  const pair = [actorId, memberId].sort();
+  const low = pair[0];
+  const high = pair[1];
+  if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+  return { low, high };
 }
 
 function participants(row: ConversationRow): string[] {
@@ -522,6 +615,32 @@ function mapMessage(row: MessageRow): Message {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+function mapAgentContextAuthor(row: UserRow): AgentContextAuthor {
+  return {
+    id: row.id,
+    kind: row.kind,
+    username: row.username,
+    displayName: row.display_name,
+  };
+}
+
+function mapAgentContextMessage(row: AgentContextMessageRow): AgentContextMessage {
+  return {
+    id: row.id,
+    conversationSequence: row.conversation_sequence,
+    createdAt: iso(row.created_at),
+    body: row.body,
+    author: {
+      id: row.author_id,
+      kind: row.author_kind,
+      username: row.author_username,
+      displayName: row.author_display_name,
+    },
+    mentionedYou: row.mentioned_you,
+    threadRootId: row.thread_root_id,
+  };
 }
 
 function mapAttachment(row: AttachmentRow): Attachment {
@@ -869,7 +988,19 @@ export class WorkspaceRepository {
     return this.hooks.announcementChannelsEnabled ?? false;
   }
 
-  async bootstrap(identity: AuthenticatedIdentity): Promise<WorkspaceBootstrapResponse> {
+  /** Persist the one-way cutover before this process begins serving default-agency traffic. */
+  async enableDefaultAgentAgency(): Promise<void> {
+    await this.pool.query(
+      `UPDATE workspaces
+          SET default_agent_agency_available = true
+        WHERE default_agent_agency_available = false`,
+    );
+  }
+
+  async bootstrap(
+    identity: AuthenticatedIdentity,
+    includeGroupDirectMessages = true,
+  ): Promise<WorkspaceBootstrapResponse> {
     if (this.announcementChannelsEnabled) {
       await this.pool.query(
         `UPDATE workspaces
@@ -899,6 +1030,7 @@ export class WorkspaceRepository {
           identity,
           null,
           CONVERSATION_PAGE_DEFAULT_LIMIT,
+          includeGroupDirectMessages,
         );
         return workspaceBootstrapResponseSchema.parse({
           currentUser: identity.currentUser,
@@ -920,6 +1052,52 @@ export class WorkspaceRepository {
     );
   }
 
+  /**
+   * Establishes the future-only agent wake cursor and its visible conversation-kind projection in
+   * one repeatable-read snapshot. The query deliberately selects no summaries, messages, or bodies.
+   * The extra row distinguishes an exactly-full response from unsafe truncation.
+   */
+  async agentWakeBootstrap(
+    identity: AuthenticatedAgentIdentity,
+  ): Promise<AgentWakeBootstrapResponse> {
+    return this.#transaction(
+      async (client) => {
+        const highWaterCursor = await this.#highWater(client, identity.currentUser.workspaceId);
+        await this.hooks.afterAgentWakeBootstrapCursorRead?.();
+        const result = await client.query<AgentWakeConversationRow>(
+          `SELECT conversation.id, conversation.kind
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND ${conversationVisibilitySql("conversation", "$2")}
+            ORDER BY conversation.id
+            LIMIT $3`,
+          [
+            identity.currentUser.workspaceId,
+            identity.currentUser.user.id,
+            AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS + 1,
+          ],
+        );
+        if (result.rows.length > AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS) {
+          throw new ApiError(
+            409,
+            "CONFLICT",
+            `Agent wake bootstrap exceeds ${AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS} visible conversations`,
+          );
+        }
+        return agentWakeBootstrapResponseSchema.parse({
+          agentUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
+          highWaterCursor,
+          conversations: result.rows.map((conversation) => ({
+            conversationId: conversation.id,
+            kind: conversation.kind,
+          })),
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
+  }
+
   async listMembers(identity: AuthenticatedIdentity): Promise<ListMembersResponse> {
     const client = await this.pool.connect();
     try {
@@ -931,15 +1109,122 @@ export class WorkspaceRepository {
     }
   }
 
+  async requireGroupDirectMessagesForConversations(
+    identity: AuthenticatedIdentity,
+    conversationIds: readonly string[],
+    supported: boolean,
+  ): Promise<void> {
+    if (supported || conversationIds.length === 0) return;
+    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM conversations AS conversation
+          WHERE conversation.workspace_id = $1
+            AND conversation.id = ANY($3::uuid[])
+            AND conversation.kind = 'group_direct_message'
+            AND ${conversationVisibilitySql("conversation", "$2")}
+       ) AS blocked`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id, conversationIds],
+    );
+    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
+  }
+
+  async requireGroupDirectMessagesForMessages(
+    identity: AuthenticatedIdentity,
+    messageIds: readonly string[],
+    supported: boolean,
+    eligibility: "any" | "active" | "retractable" = "any",
+  ): Promise<void> {
+    if (supported || messageIds.length === 0) return;
+    const eligibilitySql =
+      eligibility === "active"
+        ? "AND message.deleted_at IS NULL"
+        : eligibility === "retractable"
+          ? `AND message.author_id = $2
+             AND (
+               message.deleted_at IS NOT NULL
+               OR (
+                 message.edited_at IS NULL
+                 AND clock_timestamp() <= message.created_at + interval '5 minutes'
+               )
+             )`
+          : "";
+    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
+      `SELECT (
+         count(*) = cardinality($3::uuid[])
+         AND bool_or(conversation.kind = 'group_direct_message')
+       ) AS blocked
+           FROM messages AS message
+           JOIN conversations AS conversation
+             ON conversation.id = message.conversation_id
+            AND conversation.workspace_id = message.workspace_id
+          WHERE message.workspace_id = $1
+            AND message.id = ANY($3::uuid[])
+            AND ${conversationVisibilitySql("conversation", "$2")}
+            ${eligibilitySql}`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id, messageIds],
+    );
+    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
+  }
+
+  async requireGroupDirectMessagesForAttachments(
+    identity: AuthenticatedIdentity,
+    attachmentIds: readonly string[],
+    supported: boolean,
+    eligibility: "any" | "content-write" | "complete" = "any",
+  ): Promise<void> {
+    if (supported || attachmentIds.length === 0) return;
+    const eligibilitySql =
+      eligibility === "content-write"
+        ? `AND attachment.uploaded_by = $2
+           AND attachment.status = 'pending'
+           AND (
+             attachment.upload_expires_at IS NULL
+             OR attachment.upload_expires_at > clock_timestamp()
+           )`
+        : eligibility === "complete"
+          ? `AND attachment.uploaded_by = $2
+             AND (
+               attachment.status = 'ready'
+               OR (
+                 attachment.status = 'pending'
+                 AND (
+                   attachment.upload_expires_at IS NULL
+                   OR attachment.upload_expires_at > clock_timestamp()
+                 )
+               )
+             )`
+          : "";
+    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
+      `SELECT (
+         count(*) = cardinality($3::uuid[])
+         AND bool_or(conversation.kind = 'group_direct_message')
+       ) AS blocked
+           FROM attachments AS attachment
+           JOIN conversations AS conversation
+             ON conversation.id = attachment.conversation_id
+            AND conversation.workspace_id = attachment.workspace_id
+          WHERE attachment.workspace_id = $1
+            AND attachment.id = ANY($3::uuid[])
+            AND ${conversationVisibilitySql("conversation", "$2")}
+            ${eligibilitySql}`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id, attachmentIds],
+    );
+    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
+  }
+
   /**
    * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
    * workspace-membership join makes each best-effort authorization reflect revocation immediately
-   * instead of waiting for the socket heartbeat to close the connection.
+   * instead of waiting for the socket heartbeat to close the connection. The capability argument
+   * is bound into the realtime ticket, so an older device cannot discover a group conversation
+   * through typing frames merely because another device for the same user supports groups.
    */
   async canViewConversation(
     workspaceId: string,
     userId: string,
     conversationId: string,
+    includeGroupDirectMessages: boolean,
   ): Promise<boolean> {
     const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
       `SELECT EXISTS (
@@ -952,8 +1237,9 @@ export class WorkspaceRepository {
           WHERE conversation.id = $3
             AND conversation.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
+            AND ($4::boolean OR conversation.kind <> 'group_direct_message')
        ) AS visible`,
-      [workspaceId, userId, conversationId],
+      [workspaceId, userId, conversationId, includeGroupDirectMessages],
     );
     return result.rows[0]?.visible ?? false;
   }
@@ -983,12 +1269,12 @@ export class WorkspaceRepository {
         const members = await this.#members(client, identity.currentUser.workspaceId);
         const result = await client.query<CommunicationPathRow>(
           // `actor` is the active human/agent member set; every path endpoint comes from it.
-          // `accessible` mirrors the channel-visibility rule for those actors: workspace-access
-          // channels are visible to every actor, restricted channels through a live explicit
-          // membership. Bots are deliberately absent here -- their grant-based access never
-          // produces a member-to-member path under the scope decisions above.
+          // `accessible` mirrors channel visibility: humans implicitly see public channels,
+          // while agents and restricted-channel members require a live conversation seat. Bots
+          // are deliberately absent here -- their grant-based access never produces a
+          // member-to-member path under the scope decisions above.
           `WITH actor AS (
-           SELECT membership.user_id AS user_id
+           SELECT membership.user_id AS user_id, user_account.kind
              FROM workspace_memberships AS membership
              JOIN users AS user_account ON user_account.id = membership.user_id
             WHERE membership.workspace_id = $1
@@ -1004,6 +1290,7 @@ export class WorkspaceRepository {
               AND conversation.kind = 'channel'
               AND conversation.is_archived = false
               AND conversation.channel_access = 'workspace'
+              AND actor.kind = 'human'
             UNION
            SELECT conversation_membership.user_id AS user_id,
                   conversation_membership.conversation_id AS conversation_id
@@ -1016,7 +1303,7 @@ export class WorkspaceRepository {
             WHERE conversation_membership.workspace_id = $1
               AND conversation_membership.left_at IS NULL
          ),
-         dm AS (
+         dm_source AS (
            SELECT conversation.dm_user_low_id AS member_a_id,
                   conversation.dm_user_high_id AS member_b_id,
                   COUNT(message.id) AS direct_message_count,
@@ -1030,6 +1317,32 @@ export class WorkspaceRepository {
             WHERE conversation.workspace_id = $1
               AND conversation.kind = 'direct_message'
               AND conversation.dm_user_low_id <> conversation.dm_user_high_id
+            GROUP BY 1, 2
+            UNION ALL
+           SELECT LEAST(message.author_id, recipient.user_id) AS member_a_id,
+                  GREATEST(message.author_id, recipient.user_id) AS member_b_id,
+                  COUNT(message.id) AS direct_message_count,
+                  MAX(message.created_at) AS last_dm_at
+             FROM conversations AS conversation
+             JOIN messages AS message
+               ON message.conversation_id = conversation.id
+              AND message.deleted_at IS NULL
+             JOIN actor AS author ON author.user_id = message.author_id
+             JOIN conversation_memberships AS recipient_membership
+               ON recipient_membership.conversation_id = conversation.id
+              AND recipient_membership.left_at IS NULL
+              AND recipient_membership.user_id <> message.author_id
+             JOIN actor AS recipient ON recipient.user_id = recipient_membership.user_id
+            WHERE conversation.workspace_id = $1
+              AND conversation.kind = 'group_direct_message'
+            GROUP BY 1, 2
+         ),
+         dm AS (
+           SELECT member_a_id,
+                  member_b_id,
+                  SUM(direct_message_count) AS direct_message_count,
+                  MAX(last_dm_at) AS last_dm_at
+             FROM dm_source
             GROUP BY 1, 2
          ),
          shared AS (
@@ -1101,11 +1414,18 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     after: string | undefined,
     limit: number,
+    includeGroupDirectMessages = true,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
     const client = await this.pool.connect();
     try {
-      const page = await this.#conversationSummaries(client, identity, anchorId, limit);
+      const page = await this.#conversationSummaries(
+        client,
+        identity,
+        anchorId,
+        limit,
+        includeGroupDirectMessages,
+      );
       return listConversationsResponseSchema.parse({
         conversations: page.conversations,
         nextCursor: page.nextCursor,
@@ -1116,12 +1436,143 @@ export class WorkspaceRepository {
     }
   }
 
+  async listPublicChannels(
+    identity: AuthenticatedIdentity,
+    after: string | undefined,
+    limit: number,
+  ): Promise<ListPublicChannelsResponse> {
+    const anchorId = decodeConversationCursor(after);
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
+    const result = await this.pool.query<PublicChannelRow>(
+      `SELECT conversation.*,
+              CASE
+                WHEN actor.kind = 'human' THEN true
+                ELSE EXISTS (
+                  SELECT 1
+                    FROM conversation_memberships AS membership
+                   WHERE membership.conversation_id = conversation.id
+                     AND membership.user_id = $2
+                     AND membership.left_at IS NULL
+                )
+              END AS joined
+         FROM conversations AS conversation
+         JOIN workspace_memberships AS workspace_membership
+           ON workspace_membership.workspace_id = conversation.workspace_id
+          AND workspace_membership.user_id = $2
+          AND workspace_membership.status = 'active'
+         JOIN users AS actor
+           ON actor.id = workspace_membership.user_id
+          AND actor.kind IN ('human', 'agent')
+        WHERE conversation.workspace_id = $1
+          AND conversation.kind = 'channel'
+          AND conversation.channel_access = 'workspace'
+          AND conversation.is_archived = false
+          AND (
+            $3::uuid IS NULL
+            OR (
+              lower(conversation.name),
+              conversation.created_at,
+              conversation.id
+            ) > (
+              SELECT lower(anchor.name), anchor.created_at, anchor.id
+                FROM conversations AS anchor
+               WHERE anchor.id = $3::uuid
+                 AND anchor.workspace_id = $1
+                 AND anchor.kind = 'channel'
+                 AND anchor.channel_access = 'workspace'
+            )
+          )
+        ORDER BY lower(conversation.name), conversation.created_at, conversation.id
+        LIMIT $4`,
+      [identity.currentUser.workspaceId, identity.currentUser.user.id, anchorId, pageLimit + 1],
+    );
+    const selected = result.rows.slice(0, pageLimit);
+    const last = selected.at(-1);
+    const nextCursor =
+      result.rows.length > pageLimit && last !== undefined
+        ? encodeConversationCursor(last.id)
+        : null;
+    return listPublicChannelsResponseSchema.parse({
+      channels: selected.map((row) => ({ conversation: mapConversation(row), joined: row.joined })),
+      nextCursor,
+      hasMore: nextCursor !== null,
+    });
+  }
+
+  async joinPublicChannel(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+  ): Promise<ConversationMutationResponse> {
+    return this.#transaction(async (client) => {
+      const locked = await client.query<ConversationRow>(
+        `SELECT *
+           FROM conversations
+          WHERE id = $1
+            AND workspace_id = $2
+            AND kind = 'channel'
+            AND channel_access = 'workspace'
+            AND is_archived = false
+          FOR UPDATE`,
+        [conversationId, identity.currentUser.workspaceId],
+      );
+      const conversation = locked.rows[0];
+      if (conversation === undefined) {
+        throw new ApiError(404, "NOT_FOUND", "Channel not found");
+      }
+      const principal = await this.#requireActivePrincipal(client, identity);
+      if (principal.kind === "human") {
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, conversation),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
+      const existing = await client.query<ConversationMembershipRow>(
+        `SELECT *
+           FROM conversation_memberships
+          WHERE conversation_id = $1
+            AND user_id = $2
+          FOR UPDATE`,
+        [conversationId, identity.currentUser.user.id],
+      );
+      if (existing.rows[0]?.left_at === null) {
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, conversation),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      }
+      const audienceBefore = await this.#conversationAudience(client, conversation);
+      await client.query(
+        `INSERT INTO conversation_memberships
+           (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')
+         ON CONFLICT (conversation_id, user_id) DO UPDATE
+           SET role = 'member',
+               joined_at = clock_timestamp(),
+               left_at = NULL,
+               updated_at = clock_timestamp()`,
+        [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+      );
+      const audienceAfter = await this.#conversationAudience(client, conversation);
+      const event = await this.#insertEvent(client, identity, {
+        type: "channel.membership_changed",
+        conversation,
+        payload: { memberId: identity.currentUser.user.id, action: "added" },
+        audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
+      });
+      return conversationMutationResponseSchema.parse({
+        conversation: await this.#conversationSummary(client, identity, conversation),
+        syncCursor: event.workspaceSequence,
+      });
+    });
+  }
+
   async createChannel(
     identity: AuthenticatedIdentity,
     input: CreateChannelRequest,
     idempotencyKey?: string,
     announcementCapability = false,
     correlationId?: string,
+    defaultAgentAgencyEnabled = true,
   ): Promise<ConversationMutationResponse> {
     let acceptedAnnouncementId: string | undefined;
     const response = await this.#transaction(async (client) => {
@@ -1153,8 +1604,9 @@ export class WorkspaceRepository {
         const created = await client
           .query<ConversationRow>(
             `INSERT INTO conversations
-           (id, workspace_id, kind, name, slug, topic, channel_access, channel_mode, created_by)
-         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7, $8)
+           (id, workspace_id, kind, name, slug, topic, channel_access, channel_mode, created_by,
+            agent_membership_required)
+         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7, $8, $9)
          RETURNING *`,
             [
               randomUUID(),
@@ -1165,6 +1617,7 @@ export class WorkspaceRepository {
               input.access,
               channelMode,
               identity.currentUser.user.id,
+              defaultAgentAgencyEnabled,
             ],
           )
           .catch((error: unknown) => {
@@ -1175,11 +1628,15 @@ export class WorkspaceRepository {
           });
         const row = created.rows[0];
         if (row === undefined) throw new Error("Channel insert returned no row");
-        if (input.access === "members") {
+        if (input.access === "members" || principal.kind === "agent") {
           await client.query(
             `INSERT INTO conversation_memberships
              (conversation_id, workspace_id, user_id, role)
-           VALUES ($1, $2, $3, 'owner')`,
+           VALUES ($1, $2, $3, 'owner')
+           ON CONFLICT (conversation_id, user_id) DO UPDATE
+             SET role = 'owner',
+                 left_at = NULL,
+                 updated_at = clock_timestamp()`,
             [row.id, row.workspace_id, identity.currentUser.user.id],
           );
         }
@@ -1453,21 +1910,8 @@ export class WorkspaceRepository {
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse> {
     return this.#transaction(async (client) => {
-      const target = await client.query(
-        `SELECT 1
-           FROM workspace_memberships AS membership
-           JOIN users AS user_account ON user_account.id = membership.user_id
-          WHERE membership.workspace_id = $1
-            AND membership.user_id = $2
-            AND membership.status = 'active'
-            AND user_account.kind IN ('human', 'agent')`,
-        [identity.currentUser.workspaceId, input.memberId],
-      );
-      if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
-      const pair = [identity.currentUser.user.id, input.memberId].sort();
-      const low = pair[0];
-      const high = pair[1];
-      if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
+      await this.#requireActiveConversationParticipants(client, identity, [input.memberId]);
+      const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
       const inserted = await client.query<ConversationRow>(
         `INSERT INTO conversations
            (id, workspace_id, kind, dm_user_low_id, dm_user_high_id, created_by)
@@ -1508,6 +1952,129 @@ export class WorkspaceRepository {
         syncCursor,
       });
     });
+  }
+
+  async createGroupDirectConversation(
+    identity: AuthenticatedIdentity,
+    input: GroupDirectConversationRequest,
+    idempotencyKey: string,
+  ): Promise<ConversationMutationResponse> {
+    const memberIds = [...input.memberIds].sort();
+    if (memberIds.includes(identity.currentUser.user.id)) {
+      throw new ApiError(400, "BAD_REQUEST", "The caller is already a group participant");
+    }
+    return this.#transaction(async (client) => {
+      return runIdempotentMutation(
+        client,
+        {
+          actorUserId: identity.currentUser.user.id,
+          route: "/v1/group-direct-conversations",
+          idempotencyKey,
+          requestFingerprint: fingerprintApiRequest({ memberIds }),
+          responseStatus: 201,
+          responseSchema: conversationMutationResponseSchema,
+        },
+        async () => {
+          await this.#requireActiveConversationParticipants(client, identity, memberIds);
+          const inserted = await client.query<ConversationRow>(
+            `INSERT INTO conversations
+               (id, workspace_id, kind, created_by)
+             VALUES ($1, $2, 'group_direct_message', $3)
+             RETURNING *`,
+            [randomUUID(), identity.currentUser.workspaceId, identity.currentUser.user.id],
+          );
+          const conversation = inserted.rows[0];
+          if (conversation === undefined) {
+            throw new Error("Group direct conversation insert returned no row");
+          }
+          const participantIds = [identity.currentUser.user.id, ...memberIds].sort();
+          await client.query(
+            `INSERT INTO conversation_memberships
+               (conversation_id, workspace_id, user_id, role)
+             SELECT $1,
+                    $2,
+                    participant.user_id,
+                    CASE WHEN participant.user_id = $3 THEN 'owner' ELSE 'member' END
+               FROM unnest($4::uuid[]) AS participant(user_id)`,
+            [
+              conversation.id,
+              identity.currentUser.workspaceId,
+              identity.currentUser.user.id,
+              participantIds,
+            ],
+          );
+          await client.query(
+            `UPDATE conversations
+                SET group_memberships_locked = true
+              WHERE id = $1
+                AND workspace_id = $2
+                AND kind = 'group_direct_message'`,
+            [conversation.id, identity.currentUser.workspaceId],
+          );
+          const event = await this.#insertEvent(client, identity, {
+            type: "direct_conversation.created",
+            conversation,
+            payload: { conversation: mapConversation(conversation), participantIds },
+            audienceUserIds: participantIds,
+          });
+          return conversationMutationResponseSchema.parse({
+            conversation: await this.#conversationSummary(client, identity, conversation),
+            syncCursor: event.workspaceSequence,
+          });
+        },
+      );
+    });
+  }
+
+  async findDirectConversation(
+    identity: AuthenticatedIdentity,
+    input: DirectConversationRequest,
+  ): Promise<ConversationMutationResponse | null> {
+    return this.#transaction(
+      async (client) => {
+        const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
+        const existing = await client.query<ConversationRow>(
+          `SELECT conversation.*
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND conversation.kind = 'direct_message'
+              AND conversation.dm_user_low_id = $2
+              AND conversation.dm_user_high_id = $3
+              AND EXISTS (
+                SELECT 1
+                  FROM workspace_memberships AS actor_membership
+                  JOIN users AS actor ON actor.id = actor_membership.user_id
+                 WHERE actor_membership.workspace_id = conversation.workspace_id
+                   AND actor_membership.user_id = $4
+                   AND actor_membership.status = 'active'
+                   AND actor.kind IN ('human', 'agent')
+              )
+              AND EXISTS (
+                SELECT 1
+                  FROM workspace_memberships AS target_membership
+                  JOIN users AS target ON target.id = target_membership.user_id
+                 WHERE target_membership.workspace_id = conversation.workspace_id
+                   AND target_membership.user_id = $5
+                   AND target_membership.status = 'active'
+                   AND target.kind IN ('human', 'agent')
+              )`,
+          [
+            identity.currentUser.workspaceId,
+            low,
+            high,
+            identity.currentUser.user.id,
+            input.memberId,
+          ],
+        );
+        const row = existing.rows[0];
+        if (row === undefined) return null;
+        return conversationMutationResponseSchema.parse({
+          conversation: await this.#conversationSummary(client, identity, row),
+          syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async history(
@@ -1560,6 +2127,129 @@ export class WorkspaceRepository {
     }
   }
 
+  async contextHistory(
+    identity: AuthenticatedIdentity,
+    conversationId: string,
+    before: string | undefined,
+    throughMessageId: string | undefined,
+    limit: number,
+  ): Promise<AgentContextHistoryResponse> {
+    return this.#transaction(
+      async (client) => {
+        const conversation = await this.#requireVisibleConversation(
+          client,
+          identity,
+          conversationId,
+          false,
+        );
+        const beforeSequence = decodeHistoryCursor(before);
+        let throughSequence: string | null = null;
+        if (throughMessageId !== undefined) {
+          const through = await client.query<{ conversation_sequence: string } & QueryResultRow>(
+            `SELECT conversation_sequence
+               FROM messages
+              WHERE id = $1
+                AND conversation_id = $2
+                AND workspace_id = $3
+                AND deleted_at IS NULL`,
+            [throughMessageId, conversation.id, identity.currentUser.workspaceId],
+          );
+          throughSequence = through.rows[0]?.conversation_sequence ?? null;
+          if (throughSequence === null) {
+            // Missing, unauthorized, wrong-conversation, and retracted anchors share one response.
+            throw new ApiError(404, "NOT_FOUND", "Message not found");
+          }
+        }
+
+        const result = await client.query<AgentContextMessageRow>(
+          `${agentContextMessageSql("$4")}
+            WHERE message.conversation_id = $1
+              AND message.deleted_at IS NULL
+              AND ($2::bigint IS NULL OR message.conversation_sequence < $2::bigint)
+              AND ($3::bigint IS NULL OR message.conversation_sequence <= $3::bigint)
+            ORDER BY message.conversation_sequence DESC, message.id DESC
+            LIMIT $5`,
+          [
+            conversation.id,
+            beforeSequence,
+            throughSequence,
+            identity.currentUser.user.id,
+            limit + 1,
+          ],
+        );
+        const queryTruncated = result.rows.length > limit;
+        const messages = result.rows.slice(0, limit).reverse().map(mapAgentContextMessage);
+        const location = await this.#contextLocation(client, identity, conversation);
+        // Trimming only ever drops from the front, so the newest message is the anchor for the
+        // whole pass and everything derived from it is computed once here.
+        const anchor = messages.at(-1);
+        let canonicalThreadRoot: AgentContextMessage | null = null;
+        if (
+          location.kind === "channel" &&
+          anchor?.threadRootId !== null &&
+          anchor?.threadRootId !== undefined
+        ) {
+          canonicalThreadRoot = await this.#contextMessageById(
+            client,
+            identity.currentUser.user.id,
+            conversation.id,
+            anchor.threadRootId,
+          );
+        }
+
+        const anchorMessageId = anchor?.id ?? null;
+        const replyTarget =
+          anchor === undefined
+            ? null
+            : location.kind === "direct_message"
+              ? { kind: "flat" as const, conversationId: conversation.id }
+              : {
+                  kind: "thread" as const,
+                  conversationId: conversation.id,
+                  rootMessageId: anchor.threadRootId ?? anchor.id,
+                };
+        // The root is only carried separately once it has fallen out of the page. Membership can
+        // only go selected -> dropped, so it is tracked incrementally instead of rebuilt per pass.
+        const canonicalThreadRootId = canonicalThreadRoot?.id ?? null;
+        let threadRootSelected =
+          canonicalThreadRootId !== null &&
+          messages.some((message) => message.id === canonicalThreadRootId);
+
+        let droppedForSize = false;
+        while (true) {
+          const oldest = messages.at(0);
+          const hasEarlier = anchor !== undefined && (queryTruncated || droppedForSize);
+          const contextPack = {
+            version: 1 as const,
+            conversation: location,
+            anchorMessageId,
+            messages,
+            threadRoot: threadRootSelected ? null : canonicalThreadRoot,
+            replyTarget,
+            readThroughMessageId: anchorMessageId,
+            truncatedBefore: hasEarlier,
+            nextCursor:
+              hasEarlier && oldest !== undefined
+                ? encodeHistoryCursor(oldest.conversationSequence)
+                : null,
+          };
+          if (injectionSafeCompactJsonByteLength(contextPack) <= AGENT_CONTEXT_PACK_MAX_BYTES) {
+            return agentContextHistoryResponseSchema.parse({ contextPack });
+          }
+          if (messages.length <= 1) {
+            throw new Error("A single context message exceeded the context-pack byte cap");
+          }
+          const dropped = messages.shift();
+          if (dropped !== undefined && dropped.id === canonicalThreadRootId) {
+            threadRootSelected = false;
+          }
+          droppedForSize = true;
+        }
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
+  }
+
   async thread(
     identity: AuthenticatedIdentity,
     threadRootId: string,
@@ -1575,13 +2265,23 @@ export class WorkspaceRepository {
           WHERE message.id = $1
             AND message.workspace_id = $2
             AND message.thread_root_id IS NULL
+            AND (
+              message.deleted_at IS NULL
+              OR EXISTS (
+                SELECT 1
+                  FROM messages AS live_reply
+                 WHERE live_reply.thread_root_id = message.id
+                   AND live_reply.conversation_id = message.conversation_id
+                   AND live_reply.deleted_at IS NULL
+              )
+            )
             AND conversation.workspace_id = $2
             AND ${conversationVisibilitySql("conversation", "$3")}`,
         [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       const root = rootResult.rows[0];
-      if (root === undefined || root.deleted_at !== null) {
-        // Missing, unauthorized, and retracted roots deliberately share one response.
+      if (root === undefined) {
+        // Missing, unauthorized, and reply-less retracted roots deliberately share one response.
         throw new ApiError(404, "NOT_FOUND", "Thread not found");
       }
 
@@ -1601,7 +2301,9 @@ export class WorkspaceRepository {
       const selected = result.rows.slice(0, limit);
       const oldest = selected.at(-1);
       const replies = selected.reverse().map(mapMessage);
-      const rootMessage = mapMessage(root);
+      const rootMessage = mapMessage(
+        root.deleted_at === null ? root : { ...root, body: "Message retracted" },
+      );
       return messageThreadResponseSchema.parse({
         root: rootMessage,
         replies,
@@ -1941,6 +2643,7 @@ export class WorkspaceRepository {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
+    supportsGroupDirectMessages: boolean,
   ): Promise<{
     readonly attachment: Attachment;
     readonly bytes: Buffer;
@@ -1949,8 +2652,8 @@ export class WorkspaceRepository {
     const store = this.#attachmentStore();
     const client = await this.pool.connect();
     try {
-      const result = await client.query<AttachmentRow>(
-        `SELECT attachment.*
+      const result = await client.query<ReadableAttachmentRow>(
+        `SELECT attachment.*, conversation.kind AS conversation_kind
            FROM attachments AS attachment
            JOIN conversations AS conversation
              ON conversation.id = attachment.conversation_id
@@ -1959,23 +2662,35 @@ export class WorkspaceRepository {
             AND conversation.workspace_id = $2
             AND attachment.status = 'ready'
             AND (
-              attachment.message_id IS NOT NULL
-              OR attachment.uploaded_by = $3
-            )
-            AND (
-              attachment.message_id IS NULL
-              OR EXISTS (
-                SELECT 1
-                  FROM messages AS message
-                 WHERE message.id = attachment.message_id
-                   AND message.deleted_at IS NULL
+              (
+                attachment.message_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                    FROM messages AS message
+                   WHERE message.id = attachment.message_id
+                     AND message.deleted_at IS NULL
+                )
+              )
+              OR (
+                $4::boolean
+                AND attachment.message_id IS NULL
+                AND attachment.uploaded_by = $3
               )
             )
             AND ${conversationVisibilitySql("conversation", "$3")}`,
-        [attachmentId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+        [
+          attachmentId,
+          identity.currentUser.workspaceId,
+          identity.currentUser.user.id,
+          identity.principalKind === "human" ||
+            identity.authorizationScopes?.includes("attachments:write") === true,
+        ],
       );
       const row = result.rows[0];
       if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      if (!supportsGroupDirectMessages && row.conversation_kind === "group_direct_message") {
+        throw new GroupDirectClientUpgradeRequiredError();
+      }
       const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
       const contentSha256 = row.content_sha256.toString("hex");
       if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {
@@ -2151,6 +2866,7 @@ export class WorkspaceRepository {
     query: string,
     after: string | undefined,
     limit: number,
+    includeGroupDirectMessages = true,
   ): Promise<MessageSearchResponse> {
     const normalizedQuery = query.trim();
     const queryHash = searchQueryHash(normalizedQuery);
@@ -2169,6 +2885,7 @@ export class WorkspaceRepository {
           CROSS JOIN search_query
           WHERE message.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
+            AND ($8::boolean OR conversation.kind <> 'group_direct_message')
             AND message.deleted_at IS NULL
             AND message.search_vector @@ search_query.value
             AND (
@@ -2191,6 +2908,7 @@ export class WorkspaceRepository {
           cursor?.workspaceSequence ?? null,
           cursor?.id ?? null,
           pageLimit + 1,
+          includeGroupDirectMessages,
         ],
       );
       const hasMore = result.rows.length > pageLimit;
@@ -2829,7 +3547,21 @@ export class WorkspaceRepository {
                     )
                   WHEN conversation.kind = 'direct_message' THEN
                     conversation.dm_user_low_id = $2 OR conversation.dm_user_high_id = $2
-                  WHEN conversation.channel_access = 'workspace' THEN true
+                  WHEN conversation.kind = 'group_direct_message' THEN EXISTS (
+                    SELECT 1
+                      FROM conversation_memberships AS group_membership
+                     WHERE group_membership.conversation_id = conversation.id
+                       AND group_membership.user_id = $2
+                       AND group_membership.left_at IS NULL
+                  )
+                  WHEN conversation.channel_access = 'workspace' THEN
+                    $4::text = 'human' OR EXISTS (
+                      SELECT 1
+                        FROM conversation_memberships AS public_membership
+                       WHERE public_membership.conversation_id = conversation.id
+                         AND public_membership.user_id = $2
+                         AND public_membership.left_at IS NULL
+                    )
                   WHEN conversation.channel_access = 'members' THEN EXISTS (
                     SELECT 1
                       FROM conversation_memberships AS channel_membership
@@ -3268,25 +4000,13 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     after: string,
     limit: number,
-    reactionEvents = false,
-    readStateEvents = false,
-    taskEvents = false,
-    announcementChannels = false,
-    participatedThreadNotifications = false,
-    messageRetractEvents = false,
-    memberProfiles = false,
+    capabilities: WorkspaceClientCapabilities = {},
   ): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
+        ...capabilities,
         workspaceId: identity.currentUser.workspaceId,
         userId: identity.currentUser.user.id,
-        reactionEvents,
-        readStateEvents,
-        taskEvents,
-        announcementChannels,
-        participatedThreadNotifications,
-        messageRetractEvents,
-        memberProfiles,
       },
       after,
       limit,
@@ -3384,6 +4104,17 @@ export class WorkspaceRepository {
                          AND reaction_message.deleted_at IS NULL
                     )
                   )
+                  AND (
+                    $9::boolean
+                    OR event.conversation_id IS NULL
+                    OR NOT EXISTS (
+                      SELECT 1
+                        FROM conversations AS group_conversation
+                       WHERE group_conversation.id = event.conversation_id
+                          AND group_conversation.workspace_id = event.workspace_id
+                          AND group_conversation.kind = 'group_direct_message'
+                    )
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -3399,6 +4130,7 @@ export class WorkspaceRepository {
           principal.taskEvents ?? false,
           principal.participatedThreadNotifications ?? false,
           principal.messageRetractEvents ?? false,
+          principal.groupDirectMessages ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -3418,11 +4150,11 @@ export class WorkspaceRepository {
         highWaterCursor,
         hasMore: rows.rows.length > limit,
       });
-      if (principal.announcementChannels ?? false) return response;
-      return {
-        ...response,
-        events: response.events.map((event) => this.#legacyAnnouncementEvent(event)),
-      } as SyncResponse;
+      let events = response.events;
+      if (!(principal.announcementChannels ?? false)) {
+        events = events.map((event) => this.#legacyAnnouncementEvent(event));
+      }
+      return events === response.events ? response : ({ ...response, events } as SyncResponse);
     } finally {
       client.release();
     }
@@ -3430,15 +4162,19 @@ export class WorkspaceRepository {
 
   async issueRealtimeTicket(
     identity: AuthenticatedIdentity,
-    reactionEvents = false,
-    readStateEvents = false,
-    taskEvents = false,
-    announcementChannels = false,
-    participatedThreadNotifications = false,
-    messageRetractEvents = false,
-    memberProfiles = false,
-    ephemeralActivity = false,
+    capabilities: WorkspaceClientCapabilities = {},
   ) {
+    const {
+      reactionEvents = false,
+      readStateEvents = false,
+      taskEvents = false,
+      announcementChannels = false,
+      participatedThreadNotifications = false,
+      messageRetractEvents = false,
+      memberProfiles = false,
+      ephemeralActivity = false,
+      groupDirectMessages = false,
+    } = capabilities;
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
     if ((deviceSessionId === null) === (agentTokenId === null)) {
@@ -3452,8 +4188,8 @@ export class WorkspaceRepository {
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
           participated_thread_notifications, message_retract_events, member_profiles,
-          ephemeral_activity)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+          ephemeral_activity, group_direct_messages)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -3470,6 +4206,7 @@ export class WorkspaceRepository {
         messageRetractEvents,
         memberProfiles,
         ephemeralActivity,
+        groupDirectMessages,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -3498,7 +4235,8 @@ export class WorkspaceRepository {
                    ticket.participated_thread_notifications,
                    ticket.message_retract_events,
                    ticket.member_profiles,
-                   ticket.ephemeral_activity
+                   ticket.ephemeral_activity,
+                   ticket.group_direct_messages
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -3511,7 +4249,8 @@ export class WorkspaceRepository {
               ticket.participated_thread_notifications,
               ticket.message_retract_events,
               ticket.member_profiles,
-              ticket.ephemeral_activity
+              ticket.ephemeral_activity,
+              ticket.group_direct_messages
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -3566,6 +4305,7 @@ export class WorkspaceRepository {
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
         ephemeralActivity: row.ephemeral_activity,
+        groupDirectMessages: row.group_direct_messages,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -3582,6 +4322,7 @@ export class WorkspaceRepository {
         messageRetractEvents: row.message_retract_events,
         memberProfiles: row.member_profiles,
         ephemeralActivity: row.ephemeral_activity,
+        groupDirectMessages: row.group_direct_messages,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -3672,6 +4413,59 @@ export class WorkspaceRepository {
     return result.rows.map(mapUser);
   }
 
+  async #contextLocation(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    conversation: ConversationRow,
+  ): Promise<AgentContextLocation> {
+    if (conversation.kind === "channel") {
+      if (conversation.slug === null) throw new Error("Channel is missing its canonical slug");
+      return {
+        id: conversation.id,
+        kind: "channel",
+        slug: conversation.slug,
+        selector: `#${conversation.slug}`,
+      };
+    }
+
+    const actorId = identity.currentUser.user.id;
+    const low = conversation.dm_user_low_id;
+    const high = conversation.dm_user_high_id;
+    if (low === null || high === null) {
+      throw new Error("Direct conversation is missing a participant");
+    }
+    const peerId = low === actorId ? high : high === actorId ? low : null;
+    if (peerId === null) throw new Error("Visible direct conversation does not include its actor");
+    const result = await client.query<UserRow>(`SELECT * FROM users WHERE id = $1`, [peerId]);
+    const peer = result.rows[0];
+    if (peer === undefined) throw new Error("Direct-conversation peer does not exist");
+    const author = mapAgentContextAuthor(peer);
+    return {
+      id: conversation.id,
+      kind: "direct_message",
+      selector: `@${author.username}`,
+      peer: author,
+      self: peerId === actorId,
+    };
+  }
+
+  async #contextMessageById(
+    client: PoolClient,
+    actorId: string,
+    conversationId: string,
+    messageId: string,
+  ): Promise<AgentContextMessage | null> {
+    const result = await client.query<AgentContextMessageRow>(
+      `${agentContextMessageSql("$3")}
+        WHERE message.id = $1
+          AND message.conversation_id = $2
+          AND message.deleted_at IS NULL`,
+      [messageId, conversationId, actorId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapAgentContextMessage(row);
+  }
+
   /**
    * One page of the member's visible conversations.
    *
@@ -3690,6 +4484,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     after: string | null,
     limit: number,
+    includeGroupDirectMessages: boolean,
   ): Promise<ConversationPage> {
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
     const result = await client.query<ConversationRow>(
@@ -3697,6 +4492,7 @@ export class WorkspaceRepository {
          FROM conversations AS conversation
         WHERE conversation.workspace_id = $1
           AND ${conversationVisibilitySql("conversation", "$2")}
+          AND ($4::boolean OR conversation.kind <> 'group_direct_message')
           AND (
             $3::uuid IS NULL
             OR (
@@ -3713,6 +4509,7 @@ export class WorkspaceRepository {
                    FROM conversations AS anchor
                   WHERE anchor.id = $3::uuid
                     AND anchor.workspace_id = $1
+                    AND ($4::boolean OR anchor.kind <> 'group_direct_message')
                     AND (
                       ${conversationVisibilitySql("anchor", "$2")}
                       OR (
@@ -3730,8 +4527,14 @@ export class WorkspaceRepository {
           )
         ORDER BY conversation.kind, lower(coalesce(conversation.name, '')),
                  conversation.created_at, conversation.id
-        LIMIT $4`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, after, pageLimit + 1],
+        LIMIT $5`,
+      [
+        identity.currentUser.workspaceId,
+        identity.currentUser.user.id,
+        after,
+        includeGroupDirectMessages,
+        pageLimit + 1,
+      ],
     );
     const rows = result.rows.slice(0, pageLimit);
     const summaries: ConversationSummary[] = [];
@@ -3767,7 +4570,7 @@ export class WorkspaceRepository {
     const counts = await this.#unreadCounts(client, identity.currentUser.user.id, conversation.id);
     return conversationSummarySchema.parse({
       conversation: mapConversation(conversation),
-      participantIds: await this.#conversationAudience(client, conversation),
+      participantIds: await this.#conversationParticipants(client, conversation),
       membershipRole: await this.#membershipRole(client, identity, conversation),
       lastMessage: latestResult.rows[0] === undefined ? null : mapMessage(latestResult.rows[0]),
       ...counts,
@@ -3988,6 +4791,40 @@ export class WorkspaceRepository {
     return principal;
   }
 
+  async #requireActiveConversationParticipants(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+    memberIds: readonly string[],
+  ): Promise<void> {
+    const actorId = identity.currentUser.user.id;
+    const participantIds = [...new Set([actorId, ...memberIds])].sort();
+    const result = await client.query<{ id: string } & QueryResultRow>(
+      `SELECT membership.user_id AS id
+         FROM workspace_memberships AS membership
+         JOIN users AS user_account ON user_account.id = membership.user_id
+        WHERE membership.workspace_id = $1
+          AND membership.user_id = ANY($2::uuid[])
+          AND membership.status = 'active'
+          AND user_account.kind IN ('human', 'agent')
+        ORDER BY membership.user_id
+        FOR UPDATE OF membership`,
+      [identity.currentUser.workspaceId, participantIds],
+    );
+    const activeIds = new Set(result.rows.map((row) => row.id));
+    if (!activeIds.has(actorId)) {
+      throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    }
+    if (memberIds.some((id) => !activeIds.has(id))) {
+      throw new ApiError(404, "NOT_FOUND", "One or more members were not found");
+    }
+    // Membership rows are locked in deterministic UUID order before the workspace row. Agent
+    // disable and human membership revocation use the same membership-before-workspace order, so
+    // a DM cannot be created with a participant who is concurrently leaving the workspace.
+    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
+      identity.currentUser.workspaceId,
+    ]);
+  }
+
   #auditAnnouncement(record: AnnouncementAuditRecord): void {
     try {
       this.hooks.onAnnouncementAudit?.(record);
@@ -4099,21 +4936,35 @@ export class WorkspaceRepository {
                     user_account.display_name,
                     user_account.avatar_url, user_account.title, user_account.created_at,
                     user_account.updated_at,
-                    CASE WHEN user_account.id = $2 THEN 'owner' ELSE 'member' END AS role,
-                    workspace_membership.created_at AS joined_at
+                    CASE
+                      WHEN user_account.kind = 'human' AND user_account.id = $2 THEN 'owner'
+                      WHEN user_account.kind = 'agent' THEN public_membership.role
+                      ELSE 'member'
+                    END AS role,
+                    CASE
+                      WHEN user_account.kind = 'human' THEN workspace_membership.created_at
+                      WHEN user_account.kind = 'agent' THEN public_membership.joined_at
+                      ELSE bot_grant.created_at
+                    END AS joined_at
                FROM users AS user_account
                JOIN workspace_memberships AS workspace_membership
                  ON workspace_membership.user_id = user_account.id
+               LEFT JOIN conversation_memberships AS public_membership
+                 ON public_membership.conversation_id = $3
+                AND public_membership.user_id = user_account.id
+                AND public_membership.left_at IS NULL
+               LEFT JOIN bot_channel_grants AS bot_grant
+                 ON bot_grant.conversation_id = $3
+                AND bot_grant.bot_user_id = user_account.id
               WHERE workspace_membership.workspace_id = $1
                 AND workspace_membership.status = 'active'
                 AND (
-                  user_account.kind IN ('human', 'agent')
-                  OR EXISTS (
-                    SELECT 1
-                      FROM bot_channel_grants AS grant_record
-                     WHERE grant_record.conversation_id = $3
-                       AND grant_record.bot_user_id = user_account.id
+                  user_account.kind = 'human'
+                  OR (
+                    user_account.kind = 'agent'
+                    AND public_membership.user_id IS NOT NULL
                   )
+                  OR bot_grant.bot_user_id IS NOT NULL
                 )
               ORDER BY lower(user_account.display_name), user_account.id`,
             [conversation.workspace_id, conversation.created_by, conversation.id],
@@ -4169,6 +5020,23 @@ export class WorkspaceRepository {
     conversation: ConversationRow,
   ): Promise<string[]> {
     if (conversation.kind === "direct_message") return participants(conversation);
+    if (conversation.kind === "group_direct_message") {
+      const result = await client.query<{ user_id: string } & QueryResultRow>(
+        `SELECT membership.user_id
+           FROM conversation_memberships AS membership
+           JOIN workspace_memberships AS workspace_membership
+             ON workspace_membership.workspace_id = membership.workspace_id
+            AND workspace_membership.user_id = membership.user_id
+           JOIN users AS user_account ON user_account.id = membership.user_id
+          WHERE membership.conversation_id = $1
+            AND membership.left_at IS NULL
+            AND workspace_membership.status = 'active'
+            AND user_account.kind IN ('human', 'agent')
+          ORDER BY membership.user_id`,
+        [conversation.id],
+      );
+      return result.rows.map((row) => row.user_id);
+    }
     if (conversation.channel_access === "workspace") {
       const result = await client.query<{ user_id: string } & QueryResultRow>(
         `SELECT membership.user_id
@@ -4177,7 +5045,17 @@ export class WorkspaceRepository {
           WHERE membership.workspace_id = $1
             AND membership.status = 'active'
             AND (
-              user_account.kind IN ('human', 'agent')
+              user_account.kind = 'human'
+              OR (
+                user_account.kind = 'agent'
+                AND EXISTS (
+                  SELECT 1
+                    FROM conversation_memberships AS public_membership
+                   WHERE public_membership.conversation_id = $2
+                     AND public_membership.user_id = membership.user_id
+                     AND public_membership.left_at IS NULL
+                )
+              )
               OR EXISTS (
                 SELECT 1
                   FROM bot_channel_grants AS grant_record
@@ -4215,6 +5093,28 @@ export class WorkspaceRepository {
               AND user_account.kind = 'bot'
          ) AS audience
         ORDER BY audience.user_id`,
+      [conversation.id],
+    );
+    return result.rows.map((row) => row.user_id);
+  }
+
+  async #conversationParticipants(
+    client: PoolClient,
+    conversation: ConversationRow,
+  ): Promise<string[]> {
+    if (conversation.kind !== "group_direct_message") {
+      return this.#conversationAudience(client, conversation);
+    }
+    // Group membership is fixed history. Disabled members stop receiving events and cannot
+    // authenticate, but remain participants in summaries so the group never collapses into a 1:1.
+    const result = await client.query<{ user_id: string } & QueryResultRow>(
+      `SELECT membership.user_id
+         FROM conversation_memberships AS membership
+         JOIN users AS user_account ON user_account.id = membership.user_id
+        WHERE membership.conversation_id = $1
+          AND membership.left_at IS NULL
+          AND user_account.kind IN ('human', 'agent')
+        ORDER BY membership.user_id`,
       [conversation.id],
     );
     return result.rows.map((row) => row.user_id);
@@ -4287,7 +5187,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversation: ConversationRow,
   ): Promise<"owner" | "member" | null> {
-    if (conversation.kind !== "channel" || conversation.channel_access !== "members") return null;
+    if (conversation.kind === "direct_message") return null;
     const result = await client.query<{ role: "owner" | "member" } & QueryResultRow>(
       `SELECT role
          FROM conversation_memberships
