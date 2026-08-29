@@ -1,8 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
   appImageDesktopFileName,
   createAppImageDesktopFilePlan,
+  createLinuxProtocolRegistrationTarget,
   parseDesktopEntryExecPath,
   queryProtocolHandlerBinding,
   quoteExecArgument,
@@ -26,14 +31,14 @@ function createTarget(
   readonly makeDirectory: ReturnType<typeof vi.fn>;
   readonly writeFile: ReturnType<typeof vi.fn>;
   readonly readFile: ReturnType<typeof vi.fn>;
-  readonly fileExists: ReturnType<typeof vi.fn>;
+  readonly fileIsExecutable: ReturnType<typeof vi.fn>;
   readonly runCommand: ReturnType<typeof vi.fn>;
 } {
   return {
     makeDirectory: vi.fn(async () => undefined),
     writeFile: vi.fn(async () => undefined),
     readFile: vi.fn(async () => null),
-    fileExists: vi.fn(async () => false),
+    fileIsExecutable: vi.fn(async () => false),
     runCommand: vi.fn(async () => commandResult),
   };
 }
@@ -207,28 +212,28 @@ describe("queryProtocolHandlerBinding", () => {
     };
     const ENTRY = 'Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n';
 
-    it("trusts the self-registered entry only while its Exec target exists", async () => {
+    it("trusts the self-registered entry only while its Exec target is launchable", async () => {
       const target = createTarget({
         exitCode: 0,
         stdout: "com.hypemm.hypecomms.appimage.desktop\n",
       });
       target.readFile.mockResolvedValue(ENTRY);
-      target.fileExists.mockResolvedValue(true);
+      target.fileIsExecutable.mockResolvedValue(true);
 
       await expect(
         queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
       ).resolves.toBe("bound");
       expect(target.readFile).toHaveBeenCalledWith(SELF_REGISTERED.desktopFilePath);
-      expect(target.fileExists).toHaveBeenCalledWith("/home/wren/Apps/Hype Comms.AppImage");
+      expect(target.fileIsExecutable).toHaveBeenCalledWith("/home/wren/Apps/Hype Comms.AppImage");
     });
 
-    it("reports unbound when the Exec target was moved or deleted", async () => {
+    it("reports unbound when the Exec target is missing, a directory, or not executable", async () => {
       const target = createTarget({
         exitCode: 0,
         stdout: "com.hypemm.hypecomms.appimage.desktop\n",
       });
       target.readFile.mockResolvedValue(ENTRY);
-      target.fileExists.mockResolvedValue(false);
+      target.fileIsExecutable.mockResolvedValue(false);
 
       await expect(
         queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
@@ -261,7 +266,7 @@ describe("queryProtocolHandlerBinding", () => {
         queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
       ).resolves.toBe("bound");
       expect(target.readFile).not.toHaveBeenCalled();
-      expect(target.fileExists).not.toHaveBeenCalled();
+      expect(target.fileIsExecutable).not.toHaveBeenCalled();
     });
   });
 });
@@ -284,6 +289,48 @@ describe("parseDesktopEntryExecPath", () => {
     expect(parseDesktopEntryExecPath("[Desktop Entry]\nType=Application\n")).toBeNull();
     expect(parseDesktopEntryExecPath("Exec=\n")).toBeNull();
     expect(parseDesktopEntryExecPath('Exec="/tmp/unterminated %u')).toBeNull();
+  });
+});
+
+describe("createLinuxProtocolRegistrationTarget", () => {
+  it("treats only a regular file with the execute bit as launchable", async () => {
+    const target = createLinuxProtocolRegistrationTarget();
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "hype-protocol-target-"));
+    try {
+      const executable = path.join(scratch, "app.AppImage");
+      const plain = path.join(scratch, "plain.AppImage");
+      await fs.writeFile(executable, "#!/bin/sh\n", { mode: 0o755 });
+      await fs.writeFile(plain, "#!/bin/sh\n", { mode: 0o644 });
+
+      await expect(target.fileIsExecutable(executable)).resolves.toBe(true);
+      await expect(target.fileIsExecutable(plain)).resolves.toBe(false);
+      await expect(target.fileIsExecutable(scratch)).resolves.toBe(false);
+      await expect(target.fileIsExecutable(path.join(scratch, "gone.AppImage"))).resolves.toBe(
+        false,
+      );
+    } finally {
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("reads files leniently and never rejects on a missing path", async () => {
+    const target = createLinuxProtocolRegistrationTarget();
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "hype-protocol-target-"));
+    try {
+      const entry = path.join(scratch, "entry.desktop");
+      await fs.writeFile(entry, "[Desktop Entry]\n", "utf8");
+      await expect(target.readFile(entry)).resolves.toBe("[Desktop Entry]\n");
+      await expect(target.readFile(path.join(scratch, "missing.desktop"))).resolves.toBeNull();
+    } finally {
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("maps a spawn failure to a null exit code instead of rejecting", async () => {
+    const target = createLinuxProtocolRegistrationTarget();
+    await expect(
+      target.runCommand("hype-comms-definitely-not-a-command", ["query"]),
+    ).resolves.toEqual({ exitCode: null, stdout: "" });
   });
 });
 

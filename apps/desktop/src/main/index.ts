@@ -1,5 +1,5 @@
-import { execFile, spawnSync } from "node:child_process";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { realpath, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -159,10 +159,10 @@ import {
 import {
   appImageDesktopFileName,
   createAppImageDesktopFilePlan,
+  createLinuxProtocolRegistrationTarget,
   queryProtocolHandlerBinding,
   registerAppImageProtocolHandler,
   userApplicationsDirectory,
-  type LinuxProtocolRegistrationTarget,
 } from "./linux-protocol-registration";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
@@ -270,47 +270,6 @@ let protocolHandlerState: ProtocolHandlerState = {
   binding: "unknown",
 };
 let protocolHandlerProbe: Promise<ProtocolHandlerState> | null = null;
-
-function createLinuxProtocolRegistrationTarget(): LinuxProtocolRegistrationTarget {
-  return {
-    makeDirectory: async (directoryPath) => {
-      await mkdir(directoryPath, { recursive: true });
-    },
-    writeFile: async (filePath, contents) => {
-      await writeFile(filePath, contents, "utf8");
-    },
-    readFile: async (filePath) => {
-      try {
-        return await readFile(filePath, "utf8");
-      } catch {
-        return null;
-      }
-    },
-    fileExists: async (filePath) => {
-      try {
-        await stat(filePath);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    runCommand: (command, commandArguments) =>
-      new Promise((resolve) => {
-        execFile(
-          command,
-          [...commandArguments],
-          { timeout: 5_000, windowsHide: true },
-          (error, stdout) => {
-            if (error === null) {
-              resolve({ exitCode: 0, stdout });
-              return;
-            }
-            resolve({ exitCode: typeof error.code === "number" ? error.code : null, stdout: "" });
-          },
-        );
-      }),
-  };
-}
 
 /**
  * On Linux the xdg database, not Electron, decides whether hype-comms:// URLs reach this app. An

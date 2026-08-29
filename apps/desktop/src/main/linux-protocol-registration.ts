@@ -1,3 +1,12 @@
+import { execFile } from "node:child_process";
+import {
+  access,
+  constants as fsConstants,
+  mkdir,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 
 import type { AuthProtocolScheme } from "./security";
@@ -26,7 +35,8 @@ export interface LinuxProtocolRegistrationTarget {
   readonly writeFile: (filePath: string, contents: string) => Promise<void>;
   /** Resolves `null` when the file is missing or unreadable; this never rejects. */
   readonly readFile: (filePath: string) => Promise<string | null>;
-  readonly fileExists: (filePath: string) => Promise<boolean>;
+  /** True only for a regular file this user may execute; directories and mode-000 files fail. */
+  readonly fileIsExecutable: (filePath: string) => Promise<boolean>;
   /** Spawn failures resolve as `{ exitCode: null, stdout: "" }`; this never rejects. */
   readonly runCommand: (
     command: string,
@@ -41,6 +51,51 @@ export interface SelfRegisteredHandlerCheck {
 }
 
 export type ProtocolHandlerBinding = "bound" | "unbound" | "unknown";
+
+/** The production effect layer: real filesystem plus `execFile` (no shell) with a 5s timeout. */
+export function createLinuxProtocolRegistrationTarget(): LinuxProtocolRegistrationTarget {
+  return {
+    makeDirectory: async (directoryPath) => {
+      await mkdir(directoryPath, { recursive: true });
+    },
+    writeFile: async (filePath, contents) => {
+      await writeFile(filePath, contents, "utf8");
+    },
+    readFile: async (filePath) => {
+      try {
+        return await readFile(filePath, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    fileIsExecutable: async (filePath) => {
+      try {
+        if (!(await stat(filePath)).isFile()) {
+          return false;
+        }
+        await access(filePath, fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    runCommand: (command, commandArguments) =>
+      new Promise((resolve) => {
+        execFile(
+          command,
+          [...commandArguments],
+          { timeout: 5_000, windowsHide: true },
+          (error, stdout) => {
+            if (error === null) {
+              resolve({ exitCode: 0, stdout });
+              return;
+            }
+            resolve({ exitCode: typeof error.code === "number" ? error.code : null, stdout: "" });
+          },
+        );
+      }),
+  };
+}
 
 /**
  * The self-registered entry must never reuse the installed name: a user-level file named
@@ -163,12 +218,12 @@ export async function registerAppImageProtocolHandler(
  * When the default resolves to the self-registered entry, its filename alone is not proof: the
  * AppImage that wrote it may have been moved or deleted since, leaving an entry whose Exec launches
  * nothing. The deb path verifies without rewriting, so it must read the entry and confirm the Exec
- * target still exists before trusting it.
+ * target is still launchable before trusting it.
  */
 export async function queryProtocolHandlerBinding(
   mimeType: string,
   acceptedHandlers: readonly string[],
-  target: Pick<LinuxProtocolRegistrationTarget, "runCommand" | "readFile" | "fileExists">,
+  target: Pick<LinuxProtocolRegistrationTarget, "runCommand" | "readFile" | "fileIsExecutable">,
   selfRegistered?: SelfRegisteredHandlerCheck,
 ): Promise<ProtocolHandlerBinding> {
   const result = await target.runCommand("xdg-mime", ["query", "default", mimeType]);
@@ -187,5 +242,5 @@ export async function queryProtocolHandlerBinding(
   if (executablePath === null) {
     return "unbound";
   }
-  return (await target.fileExists(executablePath)) ? "bound" : "unbound";
+  return (await target.fileIsExecutable(executablePath)) ? "bound" : "unbound";
 }
