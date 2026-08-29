@@ -7,6 +7,7 @@ export * from "./cache.js";
 export * from "./channel-slug.js";
 export * from "./chat.js";
 export * from "./compact-mode.js";
+export * from "./desktop-protocol.js";
 export * from "./entities.js";
 export * from "./files.js";
 export * from "./http.js";

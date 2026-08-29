@@ -11,6 +11,7 @@ import {
   ChatSession,
   ChatSessionError,
   INVALID_MAGIC_LINK_MESSAGE,
+  describeNetworkError,
   SESSION_SERVER_ERROR_MESSAGE,
   SESSION_UNREACHABLE_MESSAGE,
   type SessionCookieStore,
@@ -825,6 +826,36 @@ describe("ChatSession AuthKit", () => {
     ]);
   });
 
+  it("surfaces the Chromium net error token when authorization cannot reach the service", async () => {
+    const session = createSession(async () => {
+      throw new TypeError("Failed to fetch", {
+        cause: new Error("net::ERR_SSL_KEY_USAGE_INCOMPATIBLE"),
+      });
+    });
+
+    await expect(
+      session.beginDesktopAuthorization({
+        codeChallenge: AUTHKIT_CHALLENGE,
+        state: AUTHKIT_STATE,
+      }),
+    ).rejects.toThrow(
+      "Could not reach the authentication service (net::ERR_SSL_KEY_USAGE_INCOMPATIBLE)",
+    );
+  });
+
+  it("keeps the plain unreachable message when the failure carries no net error code", async () => {
+    const session = createSession(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    await expect(
+      session.beginDesktopAuthorization({
+        codeChallenge: AUTHKIT_CHALLENGE,
+        state: AUTHKIT_STATE,
+      }),
+    ).rejects.toThrow(/^Could not reach the authentication service$/);
+  });
+
   it("exchanges a one-use handoff into the existing cookie identity", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const session = createSession(async (url, init) => {
@@ -966,5 +997,40 @@ describe("ChatSession renewal", () => {
 
     expect(requests).toEqual([]);
     expect(session.state).toEqual({ status: "signed-out" });
+  });
+});
+
+describe("describeNetworkError", () => {
+  it("finds the token in the error's own message", () => {
+    expect(describeNetworkError(new Error("net::ERR_CONNECTION_REFUSED"))).toBe(
+      "net::ERR_CONNECTION_REFUSED",
+    );
+  });
+
+  it("finds the token on the cause chain", () => {
+    const error = new TypeError("Failed to fetch", {
+      cause: new Error("net::ERR_SSL_KEY_USAGE_INCOMPATIBLE"),
+    });
+    expect(describeNetworkError(error)).toBe("net::ERR_SSL_KEY_USAGE_INCOMPATIBLE");
+  });
+
+  it("walks nested causes", () => {
+    const error = new Error("outer", {
+      cause: new Error("middle", { cause: new Error("request failed net::ERR_TIMED_OUT") }),
+    });
+    expect(describeNetworkError(error)).toBe("net::ERR_TIMED_OUT");
+  });
+
+  it("returns null for non-errors and messages without a token", () => {
+    expect(describeNetworkError("net::ERR_FAKE")).toBeNull();
+    expect(describeNetworkError(new Error("just unreachable"))).toBeNull();
+    expect(describeNetworkError(undefined)).toBeNull();
+  });
+
+  it("terminates on a cyclic cause chain", () => {
+    const first = new Error("first");
+    const second = new Error("second", { cause: first });
+    Object.defineProperty(first, "cause", { value: second });
+    expect(describeNetworkError(first)).toBeNull();
   });
 });
