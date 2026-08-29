@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { realpath, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -64,6 +64,7 @@ import {
   type NotificationContext,
   type NotificationState,
   type ProductRealtimeEvent,
+  type ProtocolHandlerState,
   type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
   type ThemeState,
@@ -155,6 +156,14 @@ import {
   reportMainProcessError,
   reportMainProcessEvent,
 } from "./main-process-log";
+import {
+  appImageDesktopFileName,
+  createAppImageDesktopFilePlan,
+  createLinuxProtocolRegistrationTarget,
+  queryProtocolHandlerBinding,
+  registerAppImageProtocolHandler,
+  userApplicationsDirectory,
+} from "./linux-protocol-registration";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
   createMacosNotificationAuthorization,
@@ -256,6 +265,59 @@ let rendererSessionGeneration = 0;
 const mainWindowRecreationCoordinator = new MainWindowRecreationCoordinator();
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
+let protocolHandlerState: ProtocolHandlerState = {
+  scheme: __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+  binding: "unknown",
+};
+let protocolHandlerProbe: Promise<ProtocolHandlerState> | null = null;
+
+/**
+ * On Linux the xdg database, not Electron, decides whether hype-comms:// URLs reach this app. An
+ * AppImage installs no desktop entry, so this self-registers one pointing at $APPIMAGE; the deb
+ * already installs its entry, so that path only verifies. The result feeds the sign-in card so a
+ * missing handler warns before AuthKit strands the user in the browser (issue #75).
+ */
+async function probeLinuxProtocolHandler(): Promise<ProtocolHandlerState> {
+  if (process.platform !== "linux" || !app.isPackaged) {
+    return protocolHandlerState;
+  }
+  const target = createLinuxProtocolRegistrationTarget();
+  const appImagePath = process.env.APPIMAGE;
+  if (appImagePath !== undefined && appImagePath !== "") {
+    const plan = createAppImageDesktopFilePlan({
+      scheme: __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+      installedDesktopName: __HYPE_COMMS_DESKTOP_NAME__,
+      productName: __HYPE_COMMS_PRODUCT_NAME__,
+      appImagePath,
+      homeDirectory: homedir(),
+      xdgDataHome: process.env.XDG_DATA_HOME,
+    });
+    if (plan === null) {
+      reportMainProcessError("The AppImage path cannot be written to a desktop entry");
+    } else {
+      try {
+        await registerAppImageProtocolHandler(plan, target);
+      } catch (error) {
+        reportMainProcessError("Could not self-register the AppImage protocol handler", error);
+      }
+    }
+  }
+  const selfRegisteredName = appImageDesktopFileName(__HYPE_COMMS_DESKTOP_NAME__);
+  const binding = await queryProtocolHandlerBinding(
+    `x-scheme-handler/${__HYPE_COMMS_AUTH_PROTOCOL_SCHEME__}`,
+    [__HYPE_COMMS_DESKTOP_NAME__, selfRegisteredName],
+    target,
+    {
+      desktopFileName: selfRegisteredName,
+      desktopFilePath: path.join(
+        userApplicationsDirectory(homedir(), process.env.XDG_DATA_HOME),
+        selfRegisteredName,
+      ),
+    },
+  );
+  protocolHandlerState = { ...protocolHandlerState, binding };
+  return protocolHandlerState;
+}
 interface PendingAuthCallback {
   readonly transientAttempts: number;
   readonly value: string;
@@ -1090,6 +1152,18 @@ function registerIpcHandlers(): void {
     return request;
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.protocolHandlerState);
+  ipcMain.handle(DESKTOP_CHANNELS.protocolHandlerState, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted protocol-handler-state IPC sender");
+    }
+    if (protocolHandlerProbe === null) {
+      return protocolHandlerState;
+    }
+    // A failed probe keeps the stored "unknown" state: never warn on a probe that could not run.
+    return protocolHandlerProbe.catch(() => protocolHandlerState);
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.updateState);
   ipcMain.handle(DESKTOP_CHANNELS.updateState, (event): UpdateState => {
     if (!isTrustedIpcSender(event)) {
@@ -1414,8 +1488,13 @@ function registerIpcHandlers(): void {
         if (authKitPendingIntentGeneration === startIntent) {
           authKitPendingIntentGeneration = null;
         }
-        reportMainProcessError("AuthKit authorization could not be started");
-        throw new Error("Could not start WorkOS sign-in", { cause: error });
+        reportMainProcessError("AuthKit authorization could not be started", error);
+        // Only .message survives IPC serialization, so surface curated ChatSessionError text (it
+        // carries the net::ERR_* diagnostic); internal errors keep the generic message.
+        throw new Error(
+          error instanceof ChatSessionError ? error.message : "Could not start WorkOS sign-in",
+          { cause: error },
+        );
       }
     })();
     authKitStartPromise = start;
@@ -2691,18 +2770,25 @@ if (!hasSingleInstanceLock) {
           process.argv,
           __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
         );
-        if (
+        const registered =
           protocolRegistration.executablePath === undefined ||
           protocolRegistration.arguments === undefined
-        ) {
-          app.setAsDefaultProtocolClient(protocolRegistration.scheme);
-        } else {
-          app.setAsDefaultProtocolClient(
-            protocolRegistration.scheme,
-            protocolRegistration.executablePath,
-            [...protocolRegistration.arguments],
-          );
+            ? app.setAsDefaultProtocolClient(protocolRegistration.scheme)
+            : app.setAsDefaultProtocolClient(
+                protocolRegistration.scheme,
+                protocolRegistration.executablePath,
+                [...protocolRegistration.arguments],
+              );
+        if (!registered) {
+          // Log only: on Linux the xdg probe below is the authoritative binding signal.
+          reportMainProcessError("Electron could not register the auth protocol handler");
         }
+        // Fire-and-forget so a slow xdg toolchain never delays window creation; the IPC handler
+        // awaits this same promise.
+        protocolHandlerProbe = probeLinuxProtocolHandler();
+        protocolHandlerProbe.catch((error: unknown) => {
+          reportMainProcessError("The protocol-handler probe failed", error);
+        });
       }
 
       await createMainWindow();

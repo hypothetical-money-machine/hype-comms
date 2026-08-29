@@ -137,6 +137,18 @@ button {
   line-height: 1.55;
 }
 
+.signin-warning {
+  margin: 20px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--theme-text-warning) 45%, var(--theme-border-default));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--theme-text-warning) 10%, var(--theme-surface-card));
+  color: var(--theme-text-warning);
+  line-height: 1.55;
+  font-size: 14px;
+  text-align: left;
+}
+
 .signin-card form {
   display: grid;
   gap: 10px;

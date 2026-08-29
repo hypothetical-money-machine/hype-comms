@@ -10,6 +10,7 @@ import {
   type ChatSessionState,
   type Message,
   type NotificationContext,
+  type ProtocolHandlerState,
   type Reaction,
   type ReactionEmoji,
   type Task,
@@ -97,7 +98,10 @@ type UpdateClient = Pick<
 >;
 
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message !== "" ? error.message : fallback;
+  if (!(error instanceof Error) || error.message === "") return fallback;
+  // Electron prefixes IPC rejections with the transport detail; the card only needs the message.
+  const message = error.message.replace(/^Error invoking remote method '[^']*': Error: /, "");
+  return message === "" ? fallback : message;
 }
 
 export function recoverableAuthenticatedSession(
@@ -215,6 +219,7 @@ export function SignIn({
   const [authKitStarting, setAuthKitStarting] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [status, setStatus] = useState(sessionMessage ?? "");
+  const [protocolHandler, setProtocolHandler] = useState<ProtocolHandlerState | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -235,6 +240,22 @@ export function SignIn({
   useEffect(() => {
     if (sessionMessage !== undefined) setStatus(sessionMessage);
   }, [sessionMessage]);
+
+  useEffect(() => {
+    let active = true;
+    if (client.getProtocolHandlerState === undefined) return () => undefined;
+    void client
+      .getProtocolHandlerState()
+      .then((state) => {
+        if (active) setProtocolHandler(state);
+      })
+      .catch(() => {
+        // Without a probe result the card stays quiet; only a confirmed "unbound" warns.
+      });
+    return () => {
+      active = false;
+    };
+  }, [client]);
 
   const startAuthKit = async (): Promise<void> => {
     if (authKitStarting || requesting || client.startAuthKitSignIn === undefined) return;
@@ -292,6 +313,13 @@ export function SignIn({
         <p className="eyebrow">Hypothetical Money Machine</p>
         <h1>Private workspace chat</h1>
         <p className="signin-lede">Sign in with the email address invited to this workspace.</p>
+        {protocolHandler?.binding === "unbound" && (
+          <p className="signin-warning" role="status" aria-live="polite">
+            Browser sign-in can’t return to this app: the {protocolHandler.scheme}:// link handler
+            is not registered on this system. Reinstall from the .deb package, or install xdg-utils
+            and relaunch to let the AppImage register itself.
+          </p>
+        )}
         {capabilities.authKit && (
           <button
             className="authkit-button"
@@ -328,7 +356,11 @@ export function SignIn({
         {!capabilities.authKit && !capabilities.magicLink && (
           <p className="signin-status">No sign-in method is currently available.</p>
         )}
-        {status !== "" && <p className="signin-status">{status}</p>}
+        {status !== "" && (
+          <p className="signin-status" role="alert" aria-live="assertive">
+            {status}
+          </p>
+        )}
 
         <ThemeSelector theme={theme} />
         <UpdateControl client={client} />
