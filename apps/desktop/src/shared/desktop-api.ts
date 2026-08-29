@@ -46,6 +46,7 @@ import type {
   NotificationCaptureActivationResponse,
   NotificationPreference,
   NotificationState,
+  ProtocolHandlerState,
   ReactionEmoji,
   RemoveReactionResponse,
   RealtimeAcknowledgement,
@@ -94,6 +95,8 @@ export interface SessionTransport {
   readonly retrySession: () => Promise<ChatSessionState>;
   /** Optional only so narrow test transports and older embedders remain source-compatible. */
   readonly getAuthCapabilities?: () => Promise<AuthCapabilities>;
+  /** Optional for the same source-compatibility reason as getAuthCapabilities. */
+  readonly getProtocolHandlerState?: () => Promise<ProtocolHandlerState>;
   readonly startAuthKitSignIn?: () => Promise<void>;
   readonly requestMagicLink: (email: string) => Promise<MagicLinkDeliveryState>;
   readonly signOut: () => Promise<ChatSessionState>;

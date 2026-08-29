@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { realpath, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -65,6 +65,7 @@ import {
   type NotificationContext,
   type NotificationState,
   type ProductRealtimeEvent,
+  type ProtocolHandlerState,
   type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
   type ThemeState,
@@ -114,6 +115,17 @@ import {
 import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import {
+  loadAgentWakeConfiguration,
+  resolveAgentWakeConfigurationPath,
+} from "./agent-wake-configuration";
+import {
+  applyAgentWakeOperatorRequest,
+  loadAgentWakeOperatorRequest,
+  resolveAgentWakeOperatorRequestPath,
+  writeAgentWakeOperatorResponse,
+} from "./agent-wake-operator";
+import { startAgentWakeRuntime, type AgentWakeRuntimeSession } from "./agent-wake-runtime";
 import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
 import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
 import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
@@ -145,6 +157,14 @@ import {
   reportMainProcessError,
   reportMainProcessEvent,
 } from "./main-process-log";
+import {
+  appImageDesktopFileName,
+  createAppImageDesktopFilePlan,
+  createLinuxProtocolRegistrationTarget,
+  queryProtocolHandlerBinding,
+  registerAppImageProtocolHandler,
+  userApplicationsDirectory,
+} from "./linux-protocol-registration";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
   createMacosNotificationAuthorization,
@@ -246,6 +266,59 @@ let rendererSessionGeneration = 0;
 const mainWindowRecreationCoordinator = new MainWindowRecreationCoordinator();
 let trustedDevelopmentRendererUrl: string | null = null;
 let serverStatusRequest: Promise<ServerStatus> | null = null;
+let protocolHandlerState: ProtocolHandlerState = {
+  scheme: __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+  binding: "unknown",
+};
+let protocolHandlerProbe: Promise<ProtocolHandlerState> | null = null;
+
+/**
+ * On Linux the xdg database, not Electron, decides whether hype-comms:// URLs reach this app. An
+ * AppImage installs no desktop entry, so this self-registers one pointing at $APPIMAGE; the deb
+ * already installs its entry, so that path only verifies. The result feeds the sign-in card so a
+ * missing handler warns before AuthKit strands the user in the browser (issue #75).
+ */
+async function probeLinuxProtocolHandler(): Promise<ProtocolHandlerState> {
+  if (process.platform !== "linux" || !app.isPackaged) {
+    return protocolHandlerState;
+  }
+  const target = createLinuxProtocolRegistrationTarget();
+  const appImagePath = process.env.APPIMAGE;
+  if (appImagePath !== undefined && appImagePath !== "") {
+    const plan = createAppImageDesktopFilePlan({
+      scheme: __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
+      installedDesktopName: __HYPE_COMMS_DESKTOP_NAME__,
+      productName: __HYPE_COMMS_PRODUCT_NAME__,
+      appImagePath,
+      homeDirectory: homedir(),
+      xdgDataHome: process.env.XDG_DATA_HOME,
+    });
+    if (plan === null) {
+      reportMainProcessError("The AppImage path cannot be written to a desktop entry");
+    } else {
+      try {
+        await registerAppImageProtocolHandler(plan, target);
+      } catch (error) {
+        reportMainProcessError("Could not self-register the AppImage protocol handler", error);
+      }
+    }
+  }
+  const selfRegisteredName = appImageDesktopFileName(__HYPE_COMMS_DESKTOP_NAME__);
+  const binding = await queryProtocolHandlerBinding(
+    `x-scheme-handler/${__HYPE_COMMS_AUTH_PROTOCOL_SCHEME__}`,
+    [__HYPE_COMMS_DESKTOP_NAME__, selfRegisteredName],
+    target,
+    {
+      desktopFileName: selfRegisteredName,
+      desktopFilePath: path.join(
+        userApplicationsDirectory(homedir(), process.env.XDG_DATA_HOME),
+        selfRegisteredName,
+      ),
+    },
+  );
+  protocolHandlerState = { ...protocolHandlerState, binding };
+  return protocolHandlerState;
+}
 interface PendingAuthCallback {
   readonly transientAttempts: number;
   readonly value: string;
@@ -351,6 +424,10 @@ let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
 let aiChannelController: AiChannelController | null = null;
 let stopAiChannelSubscription: (() => void) | null = null;
+let agentWakeRuntime: AgentWakeRuntimeSession | null = null;
+let agentWakeStartup: Promise<void> | null = null;
+let agentWakeStartupAbort: AbortController | null = null;
+let agentWakeStopping = false;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
 let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
@@ -413,6 +490,105 @@ function createNotificationPresenter(): NotificationPresenter {
     },
   });
   return captureNotificationPresenter;
+}
+
+async function initializeAgentWakeRuntime(): Promise<void> {
+  let filePath: string | null;
+  let operatorRequestPath: string | null;
+  try {
+    filePath = resolveAgentWakeConfigurationPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+    operatorRequestPath = resolveAgentWakeOperatorRequestPath({
+      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
+      env: process.env,
+    });
+  } catch {
+    reportMainProcessError("Agent wake startup configuration is invalid");
+    return;
+  }
+  if (filePath === null) {
+    if (operatorRequestPath !== null) {
+      reportMainProcessError("Agent wake operator request has no configured enrollment");
+    }
+    return;
+  }
+  const startupAbort = new AbortController();
+  agentWakeStartupAbort = startupAbort;
+  try {
+    const configuration = await loadAgentWakeConfiguration({
+      filePath,
+      expectedApiOrigin: __HYPE_COMMS_API_ORIGIN__,
+    });
+    const runtime = await startAgentWakeRuntime({
+      configuration,
+      userDataPath: app.getPath("userData"),
+      environment: process.env,
+      startupSignal: startupAbort.signal,
+      onStartupRetry: (notice) => {
+        reportMainProcessEvent("agent_wake_startup_retry", {
+          enrollmentId: notice.enrollmentId,
+          code: notice.code,
+          attempt: String(notice.attempt),
+          delayMs: String(notice.delayMs),
+        });
+      },
+      onNotice: (notice) => {
+        reportMainProcessEvent("agent_wake_notice", {
+          enrollmentId: notice.enrollmentId,
+          code: notice.code,
+          ...(notice.wakeId === null ? {} : { wakeId: notice.wakeId }),
+        });
+      },
+    });
+    let startedStatus = runtime.initialStatus;
+    if (operatorRequestPath !== null) {
+      try {
+        const request = await loadAgentWakeOperatorRequest({
+          filePath: operatorRequestPath,
+        });
+        const response = await applyAgentWakeOperatorRequest({
+          broker: runtime.broker,
+          enrollmentId: configuration.enrollmentId,
+          request,
+        });
+        await writeAgentWakeOperatorResponse(
+          path.join(app.getPath("userData"), "agent-wake-operator"),
+          response,
+        );
+        startedStatus = response.status ?? startedStatus;
+        reportMainProcessEvent("agent_wake_operator_request", {
+          enrollmentId: configuration.enrollmentId,
+          requestId: request.requestId,
+          action: request.action,
+          ok: response.ok ? "true" : "false",
+          ...(response.errorCode === null ? {} : { code: response.errorCode }),
+          phase: response.status?.phase ?? "unavailable",
+        });
+      } catch {
+        reportMainProcessError("Agent wake operator request failed");
+      }
+    }
+    if (agentWakeStopping) {
+      await runtime.dispose();
+      return;
+    }
+    agentWakeRuntime = runtime;
+    reportMainProcessEvent("agent_wake_started", {
+      enrollmentId: startedStatus.enrollmentId,
+      adapterId: startedStatus.adapterId,
+      phase: startedStatus.phase,
+      cursor: startedStatus.cursor,
+    });
+  } catch {
+    // Wake configuration and adapters may fail while resolving credential-backed bindings.
+    // Keep startup diagnostics body- and credential-free; detailed repair is represented by
+    // stable broker notices and the durable enrollment state.
+    if (!agentWakeStopping) reportMainProcessError("Agent wake runtime failed to initialize");
+  } finally {
+    if (agentWakeStartupAbort === startupAbort) agentWakeStartupAbort = null;
+  }
 }
 
 function createUpdateSource(): UpdateSource {
@@ -977,6 +1153,18 @@ function registerIpcHandlers(): void {
     return request;
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.protocolHandlerState);
+  ipcMain.handle(DESKTOP_CHANNELS.protocolHandlerState, async (event) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted protocol-handler-state IPC sender");
+    }
+    if (protocolHandlerProbe === null) {
+      return protocolHandlerState;
+    }
+    // A failed probe keeps the stored "unknown" state: never warn on a probe that could not run.
+    return protocolHandlerProbe.catch(() => protocolHandlerState);
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.updateState);
   ipcMain.handle(DESKTOP_CHANNELS.updateState, (event): UpdateState => {
     if (!isTrustedIpcSender(event)) {
@@ -1301,8 +1489,13 @@ function registerIpcHandlers(): void {
         if (authKitPendingIntentGeneration === startIntent) {
           authKitPendingIntentGeneration = null;
         }
-        reportMainProcessError("AuthKit authorization could not be started");
-        throw new Error("Could not start WorkOS sign-in", { cause: error });
+        reportMainProcessError("AuthKit authorization could not be started", error);
+        // Only .message survives IPC serialization, so surface curated ChatSessionError text (it
+        // carries the net::ERR_* diagnostic); internal errors keep the generic message.
+        throw new Error(
+          error instanceof ChatSessionError ? error.message : "Could not start WorkOS sign-in",
+          { cause: error },
+        );
       }
     })();
     authKitStartPromise = start;
@@ -2578,6 +2771,9 @@ if (!hasSingleInstanceLock) {
       chatSession.subscribe(deliverSessionState);
       updateController = new UpdateController({
         updater: createUpdateSource(),
+        // A signed Wake evidence artifact must remain byte-for-byte stable throughout its soak.
+        // Ordinary production builds compile this to true and retain automatic updates.
+        updatesAllowed: __HYPE_COMMS_UPDATES_ALLOWED__,
         isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
@@ -2616,21 +2812,32 @@ if (!hasSingleInstanceLock) {
           process.argv,
           __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
         );
-        if (
+        const registered =
           protocolRegistration.executablePath === undefined ||
           protocolRegistration.arguments === undefined
-        ) {
-          app.setAsDefaultProtocolClient(protocolRegistration.scheme);
-        } else {
-          app.setAsDefaultProtocolClient(
-            protocolRegistration.scheme,
-            protocolRegistration.executablePath,
-            [...protocolRegistration.arguments],
-          );
+            ? app.setAsDefaultProtocolClient(protocolRegistration.scheme)
+            : app.setAsDefaultProtocolClient(
+                protocolRegistration.scheme,
+                protocolRegistration.executablePath,
+                [...protocolRegistration.arguments],
+              );
+        if (!registered) {
+          // Log only: on Linux the xdg probe below is the authoritative binding signal.
+          reportMainProcessError("Electron could not register the auth protocol handler");
         }
+        // Fire-and-forget so a slow xdg toolchain never delays window creation; the IPC handler
+        // awaits this same promise.
+        protocolHandlerProbe = probeLinuxProtocolHandler();
+        protocolHandlerProbe.catch((error: unknown) => {
+          reportMainProcessError("The protocol-handler probe failed", error);
+        });
       }
 
       await createMainWindow();
+
+      // Agent wake has its own agent-authenticated source and durable main-process inbox. It starts
+      // beside human session restore so an unavailable provider cannot delay the interactive UI.
+      agentWakeStartup = initializeAgentWakeRuntime();
 
       // Show the window before an upgraded enabled preference can prompt. The request runs beside
       // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
@@ -2747,21 +2954,38 @@ if (!hasSingleInstanceLock) {
   });
 
   let quittingAiChannel: AiChannelController | null = null;
+  let quittingAgentWakeRuntime: AgentWakeRuntimeSession | null = null;
   const beforeQuitCoordinator = new BeforeQuitCoordinator({
     cleanup: () => {
+      agentWakeStopping = true;
+      agentWakeStartupAbort?.abort();
+      agentWakeStartupAbort = null;
+      quittingAgentWakeRuntime = agentWakeRuntime;
+      agentWakeRuntime = null;
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
     },
     teardown: async () => {
       const localAiChannel = quittingAiChannel;
+      const localAgentWakeRuntime = quittingAgentWakeRuntime;
+      const pendingAgentWakeStartup = agentWakeStartup;
       quittingAiChannel = null;
-      await localAiChannel?.dispose();
+      quittingAgentWakeRuntime = null;
+      agentWakeStartup = null;
+      await pendingAgentWakeStartup;
+      const lateAgentWakeRuntime = agentWakeRuntime;
+      agentWakeRuntime = null;
+      await Promise.all([
+        localAiChannel?.dispose(),
+        localAgentWakeRuntime?.dispose(),
+        lateAgentWakeRuntime?.dispose(),
+      ]);
     },
     reportCleanupFailure: () => {
       reportMainProcessError("Failed to prepare application cleanup before quitting");
     },
     reportTeardownFailure: () => {
-      reportMainProcessError("Failed to stop the local AI Channel");
+      reportMainProcessError("Failed to stop privileged local services");
     },
     quit: () => app.quit(),
   });

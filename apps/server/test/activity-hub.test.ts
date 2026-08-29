@@ -9,16 +9,23 @@ import {
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const conversationId = "10000000-0000-4000-8000-000000000002";
+const groupConversationId = "10000000-0000-4000-8000-000000000005";
 const alexId = "10000000-0000-4000-8000-000000000003";
 const danId = "10000000-0000-4000-8000-000000000004";
 
-function human(userId: string, deviceSessionId: string, capable = true): RealtimePrincipal {
+function human(
+  userId: string,
+  deviceSessionId: string,
+  capable = true,
+  groupDirectMessages = true,
+): RealtimePrincipal {
   return {
     workspaceId,
     userId,
     deviceSessionId,
     agentTokenId: null,
     ephemeralActivity: capable,
+    groupDirectMessages,
   };
 }
 
@@ -134,6 +141,49 @@ describe("EphemeralActivityHub", () => {
     hub.register(capable.value);
     await hub.setTyping("capable", conversationId, true);
     expect(legacy.frames).toEqual([]);
+    hub.close();
+  });
+
+  it("keeps group typing off legacy tickets in both directions without blocking ordinary DMs", async () => {
+    const hub = new EphemeralActivityHub(
+      async (_workspace, _user, requestedConversationId, includeGroupDirectMessages) =>
+        requestedConversationId !== groupConversationId || includeGroupDirectMessages,
+    );
+    const alexLegacy = connection("alex-legacy", human(alexId, "alex-legacy", true, false));
+    const alexCurrent = connection("alex-current", human(alexId, "alex-current"));
+    const danCurrent = connection("dan-current", human(danId, "dan-current"));
+    hub.register(alexLegacy.value);
+    hub.register(alexCurrent.value);
+    hub.register(danCurrent.value);
+
+    await hub.setTyping("alex-legacy", groupConversationId, true);
+    expect(typing(danCurrent.frames, alexId)).toEqual([]);
+
+    await hub.setTyping("alex-current", groupConversationId, true);
+    expect(typing(danCurrent.frames, alexId).at(-1)).toMatchObject({
+      conversationId: groupConversationId,
+      userId: alexId,
+      typing: true,
+    });
+    expect(
+      typing(alexLegacy.frames, alexId).filter(
+        (frame) => frame.conversationId === groupConversationId,
+      ),
+    ).toEqual([]);
+
+    await hub.setTyping("alex-legacy", conversationId, true);
+    expect(typing(danCurrent.frames, alexId).at(-1)).toMatchObject({
+      conversationId,
+      userId: alexId,
+      typing: true,
+    });
+
+    await hub.setTyping("dan-current", conversationId, true);
+    expect(typing(alexLegacy.frames, danId).at(-1)).toMatchObject({
+      conversationId,
+      userId: danId,
+      typing: true,
+    });
     hub.close();
   });
 });

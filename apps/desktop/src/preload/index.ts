@@ -67,6 +67,7 @@ import {
   notificationCaptureActivationResponseSchema,
   notificationPreferenceSchema,
   notificationStateSchema,
+  protocolHandlerStateSchema,
   realtimeConnectionStateSchema,
   realtimeAcknowledgementSchema,
   realtimeSessionScopeSchema,
@@ -359,6 +360,10 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       ),
     getServerStatus: () =>
       ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
+    getProtocolHandlerState: async () =>
+      protocolHandlerStateSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.protocolHandlerState),
+      ),
     getSessionState: async () =>
       chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
     retrySession: async () =>

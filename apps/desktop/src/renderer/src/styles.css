@@ -21,6 +21,7 @@
   --density-message-padding-block: 9px;
   --density-message-gap: 11px;
   --density-message-continuation-padding-block: 2px;
+  --density-thread-summary-margin: 5px;
   --density-composer-padding: 16px 22px 20px;
   --density-unreads-header-padding: 14px 22px;
   --density-unreads-list-padding: 10px 18px 24px;
@@ -134,6 +135,18 @@ button {
 .signin-status {
   color: var(--theme-text-muted);
   line-height: 1.55;
+}
+
+.signin-warning {
+  margin: 20px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--theme-text-warning) 45%, var(--theme-border-default));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--theme-text-warning) 10%, var(--theme-surface-card));
+  color: var(--theme-text-warning);
+  line-height: 1.55;
+  font-size: 14px;
+  text-align: left;
 }
 
 .signin-card form {
@@ -3041,6 +3054,22 @@ html[data-sidebar-position="right"] .sidebar {
   display: none;
 }
 
+.thread-summary {
+  margin-top: var(--density-thread-summary-margin);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--theme-text-accent);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.thread-summary:hover {
+  text-decoration: underline;
+}
+
 .message-reply-action,
 .message-task-action,
 .message-retract-action {
@@ -4503,6 +4532,7 @@ html[data-compact] {
   --density-message-padding-block: 4px;
   --density-message-gap: 8px;
   --density-message-continuation-padding-block: 1px;
+  --density-thread-summary-margin: 3px;
   --density-composer-padding: 10px 16px 12px;
   --density-unreads-header-padding: 8px 16px;
   --density-unreads-list-padding: 6px 12px 16px;

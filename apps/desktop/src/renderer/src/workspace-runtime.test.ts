@@ -272,6 +272,43 @@ function directConversation(id: string, participantIds: readonly string[]): Conv
   };
 }
 
+function groupConversationCreated(
+  id: string,
+  eventId: string,
+  workspaceSequence: string,
+  createdBy: string,
+): WorkspaceEvent {
+  return {
+    version: 1,
+    id: eventId,
+    type: "direct_conversation.created",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId: id,
+    workspaceSequence,
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: {
+      conversation: {
+        id,
+        workspaceId: WORKSPACE_ID,
+        kind: "group_direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+        access: null,
+        channelMode: null,
+        isArchived: false,
+        createdBy,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    },
+  };
+}
+
 function catalogConversation(index: number): ConversationSummary {
   return channel(
     `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
@@ -1785,6 +1822,26 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("names a group conversation for all other participants", async () => {
+    const direct = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID, AGENT_ID]);
+    const group: ConversationSummary = {
+      ...direct,
+      conversation: { ...direct.conversation, kind: "group_direct_message" },
+    };
+    const snapshot = bootstrapAt("10", {
+      members: [user, peer, agent],
+      conversations: [group],
+    });
+    const api = new FakeDesktopApi(snapshot);
+    api.members = snapshot.members;
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+
+    expect(runtime.conversationName(group)).toBe("CPO, Hermes");
+    await runtime.stop();
+  });
+
   it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
@@ -2278,6 +2335,66 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).messages).toEqual(
       expect.arrayContaining([ownMessage, peerMessage]),
     );
+  });
+
+  it("applies another member's channel join during HTTP catch-up without a repair", async () => {
+    const initialSummary = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const joinedSummary = {
+      ...initialSummary,
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    };
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(
+      bootstrapAt("10", {
+        conversations: [initialSummary],
+      }),
+      [],
+    );
+    const api = new FakeDesktopApi(
+      bootstrapAt("11", {
+        conversations: [joinedSummary],
+      }),
+    );
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-000000000011",
+            type: "channel.membership_changed",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: CONVERSATION_ID,
+            workspaceSequence: "11",
+            conversationSequence: null,
+            entityVersion: 1,
+            delivery: "at_least_once",
+            payload: { memberId: AGENT_ID, action: "added" },
+          },
+        ],
+        nextCursor: "11",
+        highWaterCursor: "11",
+        hasMore: false,
+      },
+    });
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.bootstrap?.conversations[0]?.participantIds).toEqual([
+      USER_ID,
+      PEER_ID,
+      AGENT_ID,
+    ]);
+    expect(api.bootstrapRequests).toBe(1);
+    expect(api.stopRequests).toBe(1);
+    expect(api.startedCursors).toEqual(["11"]);
+    expect(api.acknowledged).toContain("11");
+    expect((await cache.load()).repairMarker).toBeNull();
   });
 
   it("reconciles a closed-thread retract during the final HTTP catch-up", async () => {
@@ -2985,6 +3102,84 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.conversationFiles).toEqual([]);
   });
 
+  it("retains exact mentions for a live message reachable only as lastMessage", async () => {
+    const liveMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-0000000000c4",
+      clientMessageId: "20000000-0000-4000-8000-0000000000c5",
+      conversationSequence: "3",
+      body: "@morgan Please review this",
+    };
+    const beforeRefresh = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { members: [user, peer], conversations: [beforeRefresh] }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000c6",
+      type: "message.created",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: liveMessage.conversationSequence,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { message: liveMessage, mentionedUserIds: [USER_ID] },
+    });
+    await settle(() => api.acknowledged.includes("11"), "live mention projection");
+
+    const renamedUser = { ...user, username: "morgan-renamed" } as const satisfies User;
+    const refreshedSummary = {
+      ...beforeRefresh,
+      lastMessage: liveMessage,
+      unreadCount: 1,
+      mentionCount: 1,
+    };
+    api.bootstrap = bootstrapAt("11", {
+      currentUser: {
+        user: renamedUser,
+        email: "morgan@example.com",
+        workspaceId: WORKSPACE_ID,
+        role: "owner",
+      },
+      members: [renamedUser, peer],
+      conversations: [refreshedSummary],
+    });
+    api.channelResults.push({ conversation: refreshedSummary, syncCursor: "11" });
+    await runtime.archiveChannel(CONVERSATION_ID);
+
+    expect(runtime.state.messages.some((message) => message.id === liveMessage.id)).toBe(false);
+    expect(runtime.state.bootstrap?.conversations[0]?.lastMessage?.id).toBe(liveMessage.id);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000c7",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "12",
+      conversationSequence: liveMessage.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: liveMessage.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("12"), "last-message retract projection");
+
+    expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+      lastMessage: null,
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
   it("matches a fresh bootstrap after a live retract", async () => {
     const earlierReply: Message = {
       ...threadReply,
@@ -3075,6 +3270,65 @@ describe("WorkspaceRuntime", () => {
       conversationFiles: runtime.state.conversationFiles,
     });
     expect(projection(live)).toEqual(projection(fresh));
+  });
+
+  it("drops a partial thread summary when its latest reply is retracted", async () => {
+    const retainedEarlierReply: Message = {
+      ...threadReply,
+      id: PEER_MESSAGE_ID,
+      clientMessageId: PEER_CLIENT_MESSAGE_ID,
+      conversationSequence: "3",
+      body: "Retained earlier reply",
+    };
+    const unretainedReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-0000000000b2",
+      clientMessageId: "20000000-0000-4000-8000-0000000000b3",
+      conversationSequence: "4",
+      body: "Newer reply outside the retained page",
+    };
+    const latestReply: Message = {
+      ...threadReply,
+      conversationSequence: "5",
+      body: "Latest reply",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [{ ...channel(CONVERSATION_ID, "general"), lastMessage: latestReply }],
+      }),
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.threadResults.push({
+      root: ownMessage,
+      replies: [retainedEarlierReply],
+      nextCursor: unretainedReply.id,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    await runtime.openThread(OWN_MESSAGE_ID);
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-0000000000b4",
+      type: "message.retracted",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: latestReply.conversationSequence,
+      entityVersion: 2,
+      delivery: "at_least_once",
+      payload: { messageId: latestReply.id, deletedAt: NOW },
+    });
+    await settle(() => api.acknowledged.includes("11"), "partial thread retract projection");
+
+    expect(runtime.state.messages).toContainEqual(retainedEarlierReply);
+    expect(runtime.state.threadSummaries).toEqual([]);
   });
 
   it("does not reconcile a locally retracted reply twice when its realtime echo arrives", async () => {
@@ -5497,6 +5751,47 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).messages.map((item) => item.id)).toContain(PEER_MESSAGE_ID);
   });
 
+  it("projects creator and invitee roles from live group creation events", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const creatorGroupId = "20000000-0000-4000-8000-000000000081";
+    const inviteeGroupId = "20000000-0000-4000-8000-000000000082";
+
+    api.emitWorkspaceEvent(
+      groupConversationCreated(
+        creatorGroupId,
+        "20000000-0000-4000-8000-000000000083",
+        "11",
+        USER_ID,
+      ),
+    );
+    api.emitWorkspaceEvent(
+      groupConversationCreated(
+        inviteeGroupId,
+        "20000000-0000-4000-8000-000000000084",
+        "12",
+        PEER_ID,
+      ),
+    );
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations.some(
+          (summary) => summary.conversation.id === inviteeGroupId,
+        ) === true,
+      "live group projections",
+    );
+
+    const roles = new Map(
+      runtime.state.bootstrap?.conversations.map((summary) => [
+        summary.conversation.id,
+        summary.membershipRole,
+      ]) ?? [],
+    );
+    expect(roles.get(creatorGroupId)).toBe("owner");
+    expect(roles.get(inviteeGroupId)).toBe("member");
+  });
+
   it("opens a search hit in the main timeline and clears the focus on normal navigation", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -5981,6 +6276,52 @@ describe("WorkspaceRuntime", () => {
       "alpha",
       "general",
     ]);
+  });
+
+  it("applies another member's channel join without restarting realtime", async () => {
+    const initialSummary = {
+      ...channel(CONVERSATION_ID, "general"),
+      participantIds: [USER_ID, PEER_ID],
+    };
+    const joinedSummary = {
+      ...initialSummary,
+      participantIds: [USER_ID, PEER_ID, AGENT_ID],
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [initialSummary],
+      }),
+    );
+    const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+    await runtime.start(session);
+    const bootstrapRequests = api.bootstrapRequests;
+    const stopRequests = api.stopRequests;
+    const startedCursors = [...api.startedCursors];
+    api.bootstrap = bootstrapAt("11", { conversations: [joinedSummary] });
+
+    api.emitWorkspaceEvent({
+      version: 1,
+      id: "20000000-0000-4000-8000-000000000011",
+      type: "channel.membership_changed",
+      occurredAt: NOW,
+      workspaceId: WORKSPACE_ID,
+      conversationId: CONVERSATION_ID,
+      workspaceSequence: "11",
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+      payload: { memberId: AGENT_ID, action: "added" },
+    });
+
+    await settle(() => api.acknowledged.includes("11"), "peer membership acknowledgement");
+    expect(runtime.state.bootstrap?.conversations[0]?.participantIds).toEqual([
+      USER_ID,
+      PEER_ID,
+      AGENT_ID,
+    ]);
+    expect(api.bootstrapRequests).toBe(bootstrapRequests);
+    expect(api.stopRequests).toBe(stopRequests);
+    expect(api.startedCursors).toEqual(startedCursors);
   });
 
   it("purges a removed member's private channel, history, and active selection", async () => {

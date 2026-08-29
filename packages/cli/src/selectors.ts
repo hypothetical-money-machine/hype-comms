@@ -1,9 +1,12 @@
 import {
   entityIdSchema,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   listConversationsResponseSchema,
   listMembersResponseSchema,
+  listPublicChannelsResponseSchema,
   workspaceBootstrapResponseSchema,
   type ConversationSummary,
+  type PublicChannelDirectoryEntry,
   type User,
 } from "@hype-comms/contracts";
 
@@ -16,8 +19,15 @@ import { UsageError } from "./errors.js";
  * so keying the caches on the client scopes them to a single invocation.
  */
 const conversationCache = new WeakMap<ApiClient, Promise<readonly ConversationSummary[]>>();
+const publicChannelCache = new WeakMap<
+  ApiClient,
+  Promise<readonly PublicChannelDirectoryEntry[]>
+>();
 const memberCache = new WeakMap<ApiClient, Promise<readonly User[]>>();
 const currentUserIdCache = new WeakMap<ApiClient, Promise<string>>();
+const GROUP_DIRECT_MESSAGES_HEADER = {
+  "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+} as const;
 
 async function fetchAllConversations(client: ApiClient): Promise<readonly ConversationSummary[]> {
   const conversations: ConversationSummary[] = [];
@@ -28,6 +38,7 @@ async function fetchAllConversations(client: ApiClient): Promise<readonly Conver
       path: "/v1/conversations",
       query: { limit: 100, after },
       responseSchema: listConversationsResponseSchema,
+      headers: GROUP_DIRECT_MESSAGES_HEADER,
     });
     conversations.push(...response.conversations);
     if (!response.hasMore) return conversations;
@@ -50,6 +61,42 @@ export async function listAllConversations(
   return pending;
 }
 
+async function fetchAllPublicChannels(
+  client: ApiClient,
+): Promise<readonly PublicChannelDirectoryEntry[]> {
+  const channels: PublicChannelDirectoryEntry[] = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const response = await client.request({
+      path: "/v1/channels",
+      query: { limit: 100, after },
+      responseSchema: listPublicChannelsResponseSchema,
+    });
+    channels.push(...response.channels);
+    if (!response.hasMore) return channels;
+    if (response.nextCursor === null || seen.has(response.nextCursor)) {
+      throw new UsageError("Public channel pagination did not advance", "PAGINATION_STALLED");
+    }
+    seen.add(response.nextCursor);
+    after = response.nextCursor;
+  }
+  throw new UsageError(
+    "Public channel listing exceeded the supported page count",
+    "TOO_MANY_PAGES",
+  );
+}
+
+export async function listAllPublicChannels(
+  client: ApiClient,
+): Promise<readonly PublicChannelDirectoryEntry[]> {
+  const cached = publicChannelCache.get(client);
+  if (cached !== undefined) return cached;
+  const pending = fetchAllPublicChannels(client);
+  publicChannelCache.set(client, pending);
+  return pending;
+}
+
 export async function listMembers(client: ApiClient): Promise<readonly User[]> {
   const cached = memberCache.get(client);
   if (cached !== undefined) return cached;
@@ -64,7 +111,11 @@ async function currentUserId(client: ApiClient): Promise<string> {
   const cached = currentUserIdCache.get(client);
   if (cached !== undefined) return cached;
   const pending = client
-    .request({ path: "/v1/bootstrap", responseSchema: workspaceBootstrapResponseSchema })
+    .request({
+      path: "/v1/bootstrap",
+      responseSchema: workspaceBootstrapResponseSchema,
+      headers: GROUP_DIRECT_MESSAGES_HEADER,
+    })
     .then((bootstrap) => bootstrap.currentUser.user.id);
   currentUserIdCache.set(client, pending);
   return pending;
@@ -81,6 +132,27 @@ export async function resolveMemberSelector(client: ApiClient, selector: string)
     throw new UsageError(`No member matches ${selector}`, "MEMBER_NOT_FOUND");
   if (matches.length > 1)
     throw new UsageError(`Member selector ${selector} is ambiguous`, "AMBIGUOUS_MEMBER");
+  return matches[0]!.id;
+}
+
+export async function resolveDirectMemberSelector(
+  client: ApiClient,
+  selector: string,
+): Promise<string> {
+  const id = entityIdSchema.safeParse(selector);
+  if (id.success) return id.data;
+  const members = (await listMembers(client)).filter((member) => member.kind !== "bot");
+  const matches = members.filter(
+    (member) =>
+      member.username.toLocaleLowerCase("en-US") ===
+      selector.replace(/^@/u, "").toLocaleLowerCase("en-US"),
+  );
+  if (matches.length === 0) {
+    throw new UsageError(`No direct-conversation member matches ${selector}`, "MEMBER_NOT_FOUND");
+  }
+  if (matches.length > 1) {
+    throw new UsageError(`Member selector ${selector} is ambiguous`, "AMBIGUOUS_MEMBER");
+  }
   return matches[0]!.id;
 }
 
@@ -128,4 +200,28 @@ export async function resolveConversationSelector(
     }
   }
   throw new UsageError(`No conversation matches ${selector}`, "CONVERSATION_NOT_FOUND");
+}
+
+export async function resolvePublicChannelSelector(
+  client: ApiClient,
+  selector: string,
+): Promise<string> {
+  const id = entityIdSchema.safeParse(selector);
+  if (id.success) return id.data;
+  const normalized = selector.replace(/^#/u, "").toLocaleLowerCase("en-US");
+  const matches = (await listAllPublicChannels(client)).filter(
+    ({ conversation }) =>
+      conversation.slug?.toLocaleLowerCase("en-US") === normalized ||
+      conversation.name?.toLocaleLowerCase("en-US") === normalized,
+  );
+  if (matches.length === 0) {
+    throw new UsageError(`No public channel matches ${selector}`, "CONVERSATION_NOT_FOUND");
+  }
+  if (matches.length > 1) {
+    throw new UsageError(
+      `Public channel selector ${selector} is ambiguous`,
+      "AMBIGUOUS_CONVERSATION",
+    );
+  }
+  return matches[0]!.conversation.id;
 }

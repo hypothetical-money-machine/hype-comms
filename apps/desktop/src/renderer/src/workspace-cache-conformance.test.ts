@@ -20,9 +20,11 @@ import {
 
 import {
   clearPersistentWorkspaceCaches,
+  MAX_RECENT_MESSAGE_MENTIONS,
   MAX_RETRACT_RESERVATIONS,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
+  rememberCreatedMessageMentions,
   upsertRetractReservation,
   type CachedWorkspaceState,
   type WorkspaceCache,
@@ -659,6 +661,100 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
   });
 
+  it("retains exact mention IDs while a message is reachable only as lastMessage", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence2,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: messageCreatedEvent.workspaceSequence,
+      },
+      [],
+    );
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+    await cache.applyEvent(messageRetractedEvent);
+
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({ lastMessage: null, unreadCount: 0, mentionCount: 0 });
+  });
+
+  it("retains exact mention IDs for a caller-owned thread-summary source", async () => {
+    const cache = create();
+    const closedThreadReply = {
+      ...messageSequence2,
+      threadRootId: messageSequence1.id,
+    };
+    const created: WorkspaceEvent = {
+      ...messageCreatedEvent,
+      payload: { message: closedThreadReply, mentionedUserIds: [MORGAN_ID] },
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(created);
+    await cache.replaceSnapshot(
+      {
+        ...snapshot,
+        conversations: [
+          directSummary,
+          zebraSummary,
+          {
+            ...alphaSummary,
+            lastMessage: messageSequence10,
+            unreadCount: 1,
+            mentionCount: 1,
+          },
+        ],
+        syncCursor: created.workspaceSequence,
+      },
+      [messageSequence1, messageSequence10],
+      [],
+      [],
+      undefined,
+      [closedThreadReply.id],
+    );
+
+    await expect(cache.getCreatedMessageMentions(closedThreadReply.id)).resolves.toEqual([
+      MORGAN_ID,
+    ]);
+    await cache.applyEvent(messageRetractedEvent, undefined, closedThreadReply);
+
+    const alpha = (await cache.load()).bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ALPHA_ID,
+    );
+    expect(alpha).toMatchObject({
+      lastMessage: { id: MESSAGE_SEQUENCE_10_ID, deletedAt: null },
+      unreadCount: 0,
+      mentionCount: 0,
+    });
+  });
+
+  it("prunes exact mention IDs after a message becomes unreachable", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    await cache.replaceSnapshot(
+      { ...snapshot, syncCursor: messageCreatedEvent.workspaceSequence },
+      [],
+    );
+
+    await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
+  });
+
   it("reconciles a retracted summary to its newest cached live message", async () => {
     const cache = create();
     await cache.replaceSnapshot(
@@ -1121,10 +1217,17 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect((await cache.load()).reactions).toEqual([]);
   });
 
-  it("does not purge a conversation when a different member is removed", async () => {
+  it("projects another member's removal without opening a membership repair", async () => {
     const cache = create();
     await cache.replaceSnapshot(
-      snapshot,
+      {
+        ...snapshot,
+        conversations: snapshot.conversations.map((summary) =>
+          summary.conversation.id === ALPHA_ID
+            ? { ...summary, participantIds: [MORGAN_ID, ALICE_ID] }
+            : summary,
+        ),
+      },
       [messageSequence2],
       [reactionAddedEvent.payload.reaction],
       [task],
@@ -1141,10 +1244,13 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.reactions).toContainEqual(reactionAddedEvent.payload.reaction);
     expect(state.tasks).toContainEqual(task);
     expect(state.outbox[0]?.operation).toEqual(queuedAlphaMessage);
-    expect(state.repairMarker).toMatchObject({
-      conversationId: ALPHA_ID,
-      selfRemoval: false,
-    });
+    expect(
+      state.bootstrap?.conversations.find((summary) => summary.conversation.id === ALPHA_ID)
+        ?.participantIds,
+    ).toEqual([MORGAN_ID]);
+    expect(state.syncCursor).toBe(otherMemberRemovedEvent.workspaceSequence);
+    expect(state.repairMarker).toBeNull();
+    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(false);
   });
 
   it("prunes only outbox rows outside an authoritative conversation catalog", async () => {
@@ -1573,6 +1679,19 @@ describe("PersistentWorkspaceCache durability", () => {
       ALICE_ID,
       MORGAN_ID,
     ]);
+  });
+});
+
+describe("created-message mention retention", () => {
+  it("keeps only the newest bounded exact mention metadata", () => {
+    const mentions = new Map<string, readonly string[]>();
+    for (let index = 0; index <= MAX_RECENT_MESSAGE_MENTIONS; index += 1) {
+      rememberCreatedMessageMentions(mentions, `message-${String(index)}`, [MORGAN_ID]);
+    }
+
+    expect(mentions.size).toBe(MAX_RECENT_MESSAGE_MENTIONS);
+    expect(mentions.has("message-0")).toBe(false);
+    expect(mentions.has(`message-${String(MAX_RECENT_MESSAGE_MENTIONS)}`)).toBe(true);
   });
 });
 

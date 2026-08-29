@@ -163,6 +163,26 @@ describe("preload session and cache scope boundary", () => {
   });
 });
 
+describe("preload protocol-handler boundary", () => {
+  it("invokes the protocol-handler channel and returns the validated state", async () => {
+    invoke.mockResolvedValueOnce({ scheme: "hype-comms", binding: "unbound" });
+
+    await expect(desktopApi.getProtocolHandlerState?.()).resolves.toEqual({
+      scheme: "hype-comms",
+      binding: "unbound",
+    });
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.protocolHandlerState);
+  });
+
+  it("rejects a protocol-handler payload outside the wire contract", async () => {
+    invoke.mockResolvedValueOnce({ scheme: "hype-comms", binding: "maybe" });
+    await expect(desktopApi.getProtocolHandlerState?.()).rejects.toThrow();
+
+    invoke.mockResolvedValueOnce({ scheme: "hype-comms", binding: "bound", extra: true });
+    await expect(desktopApi.getProtocolHandlerState?.()).rejects.toThrow();
+  });
+});
+
 describe("preload theme boundary", () => {
   it("gets a strictly validated System appearance without applying a preference", async () => {
     const systemState = {

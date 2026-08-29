@@ -2,6 +2,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   appVersion: "desktop:app-version",
   automationHeadless: "desktop:automation-headless",
   serverStatus: "desktop:server-status",
+  protocolHandlerState: "desktop:protocol-handler-state",
   updateState: "desktop:update-state",
   updateCheck: "desktop:update-check",
   updateInstall: "desktop:update-install",

@@ -46,6 +46,19 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      # Cache downloads only, and rebuild node_modules from scratch every run. npm ci verifies
+      # every tarball against the lockfile's integrity hashes, and the Electron postinstall
+      # checksums its binary download.
+      - name: Restore dependency downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/electron
+          key: ci-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ci-downloads-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: npm ci --no-audit --prefer-offline
 

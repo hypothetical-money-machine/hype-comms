@@ -34,8 +34,8 @@ import { mentionedMemberIds } from "./mentions";
 const CACHE_SCHEMA_VERSION = 1 as const;
 const CACHE_DATABASE_PREFIX = "hype-comms-cache-v1-";
 const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
-// Live creates retain exact mention IDs until a retract arrives. Eviction falls back to the
-// message-body scan, but this map must not grow for the lifetime of a busy desktop session.
+// Live creates retain exact mention IDs while a retract can still reach the message. The hard cap
+// keeps this auxiliary runtime-only map bounded during a busy desktop session.
 export const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
 /** Bounds tombstones retained solely to defeat an in-flight stale response after eviction. */
 export const MAX_RETRACT_RESERVATIONS = 20_000;
@@ -114,6 +114,7 @@ export interface WorkspaceCache {
     reactions?: readonly Reaction[],
     tasks?: readonly Task[],
     signal?: AbortSignal,
+    retractSourceMessageIds?: readonly string[],
   ): Promise<boolean>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v1/members`.
@@ -126,12 +127,13 @@ export interface WorkspaceCache {
   replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void>;
   /** Persists a mutation projection without claiming that its workspace cursor was applied. */
   upsertConversation(summary: ConversationSummary): Promise<void>;
-  /** Durably closes the cache before a membership event can wait on network or shutdown work. */
+  /** Durably closes the cache before the current user's membership repair can wait on network. */
   stageMembershipRepair(event: MembershipChangedEvent): Promise<boolean>;
   /**
-   * Applies an event and advances the durable cursor. A membership change first stages its repair,
-   * purges revoked conversation state when applicable, and leaves the cache blocked until an
-   * authoritative snapshot clears the repair marker.
+   * Applies an event and advances the durable cursor. A change to the current user's membership
+   * first stages its repair, purges revoked conversation state when applicable, and leaves the
+   * cache blocked until an authoritative snapshot clears the repair marker. Other members'
+   * changes update the affected conversation's participant list like ordinary durable events.
    *
    * A retract has no message body. The runtime may supply its retained source when a closed
    * thread's latest reply is not part of the cached history page.
@@ -450,6 +452,19 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export function projectConversationMembershipChange(
+  summary: ConversationSummary,
+  event: MembershipChangedEvent,
+): ConversationSummary {
+  const participantIds =
+    event.payload.action === "added"
+      ? [...new Set([...summary.participantIds, event.payload.memberId])].sort(compareText)
+      : event.payload.action === "removed"
+        ? summary.participantIds.filter((memberId) => memberId !== event.payload.memberId)
+        : summary.participantIds;
+  return conversationSummarySchema.parse({ ...summary, participantIds });
+}
+
 /**
  * Sequences are decimal strings, so IndexedDB's lexicographic index order is not the numeric
  * order the UI needs ("10" sorts before "9"). Every read therefore sorts numerically in JS; the
@@ -528,10 +543,16 @@ function matchingRetractSource(
 function retainLiveMessageMentions(
   mentions: Map<string, readonly string[]>,
   messages: readonly Message[],
+  conversations: readonly ConversationSummary[] = [],
+  retractSourceMessageIds: readonly string[] = [],
 ): void {
   const liveMessageIds = new Set(
     messages.filter((message) => message.deletedAt === null).map((message) => message.id),
   );
+  for (const summary of conversations) {
+    if (summary.lastMessage?.deletedAt === null) liveMessageIds.add(summary.lastMessage.id);
+  }
+  for (const messageId of retractSourceMessageIds) liveMessageIds.add(messageId);
   for (const messageId of mentions.keys()) {
     if (!liveMessageIds.has(messageId)) mentions.delete(messageId);
   }
@@ -1012,6 +1033,17 @@ function mergeConversationProjection(
   });
 }
 
+/** Group creation events have a fixed audience but no recipient-specific membership role. */
+export function membershipRoleForConversationEvent(
+  conversation: ConversationSummary["conversation"],
+  retainedRole: ConversationSummary["membershipRole"] | null | undefined,
+  currentUserId: string,
+): ConversationSummary["membershipRole"] {
+  if (retainedRole !== null && retainedRole !== undefined) return retainedRole;
+  if (conversation.kind !== "group_direct_message") return null;
+  return conversation.createdBy === currentUserId ? "owner" : "member";
+}
+
 export class PersistentWorkspaceCache implements WorkspaceCache {
   readonly mode = "persistent" as const;
   readonly #crypto: CacheCryptoClient;
@@ -1162,6 +1194,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
+    retractSourceMessageIds: readonly string[] = [],
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -1292,7 +1325,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       if (outcome === "retry") continue;
       if (outcome === "stale") return false;
       await this.#evictMessages();
-      retainLiveMessageMentions(this.#createdMessageMentions, parsedMessages);
+      retainLiveMessageMentions(
+        this.#createdMessageMentions,
+        parsedMessages,
+        parsedConversations,
+        retractSourceMessageIds,
+      );
       return true;
     }
   }
@@ -1402,7 +1440,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
     const metadata = await this.#database.metadata.get("state");
     const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
-    if (parsed.type === "channel.membership_changed") {
+    if (
+      parsed.type === "channel.membership_changed" &&
+      parsed.payload.memberId === this.#scope.userId
+    ) {
       if (repairMarker === null) {
         const staged = await this.stageMembershipRepair(parsed);
         if (!staged) return false;
@@ -1423,7 +1464,32 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       return false;
     }
 
-    if (parsed.type === "message.created") {
+    if (parsed.type === "channel.membership_changed") {
+      const current = await this.#conversation(parsed.conversationId);
+      const summary =
+        current === null ? null : projectConversationMembershipChange(current, parsed);
+      const encrypted = await encryptRecords(
+        this.#crypto,
+        summary === null ? [] : [protectedRecord("conversation", summary.conversation.id, summary)],
+      );
+      await this.#database.transaction(
+        "rw",
+        this.#database.metadata,
+        this.#database.conversations,
+        this.#database.events,
+        async () => {
+          if (summary !== null) {
+            await this.#database.conversations.put({
+              id: summary.conversation.id,
+              kind: summary.conversation.kind,
+              updatedAt: summary.conversation.updatedAt,
+              value: encryptedValue(encrypted, "conversation", summary.conversation.id),
+            });
+          }
+          await this.#recordEvent(parsed, signal);
+        },
+      );
+    } else if (parsed.type === "message.created") {
       const [currentSummary, currentMessage] = await Promise.all([
         this.#conversation(parsed.conversationId),
         this.#message(parsed.payload.message.id),
@@ -1680,7 +1746,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         nextSummary = conversationSummarySchema.parse({
           conversation: parsed.payload.conversation,
           participantIds: parsed.payload.participantIds,
-          membershipRole: current?.membershipRole ?? null,
+          membershipRole: membershipRoleForConversationEvent(
+            parsed.payload.conversation,
+            current?.membershipRole,
+            this.#scope.userId,
+          ),
           lastMessage: current?.lastMessage ?? null,
           unreadCount: current?.unreadCount ?? 0,
           mentionCount: current?.mentionCount ?? 0,
@@ -2474,6 +2544,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     reactions: readonly Reaction[] = [],
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
+    retractSourceMessageIds: readonly string[] = [],
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -2527,7 +2598,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#syncCursor = parsed.syncCursor;
     this.#lastSyncedAt = new Date().toISOString();
     this.#repairMarker = null;
-    retainLiveMessageMentions(this.#createdMessageMentions, retainedMessages);
+    retainLiveMessageMentions(
+      this.#createdMessageMentions,
+      retainedMessages,
+      retainedConversations,
+      retractSourceMessageIds,
+    );
     return true;
   }
 
@@ -2597,7 +2673,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   ): Promise<boolean> {
     signal?.throwIfAborted();
     const parsed = workspaceEventSchema.parse(event);
-    if (parsed.type === "channel.membership_changed") {
+    if (
+      parsed.type === "channel.membership_changed" &&
+      (this.#currentUserId === null || parsed.payload.memberId === this.#currentUserId)
+    ) {
       if (this.#repairMarker === null) {
         const staged = await this.stageMembershipRepair(parsed);
         if (!staged) return false;
@@ -2619,7 +2698,21 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#events.add(parsed.id);
     this.#syncCursor = parsed.workspaceSequence;
     this.#lastSyncedAt = new Date().toISOString();
-    if (parsed.type === "message.created") {
+    if (parsed.type === "channel.membership_changed") {
+      if (this.#snapshot !== null) {
+        const conversations = new Map(
+          this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
+        );
+        const current = conversations.get(parsed.conversationId);
+        if (current !== undefined) {
+          conversations.set(
+            parsed.conversationId,
+            projectConversationMembershipChange(current, parsed),
+          );
+          this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
+        }
+      }
+    } else if (parsed.type === "message.created") {
       const incoming = applyRetractReservation(
         parsed.payload.message,
         retractReservationMap(this.#retractReservations),
@@ -2747,7 +2840,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         conversations.set(parsed.conversationId, {
           conversation: parsed.payload.conversation,
           participantIds: parsed.payload.participantIds,
-          membershipRole: current?.membershipRole ?? null,
+          membershipRole: membershipRoleForConversationEvent(
+            parsed.payload.conversation,
+            current?.membershipRole,
+            this.#snapshot.currentUser.user.id,
+          ),
           lastMessage: current?.lastMessage ?? null,
           unreadCount: current?.unreadCount ?? 0,
           mentionCount: current?.mentionCount ?? 0,

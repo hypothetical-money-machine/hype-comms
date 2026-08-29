@@ -10,8 +10,9 @@ Product strategy and delivery work are tracked in
 [GitHub Issues](https://github.com/hypothetical-money-machine/hype-comms/issues).
 See [packages/cli/README.md](packages/cli/README.md) for CLI installation and automation
 contracts, [integrations/hermes-hype-comms/README.md](integrations/hermes-hype-comms/README.md) for
-the Hermes gateway adapter, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the
-SQLite-to-PostgreSQL cutover boundary.
+the Hermes gateway adapter, [docs/agent-wake.md](docs/agent-wake.md) for the default-off agent wake
+pilot, and [docs/sqlite-cutover.md](docs/sqlite-cutover.md) for the SQLite-to-PostgreSQL cutover
+boundary.
 
 ## Joining a workspace
 
@@ -234,21 +235,24 @@ development servers. Human sessions can request and exchange magic links; agent 
 read from a private prompt, stdin, an injected environment variable, or a `0600` profile file.
 Do not put credentials in command arguments.
 
-Routine agent provisioning is a zero-copy enrollment: the child profile generates and retains its
-final credential, an existing agent requests the enrollment with a non-secret verifier, the owner
-reviews it when policy requires, and the child redeems it. The immutable `default-agency-v1`
-credential grants workspace read, seated-conversation messaging, DM open/send, and agent enrollment
-requests; file projections use the separate `attachments-v1` wire capability and remain authorized
-by workspace read plus conversation visibility. Owner-minted agent tokens are a break-glass path,
-not the routine Atlas workflow. Agents count toward the same 25-active-member limit as people. See
-the [default agent agency runbook](docs/default-agent-agency.md) for exact commands, policy,
-seating, Atlas migration, rollback, and completion evidence, and the
-[CLI guide](packages/cli/README.md) for general profile and output behavior.
+The immutable `default-agency-v1` credential grants workspace read, messaging in joined
+conversations, direct and group conversation creation, public-channel self-join, and agent
+enrollment requests. Public channels are discoverable but require an explicit join; private
+channels still require an invitation. File projections use the separate `attachments-v1` wire
+capability and remain authorized by workspace read plus conversation visibility. Default agents
+can read accessible attachments but need explicit `attachments:write` authority to upload or attach
+bytes. Owners can revoke one credential or disable an entire agent while preserving historical
+authorship. See the [default agent agency runbook](docs/default-agent-agency.md) for exact behavior,
+rollout, and completion evidence, and the [CLI guide](packages/cli/README.md) for command and profile
+details.
 
 The [Hermes adapter](integrations/hermes-hype-comms/README.md) runs the CLI as its transport. It
 wakes Hermes for every DM and only for channel messages that explicitly mention the agent, resumes
 one Hermes session per Hype Comms conversation, and sends replies back to that canonical
-conversation.
+conversation. Each eligible wake carries a server-authoritative, bounded context pack with recent
+authors, verified mention status, the canonical channel or DM selector, and the correct reply
+target. Tokens with the optional `read-cursors:write` scope advance the agent's read state after a
+successful Hermes handoff.
 Install the server migration first, then the CLI, complete the agent enrollment, install the adapter
 under `~/.hermes/plugins/`, and finally start the Hermes gateway.
 
@@ -263,8 +267,10 @@ docker compose up --build -d
 ```
 
 The API and database ports bind to loopback. PostgreSQL is authoritative for identity, sessions,
-conversations, messages, idempotency records, read cursors, and sync events. There is no SQLite
-runtime volume or shared access-code mode.
+conversations, messages, idempotency records, read cursors, and sync events. Attachment bytes live
+in the Compose-managed `attachment-data` volume and must be backed up with PostgreSQL. The server's
+root filesystem remains read-only; only that attachment volume and `/tmp` are writable. There is no
+SQLite runtime volume or shared access-code mode.
 
 The server accepts forwarded client addresses only from `HYPE_COMMS_TRUSTED_PROXIES`. Host-run
 production defaults to the exact IPv4 and IPv6 loopback addresses; Compose supplies its private
@@ -314,9 +320,11 @@ To cut a release:
 2. Review the generated notes scaffold, replace its instructional text, and remove its review
    marker, following the [release-notes guide](docs/releases/README.md). Re-running the command for
    the same version preserves the edited notes.
-3. Run `npm run check`. On a packaging machine, explicitly select the release identity for both
-   commands: `HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop`, then
-   `HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`.
+3. Run `npm run check`. On a packaging machine, explicitly select the deployed API and release
+   identity for both commands:
+   `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production npm run package:desktop`,
+   then
+   `HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com HYPE_COMMS_BUILD_FLAVOR=production npm run verify:desktop-package`.
 4. Land that focused version change, then create and push `v<version>` at the exact revision. The
    release workflow rejects a tag whose value does not exactly match the desktop package version or
    whose release notes still contain the review marker.
@@ -436,7 +444,9 @@ change both together with the deployment rather than letting them drift apart.
 
 `test:db` is unaffected by this because its container is disposable, but a Compose volume already
 initialised by a different major version will refuse to start, reporting incompatible database
-files. Recreate it with `docker compose down -v` — that discards local development data only.
+files. In a disposable local environment only, `docker compose down -v` recreates it; that command
+also permanently deletes the Compose-managed PostgreSQL and attachment volumes, so never use it to
+repair a deployment whose data must be retained.
 
 Local desktop packaging defaults to the side-by-side `Hype Comms DEV` identity. macOS DEV packages
 are ad-hoc signed so the modified Electron application can launch, but are not notarized. The DEV
@@ -449,9 +459,10 @@ npm run package:desktop:appimage
 npm run verify:desktop-package
 ```
 
-Tagged release jobs set `HYPE_COMMS_BUILD_FLAVOR=production` at the job level. That explicit flavor
-retains the existing `Hype Comms` identity, `hype-comms-*` artifact names, release directory, and
-update feed. Do not set the production flavor for an ordinary preview build.
+Tagged release jobs set `HYPE_COMMS_BUILD_FLAVOR=production` and
+`HYPE_COMMS_API_ORIGIN=https://chat-api.hypemm.com` at the job level. The explicit flavor retains
+the existing `Hype Comms` identity, `hype-comms-*` artifact names, release directory, and update
+feed. Do not set the production flavor for an ordinary preview build.
 
 Generated `dist/`, `release/`, coverage, databases, credentials, and installers are never
 committed.
@@ -471,11 +482,14 @@ roll directly into the gatorlunch cluster.
 - `ci.yml` runs `npm run check` on every pull request and push to `main`.
 - `desktop-package-smoke.yml` packages the default DEV artifacts on macOS, Windows, and Ubuntu,
   then packages production on Linux to check the stable identity and updater feed before a tag.
-  Pull requests use disposable GitHub-hosted ARM64 runners; trusted `main` and manual runs retain
-  native self-hosted coverage. macOS DEV artifacts are ad-hoc signed; the Windows and Ubuntu
-  artifacts remain unsigned. Its signed macOS notification-evidence job selects the production
-  identity because that evidence applies to a release candidate.
-- `desktop-release.yml` builds, signs, notarizes, verifies, and publishes a tagged release.
+  Pull requests and pushes to `main` use disposable GitHub-hosted ARM64 runners; a manual
+  dispatch retains native self-hosted coverage. macOS DEV artifacts are ad-hoc signed; the Windows
+  and Ubuntu artifacts remain unsigned. Its signed macOS notification-evidence job selects the
+  production identity because that evidence applies to a release candidate.
+- `desktop-release.yml` builds, signs, notarizes, and verifies a tagged release on disposable
+  GitHub-hosted ARM64 runners, then stages its files in a draft GitHub Release. The protected
+  `release` environment has one final approval before it publishes update manifests, the download
+  page, and the GitHub Release. No persistent host holds release credentials.
 
 The desktop half cannot move to the homelab: macOS artifacts must be built and signed on macOS,
 and Windows installers on Windows. GitHub provides those runners; the homelab does not.

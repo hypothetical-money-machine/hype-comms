@@ -1,4 +1,6 @@
 import {
+  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  GROUP_DIRECT_MESSAGES_CAPABILITY,
   apiErrorEnvelopeSchema,
   authCapabilitiesSchema,
   authKitLogoutUrlHeaderName,
@@ -138,6 +140,26 @@ export class ChatSessionError extends Error {
     super(message);
     this.name = "ChatSessionError";
   }
+}
+
+const NET_ERROR_PATTERN = /net::ERR_[A-Z0-9_]+/;
+
+/**
+ * Extracts the Chromium net error token from a failed `net.fetch`. The code may sit in the
+ * rejection's own message or on its cause chain depending on the failure, so both are walked, with
+ * a bounded depth in case the chain cycles. Only the token is returned — never the raw message,
+ * which can contain URLs — so composed user-facing strings stay short and safe.
+ */
+export function describeNetworkError(error: unknown): string | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    const match = NET_ERROR_PATTERN.exec(current.message);
+    if (match !== null) {
+      return match[0];
+    }
+    current = current.cause;
+  }
+  return null;
 }
 
 async function readErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -381,8 +403,15 @@ export class ChatSession {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(request),
       });
-    } catch {
-      throw new ChatSessionError("Could not reach the authentication service");
+    } catch (error) {
+      // The net error token (e.g. net::ERR_SSL_KEY_USAGE_INCOMPATIBLE) is the one diagnostic that
+      // separates a broken TLS path from an unreachable host; issue #75 died without it.
+      const detail = describeNetworkError(error);
+      throw new ChatSessionError(
+        detail === null
+          ? "Could not reach the authentication service"
+          : `Could not reach the authentication service (${detail})`,
+      );
     }
     if (!response.ok) {
       throw new ChatSessionError(
@@ -745,7 +774,17 @@ export class ChatSession {
     if (this.#state.status === "session-unavailable") {
       throw new ChatSessionError("Workspace requests require a validated session");
     }
-    return this.#fetch(url, init);
+    const headers = new Headers(init.headers);
+    const capabilities = new Set(
+      (headers.get("x-hype-comms-capabilities") ?? "")
+        .split(",")
+        .map((capability) => capability.trim())
+        .filter((capability) => capability.length > 0),
+    );
+    capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
+    capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
+    headers.set("x-hype-comms-capabilities", [...capabilities].join(","));
+    return this.#fetch(url, { ...init, headers });
   }
 
   async #fetch(url: string, init: RequestInit): Promise<Response> {
