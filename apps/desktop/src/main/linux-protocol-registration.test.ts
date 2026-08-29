@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appImageDesktopFileName,
   createAppImageDesktopFilePlan,
+  parseDesktopEntryExecPath,
   queryProtocolHandlerBinding,
   quoteExecArgument,
   registerAppImageProtocolHandler,
+  userApplicationsDirectory,
   type LinuxProtocolRegistrationTarget,
 } from "./linux-protocol-registration";
 
@@ -23,11 +25,15 @@ function createTarget(
 ): LinuxProtocolRegistrationTarget & {
   readonly makeDirectory: ReturnType<typeof vi.fn>;
   readonly writeFile: ReturnType<typeof vi.fn>;
+  readonly readFile: ReturnType<typeof vi.fn>;
+  readonly fileExists: ReturnType<typeof vi.fn>;
   readonly runCommand: ReturnType<typeof vi.fn>;
 } {
   return {
     makeDirectory: vi.fn(async () => undefined),
     writeFile: vi.fn(async () => undefined),
+    readFile: vi.fn(async () => null),
+    fileExists: vi.fn(async () => false),
     runCommand: vi.fn(async () => commandResult),
   };
 }
@@ -192,5 +198,105 @@ describe("queryProtocolHandlerBinding", () => {
     await expect(
       queryProtocolHandlerBinding(MIME, ACCEPTED, createTarget({ exitCode: null, stdout: "" })),
     ).resolves.toBe("unknown");
+  });
+
+  describe("self-registered entry staleness", () => {
+    const SELF_REGISTERED = {
+      desktopFileName: "com.hypemm.hypecomms.appimage.desktop",
+      desktopFilePath: "/home/wren/.local/share/applications/com.hypemm.hypecomms.appimage.desktop",
+    };
+    const ENTRY = 'Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n';
+
+    it("trusts the self-registered entry only while its Exec target exists", async () => {
+      const target = createTarget({
+        exitCode: 0,
+        stdout: "com.hypemm.hypecomms.appimage.desktop\n",
+      });
+      target.readFile.mockResolvedValue(ENTRY);
+      target.fileExists.mockResolvedValue(true);
+
+      await expect(
+        queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
+      ).resolves.toBe("bound");
+      expect(target.readFile).toHaveBeenCalledWith(SELF_REGISTERED.desktopFilePath);
+      expect(target.fileExists).toHaveBeenCalledWith("/home/wren/Apps/Hype Comms.AppImage");
+    });
+
+    it("reports unbound when the Exec target was moved or deleted", async () => {
+      const target = createTarget({
+        exitCode: 0,
+        stdout: "com.hypemm.hypecomms.appimage.desktop\n",
+      });
+      target.readFile.mockResolvedValue(ENTRY);
+      target.fileExists.mockResolvedValue(false);
+
+      await expect(
+        queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
+      ).resolves.toBe("unbound");
+    });
+
+    it("reports unbound when the entry is unreadable or has no parseable Exec", async () => {
+      const unreadable = createTarget({
+        exitCode: 0,
+        stdout: "com.hypemm.hypecomms.appimage.desktop\n",
+      });
+      await expect(
+        queryProtocolHandlerBinding(MIME, ACCEPTED, unreadable, SELF_REGISTERED),
+      ).resolves.toBe("unbound");
+
+      const noExec = createTarget({
+        exitCode: 0,
+        stdout: "com.hypemm.hypecomms.appimage.desktop\n",
+      });
+      noExec.readFile.mockResolvedValue("[Desktop Entry]\nType=Application\n");
+      await expect(
+        queryProtocolHandlerBinding(MIME, ACCEPTED, noExec, SELF_REGISTERED),
+      ).resolves.toBe("unbound");
+    });
+
+    it("does not read anything when the deb's installed entry is the default", async () => {
+      const target = createTarget({ exitCode: 0, stdout: "com.hypemm.hypecomms.desktop\n" });
+
+      await expect(
+        queryProtocolHandlerBinding(MIME, ACCEPTED, target, SELF_REGISTERED),
+      ).resolves.toBe("bound");
+      expect(target.readFile).not.toHaveBeenCalled();
+      expect(target.fileExists).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("parseDesktopEntryExecPath", () => {
+  it("undoes the quoting the plan writes, including escaped reserved characters", () => {
+    expect(parseDesktopEntryExecPath('Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n')).toBe(
+      "/home/wren/Apps/Hype Comms.AppImage",
+    );
+    expect(parseDesktopEntryExecPath('Exec="/tmp/we\\"ird\\$pa\\`th.AppImage" %u')).toBe(
+      '/tmp/we"ird$pa`th.AppImage',
+    );
+  });
+
+  it("accepts an unquoted single-path Exec line", () => {
+    expect(parseDesktopEntryExecPath("Exec=/opt/hype/hype-comms %u")).toBe("/opt/hype/hype-comms");
+  });
+
+  it("parses null for a missing, empty, or unterminated Exec", () => {
+    expect(parseDesktopEntryExecPath("[Desktop Entry]\nType=Application\n")).toBeNull();
+    expect(parseDesktopEntryExecPath("Exec=\n")).toBeNull();
+    expect(parseDesktopEntryExecPath('Exec="/tmp/unterminated %u')).toBeNull();
+  });
+});
+
+describe("userApplicationsDirectory", () => {
+  it("prefers XDG_DATA_HOME and falls back to ~/.local/share", () => {
+    expect(userApplicationsDirectory("/home/wren", "/custom/share")).toBe(
+      "/custom/share/applications",
+    );
+    expect(userApplicationsDirectory("/home/wren", undefined)).toBe(
+      "/home/wren/.local/share/applications",
+    );
+    expect(userApplicationsDirectory("/home/wren", "")).toBe(
+      "/home/wren/.local/share/applications",
+    );
   });
 });

@@ -24,11 +24,20 @@ export interface LinuxDesktopFilePlan {
 export interface LinuxProtocolRegistrationTarget {
   readonly makeDirectory: (directoryPath: string) => Promise<void>;
   readonly writeFile: (filePath: string, contents: string) => Promise<void>;
+  /** Resolves `null` when the file is missing or unreadable; this never rejects. */
+  readonly readFile: (filePath: string) => Promise<string | null>;
+  readonly fileExists: (filePath: string) => Promise<boolean>;
   /** Spawn failures resolve as `{ exitCode: null, stdout: "" }`; this never rejects. */
   readonly runCommand: (
     command: string,
     commandArguments: readonly string[],
   ) => Promise<{ readonly exitCode: number | null; readonly stdout: string }>;
+}
+
+/** The self-registered entry the verifier must distrust until its Exec target proves to exist. */
+export interface SelfRegisteredHandlerCheck {
+  readonly desktopFileName: string;
+  readonly desktopFilePath: string;
 }
 
 export type ProtocolHandlerBinding = "bound" | "unbound" | "unknown";
@@ -50,6 +59,50 @@ export function quoteExecArgument(value: string): string {
   return `"${value.replace(/[\\"`$]/g, (character) => `\\${character}`)}"`;
 }
 
+export function userApplicationsDirectory(
+  homeDirectory: string,
+  xdgDataHome: string | undefined,
+): string {
+  const dataHome =
+    xdgDataHome === undefined || xdgDataHome === ""
+      ? path.join(homeDirectory, ".local", "share")
+      : xdgDataHome;
+  return path.join(dataHome, "applications");
+}
+
+/**
+ * First Exec argument of a desktop entry, undoing the quoting `quoteExecArgument` applies.
+ * Unquoted single-path Exec lines are accepted too; anything else parses as `null`.
+ */
+export function parseDesktopEntryExecPath(desktopFileContents: string): string | null {
+  const execLine = desktopFileContents
+    .split("\n")
+    .find((line) => line.startsWith("Exec="))
+    ?.slice("Exec=".length)
+    .trim();
+  if (execLine === undefined || execLine === "") {
+    return null;
+  }
+  if (!execLine.startsWith('"')) {
+    const firstArgument = execLine.split(/\s/, 1)[0] ?? "";
+    return firstArgument === "" ? null : firstArgument;
+  }
+  let executablePath = "";
+  for (let index = 1; index < execLine.length; index += 1) {
+    const character = execLine[index];
+    if (character === "\\") {
+      index += 1;
+      executablePath += execLine[index] ?? "";
+      continue;
+    }
+    if (character === '"') {
+      return executablePath === "" ? null : executablePath;
+    }
+    executablePath += character;
+  }
+  return null;
+}
+
 export function createAppImageDesktopFilePlan(input: {
   readonly scheme: AuthProtocolScheme;
   readonly installedDesktopName: string;
@@ -63,11 +116,7 @@ export function createAppImageDesktopFilePlan(input: {
     return null;
   }
 
-  const dataHome =
-    input.xdgDataHome === undefined || input.xdgDataHome === ""
-      ? path.join(input.homeDirectory, ".local", "share")
-      : input.xdgDataHome;
-  const applicationsDirectory = path.join(dataHome, "applications");
+  const applicationsDirectory = userApplicationsDirectory(input.homeDirectory, input.xdgDataHome);
   const desktopFileName = appImageDesktopFileName(input.installedDesktopName);
   const mimeType = `x-scheme-handler/${input.scheme}`;
   const desktopFileContents = [
@@ -110,16 +159,33 @@ export async function registerAppImageProtocolHandler(
 /**
  * `unknown` covers boxes without xdg-utils; only a confirmed empty or foreign handler reports
  * `unbound`, so the sign-in warning never fires on a query that simply could not run.
+ *
+ * When the default resolves to the self-registered entry, its filename alone is not proof: the
+ * AppImage that wrote it may have been moved or deleted since, leaving an entry whose Exec launches
+ * nothing. The deb path verifies without rewriting, so it must read the entry and confirm the Exec
+ * target still exists before trusting it.
  */
 export async function queryProtocolHandlerBinding(
   mimeType: string,
   acceptedHandlers: readonly string[],
-  target: Pick<LinuxProtocolRegistrationTarget, "runCommand">,
+  target: Pick<LinuxProtocolRegistrationTarget, "runCommand" | "readFile" | "fileExists">,
+  selfRegistered?: SelfRegisteredHandlerCheck,
 ): Promise<ProtocolHandlerBinding> {
   const result = await target.runCommand("xdg-mime", ["query", "default", mimeType]);
   if (result.exitCode !== 0) {
     return "unknown";
   }
   const handler = result.stdout.trim();
-  return acceptedHandlers.includes(handler) ? "bound" : "unbound";
+  if (!acceptedHandlers.includes(handler)) {
+    return "unbound";
+  }
+  if (selfRegistered === undefined || handler !== selfRegistered.desktopFileName) {
+    return "bound";
+  }
+  const contents = await target.readFile(selfRegistered.desktopFilePath);
+  const executablePath = contents === null ? null : parseDesktopEntryExecPath(contents);
+  if (executablePath === null) {
+    return "unbound";
+  }
+  return (await target.fileExists(executablePath)) ? "bound" : "unbound";
 }

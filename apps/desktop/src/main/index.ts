@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -161,6 +161,7 @@ import {
   createAppImageDesktopFilePlan,
   queryProtocolHandlerBinding,
   registerAppImageProtocolHandler,
+  userApplicationsDirectory,
   type LinuxProtocolRegistrationTarget,
 } from "./linux-protocol-registration";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
@@ -278,6 +279,21 @@ function createLinuxProtocolRegistrationTarget(): LinuxProtocolRegistrationTarge
     writeFile: async (filePath, contents) => {
       await writeFile(filePath, contents, "utf8");
     },
+    readFile: async (filePath) => {
+      try {
+        return await readFile(filePath, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    fileExists: async (filePath) => {
+      try {
+        await stat(filePath);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     runCommand: (command, commandArguments) =>
       new Promise((resolve) => {
         execFile(
@@ -327,10 +343,18 @@ async function probeLinuxProtocolHandler(): Promise<ProtocolHandlerState> {
       }
     }
   }
+  const selfRegisteredName = appImageDesktopFileName(__HYPE_COMMS_DESKTOP_NAME__);
   const binding = await queryProtocolHandlerBinding(
     `x-scheme-handler/${__HYPE_COMMS_AUTH_PROTOCOL_SCHEME__}`,
-    [__HYPE_COMMS_DESKTOP_NAME__, appImageDesktopFileName(__HYPE_COMMS_DESKTOP_NAME__)],
+    [__HYPE_COMMS_DESKTOP_NAME__, selfRegisteredName],
     target,
+    {
+      desktopFileName: selfRegisteredName,
+      desktopFilePath: path.join(
+        userApplicationsDirectory(homedir(), process.env.XDG_DATA_HOME),
+        selfRegisteredName,
+      ),
+    },
   );
   protocolHandlerState = { ...protocolHandlerState, binding };
   return protocolHandlerState;
