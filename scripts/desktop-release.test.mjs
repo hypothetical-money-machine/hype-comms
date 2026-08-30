@@ -125,6 +125,16 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     releaseWorkflow,
     /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production\n {2}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com$/mu,
   );
+  // The updater only arms when the baked API origin matches OFFICIAL_PRODUCTION_API_ORIGIN, so a
+  // workflow origin that drifts from the constant ships packages that silently never auto-update.
+  const apiOriginSource = await readFile(
+    new URL("../apps/desktop/src/shared/api-origin.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    apiOriginSource,
+    /^export const OFFICIAL_PRODUCTION_API_ORIGIN = "https:\/\/chat-api\.hypemm\.com";$/mu,
+  );
   assert.match(matrixEntry(releasePackageJob, "macOS"), /runner: '\["macos-15"\]'/u);
   assert.match(matrixEntry(releasePackageJob, "Windows"), /runner: '\["windows-11-arm"\]'/u);
   assert.match(matrixEntry(releasePackageJob, "Linux"), /runner: '\["ubuntu-24\.04-arm"\]'/u);

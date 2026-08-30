@@ -1,5 +1,12 @@
 export const DEFAULT_DEVELOPMENT_API_ORIGIN = "http://127.0.0.1:3000";
 export const DEFAULT_PRODUCTION_API_ORIGIN = "https://chat-api.example.invalid";
+/**
+ * The deployed production API, as baked into release packages by the desktop-release workflow's
+ * HYPE_COMMS_API_ORIGIN. Only packages aimed at this origin may consume the public update feed;
+ * DEFAULT_PRODUCTION_API_ORIGIN stays a reserved-invalid placeholder so an unconfigured
+ * production build fails closed instead of silently targeting a real host.
+ */
+export const OFFICIAL_PRODUCTION_API_ORIGIN = "https://chat-api.hypemm.com";
 
 function parseBareOrigin(value: string): URL | null {
   try {

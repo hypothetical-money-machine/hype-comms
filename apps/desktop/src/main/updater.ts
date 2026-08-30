@@ -6,7 +6,7 @@ import {
   type UpdateState,
 } from "@hype-comms/contracts";
 
-import { DEFAULT_PRODUCTION_API_ORIGIN } from "../shared/api-origin";
+import { OFFICIAL_PRODUCTION_API_ORIGIN } from "../shared/api-origin";
 
 export const INITIAL_UPDATE_CHECK_DELAY_MS = 30_000;
 export const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000;
@@ -91,7 +91,7 @@ function isSupported(options: UpdateControllerOptions): boolean {
 
   // A package aimed at another server must never replace itself with the official
   // production-origin build just because both packages can reach the public update feed.
-  if (options.apiOrigin !== DEFAULT_PRODUCTION_API_ORIGIN) {
+  if (options.apiOrigin !== OFFICIAL_PRODUCTION_API_ORIGIN) {
     return false;
   }
 
