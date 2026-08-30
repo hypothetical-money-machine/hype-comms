@@ -441,6 +441,10 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
   );
   assert.match(
     releaseWorkflow,
+    /^ {2}github-release:[\s\S]*?npm ci --no-audit --prefer-offline[\s\S]*?node scripts\/desktop-release\.mjs configure-s3/mu,
+  );
+  assert.match(
+    releaseWorkflow,
     /name: Publish and verify Linux ARM64 update manifest[\s\S]*node scripts\/desktop-release\.mjs upload-manifest[\s\S]*node scripts\/verify-published-desktop-release\.mjs/u,
   );
   assert.match(
