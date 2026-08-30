@@ -486,6 +486,7 @@ export function MessageRow({
       <div>
         <header className={continuation ? "sr-only" : undefined}>
           <strong>{author?.displayName ?? "Former member"}</strong>
+          {author?.title != null && <span className="message-author-title">{author.title}</span>}
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
         <MessageBody
@@ -2735,6 +2736,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         notifications={notificationTransport ?? undefined}
         platform={client.platform}
         triggerRef={preferencesTrigger}
+        currentUser={bootstrap.currentUser.user}
+        onUpdateProfile={(title) => runtime.updateProfileTitle(title)}
         onClose={() => setShowPreferences(false)}
         onOpenChange={onWorkspaceDialogOpenChange}
       />

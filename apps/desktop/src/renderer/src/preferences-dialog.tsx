@@ -9,12 +9,15 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import type { User } from "@hype-comms/contracts";
+
 import type { DesktopPlatform, NotificationTransport } from "../../shared/desktop-api";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CompactModeToggle } from "./compact-mode-toggle";
 import { FencedBlockquoteControl } from "./fenced-blockquote-control";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { NotificationSettings } from "./notification-settings";
+import { ProfileSection } from "./profile-section";
 import { SidebarPositionControl } from "./sidebar-position-control";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeDesigner } from "./theme-designer";
@@ -30,6 +33,8 @@ interface PreferencesDialogProps {
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
   readonly platform: DesktopPlatform;
+  readonly currentUser: User;
+  readonly onUpdateProfile: (title: string | null) => Promise<void>;
   readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onClose: () => void;
   readonly onOpenChange?: (open: boolean) => void;
@@ -53,6 +58,8 @@ export function PreferencesDialog({
   sidebarPosition,
   notifications,
   platform,
+  currentUser,
+  onUpdateProfile,
   triggerRef,
   onClose,
   onOpenChange,
@@ -227,6 +234,10 @@ export function PreferencesDialog({
           />
         ) : (
           <>
+            <section aria-labelledby="preferences-profile-title">
+              <h3 id="preferences-profile-title">Profile</h3>
+              <ProfileSection currentUser={currentUser} onUpdateProfile={onUpdateProfile} />
+            </section>
             <section aria-labelledby="preferences-appearance-title">
               <h3 id="preferences-appearance-title">Appearance</h3>
               <ThemeSelector

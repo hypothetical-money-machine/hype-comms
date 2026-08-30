@@ -1293,6 +1293,12 @@ class FakeDesktopApi implements DesktopApi {
     return this.bootstrap;
   }
 
+  readonly updateProfileRequests: (string | null)[] = [];
+  async updateProfile(title: string | null): Promise<User> {
+    this.updateProfileRequests.push(title);
+    return { ...this.bootstrap.currentUser.user, title };
+  }
+
   async listWorkspaceMembers(): Promise<ListMembersResponse> {
     this.memberRequests += 1;
     if (this.memberFailures > 0) {
@@ -7905,5 +7911,57 @@ describe("WorkspaceRuntime", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("updateProfileTitle", () => {
+    it("updates currentUser and the matching member with the returned user", async () => {
+      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      await runtime.updateProfileTitle("Captain");
+
+      expect(api.updateProfileRequests).toEqual(["Captain"]);
+      expect(runtime.state.bootstrap?.currentUser.user.title).toBe("Captain");
+      const currentMember = runtime.state.bootstrap?.members.find(
+        (member) => member.id === USER_ID,
+      );
+      expect(currentMember?.title).toBe("Captain");
+      expect(
+        runtime.state.bootstrap?.members.find((member) => member.id === PEER_ID)?.title,
+      ).toBeUndefined();
+    });
+
+    it("clears the title when null is supplied", async () => {
+      const titledUser = { ...user, title: "Captain" };
+      const titledMember: User = titledUser;
+      const titledBootstrap = bootstrapAt("10", { members: [titledMember, peer] });
+      const api = new FakeDesktopApi({
+        ...titledBootstrap,
+        currentUser: { ...titledBootstrap.currentUser, user: titledUser },
+      });
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      await runtime.updateProfileTitle(null);
+
+      expect(api.updateProfileRequests).toEqual([null]);
+      expect(runtime.state.bootstrap?.currentUser.user.title).toBeNull();
+      expect(
+        runtime.state.bootstrap?.members.find((member) => member.id === USER_ID)?.title,
+      ).toBeNull();
+    });
+
+    it("re-throws when the server rejects the update", async () => {
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.updateProfile = async () => {
+        throw new Error("Profile update failed");
+      };
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      await expect(runtime.updateProfileTitle("Captain")).rejects.toThrow("Profile update failed");
+      expect(runtime.state.bootstrap?.currentUser.user.title).toBeUndefined();
+    });
   });
 });

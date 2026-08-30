@@ -48,6 +48,7 @@ describeWithPostgres("IdentityRepository", () => {
       username: "owner",
       displayName: "Workspace Owner",
       avatarUrl: null,
+      title: null,
     });
   });
 

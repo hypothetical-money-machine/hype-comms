@@ -59,6 +59,8 @@ test("derives an isolated loopback database and never inherits the normal databa
   assert.equal(result.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], undefined);
   assert.equal(result.env.ELECTRON_CLI_ARGS, undefined);
   assert.equal(result.env.REMOTE_DEBUGGING_PORT, undefined);
+  assert.equal(result.env.HYPE_COMMS_PORT, "3000");
+  assert.equal(result.env.HYPE_COMMS_API_ORIGIN, "http://127.0.0.1:3000");
   assert.equal(result.paths.stateDirectory, path.join(root, ".dev-data", "demo"));
 });
 
@@ -137,14 +139,30 @@ test("creates isolated headless artifacts and Electron launch configuration", as
   assert.equal(desktopEnvironment[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV], artifactsDirectory);
   assert.equal(desktopEnvironment.ELECTRON_CLI_ARGS, undefined);
   assert.equal(desktopEnvironment.REMOTE_DEBUGGING_PORT, undefined);
+  assert.equal(desktopEnvironment.ELECTRON_ENABLE_LOGGING, "1");
+  assert.equal(desktopEnvironment.ELECTRON_ENABLE_STACK_DUMPING, "1");
   assert.deepEqual(headlessElectronViteArguments(9410), [
     "--remoteDebuggingPort=9410",
     "--",
     "--remote-debugging-address=127.0.0.1",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--enable-features=NetworkServiceInProcess",
+    "--disable-features=IsolateOrigins,site-per-process",
   ]);
   assert.deepEqual(headlessElectronArguments(9411), [
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=9411",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--enable-features=NetworkServiceInProcess",
+    "--disable-features=IsolateOrigins,site-per-process",
   ]);
   assert.throws(
     () =>
@@ -262,4 +280,40 @@ test("reset refuses an active marker and validates only the exact demo target", 
     assertDemoCanReset({ ...paths, stateDirectory: path.join(root, ".dev-data") }),
   );
   await rm(root, { recursive: true, force: true });
+});
+
+test("HYPE_COMMS_DEMO_API_PORT overrides the demo API port passed to the server", async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      "import('./demo-environment.mjs').then((m) => { " +
+        "const result = m.deriveDemoEnvironment({ HYPE_COMMS_POSTGRES_PASSWORD: 'pw' }, '/tmp'); " +
+        "console.log(JSON.stringify({ " +
+        "port: m.DEMO_API_PORT, " +
+        "serverPort: result.env.HYPE_COMMS_PORT, " +
+        "apiOrigin: result.env.HYPE_COMMS_API_ORIGIN " +
+        "})); " +
+        "});",
+    ],
+    {
+      cwd: new URL(".", import.meta.url).pathname,
+      env: { ...process.env, HYPE_COMMS_DEMO_API_PORT: "3001" },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  const { code } = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code_, signal) => resolve({ code: code_, signal }));
+  });
+  assert.equal(code, 0);
+  const parsed = JSON.parse(output.trim());
+  assert.equal(parsed.port, 3001);
+  assert.equal(parsed.serverPort, "3001");
+  assert.equal(parsed.apiOrigin, "http://127.0.0.1:3001");
 });

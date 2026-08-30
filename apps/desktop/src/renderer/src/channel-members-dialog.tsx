@@ -240,6 +240,9 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                   availableMembers.map((member) => (
                     <option key={member.id} value={member.id}>
                       {member.displayName}
+                      {member.title !== null && member.title !== undefined
+                        ? ` · ${member.title}`
+                        : ""}
                     </option>
                   ))
                 )}
@@ -275,6 +278,9 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                       {entry.user.id === currentUserId ? " (you)" : ""}
                     </strong>
                     <span>@{entry.user.username}</span>
+                    {entry.user.title !== null && entry.user.title !== undefined && (
+                      <span className="channel-member-title">{entry.user.title}</span>
+                    )}
                   </div>
                   {kind !== null && <span className="member-kind">{kind}</span>}
                   {showChannelRole && entry.role !== null && (
