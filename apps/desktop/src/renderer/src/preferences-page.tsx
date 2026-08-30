@@ -110,12 +110,11 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     }, []);
 
     const requestNavigationAway = useCallback((): Promise<boolean> => {
-      if (designerSaving || discardAction !== null) return Promise.resolve(false);
-      if (view !== "designer") return Promise.resolve(true);
-      if (!designerDirty) {
-        setView("preferences");
-        return Promise.resolve(true);
+      if (designerSaving || discardAction !== null || leaveResolver.current !== null) {
+        return Promise.resolve(false);
       }
+      if (view !== "designer") return Promise.resolve(true);
+      if (!designerDirty) return Promise.resolve(true);
 
       discardReturnFocusRef.current =
         document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -135,6 +134,10 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     );
 
     useEffect(() => {
+      if (!active) setView("preferences");
+    }, [active]);
+
+    useEffect(() => {
       if (active || discardAction === null) return;
       setDiscardAction(null);
       resolvePendingLeave(false);
@@ -151,6 +154,20 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
       document.addEventListener("keydown", onKeyDown, true);
       return () => document.removeEventListener("keydown", onKeyDown, true);
     }, [active, cancelDiscard, discardAction]);
+
+    useEffect(() => {
+      if (!active || discardAction !== null || view !== "designer") return;
+      const onKeyDown = (event: KeyboardEvent): void => {
+        if (event.key !== "Escape" || document.querySelector('[aria-modal="true"]') !== null) {
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        returnToPreferences();
+      };
+      document.addEventListener("keydown", onKeyDown, true);
+      return () => document.removeEventListener("keydown", onKeyDown, true);
+    }, [active, discardAction, returnToPreferences, view]);
 
     useEffect(() => {
       if (!active || discardAction === null) return;
@@ -293,7 +310,6 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
                     onClick={() => {
                       const action = discardAction;
                       setDesignerDirty(false);
-                      setDesignerSaving(false);
                       setDiscardAction(null);
                       setView("preferences");
                       if (action === "leave") resolvePendingLeave(true);

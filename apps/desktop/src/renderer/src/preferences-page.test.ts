@@ -180,6 +180,7 @@ interface PreferencesHarnessProps {
   readonly platform: DesktopPlatform;
   readonly currentUser: User;
   readonly onUpdateProfile: (title: string | null) => Promise<void>;
+  readonly onNavigationResult?: (allowed: boolean) => void;
 }
 
 function PreferencesHarness({
@@ -191,9 +192,17 @@ function PreferencesHarness({
   platform,
   currentUser,
   onUpdateProfile,
+  onNavigationResult,
 }: PreferencesHarnessProps) {
   const [active, setActive] = useState(false);
   const page = useRef<PreferencesPageHandle>(null);
+
+  const requestNavigation = async (leavePage: boolean): Promise<void> => {
+    const allowed = (await page.current?.requestNavigationAway()) ?? true;
+    onNavigationResult?.(allowed);
+    if (allowed && leavePage) setActive(false);
+  };
+
   return createElement(
     "div",
     null,
@@ -210,11 +219,17 @@ function PreferencesHarness({
       "button",
       {
         type: "button",
-        onClick: async () => {
-          if (await page.current?.requestNavigationAway()) setActive(false);
-        },
+        onClick: () => void requestNavigation(true),
       },
       "Open conversation",
+    ),
+    createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => void requestNavigation(false),
+      },
+      "Check navigation",
     ),
     createElement(PreferencesPage, {
       ref: page,
@@ -248,12 +263,14 @@ interface RenderPreferencesOptions {
   readonly notifications?: NotificationTransport;
   readonly currentUser?: User;
   readonly onUpdateProfile?: (title: string | null) => Promise<void>;
+  readonly onNavigationResult?: (allowed: boolean) => void;
 }
 
 async function renderPreferences({
   notifications,
   currentUser = makeUser(),
   onUpdateProfile = vi.fn().mockResolvedValue(undefined),
+  onNavigationResult,
 }: RenderPreferencesOptions = {}) {
   const themeClient = new PreferencesThemeTransport();
   const compactModeClient = new PreferencesCompactModeTransport();
@@ -273,6 +290,7 @@ async function renderPreferences({
       platform: "linux",
       currentUser,
       onUpdateProfile,
+      onNavigationResult,
     }),
   );
   return {
@@ -386,6 +404,23 @@ describe("PreferencesPage", () => {
     expect(page.hidden).toBe(false);
   });
 
+  it("keeps a clean designer open until navigation changes the page", async () => {
+    const onNavigationResult = vi.fn();
+    await renderPreferences({ onNavigationResult });
+    const page = openPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Check navigation" }));
+    await waitFor(() => expect(onNavigationResult).toHaveBeenCalledWith(true));
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    expect(page.hidden).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    await waitFor(() => expect(page.hidden).toBe(true));
+    openPreferences();
+    expect(screen.getByRole("heading", { name: "Preferences" })).toBeTruthy();
+  });
+
   it("confirms before discarding a draft to leave the page", async () => {
     await renderPreferences();
     const page = openPreferences();
@@ -405,6 +440,46 @@ describe("PreferencesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
     fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
     await waitFor(() => expect(page.hidden).toBe(true));
+  });
+
+  it("settles a repeated navigation request without replacing its first resolver", async () => {
+    const onNavigationResult = vi.fn();
+    await renderPreferences({ onNavigationResult });
+    openPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    const openConversation = screen.getByRole("button", { name: "Open conversation" });
+    fireEvent.click(openConversation);
+    fireEvent.click(openConversation);
+    expect(screen.getByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    await waitFor(() => expect(onNavigationResult).toHaveBeenCalledTimes(2));
+    expect(onNavigationResult.mock.calls.map(([allowed]) => allowed)).toEqual([false, true]);
+  });
+
+  it("uses Escape to return a clean designer to Preferences", async () => {
+    await renderPreferences();
+    openPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("heading", { name: "Preferences" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Design a theme" }));
+  });
+
+  it("uses Escape to confirm a dirty designer before returning", async () => {
+    await renderPreferences();
+    openPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
   });
 
   it("does not leave while a theme save is in flight", async () => {
@@ -462,6 +537,18 @@ describe("PreferencesPage", () => {
     expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
   });
 
+  it("clears a profile title", async () => {
+    const onUpdateProfile = vi.fn().mockResolvedValue(undefined);
+    await renderPreferences({ currentUser: makeUser("Engineering Lead"), onUpdateProfile });
+    openPreferences();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+
+    await waitFor(() => expect(onUpdateProfile).toHaveBeenCalledWith(null));
+    expect(screen.getByText("Saved.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+  });
+
   it("surfaces validation and server errors when saving a profile title", async () => {
     const onUpdateProfile = vi.fn().mockRejectedValue(new Error("Network error"));
     await renderPreferences({ onUpdateProfile });
@@ -474,6 +561,13 @@ describe("PreferencesPage", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Title must be 1–160 characters",
     );
+
+    fireEvent.change(input, { target: { value: "a".repeat(161) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("Title must be 1–160 characters"),
+    );
+    expect(onUpdateProfile).not.toHaveBeenCalled();
 
     fireEvent.change(input, { target: { value: "Engineering Lead" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

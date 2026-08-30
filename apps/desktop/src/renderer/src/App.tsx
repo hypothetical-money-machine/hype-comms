@@ -777,27 +777,29 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   }, [requestPreferencesNavigation]);
 
   const runPreferencesNavigation = useCallback(
-    (navigation: () => void): void => {
+    (navigation: () => void): boolean | Promise<boolean> => {
       const allowed = requestPreferencesNavigation();
       if (typeof allowed === "boolean") {
-        if (allowed) navigation();
-        return;
+        if (!allowed) return false;
+        navigation();
+        return true;
       }
-      void allowed.then((confirmed) => {
-        if (confirmed) navigation();
+      return allowed.then((confirmed) => {
+        if (!confirmed) return false;
+        navigation();
+        return true;
       });
     },
     [requestPreferencesNavigation],
   );
 
   const selectConversation = useCallback(
-    (conversationId: string, onSelected?: () => void): void => {
+    (conversationId: string, onSelected?: () => void): boolean | Promise<boolean> =>
       runPreferencesNavigation(() => {
         setDestination("workspace");
         runtime.selectConversation(conversationId);
         onSelected?.();
-      });
-    },
+      }),
     [runPreferencesNavigation, runtime],
   );
 
