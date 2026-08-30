@@ -110,7 +110,7 @@ async function main(): Promise<void> {
       identity = {
         service,
         agentEnrollment: new AgentEnrollmentModule(databasePool),
-        botService: new BotService(databasePool),
+        botService: new BotService(databasePool, () => new Date(), config.publicApiUrl),
         selfServiceMagicLink: config.emailDelivery !== "manual",
         agentProvisioningEnabled: config.agentProvisioningEnabled,
         authKitAdmissionEnabled: config.authKitAdmissionEnabled,

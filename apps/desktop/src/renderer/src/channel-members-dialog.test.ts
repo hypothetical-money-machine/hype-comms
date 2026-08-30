@@ -132,6 +132,32 @@ describe("ChannelMembersDialog", () => {
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
   });
 
+  it("renders member titles in the directory and available-member select", async () => {
+    const titledOwner: User = { ...owner, title: "Boss" };
+    const titledMember: User = { ...member, title: "Helper" };
+    render(
+      createElement(ChannelMembersDialog, {
+        source: "channel",
+        channelName: "leadership",
+        conversationId: CONVERSATION_ID,
+        currentUserId: OWNER_ID,
+        workspaceMembers: [titledOwner, titledMember],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        load: vi.fn().mockResolvedValue({
+          ...initial,
+          members: [{ user: titledOwner, role: "owner", joinedAt: NOW }],
+        }),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+      }),
+    );
+
+    expect(await screen.findByText("Boss")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Member · Helper" })).toBeTruthy();
+  });
+
   it("messages humans and agents from a channel directory without treating the row as navigation", async () => {
     const onMessage = vi.fn();
     render(

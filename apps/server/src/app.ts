@@ -19,8 +19,10 @@ import { EphemeralActivityHub } from "./modules/realtime/activity-hub.js";
 import type { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
+import { channelWebhookRoutes } from "./modules/webhooks/routes.js";
 import type { WorkspaceRepository } from "./modules/workspace/repository.js";
 import { workspaceRoutes } from "./modules/workspace/routes.js";
+import type { FixedWindowAttemptThrottle } from "./throttle.js";
 
 export interface BuildAppOptions {
   readonly logger?: FastifyServerOptions["logger"];
@@ -38,6 +40,7 @@ export interface BuildAppOptions {
     readonly service: IdentityService;
     readonly agentEnrollment?: AgentEnrollmentModule;
     readonly botService?: BotService;
+    readonly webhookThrottle?: FixedWindowAttemptThrottle;
     /** False when links are issued by an administrator, which disables self-service requests. */
     readonly selfServiceMagicLink?: boolean;
     /** False while the previous server remains a supported production rollback target. */
@@ -200,6 +203,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
           repository: options.workspace.repository,
           defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
+        if (options.identity.botService !== undefined) {
+          await v1.register(channelWebhookRoutes, {
+            identityService: options.identity.service,
+            botService: options.identity.botService,
+            repository: options.workspace.repository,
+            ...(options.identity.webhookThrottle === undefined
+              ? {}
+              : { throttle: options.identity.webhookThrottle }),
+          });
+        }
       }
     },
     { prefix: "/v1" },

@@ -185,6 +185,7 @@ export interface InsertUserInput {
   readonly username: string;
   readonly displayName: string;
   readonly avatarUrl: string | null;
+  readonly title: MemberTitle | null;
 }
 
 export interface InsertWorkspaceInput {
@@ -504,15 +505,16 @@ export class IdentityRepository {
 
   async insertUser(input: InsertUserInput): Promise<IdentityUser> {
     const result = await this.#database.query<UserRow>(
-      `INSERT INTO users (id, email, username, display_name, avatar_url)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, kind, username, display_name, avatar_url, created_at, updated_at`,
+      `INSERT INTO users (id, email, username, display_name, avatar_url, title)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, email, kind, username, display_name, avatar_url, title, created_at, updated_at`,
       [
         input.id,
         emailSchema.parse(input.email),
         input.username,
         input.displayName,
         input.avatarUrl,
+        input.title,
       ],
     );
     return mapUser(result.rows[0] as UserRow);

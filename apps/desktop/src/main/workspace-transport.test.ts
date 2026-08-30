@@ -6,6 +6,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
@@ -17,7 +18,7 @@ import {
 } from "@hype-comms/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
-import { WorkspaceTransport } from "./workspace-transport";
+import { WorkspaceTransport, WorkspaceRequestError } from "./workspace-transport";
 
 const API_ORIGIN = "https://chat.example";
 const NOW = "2026-07-24T12:00:00.000Z";
@@ -39,6 +40,7 @@ const CLIENT_CAPABILITIES = [
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  MEMBER_PROFILES_CAPABILITY,
 ].join(",");
 
 const CURRENT_USER = {
@@ -871,6 +873,94 @@ describe("WorkspaceTransport members", () => {
     // `userSchema` is strict, so a server that starts inventing a status field fails loudly here
     // instead of silently handing the renderer a shape the cache cannot store.
     await expect(transport.members()).rejects.toThrow();
+  });
+
+  it("advertises member-profile support when reading the member directory", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ members: [CURRENT_USER.user] });
+    });
+
+    await transport.members();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://chat.example/v1/members",
+      init: { method: "GET" },
+    });
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
+      CLIENT_CAPABILITIES,
+    );
+  });
+});
+
+describe("WorkspaceTransport updateProfile", () => {
+  it("PATCHes /v1/profile with the title and returns the updated user", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const updatedUser = { ...CURRENT_USER.user, title: "Engineering Lead" };
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ user: updatedUser });
+    });
+
+    await expect(transport.updateProfile("Engineering Lead")).resolves.toEqual(updatedUser);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://chat.example/v1/profile",
+      init: {
+        method: "PATCH",
+        body: JSON.stringify({ title: "Engineering Lead" }),
+      },
+    });
+    const updateHeaders = new Headers(requests[0]?.init.headers);
+    expect(updateHeaders.get("content-type")).toBe("application/json");
+    expect(updateHeaders.get("x-hype-comms-capabilities")).toBe(CLIENT_CAPABILITIES);
+  });
+
+  it("allows the title to be cleared with null", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const updatedUser = { ...CURRENT_USER.user, title: null };
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse({ user: updatedUser });
+    });
+
+    await expect(transport.updateProfile(null)).resolves.toEqual(updatedUser);
+    expect(requests).toEqual([
+      expect.objectContaining({
+        init: expect.objectContaining({
+          body: JSON.stringify({ title: null }),
+        }),
+      }),
+    ]);
+  });
+
+  it("throws a WorkspaceRequestError for a 400 validation response", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse(
+        {
+          error: {
+            code: "BAD_REQUEST",
+            message: "Title is too long",
+            requestId: "req-1",
+          },
+        },
+        400,
+      ),
+    );
+
+    await expect(transport.updateProfile("x".repeat(500))).rejects.toThrow(
+      new WorkspaceRequestError("Title is too long", 400, null),
+    );
+  });
+
+  it("throws a WorkspaceRequestError with Retry-After for a 429 response", async () => {
+    const transport = transportAnswering(() => statusResponse(429, { "retry-after": "5" }));
+
+    await expect(transport.updateProfile("Engineering Lead")).rejects.toThrow(
+      new WorkspaceRequestError("Workspace request failed (429)", 429, 5_000),
+    );
   });
 });
 

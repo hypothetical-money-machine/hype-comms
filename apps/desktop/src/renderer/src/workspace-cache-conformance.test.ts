@@ -449,11 +449,22 @@ class DeferredFakeCrypto extends FakeCrypto {
     readonly started: Deferred<void>;
     readonly release: Deferred<void>;
   } | null = null;
+  #nextDecryptionGate: {
+    readonly started: Deferred<void>;
+    readonly release: Deferred<void>;
+  } | null = null;
 
   pauseNextEncryption(): EncryptionGate {
     const started = deferred<void>();
     const release = deferred<void>();
     this.#nextGate = { started, release };
+    return { started: started.promise, release: () => release.resolve() };
+  }
+
+  pauseNextDecryption(): EncryptionGate {
+    const started = deferred<void>();
+    const release = deferred<void>();
+    this.#nextDecryptionGate = { started, release };
     return { started: started.promise, release: () => release.resolve() };
   }
 
@@ -465,6 +476,16 @@ class DeferredFakeCrypto extends FakeCrypto {
       await gate.release.promise;
     }
     return super.encryptCacheRecords(input);
+  }
+
+  override async decryptCacheRecords(input: CacheDecryptBatchRequest) {
+    const gate = this.#nextDecryptionGate;
+    if (gate !== null) {
+      this.#nextDecryptionGate = null;
+      gate.started.resolve();
+      await gate.release.promise;
+    }
+    return super.decryptCacheRecords(input);
   }
 }
 
@@ -1813,6 +1834,49 @@ describe("PersistentWorkspaceCache retraction write races", () => {
         },
       ]),
     );
+  });
+
+  it("retries a history write and retains the newer message when a live create arrives during history decryption", async () => {
+    const writerCrypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
+    const live = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, [messageSequence2]);
+
+    const olderHistoryMessage: Message = {
+      ...messageSequence2,
+      body: "older version from history",
+      version: 1,
+    };
+    const newerLiveMessage: Message = {
+      ...messageSequence2,
+      body: "newer version from realtime",
+      version: 2,
+    };
+    const liveEvent: WorkspaceEvent = {
+      ...messageCreatedEvent,
+      workspaceSequence: "100",
+      entityVersion: 2,
+      payload: {
+        message: newerLiveMessage,
+        mentionedUserIds: [],
+      },
+    };
+
+    const gate = writerCrypto.pauseNextDecryption();
+    const writingHistory = writer.upsertHistory(ALPHA_ID, [olderHistoryMessage]);
+    await gate.started;
+    await expect(live.applyEvent(liveEvent)).resolves.toBe(true);
+    gate.release();
+    await expect(writingHistory).resolves.toBe(true);
+
+    const raw = await readRawCacheMessagesAndReactionCount();
+    expect(raw.messages).toEqual([
+      expect.objectContaining({
+        id: MESSAGE_SEQUENCE_2_ID,
+        body: "newer version from realtime",
+        version: 2,
+      }),
+    ]);
   });
 });
 

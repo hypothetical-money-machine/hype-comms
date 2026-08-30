@@ -307,10 +307,14 @@ export async function enableHeadlessNotificationCapture(page) {
   }
 }
 
+function messageRowLocator(page, message) {
+  // The message body may also appear in the unreads preview, so scope the search to the
+  // conversation timeline's article rows rather than matching text anywhere on the page.
+  return page.locator("article[data-message-id]").filter({ hasText: message }).first();
+}
+
 async function messageIdForVisibleBody(page, message) {
-  const row = page
-    .getByText(message, { exact: true })
-    .locator("xpath=ancestor::*[@data-message-id][1]");
+  const row = messageRowLocator(page, message);
   const messageId = await row.getAttribute("data-message-id");
   if (messageId === null || !MESSAGE_ID_PATTERN.test(messageId)) {
     throw new Error("The received smoke message has no canonical message target ID");
@@ -319,9 +323,7 @@ async function messageIdForVisibleBody(page, message) {
 }
 
 async function openThreadForVisibleMessage(page, message, timeoutMs) {
-  const row = page
-    .getByText(message, { exact: true })
-    .locator("xpath=ancestor::*[@data-message-id][1]");
+  const row = messageRowLocator(page, message);
   await row.hover();
   await row
     .getByRole("button", {
@@ -442,18 +444,11 @@ export async function runHeadlessSmoke({
   let hasSmokeError = false;
 
   try {
-    const connections = await Promise.allSettled([
-      (async () => {
-        claireConnection = await capture.connectToCdp(claire.cdpUrl, { timeoutMs });
-      })(),
-      (async () => {
-        wootsConnection = await capture.connectToCdp(woots.cdpUrl, { timeoutMs });
-      })(),
-    ]);
-    const failedConnection = connections.find((connection) => connection.status === "rejected");
-    if (failedConnection !== undefined && failedConnection.status === "rejected") {
-      throw failedConnection.reason;
-    }
+    // Connect sequentially. Electron's loopback CDP server can deadlock when two Playwright
+    // attach requests race on the same renderer process, especially after a previous attach/detach
+    // cycle validated readiness.
+    claireConnection = await capture.connectToCdp(claire.cdpUrl, { timeoutMs });
+    wootsConnection = await capture.connectToCdp(woots.cdpUrl, { timeoutMs });
     await Promise.all([
       capture.waitForWorkspaceReady(claireConnection.page, { timeoutMs }),
       capture.waitForWorkspaceReady(wootsConnection.page, { timeoutMs }),
@@ -472,9 +467,10 @@ export async function runHeadlessSmoke({
     await selectDirectConversation(wootsConnection.page, "Claire");
     await claireConnection.page.getByLabel("Message", { exact: true }).fill(message);
     await claireConnection.page.getByRole("button", { name: "Send", exact: true }).click();
-    await wootsConnection.page
-      .getByText(message, { exact: true })
-      .waitFor({ state: "visible", timeout: timeoutMs });
+    await messageRowLocator(wootsConnection.page, message).waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
     const messageId = await messageIdForVisibleBody(wootsConnection.page, message);
     const notificationCapture = await waitForNotificationCapture({
       filePath: notificationCapturePath,
@@ -581,18 +577,11 @@ export async function runParticipatedThreadNotificationSmoke({
   let hasSmokeError = false;
 
   try {
-    const connections = await Promise.allSettled([
-      (async () => {
-        claireConnection = await capture.connectToCdp(claire.cdpUrl, { timeoutMs });
-      })(),
-      (async () => {
-        wootsConnection = await capture.connectToCdp(woots.cdpUrl, { timeoutMs });
-      })(),
-    ]);
-    const failedConnection = connections.find((connection) => connection.status === "rejected");
-    if (failedConnection !== undefined && failedConnection.status === "rejected") {
-      throw failedConnection.reason;
-    }
+    // Connect sequentially. Electron's loopback CDP server can deadlock when two Playwright
+    // attach requests race on the same renderer process, especially after a previous attach/detach
+    // cycle validated readiness.
+    claireConnection = await capture.connectToCdp(claire.cdpUrl, { timeoutMs });
+    wootsConnection = await capture.connectToCdp(woots.cdpUrl, { timeoutMs });
     await Promise.all([
       capture.waitForWorkspaceReady(claireConnection.page, { timeoutMs }),
       capture.waitForWorkspaceReady(wootsConnection.page, { timeoutMs }),
@@ -613,9 +602,10 @@ export async function runParticipatedThreadNotificationSmoke({
     // Root authorship is committed on the server, but Woots never opens or hydrates its thread.
     await wootsConnection.page.getByLabel("Message", { exact: true }).fill(rootMessage);
     await wootsConnection.page.getByRole("button", { name: "Send", exact: true }).click();
-    await claireConnection.page
-      .getByText(rootMessage, { exact: true })
-      .waitFor({ state: "visible", timeout: timeoutMs });
+    await messageRowLocator(claireConnection.page, rootMessage).waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
     const rootMessageId = await messageIdForVisibleBody(claireConnection.page, rootMessage);
 
     await selectDirectConversation(wootsConnection.page, "Design");
@@ -625,9 +615,10 @@ export async function runParticipatedThreadNotificationSmoke({
       timeoutMs,
     );
     await sendThreadReply(claireThread, replyMessage);
-    await claireConnection.page
-      .getByText(replyMessage, { exact: true })
-      .waitFor({ state: "visible", timeout: timeoutMs });
+    await messageRowLocator(claireConnection.page, replyMessage).waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
     const replyMessageId = await messageIdForVisibleBody(claireConnection.page, replyMessage);
     const participatedCapture = await waitForNotificationCapture({
       filePath: notificationCapturePath,
@@ -648,9 +639,10 @@ export async function runParticipatedThreadNotificationSmoke({
     // Move away again so visibility suppression cannot hide the precedence assertion.
     await selectDirectConversation(wootsConnection.page, "Design");
     await sendThreadReply(claireThread, mentionMessage);
-    await claireConnection.page
-      .getByText(mentionMessage, { exact: true })
-      .waitFor({ state: "visible", timeout: timeoutMs });
+    await messageRowLocator(claireConnection.page, mentionMessage).waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
     const mentionMessageId = await messageIdForVisibleBody(claireConnection.page, mentionMessage);
     const mentionCapture = await waitForNotificationCapture({
       filePath: notificationCapturePath,

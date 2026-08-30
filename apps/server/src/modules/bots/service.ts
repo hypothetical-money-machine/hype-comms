@@ -3,13 +3,17 @@ import { randomBytes, randomUUID } from "node:crypto";
 import {
   botAccessTokenSchema,
   botScopesSchema,
+  channelWebhookSchema,
   channelSlugSchema,
   entityIdSchema,
+  issuedChannelWebhookResponseSchema,
   isoDateTimeSchema,
   userSchema,
   type BotAccessToken,
   type BotScope,
+  type ChannelWebhook,
   type EntityId,
+  type IssuedChannelWebhookResponse,
   type User,
 } from "@hype-comms/contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
@@ -20,6 +24,7 @@ import { ApiError } from "../../errors.js";
 import { hashToken } from "../identity/tokens.js";
 
 const MAX_ACTIVE_MEMBERS = 25;
+const WEBHOOK_CREDENTIAL_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
 
 export const botUsernameSchema = z
   .string()
@@ -67,12 +72,54 @@ interface ChannelRow extends QueryResultRow {
   readonly channel_mode: unknown;
 }
 
+interface ManageableChannelRow extends ChannelRow {
+  readonly workspace_id: unknown;
+  readonly name: unknown;
+  readonly is_archived: unknown;
+  readonly created_by: unknown;
+  readonly actor_role: unknown;
+}
+
+interface ChannelWebhookRow extends BotUserRow {
+  readonly conversation_id: unknown;
+  readonly bot_user_id: unknown;
+  readonly current_credential_id: unknown;
+  readonly expires_at: unknown;
+  readonly credential_active: unknown;
+  readonly membership_status: unknown;
+}
+
 const workspaceIdRowSchema = z.object({ workspace_id: entityIdSchema }).strict();
 const channelRowSchema = z
   .object({
     id: entityIdSchema,
     slug: channelSlugSchema,
     channel_mode: z.enum(["chat", "announcement"]),
+  })
+  .strict();
+const manageableChannelRowSchema = channelRowSchema
+  .extend({
+    workspace_id: entityIdSchema,
+    name: z.string().trim().min(1).max(100),
+    is_archived: z.boolean(),
+    created_by: entityIdSchema.nullable(),
+    actor_role: z.enum(["owner", "member"]),
+  })
+  .strict();
+const channelWebhookRowSchema = z
+  .object({
+    conversation_id: entityIdSchema,
+    bot_user_id: entityIdSchema,
+    current_credential_id: entityIdSchema.nullable(),
+    expires_at: z.date().nullable(),
+    credential_active: z.boolean(),
+    membership_status: z.enum(["invited", "active", "revoked"]),
+    id: entityIdSchema,
+    username: botUsernameSchema,
+    display_name: botDisplayNameSchema,
+    avatar_url: z.string().nullable(),
+    created_at: z.date(),
+    updated_at: z.date(),
   })
   .strict();
 const botAuthenticationRowSchema = z
@@ -143,6 +190,11 @@ export interface BotSummary {
   readonly channelSlugs: readonly string[];
 }
 
+export interface AuthenticatedChannelWebhook {
+  readonly identity: AuthenticatedBotIdentity;
+  readonly conversationId: EntityId;
+}
+
 function timestamp(value: unknown): string {
   if (!(value instanceof Date)) {
     throw new TypeError("Expected Postgres to return a timestamptz value as a Date");
@@ -190,6 +242,7 @@ export class BotService {
   constructor(
     private readonly pool: Pool,
     private readonly clock: () => Date = () => new Date(),
+    private readonly publicApiUrl = "http://127.0.0.1:3000",
   ) {}
 
   async authenticate(token: string): Promise<AuthenticatedBotIdentity | null> {
@@ -245,6 +298,212 @@ export class BotService {
     };
   }
 
+  /** Resolve a URL credential only while it is the active credential bound to one channel. */
+  async authenticateChannelWebhook(token: string): Promise<AuthenticatedChannelWebhook | null> {
+    const identity = await this.authenticate(token);
+    if (identity === null || !identity.scopes.includes("messages:write")) return null;
+    const result = await this.pool.query<{ conversation_id: unknown } & QueryResultRow>(
+      `SELECT webhook.conversation_id
+         FROM channel_webhooks AS webhook
+         JOIN bot_credentials AS credential
+           ON credential.id = webhook.current_credential_id
+          AND credential.workspace_id = webhook.workspace_id
+          AND credential.bot_user_id = webhook.bot_user_id
+        WHERE webhook.current_credential_id = $1
+          AND webhook.workspace_id = $2
+          AND webhook.bot_user_id = $3
+          AND webhook.disabled_at IS NULL
+          AND credential.revoked_at IS NULL
+          AND credential.expires_at > $4`,
+      [
+        identity.credentialId,
+        identity.currentUser.workspaceId,
+        identity.currentUser.user.id,
+        this.clock(),
+      ],
+    );
+    const conversationId = entityIdSchema.safeParse(result.rows[0]?.conversation_id);
+    return conversationId.success ? { identity, conversationId: conversationId.data } : null;
+  }
+
+  async getChannelWebhook(actorUserId: EntityId, channelId: EntityId): Promise<ChannelWebhook> {
+    return withTransaction(this.pool, async (client) => {
+      await this.#requireManageableWebhookChannel(client, actorUserId, channelId, false);
+      const row = await this.#channelWebhook(client, channelId, false);
+      if (row === null) throw new ApiError(404, "NOT_FOUND", "Channel webhook not found");
+      return this.#mapChannelWebhook(row);
+    });
+  }
+
+  async enableChannelWebhook(
+    actorUserId: EntityId,
+    channelId: EntityId,
+  ): Promise<IssuedChannelWebhookResponse> {
+    const now = this.clock();
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        const channel = await this.#requireManageableWebhookChannel(
+          client,
+          actorUserId,
+          channelId,
+          true,
+        );
+        const existing = await this.#channelWebhook(client, channelId, true);
+        if (existing?.credential_active) {
+          throw new ApiError(409, "CONFLICT", "The channel webhook is already enabled");
+        }
+
+        let bot: User;
+        if (existing === null) {
+          await this.#requireMemberCapacity(client, channel.workspace_id);
+          const botId = entityIdSchema.parse(randomUUID());
+          const username = botUsernameSchema.parse(`webhook-${channel.id.replaceAll("-", "")}`);
+          const displayName = botDisplayNameSchema.parse(
+            `${channel.name.slice(0, 72).trimEnd()} Webhook`,
+          );
+          const inserted = await client.query<BotUserRow>(
+            `INSERT INTO users (id, email, kind, username, display_name, avatar_url)
+             VALUES ($1, NULL, 'bot', $2, $3, NULL)
+             RETURNING id, username, display_name, avatar_url, created_at, updated_at`,
+            [botId, username, displayName],
+          );
+          const botRow = inserted.rows[0];
+          if (botRow === undefined) throw new Error("Webhook bot insert returned no row");
+          bot = mapBot(botRow);
+          await client.query(
+            `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+             VALUES ($1, $2, 'member', 'active')`,
+            [channel.workspace_id, bot.id],
+          );
+          await client.query(
+            `INSERT INTO bot_channel_grants
+               (workspace_id, bot_user_id, conversation_id, granted_by)
+             VALUES ($1, $2, $3, $4)`,
+            [channel.workspace_id, bot.id, channel.id, actorUserId],
+          );
+        } else {
+          bot = mapBot(existing);
+          if (existing.membership_status !== "active") {
+            await this.#requireMemberCapacity(client, channel.workspace_id);
+            await client.query(
+              `UPDATE workspace_memberships
+                  SET status = 'active', updated_at = $3
+                WHERE workspace_id = $1 AND user_id = $2`,
+              [channel.workspace_id, bot.id, now],
+            );
+          }
+        }
+
+        await this.#revokeBotCredentials(client, channel.workspace_id, bot.id, now);
+        const issued = await this.#insertCredential(client, {
+          workspaceId: channel.workspace_id,
+          bot,
+          scopes: ["messages:write"],
+          expiresAt: new Date(now.getTime() + WEBHOOK_CREDENTIAL_TTL_MS).toISOString(),
+          actorUserId,
+        });
+        if (existing === null) {
+          await client.query(
+            `INSERT INTO channel_webhooks
+               (conversation_id, workspace_id, bot_user_id, current_credential_id,
+                created_by, updated_by, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $5, $6, $6)`,
+            [channel.id, channel.workspace_id, bot.id, issued.credentialId, actorUserId, now],
+          );
+        } else {
+          await client.query(
+            `UPDATE channel_webhooks
+                SET current_credential_id = $2,
+                    updated_by = $3,
+                    updated_at = $4,
+                    disabled_at = NULL
+              WHERE conversation_id = $1`,
+            [channel.id, issued.credentialId, actorUserId, now],
+          );
+        }
+        return this.#issuedChannelWebhook(channel.id, issued);
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApiError(409, "CONFLICT", "The channel webhook could not be provisioned");
+      }
+      throw error;
+    }
+  }
+
+  async rotateChannelWebhook(
+    actorUserId: EntityId,
+    channelId: EntityId,
+  ): Promise<IssuedChannelWebhookResponse> {
+    const now = this.clock();
+    return withTransaction(this.pool, async (client) => {
+      const channel = await this.#requireManageableWebhookChannel(
+        client,
+        actorUserId,
+        channelId,
+        true,
+      );
+      const existing = await this.#channelWebhook(client, channelId, true);
+      if (existing === null) throw new ApiError(404, "NOT_FOUND", "Channel webhook not found");
+      if (!existing.credential_active) {
+        throw new ApiError(409, "CONFLICT", "Enable the channel webhook before rotating it");
+      }
+      const bot = mapBot(existing);
+      await this.#revokeBotCredentials(client, channel.workspace_id, bot.id, now);
+      const issued = await this.#insertCredential(client, {
+        workspaceId: channel.workspace_id,
+        bot,
+        scopes: ["messages:write"],
+        expiresAt: new Date(now.getTime() + WEBHOOK_CREDENTIAL_TTL_MS).toISOString(),
+        actorUserId,
+      });
+      await client.query(
+        `UPDATE channel_webhooks
+            SET current_credential_id = $2,
+                updated_by = $3,
+                updated_at = $4,
+                disabled_at = NULL
+          WHERE conversation_id = $1`,
+        [channel.id, issued.credentialId, actorUserId, now],
+      );
+      return this.#issuedChannelWebhook(channel.id, issued);
+    });
+  }
+
+  async disableChannelWebhook(actorUserId: EntityId, channelId: EntityId): Promise<ChannelWebhook> {
+    const now = this.clock();
+    return withTransaction(this.pool, async (client) => {
+      const channel = await this.#requireManageableWebhookChannel(
+        client,
+        actorUserId,
+        channelId,
+        false,
+        true,
+      );
+      const existing = await this.#channelWebhook(client, channelId, true);
+      if (existing === null) throw new ApiError(404, "NOT_FOUND", "Channel webhook not found");
+      await this.#revokeBotCredentials(client, channel.workspace_id, existing.bot_user_id, now);
+      await client.query(
+        `UPDATE workspace_memberships
+            SET status = 'revoked', updated_at = $3
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [channel.workspace_id, existing.bot_user_id, now],
+      );
+      await client.query(
+        `UPDATE channel_webhooks
+            SET current_credential_id = NULL,
+                updated_by = $2,
+                updated_at = $3,
+                disabled_at = coalesce(disabled_at, $3)
+          WHERE conversation_id = $1`,
+        [channel.id, actorUserId, now],
+      );
+      const disabled = await this.#channelWebhook(client, channelId, false);
+      if (disabled === null) throw new Error("Disabled channel webhook disappeared");
+      return this.#mapChannelWebhook(disabled);
+    });
+  }
+
   async createBot(actorUserId: EntityId, input: CreateBotInput): Promise<IssuedBotCredential> {
     const now = this.clock();
     const username = botUsernameSchema.parse(input.username);
@@ -261,16 +520,7 @@ export class BotService {
     try {
       return await withTransaction(this.pool, async (client) => {
         const workspaceId = await this.#requireOwner(client, actorUserId);
-        const capacity = await client.query<{ count: number } & QueryResultRow>(
-          `SELECT count(*)::integer AS count
-             FROM workspace_memberships
-            WHERE workspace_id = $1
-              AND status = 'active'`,
-          [workspaceId],
-        );
-        if ((capacity.rows[0]?.count ?? MAX_ACTIVE_MEMBERS) >= MAX_ACTIVE_MEMBERS) {
-          throw new ApiError(409, "CONFLICT", "The workspace is at capacity");
-        }
+        await this.#requireMemberCapacity(client, workspaceId, false);
         const channels = await this.#channels(client, workspaceId, channelSlugs);
         const botId = entityIdSchema.parse(randomUUID());
         const inserted = await client.query<BotUserRow>(
@@ -432,6 +682,162 @@ export class BotService {
         };
       });
     });
+  }
+
+  async #requireManageableWebhookChannel(
+    client: PoolClient,
+    actorUserId: EntityId,
+    channelId: EntityId,
+    requireWritable: boolean,
+    lock = requireWritable,
+  ): Promise<z.infer<typeof manageableChannelRowSchema>> {
+    const result = await client.query<ManageableChannelRow>(
+      `SELECT conversation.id,
+              conversation.workspace_id,
+              conversation.name,
+              conversation.slug,
+              conversation.channel_mode,
+              conversation.is_archived,
+              conversation.created_by,
+              actor_membership.role AS actor_role
+         FROM conversations AS conversation
+         JOIN workspace_memberships AS actor_membership
+           ON actor_membership.workspace_id = conversation.workspace_id
+          AND actor_membership.user_id = $1
+          AND actor_membership.status = 'active'
+         JOIN users AS actor
+           ON actor.id = actor_membership.user_id
+          AND actor.kind = 'human'
+        WHERE conversation.id = $2
+          AND conversation.kind = 'channel'
+        ${lock ? "FOR UPDATE OF conversation" : ""}`,
+      [actorUserId, channelId],
+    );
+    const raw = result.rows[0];
+    if (raw === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
+    const channel = manageableChannelRowSchema.parse(raw);
+    if (channel.actor_role !== "owner" && channel.created_by !== actorUserId) {
+      throw new ApiError(
+        403,
+        "FORBIDDEN",
+        "Only the channel creator or a workspace owner may manage its webhook",
+      );
+    }
+    if (requireWritable && channel.is_archived) {
+      throw new ApiError(404, "NOT_FOUND", "Channel not found");
+    }
+    if (channel.channel_mode === "announcement") {
+      throw new ApiError(404, "NOT_FOUND", "Webhooks are not available in announcement channels");
+    }
+    return channel;
+  }
+
+  async #channelWebhook(
+    client: PoolClient,
+    channelId: EntityId,
+    lock: boolean,
+  ): Promise<z.infer<typeof channelWebhookRowSchema> | null> {
+    const result = await client.query<ChannelWebhookRow>(
+      `SELECT webhook.conversation_id,
+              webhook.bot_user_id,
+              webhook.current_credential_id,
+              credential.expires_at,
+              membership.status AS membership_status,
+              (
+                webhook.current_credential_id IS NOT NULL
+                AND webhook.disabled_at IS NULL
+                AND membership.status = 'active'
+                AND credential.revoked_at IS NULL
+                AND credential.expires_at > $2
+                AND 'messages:write' = ANY(credential.scopes)
+              ) AS credential_active,
+              bot.id,
+              bot.username,
+              bot.display_name,
+              bot.avatar_url,
+              bot.created_at,
+              bot.updated_at
+         FROM channel_webhooks AS webhook
+         JOIN users AS bot
+           ON bot.id = webhook.bot_user_id
+          AND bot.kind = 'bot'
+         JOIN workspace_memberships AS membership
+           ON membership.workspace_id = webhook.workspace_id
+          AND membership.user_id = webhook.bot_user_id
+         LEFT JOIN bot_credentials AS credential
+           ON credential.id = webhook.current_credential_id
+          AND credential.workspace_id = webhook.workspace_id
+          AND credential.bot_user_id = webhook.bot_user_id
+        WHERE webhook.conversation_id = $1
+        ${lock ? "FOR UPDATE OF webhook" : ""}`,
+      [channelId, this.clock()],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : channelWebhookRowSchema.parse(row);
+  }
+
+  #mapChannelWebhook(row: z.infer<typeof channelWebhookRowSchema>): ChannelWebhook {
+    return channelWebhookSchema.parse({
+      channelId: row.conversation_id,
+      enabled: row.credential_active,
+      bot: mapBot(row),
+      expiresAt: row.expires_at?.toISOString() ?? null,
+    });
+  }
+
+  #issuedChannelWebhook(
+    channelId: EntityId,
+    issued: IssuedBotCredential,
+  ): IssuedChannelWebhookResponse {
+    const webhookUrl = new URL(`/v1/webhooks/incoming/${issued.token}`, this.publicApiUrl);
+    return issuedChannelWebhookResponseSchema.parse({
+      webhook: {
+        channelId,
+        enabled: true,
+        bot: issued.bot,
+        expiresAt: issued.expiresAt,
+      },
+      webhookUrl: webhookUrl.toString(),
+    });
+  }
+
+  async #requireMemberCapacity(
+    client: PoolClient,
+    workspaceId: EntityId,
+    lockWorkspace = true,
+  ): Promise<void> {
+    if (lockWorkspace) {
+      const locked = await client.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [
+        workspaceId,
+      ]);
+      if (locked.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Workspace not found");
+    }
+    const capacity = await client.query<{ count: number } & QueryResultRow>(
+      `SELECT count(*)::integer AS count
+         FROM workspace_memberships
+        WHERE workspace_id = $1
+          AND status = 'active'`,
+      [workspaceId],
+    );
+    if ((capacity.rows[0]?.count ?? MAX_ACTIVE_MEMBERS) >= MAX_ACTIVE_MEMBERS) {
+      throw new ApiError(409, "CONFLICT", "The workspace is at capacity");
+    }
+  }
+
+  async #revokeBotCredentials(
+    client: PoolClient,
+    workspaceId: EntityId,
+    botUserId: EntityId,
+    revokedAt: Date,
+  ): Promise<void> {
+    await client.query(
+      `UPDATE bot_credentials
+          SET revoked_at = $3
+        WHERE workspace_id = $1
+          AND bot_user_id = $2
+          AND revoked_at IS NULL`,
+      [workspaceId, botUserId, revokedAt],
+    );
   }
 
   async #requireOwner(client: PoolClient, actorUserId: EntityId): Promise<EntityId> {
