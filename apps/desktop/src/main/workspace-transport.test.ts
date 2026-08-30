@@ -4,6 +4,7 @@ import {
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  DEFAULT_AGENT_AGENCY_PROFILE,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
@@ -192,6 +193,35 @@ const TASK: Task = {
   createdAt: NOW,
   updatedAt: NOW,
 };
+
+const ENROLLMENT_ID = "10000000-0000-4000-8000-000000000015";
+const REQUESTING_AGENT_ID = "10000000-0000-4000-8000-000000000016";
+const AGENT_ENROLLMENT = {
+  id: ENROLLMENT_ID,
+  workspaceId: CURRENT_USER.workspaceId,
+  profile: DEFAULT_AGENT_AGENCY_PROFILE,
+  status: "pending_approval",
+  username: "new-agent",
+  displayName: "New Agent",
+  label: "Teammate enrollment",
+  requestedBy: REQUESTING_AGENT_ID,
+  requestedByKind: "agent",
+  restrictedChannelIds: [CONVERSATION_ID],
+  expiresAt: "2026-07-25T12:00:00.000Z",
+  reviewedBy: null,
+  reviewedAt: null,
+  activatedAgentUserId: null,
+  activatedAgentTokenId: null,
+  activatedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
+const REVIEWED_AGENT_ENROLLMENT = {
+  ...AGENT_ENROLLMENT,
+  status: "ready_to_redeem",
+  reviewedBy: CURRENT_USER.user.id,
+  reviewedAt: NOW,
+} as const;
 
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
@@ -961,6 +991,113 @@ describe("WorkspaceTransport updateProfile", () => {
     await expect(transport.updateProfile("Engineering Lead")).rejects.toThrow(
       new WorkspaceRequestError("Workspace request failed (429)", 429, 5_000),
     );
+  });
+});
+
+describe("WorkspaceTransport agent enrollments", () => {
+  it("lists and reviews enrollments through the exact owner routes", async () => {
+    const requests: {
+      method: string;
+      url: string;
+      body: string | null;
+      contentType: string | null;
+    }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+        contentType: new Headers(init.headers).get("content-type"),
+      });
+      return init.method === "GET"
+        ? jsonResponse({ enrollments: [AGENT_ENROLLMENT] })
+        : jsonResponse({ enrollment: REVIEWED_AGENT_ENROLLMENT });
+    });
+
+    await expect(transport.listAgentEnrollments()).resolves.toEqual({
+      enrollments: [AGENT_ENROLLMENT],
+    });
+    await expect(transport.reviewAgentEnrollment(ENROLLMENT_ID, "approve")).resolves.toEqual({
+      enrollment: REVIEWED_AGENT_ENROLLMENT,
+    });
+
+    expect(requests).toEqual([
+      {
+        method: "GET",
+        url: "https://chat.example/v1/agent-enrollments",
+        body: null,
+        contentType: null,
+      },
+      {
+        method: "POST",
+        url: `https://chat.example/v1/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/review`,
+        body: JSON.stringify({ decision: "approve" }),
+        contentType: "application/json",
+      },
+    ]);
+  });
+
+  it("rejects malformed successful list and review responses", async () => {
+    const malformedList = transportAnswering(() =>
+      jsonResponse({
+        enrollments: [{ ...AGENT_ENROLLMENT, credentialVerifier: "must-not-cross-desktop" }],
+      }),
+    );
+    const malformedReview = transportAnswering(() =>
+      jsonResponse({ enrollment: { ...REVIEWED_AGENT_ENROLLMENT, unexpected: true } }),
+    );
+
+    await expect(malformedList.listAgentEnrollments()).rejects.toThrow();
+    await expect(malformedReview.reviewAgentEnrollment(ENROLLMENT_ID, "reject")).rejects.toThrow();
+  });
+
+  it("propagates a list authorization error", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse(
+        {
+          error: {
+            code: "FORBIDDEN",
+            message: "An active workspace owner session is required",
+            requestId: "req-enrollment-list",
+          },
+        },
+        403,
+      ),
+    );
+
+    await expect(transport.listAgentEnrollments()).rejects.toThrow(
+      new WorkspaceRequestError("An active workspace owner session is required", 403, null),
+    );
+  });
+
+  it("retries a server-failed review once and propagates the final error", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse(
+        {
+          error: {
+            code: "SERVICE_UNAVAILABLE",
+            message: "Agent enrollment is unavailable",
+            requestId: "req-enrollment-review",
+          },
+        },
+        503,
+      );
+    });
+
+    await expect(transport.reviewAgentEnrollment(ENROLLMENT_ID, "reject")).rejects.toThrow(
+      new WorkspaceRequestError("Agent enrollment is unavailable", 503, null),
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
+      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
+    ]);
+    expect(requests.map((request) => request.init.body)).toEqual([
+      JSON.stringify({ decision: "reject" }),
+      JSON.stringify({ decision: "reject" }),
+    ]);
   });
 });
 

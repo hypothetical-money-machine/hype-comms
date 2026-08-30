@@ -15,6 +15,7 @@ import {
   TASK_EVENTS_CAPABILITY,
   THREADS_CAPABILITY,
   addReactionResponseSchema,
+  agentEnrollmentResponseSchema,
   updateProfileResponseSchema,
   advanceReadCursorResponseSchema,
   attachmentSchema,
@@ -30,6 +31,7 @@ import {
   conversationMutationResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   listConversationsResponseSchema,
+  listAgentEnrollmentsResponseSchema,
   listMessageReactionsResponseSchema,
   listMembersResponseSchema,
   messageHistoryResponseSchema,
@@ -49,6 +51,7 @@ import {
   taskMutationResponseSchema,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type AgentEnrollmentResponse,
   type Attachment,
   type ConversationFilesQuery,
   type ConversationFilesResponse,
@@ -63,6 +66,7 @@ import {
   type DirectConversationRequest,
   type ListConversationsQuery,
   type ListConversationsResponse,
+  type ListAgentEnrollmentsResponse,
   type ListMembersResponse,
   type ListMessageReactionsResponse,
   type MessageHistoryResponse,
@@ -75,6 +79,7 @@ import {
   type MoveTaskOperation,
   type RealtimeTicketResponse,
   type ReactionEmoji,
+  type ReviewAgentEnrollmentRequest,
   type RemoveReactionResponse,
   type SendAttemptResult,
   type SendMessageOperation,
@@ -249,6 +254,28 @@ export class WorkspaceTransport {
       headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return communicationPathsResponseSchema.parse(await this.#payload(response));
+  }
+
+  async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
+    const response = await this.session.fetch(this.#url("/v1/agent-enrollments").href, {
+      method: "GET",
+    });
+    return listAgentEnrollmentsResponseSchema.parse(await this.#payload(response));
+  }
+
+  async reviewAgentEnrollment(
+    enrollmentId: string,
+    decision: ReviewAgentEnrollmentRequest["decision"],
+  ): Promise<AgentEnrollmentResponse> {
+    const response = await this.#fetchIdempotentMutation(
+      this.#url(`/v1/agent-enrollments/${encodeURIComponent(enrollmentId)}/review`).href,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision }),
+      },
+    );
+    return agentEnrollmentResponseSchema.parse(await this.#payload(response));
   }
 
   async conversations(

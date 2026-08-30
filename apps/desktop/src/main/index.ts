@@ -50,6 +50,7 @@ import {
   notificationStateSchema,
   realtimeAcknowledgementSchema,
   realtimeSessionScopeSchema,
+  reviewAgentEnrollmentRequestSchema,
   scopedTypingActivityUpdateSchema,
   requestMagicLinkSchema,
   sendMessageOperationSchema,
@@ -1798,6 +1799,25 @@ function registerIpcHandlers(): void {
     if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
     return workspaceTransport.communicationPaths();
   });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList);
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList, async (event) => {
+    if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollments sender");
+    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    return workspaceTransport.listAgentEnrollments();
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentReview);
+  ipcMain.handle(
+    DESKTOP_CHANNELS.workspaceAgentEnrollmentReview,
+    async (event, enrollmentId: unknown, decision: unknown) => {
+      if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollment review sender");
+      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+      const parsedId = entityIdSchema.parse(enrollmentId);
+      const parsedDecision = reviewAgentEnrollmentRequestSchema.parse({ decision }).decision;
+      return workspaceTransport.reviewAgentEnrollment(parsedId, parsedDecision);
+    },
+  );
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationsList, async (event, input: unknown) => {

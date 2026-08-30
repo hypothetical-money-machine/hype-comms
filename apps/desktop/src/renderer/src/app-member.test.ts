@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   ChatSessionState,
   ConversationMutationResponse,
@@ -124,7 +124,7 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
   workspaceId: WORKSPACE_ID,
 };
 
-function createClient() {
+function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = bootstrap) {
   let realtimeStarts = 0;
   const createDirectConversation = vi.fn(async (): Promise<ConversationMutationResponse> => ({
     conversation: {
@@ -170,11 +170,15 @@ function createClient() {
         scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
         reason: "credential_store_unavailable",
       }) as const,
-    getWorkspaceBootstrap: async () => bootstrap,
+    getWorkspaceBootstrap: async () => workspaceBootstrap,
     updateProfile: async () => currentUser,
-    listWorkspaceMembers: async () => ({ members: bootstrap.members }),
+    listWorkspaceMembers: async () => ({ members: workspaceBootstrap.members }),
+    listAgentEnrollments: async () => ({ enrollments: [] }),
+    reviewAgentEnrollment: async () => {
+      throw new Error("unused");
+    },
     listConversations: async () => ({
-      conversations: bootstrap.conversations,
+      conversations: workspaceBootstrap.conversations,
       nextCursor: null,
       hasMore: false,
     }),
@@ -307,8 +311,10 @@ function createSidebarPosition(): SidebarPositionRuntime {
   } as unknown as SidebarPositionRuntime;
 }
 
-async function renderWorkspace(): Promise<DesktopApi> {
-  const client = createClient();
+async function renderWorkspace(
+  workspaceBootstrap: HumanWorkspaceBootstrapResponse = bootstrap,
+): Promise<DesktopApi> {
+  const client = createClient(workspaceBootstrap);
   render(
     createElement(App, {
       client,
@@ -340,5 +346,29 @@ describe("workspace member directory", () => {
     fireEvent.click(within(samRow).getByRole("button", { name: "Message" }));
 
     expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
+  });
+});
+
+describe("owner administration", () => {
+  it("opens agent enrollment requests for the workspace owner", async () => {
+    const client = await renderWorkspace();
+    const listAgentEnrollments = vi.spyOn(client, "listAgentEnrollments");
+    const navigation = screen.getByRole("button", { name: "Agent requests" });
+
+    fireEvent.click(navigation);
+
+    await screen.findByRole("heading", { name: "Agent requests" });
+    await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(1));
+    expect(navigation.getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId("agent-enrollments-view").hidden).toBe(false);
+  });
+
+  it("does not show agent enrollment requests to a workspace member", async () => {
+    await renderWorkspace({
+      ...bootstrap,
+      currentUser: { ...bootstrap.currentUser, role: "member" },
+    });
+
+    expect(screen.queryByRole("button", { name: "Agent requests" })).toBeNull();
   });
 });

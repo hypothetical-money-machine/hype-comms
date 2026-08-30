@@ -58,6 +58,28 @@ const USER_ID = MEMBER.id;
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000004";
+const ENROLLMENT_ID = "10000000-0000-4000-8000-000000000005";
+
+const PENDING_AGENT_ENROLLMENT = {
+  id: ENROLLMENT_ID,
+  workspaceId: WORKSPACE_ID,
+  profile: "default-agency-v1",
+  status: "pending_approval",
+  username: "grok-teammate",
+  displayName: "Grok Teammate",
+  label: "Grok teammate default agency",
+  requestedBy: USER_ID,
+  requestedByKind: "human",
+  restrictedChannelIds: [CONVERSATION_ID],
+  expiresAt: "2026-07-25T12:00:00.000Z",
+  reviewedBy: null,
+  reviewedAt: null,
+  activatedAgentUserId: null,
+  activatedAgentTokenId: null,
+  activatedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
 
 const NOTIFICATION_CONTEXT = {
   version: 1,
@@ -229,6 +251,61 @@ describe("preload listWorkspaceMembers", () => {
     invoke.mockResolvedValueOnce(null);
 
     await expect(desktopApi.listWorkspaceMembers()).rejects.toThrow();
+  });
+});
+
+describe("preload agent enrollment review boundary", () => {
+  it("lists enrollments through the owner queue channel and validates the response", async () => {
+    invoke.mockResolvedValueOnce({ enrollments: [PENDING_AGENT_ENROLLMENT] });
+
+    await expect(desktopApi.listAgentEnrollments()).resolves.toEqual({
+      enrollments: [PENDING_AGENT_ENROLLMENT],
+    });
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList);
+  });
+
+  it("rejects a malformed enrollment list returned by main", async () => {
+    invoke.mockResolvedValueOnce({
+      enrollments: [{ ...PENDING_AGENT_ENROLLMENT, unexpected: true }],
+    });
+
+    await expect(desktopApi.listAgentEnrollments()).rejects.toThrow();
+  });
+
+  it("reviews an enrollment through the exact IPC channel and validates the response", async () => {
+    const approved = {
+      ...PENDING_AGENT_ENROLLMENT,
+      status: "ready_to_redeem",
+      reviewedBy: USER_ID,
+      reviewedAt: NOW,
+    } as const;
+    invoke.mockResolvedValueOnce({ enrollment: approved });
+
+    await expect(desktopApi.reviewAgentEnrollment(ENROLLMENT_ID, "approve")).resolves.toEqual({
+      enrollment: approved,
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      DESKTOP_CHANNELS.workspaceAgentEnrollmentReview,
+      ENROLLMENT_ID,
+      "approve",
+    );
+  });
+
+  it("rejects a malformed review response returned by main", async () => {
+    invoke.mockResolvedValueOnce({
+      enrollment: { ...PENDING_AGENT_ENROLLMENT, credential: "must-not-cross-ipc" },
+    });
+
+    await expect(desktopApi.reviewAgentEnrollment(ENROLLMENT_ID, "reject")).rejects.toThrow();
+  });
+
+  it("rejects invalid review input before invoking main", async () => {
+    await expect(desktopApi.reviewAgentEnrollment("not-an-id", "approve")).rejects.toThrow();
+    await expect(
+      desktopApi.reviewAgentEnrollment(ENROLLMENT_ID, "allow" as never),
+    ).rejects.toThrow();
+
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
 

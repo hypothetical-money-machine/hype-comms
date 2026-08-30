@@ -20,6 +20,7 @@ import {
 
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
+import { AgentEnrollmentsView } from "./agent-enrollments-view";
 import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
@@ -82,7 +83,7 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
-type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin";
+type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin" | "agent-enrollments";
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -393,6 +394,18 @@ function CommunicationPathsIcon() {
         strokeLinecap="round"
         strokeWidth="1.6"
       />
+    </svg>
+  );
+}
+
+function AgentRequestsIcon() {
+  return (
+    <svg className="agent-requests-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 2.5v3M8.5 2.5h3" />
+      <rect x="4" y="5.5" width="12" height="10" rx="3" />
+      <circle cx="8" cy="10" r="1" />
+      <circle cx="12" cy="10" r="1" />
+      <path d="M7.5 13h5" />
     </svg>
   );
 }
@@ -782,6 +795,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     runtime.closeThread();
   }, [runtime]);
 
+  const openAgentEnrollments = useCallback((): void => {
+    setDestination("agent-enrollments");
+    setPaneView("chat");
+    setPeopleSource(null);
+    setShowPreferences(false);
+    runtime.closeThread();
+  }, [runtime]);
+
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
@@ -902,6 +923,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   }, [applySession, client, notificationSession, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
+  useEffect(() => {
+    if (
+      bootstrap !== null &&
+      bootstrap.currentUser.role !== "owner" &&
+      (destination === "admin" || destination === "agent-enrollments")
+    ) {
+      setDestination("workspace");
+    }
+  }, [bootstrap, destination]);
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
   // and sync failures for the entire life of a session.
   const workspaceNotice =
@@ -2033,6 +2063,21 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   <span className="conversation-label-text">Communication paths</span>
                 </span>
               </button>
+              <button
+                className={
+                  destination === "agent-enrollments"
+                    ? "conversation agent-requests-destination active"
+                    : "conversation agent-requests-destination"
+                }
+                type="button"
+                aria-current={destination === "agent-enrollments" ? "page" : undefined}
+                onClick={openAgentEnrollments}
+              >
+                <span className="conversation-label">
+                  <AgentRequestsIcon />
+                  <span className="conversation-label-text">Agent requests</span>
+                </span>
+              </button>
             </>
           )}
 
@@ -2148,14 +2193,23 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         onOpen={selectConversation}
       />
       {bootstrap.currentUser.role === "owner" && (
-        <CommunicationPathsView
-          // Keyed by the authenticated identity so the cached aggregate can never survive a
-          // session change into another workspace, even across a direct signed-in transition.
-          key={`${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
-          client={client}
-          members={bootstrap.members}
-          active={destination === "admin"}
-        />
+        <>
+          <CommunicationPathsView
+            // Keyed by the authenticated identity so the cached aggregate can never survive a
+            // session change into another workspace, even across a direct signed-in transition.
+            key={`communication-paths:${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+            client={client}
+            members={bootstrap.members}
+            active={destination === "admin"}
+          />
+          <AgentEnrollmentsView
+            key={`agent-enrollments:${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+            client={client}
+            members={bootstrap.members}
+            conversations={bootstrap.conversations}
+            active={destination === "agent-enrollments"}
+          />
+        </>
       )}
       <section className="conversation-pane" hidden={destination !== "workspace"}>
         <header className="conversation-header">
