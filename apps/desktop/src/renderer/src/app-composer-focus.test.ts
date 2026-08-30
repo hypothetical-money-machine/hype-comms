@@ -463,9 +463,8 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("leaves focus inside an open modal when the selection changes underneath it", async () => {
-    // WorkspaceSearch commits the selection before its dialog closes, and PreferencesDialog can
-    // see a background selection reassignment; both portal an aria-modal dialog into the body
-    // while the composer stays mounted behind them, so a detached node is a faithful stand-in.
+    // WorkspaceSearch commits the selection before its dialog closes while the composer stays
+    // mounted behind it, so a detached node is a faithful stand-in.
     const harness = await renderWorkspace();
     const dialog = document.createElement("section");
     dialog.setAttribute("role", "dialog");
@@ -505,17 +504,54 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("focuses the thread composer for a reply notification arriving over Preferences", async () => {
-    // Closing Preferences restores focus to its trigger; that restore must happen before the
-    // navigation records its focus intents, or the restore's focusin would expire them and
-    // leave focus stuck on the trigger.
     const harness = await renderWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
-    await screen.findByRole("dialog");
+    const preferences = await screen.findByTestId("preferences-page");
+    expect(preferences.hidden).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "Preferences" })).toBeNull();
 
     act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
 
     const replyComposer = await screen.findByRole("textbox", { name: "Reply" });
     await waitFor(() => expect(document.activeElement).toBe(replyComposer));
+    expect(preferences.hidden).toBe(true);
+  });
+
+  it("returns a clean theme designer to Preferences before following a notification", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+    await screen.findByRole("textbox", { name: "Reply" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    expect(screen.getByRole("heading", { name: "Preferences" })).toBeTruthy();
+    expect(screen.queryByText("Live preview")).toBeNull();
+  });
+
+  it("keeps a dirty theme draft when notification navigation is declined", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    });
+    expect(preferences.hidden).toBe(false);
+
+    act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(preferences.hidden).toBe(true));
+    await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
   });
 
   it("expires a deferred intent when the dialog closes by restoring its trigger", async () => {

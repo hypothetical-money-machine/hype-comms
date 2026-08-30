@@ -15,7 +15,7 @@ import type {
   UpdateState,
 } from "@hype-comms/contracts";
 import { createElement } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
@@ -271,6 +271,7 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
 interface ClientHarness {
   readonly client: DesktopApi;
   readonly emitWorkspaceEvent: (event: ProductRealtimeEvent) => void;
+  readonly signOut: () => Promise<{ readonly status: "signed-out" }>;
 }
 
 function createClient(
@@ -279,13 +280,16 @@ function createClient(
   let realtimeStarts = 0;
   let realtimeScope: RealtimeSessionScope | null = null;
   const eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
+  const signOut = vi
+    .fn<() => Promise<{ readonly status: "signed-out" }>>()
+    .mockResolvedValue({ status: "signed-out" });
   const client = {
     platform: "linux",
     isHeadless: true,
     getSessionState: async () => session,
     retrySession: async () => session,
     onSessionChanged: () => () => undefined,
-    signOut: async () => ({ status: "signed-out" }) as const,
+    signOut,
     getAppVersion: async () => "0.1.29-test",
     getUpdateState: async (): Promise<UpdateState> => ({ status: "idle" }),
     checkForUpdates: async () => undefined,
@@ -369,6 +373,7 @@ function createClient(
   } as unknown as DesktopApi;
   return {
     client,
+    signOut,
     emitWorkspaceEvent: (event: ProductRealtimeEvent): void => {
       if (realtimeScope === null) return;
       for (const listener of eventListeners) listener({ scope: realtimeScope, event });
@@ -488,5 +493,80 @@ describe("in-app Unreads destination", () => {
       expect(screen.getByRole("heading", { name: "You're caught up" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Unreads" })).toBeTruthy();
     });
+  });
+});
+
+describe("in-app Preferences destination", () => {
+  it("opens Preferences as a page and returns to a conversation", async () => {
+    await renderWorkspace();
+
+    const preferencesNav = screen.getByRole("button", { name: "Preferences" });
+    expect(preferencesNav.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(preferencesNav);
+
+    const preferences = screen.getByTestId("preferences-page");
+    expect(preferences.hidden).toBe(false);
+    expect(preferencesNav.getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { name: "Preferences" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Preferences" })).toBeNull();
+    expect(document.querySelector(".conversation-pane")?.hasAttribute("hidden")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    await waitFor(() => expect(preferences.hidden).toBe(true));
+    expect(document.querySelector(".conversation-pane")?.hasAttribute("hidden")).toBe(false);
+    expect(screen.getByRole("heading", { name: "# General" })).toBeTruthy();
+  });
+
+  it("keeps a dirty theme draft until the user confirms navigation or sign out", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(screen.getByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    });
+    expect(preferences.hidden).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(screen.getByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    expect(harness.signOut).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    await waitFor(() => expect(preferences.hidden).toBe(true));
+    expect(screen.getByRole("heading", { name: "# General" })).toBeTruthy();
+  });
+
+  it("keeps channel creation open while a dirty theme discard is cancelled", async () => {
+    await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    const name = screen.getByRole<HTMLInputElement>("textbox", { name: "Channel name" });
+    fireEvent.change(name, { target: { value: "Planning" } });
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create a channel" }));
+
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Create a channel" })).toBeTruthy();
+    expect(name.value).toBe("Planning");
+
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create a channel" }));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep editing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Create a channel" })).toBeTruthy();
+    expect(name.value).toBe("Planning");
   });
 });

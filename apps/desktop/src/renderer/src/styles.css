@@ -1300,96 +1300,100 @@ html[data-sidebar-position="right"] .sidebar {
   box-shadow: var(--theme-shadow-dialog);
 }
 
-.preferences-dialog {
-  width: min(480px, 100%);
-  max-height: min(620px, calc(100vh - 64px));
-  overflow-y: auto;
-  padding: 22px;
-  border: 1px solid var(--theme-border-strong);
-  border-radius: 14px;
-  background: var(--theme-surface-elevated);
-  box-shadow: var(--theme-shadow-dialog);
-}
-
-.preferences-dialog > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 22px;
-}
-
-.preferences-dialog > header > div {
+.preferences-page {
+  display: grid;
   min-width: 0;
-  flex: 1;
+  min-height: 0;
+  grid-area: conversation;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--theme-surface-content);
 }
 
-.preferences-dialog h2,
-.preferences-dialog h3 {
+.preferences-page[hidden] {
+  display: none;
+}
+
+.preferences-page-header {
+  display: flex;
+  min-height: var(--density-pane-header-min-height);
+  align-items: center;
+  gap: 12px;
+  padding: var(--density-unreads-header-padding);
+  border-bottom: 1px solid var(--theme-border-subtle);
+}
+
+.preferences-page-header > div {
+  min-width: 0;
+}
+
+.preferences-page-header h2,
+.preferences-page-content h3 {
   margin: 0;
 }
 
-.preferences-dialog h2 {
-  font-size: 20px;
+.preferences-page-header h2 {
+  color: var(--theme-text-strong);
+  font-size: 18px;
+  letter-spacing: -0.01em;
 }
 
-.preferences-dialog h3 {
+.preferences-page-content h3 {
   color: var(--theme-text-secondary);
   font-size: 13px;
 }
 
-.preferences-dialog > header > button {
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-  color: var(--theme-text-subtle);
-  cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
-}
-
-.preferences-dialog > header > button:hover {
-  color: var(--theme-text-strong);
-}
-
-.preferences-dialog > header > button:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
-
-.preferences-dialog > header > .preferences-back {
+.preferences-page-header .preferences-back {
   display: grid;
   width: 32px;
   height: 32px;
   flex: none;
-  margin: -4px 0 0 -6px;
   place-items: center;
+  padding: 0;
   border: 1px solid var(--theme-border-default);
   border-radius: 8px;
+  background: transparent;
+  color: var(--theme-text-subtle);
+  cursor: pointer;
   font-size: 15px;
 }
 
-.preferences-dialog > header > .preferences-back:hover {
+.preferences-page-header .preferences-back:hover {
   border-color: var(--theme-border-hover);
   background: var(--theme-surface-hover);
+  color: var(--theme-text-strong);
 }
 
-.preferences-dialog > section + section {
+.preferences-page-header .preferences-back:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.preferences-page-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px;
+}
+
+.preferences-page-content {
+  width: min(760px, 100%);
+}
+
+.preferences-page-content > section + section {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--theme-border-subtle);
 }
 
-.preferences-dialog .theme-control {
+.preferences-page .theme-control {
   margin-top: 10px;
   padding-top: 0;
   border-top: 0;
 }
 
 /* ThemeSelector labels its own select "Appearance" so it can stand alone on the sign-in
-   screens. Inside the dialog that repeats the section heading, so hide the visible copy while
+   screens. Inside Preferences that repeats the section heading, so hide the visible copy while
    leaving the label in place — it is what gives the select its accessible name. */
-.preferences-dialog .theme-control > label {
+.preferences-page .theme-control > label {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1401,7 +1405,7 @@ html[data-sidebar-position="right"] .sidebar {
   border: 0;
 }
 
-.preferences-dialog .theme-designer-open {
+.preferences-page .theme-designer-open {
   display: flex;
   width: 100%;
   align-items: center;
@@ -1417,43 +1421,39 @@ html[data-sidebar-position="right"] .sidebar {
   text-align: left;
 }
 
-.preferences-dialog .theme-designer-open:hover {
+.preferences-page .theme-designer-open:hover {
   border-color: var(--theme-border-hover);
   background: var(--theme-surface-hover);
 }
 
-.preferences-dialog .theme-designer-open > span {
+.preferences-page .theme-designer-open > span {
   display: grid;
   gap: 2px;
 }
 
-.preferences-dialog .theme-designer-open strong {
+.preferences-page .theme-designer-open strong {
   font-size: 12px;
 }
 
-.preferences-dialog .theme-designer-open small {
+.preferences-page .theme-designer-open small {
   color: var(--theme-text-subtle);
   font-size: 10px;
 }
 
-.preferences-dialog .theme-designer-open b {
+.preferences-page .theme-designer-open b {
   color: var(--theme-text-accent);
   font-size: 20px;
   line-height: 1;
 }
 
-.preferences-dialog.theme-designer-dialog {
-  position: relative;
-  width: min(920px, 100%);
-  max-height: min(760px, calc(100dvh - 48px));
-  padding: 0;
+.preferences-page.theme-designer-page {
   overflow: hidden;
 }
 
-.theme-designer-dialog > header {
-  margin: 0;
-  padding: 20px 22px 17px;
-  border-bottom: 1px solid var(--theme-border-subtle);
+.preferences-page.theme-designer-page .theme-designer {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
 }
 
 .theme-designer {
@@ -2088,17 +2088,9 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 @media (max-width: 760px) {
-  .dialog-backdrop:has(.theme-designer-dialog) {
-    padding: 12px;
-  }
-
-  .preferences-dialog.theme-designer-dialog {
-    max-height: calc(100dvh - 24px);
-  }
-
-  .theme-designer {
+  .preferences-page.theme-designer-page .theme-designer {
     display: block;
-    max-height: calc(100dvh - 108px);
+    max-height: none;
     overflow-y: auto;
   }
 
@@ -2156,25 +2148,25 @@ html[data-sidebar-position="right"] .sidebar {
   }
 }
 
-.preferences-dialog .compact-mode-control {
+.preferences-page .compact-mode-control {
   margin: 10px 0 0;
 }
 
-.preferences-dialog .sidebar-position-control {
+.preferences-page .sidebar-position-control {
   margin-top: 10px;
 }
 
-.preferences-dialog .fenced-blockquote-control {
+.preferences-page .fenced-blockquote-control {
   margin-top: 10px;
 }
 
-.preferences-dialog .notification-settings {
+.preferences-page .notification-settings {
   display: grid;
   gap: 10px;
   margin-top: 10px;
 }
 
-.preferences-dialog .notification-preference {
+.preferences-page .notification-preference {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2186,28 +2178,28 @@ html[data-sidebar-position="right"] .sidebar {
   cursor: pointer;
 }
 
-.preferences-dialog .notification-preference > span {
+.preferences-page .notification-preference > span {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.preferences-dialog .notification-preference strong {
+.preferences-page .notification-preference strong {
   color: var(--theme-text-primary);
   font-size: 12px;
 }
 
-.preferences-dialog .notification-preference small,
-.preferences-dialog .notification-capability-copy,
-.preferences-dialog .notification-settings-loading,
-.preferences-dialog .notification-settings-unavailable {
+.preferences-page .notification-preference small,
+.preferences-page .notification-capability-copy,
+.preferences-page .notification-settings-loading,
+.preferences-page .notification-settings-unavailable {
   margin: 0;
   color: var(--theme-text-subtle);
   font-size: 10px;
   line-height: 1.4;
 }
 
-.preferences-dialog .notification-preference input {
+.preferences-page .notification-preference input {
   width: auto;
   flex: none;
   margin: 0;
@@ -2215,14 +2207,14 @@ html[data-sidebar-position="right"] .sidebar {
   accent-color: var(--theme-border-accent);
 }
 
-.preferences-dialog .notification-capability {
+.preferences-page .notification-capability {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin: 2px 0 0;
 }
 
-.preferences-dialog .notification-capability > div {
+.preferences-page .notification-capability > div {
   display: grid;
   gap: 2px;
   padding: 8px 9px;
@@ -2230,7 +2222,7 @@ html[data-sidebar-position="right"] .sidebar {
   background: var(--theme-surface-subtle);
 }
 
-.preferences-dialog .notification-capability dt {
+.preferences-page .notification-capability dt {
   color: var(--theme-text-subtle);
   font-size: 9px;
   font-weight: 750;
@@ -2238,14 +2230,14 @@ html[data-sidebar-position="right"] .sidebar {
   text-transform: uppercase;
 }
 
-.preferences-dialog .notification-capability dd {
+.preferences-page .notification-capability dd {
   margin: 0;
   color: var(--theme-text-secondary);
   font-size: 11px;
   font-weight: 650;
 }
 
-.preferences-dialog .notification-capability-refresh {
+.preferences-page .notification-capability-refresh {
   justify-self: start;
   padding: 6px 9px;
   border: 1px solid var(--theme-border-default);
@@ -2257,40 +2249,40 @@ html[data-sidebar-position="right"] .sidebar {
   font-weight: 700;
 }
 
-.preferences-dialog .notification-capability-refresh:hover {
+.preferences-page .notification-capability-refresh:hover {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
 }
 
-.preferences-dialog .notification-settings-error {
+.preferences-page .notification-settings-error {
   margin: 0;
   color: var(--theme-text-danger);
   font-size: 10px;
   line-height: 1.35;
 }
 
-.preferences-dialog .profile-section {
+.preferences-page .profile-section {
   margin-top: 10px;
 }
 
-.preferences-dialog .profile-section-edit {
+.preferences-page .profile-section-edit {
   display: grid;
   gap: 8px;
 }
 
-.preferences-dialog .profile-section-edit > label {
+.preferences-page .profile-section-edit > label {
   color: var(--theme-text-secondary);
   font-size: 13px;
   font-weight: 650;
 }
 
-.preferences-dialog .profile-section-field {
+.preferences-page .profile-section-field {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.preferences-dialog .profile-section-field input {
+.preferences-page .profile-section-field input {
   min-width: 0;
   flex: 1;
   padding: 8px 10px;
@@ -2300,12 +2292,12 @@ html[data-sidebar-position="right"] .sidebar {
   color: var(--theme-text-strong);
 }
 
-.preferences-dialog .profile-section-field input:focus {
+.preferences-page .profile-section-field input:focus {
   outline: 2px solid var(--theme-border-accent);
   outline-offset: 1px;
 }
 
-.preferences-dialog .profile-section-field button {
+.preferences-page .profile-section-field button {
   padding: 7px 10px;
   border: 1px solid var(--theme-border-default);
   border-radius: 7px;
@@ -2316,30 +2308,30 @@ html[data-sidebar-position="right"] .sidebar {
   font-weight: 650;
 }
 
-.preferences-dialog .profile-section-field button:hover {
+.preferences-page .profile-section-field button:hover {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
 }
 
-.preferences-dialog .profile-section-field button:disabled {
+.preferences-page .profile-section-field button:disabled {
   cursor: wait;
   opacity: 0.55;
 }
 
-.preferences-dialog .profile-section-read {
+.preferences-page .profile-section-read {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
 }
 
-.preferences-dialog .profile-section-read p {
+.preferences-page .profile-section-read p {
   margin: 0;
   color: var(--theme-text-secondary);
   font-size: 13px;
 }
 
-.preferences-dialog .profile-section-read button {
+.preferences-page .profile-section-read button {
   padding: 5px 9px;
   border: 1px solid var(--theme-border-default);
   border-radius: 7px;
@@ -2350,23 +2342,23 @@ html[data-sidebar-position="right"] .sidebar {
   font-weight: 650;
 }
 
-.preferences-dialog .profile-section-read button:hover {
+.preferences-page .profile-section-read button:hover {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
 }
 
-.preferences-dialog .profile-section-label {
+.preferences-page .profile-section-label {
   color: var(--theme-text-subtle);
 }
 
-.preferences-dialog .profile-section-error {
+.preferences-page .profile-section-error {
   margin: 0;
   color: var(--theme-text-danger);
   font-size: 11px;
   line-height: 1.35;
 }
 
-.preferences-dialog .profile-section-success {
+.preferences-page .profile-section-success {
   margin: 0;
   color: var(--theme-text-secondary);
   font-size: 11px;
@@ -2389,6 +2381,12 @@ html[data-sidebar-position="right"] .sidebar {
 .preferences-trigger:hover {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
+}
+
+.preferences-trigger.active {
+  background: var(--theme-surface-selected);
+  color: var(--theme-text-strong);
+  box-shadow: inset 3px 0 var(--theme-border-accent);
 }
 
 .channel-members-dialog > header,
