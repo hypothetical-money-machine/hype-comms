@@ -7,6 +7,11 @@ script = """
 set -eu
 
 expected_node="$(cat .node-version)"
+if command -v fnm >/dev/null 2>&1; then
+  eval "$(fnm env --shell bash)"
+  fnm use --install-if-missing "$expected_node"
+fi
+
 actual_node="$(node --version)"
 if [ "$actual_node" != "v$expected_node" ]; then
   echo "Hype Comms requires Node v$expected_node; found $actual_node." >&2
