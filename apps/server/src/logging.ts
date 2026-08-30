@@ -3,6 +3,15 @@ import type { ServerConfig } from "./config.js";
 
 type LoggerOptions = Exclude<FastifyServerOptions["logger"], boolean | undefined>;
 
+const INCOMING_WEBHOOK_PATH_PREFIX = "/v1/webhooks/incoming/";
+
+export function redactedRequestPath(url: string): string {
+  const path = url.split("?", 1)[0] ?? url;
+  return path.startsWith(INCOMING_WEBHOOK_PATH_PREFIX)
+    ? `${INCOMING_WEBHOOK_PATH_PREFIX}[REDACTED]`
+    : path;
+}
+
 export function createLoggerOptions(config: Pick<ServerConfig, "logLevel">): LoggerOptions {
   return {
     level: config.logLevel,
@@ -25,7 +34,7 @@ export function createLoggerOptions(config: Pick<ServerConfig, "logLevel">): Log
       req(request) {
         return {
           method: request.method,
-          path: request.url.split("?", 1)[0],
+          path: redactedRequestPath(request.url),
           host: request.hostname,
           remoteAddress: request.ip,
         };

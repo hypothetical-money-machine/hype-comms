@@ -85,6 +85,7 @@ async function withoutAgentMigration(fn: (migrationsDirectory: URL) => Promise<v
       "0023_default_agent_agency.sql",
       "0025_public_channel_membership.sql",
       "0027_read_only_agent_attachments.sql",
+      "0028_channel_webhooks.sql",
     ],
     fn,
   );
@@ -135,6 +136,7 @@ describeWithPostgres("runMigrations", () => {
           "0025_public_channel_membership.sql",
           "0026_group_direct_messages.sql",
           "0027_read_only_agent_attachments.sql",
+          "0028_channel_webhooks.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -171,6 +173,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0025_public_channel_membership.sql" },
         { filename: "0026_group_direct_messages.sql" },
         { filename: "0027_read_only_agent_attachments.sql" },
+        { filename: "0028_channel_webhooks.sql" },
       ]);
 
       const userId = randomUUID();
@@ -1098,6 +1101,7 @@ describeWithPostgres("runMigrations", () => {
           "0025_public_channel_membership.sql",
           "0026_group_direct_messages.sql",
           "0027_read_only_agent_attachments.sql",
+          "0028_channel_webhooks.sql",
         ],
         async (migrationsDirectory) => {
           await runMigrations(pool, migrationsDirectory);
@@ -1176,6 +1180,7 @@ describeWithPostgres("runMigrations", () => {
               "0025_public_channel_membership.sql",
               "0026_group_direct_messages.sql",
               "0027_read_only_agent_attachments.sql",
+              "0028_channel_webhooks.sql",
             ],
           });
 

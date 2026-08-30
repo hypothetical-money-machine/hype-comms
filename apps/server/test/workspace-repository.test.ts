@@ -240,8 +240,8 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
     await pool.query(
       `INSERT INTO device_sessions
-         (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-        VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+       (id, user_id, token_hash, created_at, last_seen_at, expires_at)
+       VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 day')`,
       [ownerSessionId, ownerId, Buffer.alloc(32, 7), now],
     );
   });
@@ -3068,7 +3068,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       await client.query(
         `INSERT INTO device_sessions
            (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-          VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 hour')`,
+         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 day')`,
         [member.sessionId, memberId, Buffer.alloc(32, 8), now],
       );
       await client.query(

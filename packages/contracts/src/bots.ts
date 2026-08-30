@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-/** Task capabilities carried by one revocable bot credential. */
-export const botScopeSchema = z.enum(["tasks:read", "tasks:write"]);
+/** Least-privilege capabilities carried by one revocable bot credential. */
+export const botScopeSchema = z.enum(["messages:write", "tasks:read", "tasks:write"]);
 
 export const botScopesSchema = z
   .array(botScopeSchema)
