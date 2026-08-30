@@ -12,7 +12,7 @@ export interface NotificationActionHandler {
   handleNotificationAction(
     action: NotificationAction,
     context: NotificationContext,
-  ): Promise<unknown>;
+  ): Promise<void | boolean>;
 }
 
 const NOTIFICATION_METHODS = [
@@ -265,7 +265,8 @@ export class NotificationSessionRuntime {
     if (!this.#handledActions.has(key)) {
       if (!this.#isCurrentBinding(context, bindingGeneration)) return;
       try {
-        await this.#handler.handleNotificationAction(action, context);
+        const handled = await this.#handler.handleNotificationAction(action, context);
+        if (handled === false) return;
       } catch {
         return;
       }

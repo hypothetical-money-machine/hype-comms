@@ -531,7 +531,7 @@ describe("main composer focus on conversation changes", () => {
     expect(screen.queryByText("Live preview")).toBeNull();
   });
 
-  it("keeps a dirty theme draft when notification navigation is declined", async () => {
+  it("retries a notification after navigation from a dirty theme draft is declined", async () => {
     const harness = await renderWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
     const preferences = screen.getByTestId("preferences-page");
@@ -546,12 +546,15 @@ describe("main composer focus on conversation changes", () => {
     });
     expect(preferences.hidden).toBe(false);
 
-    act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
+    await act(async () => {
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
     expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
 
     await waitFor(() => expect(preferences.hidden).toBe(true));
-    await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
+    await screen.findByRole("textbox", { name: "Reply" });
   });
 
   it("expires a deferred intent when the dialog closes by restoring its trigger", async () => {

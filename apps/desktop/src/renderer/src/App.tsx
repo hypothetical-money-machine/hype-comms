@@ -728,12 +728,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     if (notificationTransport === null) return null;
     return new NotificationSessionRuntime(notificationTransport, {
       handleNotificationAction: async (action, context) => {
-        if (!(await requestPreferencesNavigationRef.current())) return;
+        if (!(await requestPreferencesNavigationRef.current())) return false;
         setPeopleSource(null);
         const result = await runtime.handleNotificationAction(action, context);
-        if (result === "discarded") return;
+        if (result === "discarded") return true;
         setDestination("workspace");
         setPaneView("chat");
+        return true;
       },
     });
   }, [notificationTransport, runtime]);

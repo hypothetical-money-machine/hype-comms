@@ -234,7 +234,31 @@ describe("NotificationSessionRuntime", () => {
       handleNotificationAction: vi
         .fn<NotificationActionHandler["handleNotificationAction"]>()
         .mockRejectedValueOnce(new Error("navigation failed"))
-        .mockResolvedValueOnce("opened"),
+        .mockResolvedValueOnce(true),
+    };
+    const runtime = new NotificationSessionRuntime(transport, handler);
+    runtime.start();
+
+    await runtime.bind(USER_ID, WORKSPACE_ID);
+    await settle();
+    expect(handler.handleNotificationAction).toHaveBeenCalledOnce();
+    expect(transport.acknowledgements).toEqual([]);
+
+    transport.emit(target);
+    await settle();
+    expect(handler.handleNotificationAction).toHaveBeenCalledTimes(2);
+    expect(transport.acknowledgements).toEqual([{ ...READY, action: target }]);
+  });
+
+  it("does not acknowledge a declined action and handles it when redelivered", async () => {
+    const transport = new FakeTransport();
+    const target = action(MESSAGE_ID);
+    transport.drainResult = { ...READY, actions: [target] };
+    const handler: NotificationActionHandler = {
+      handleNotificationAction: vi
+        .fn<NotificationActionHandler["handleNotificationAction"]>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
     };
     const runtime = new NotificationSessionRuntime(transport, handler);
     runtime.start();
