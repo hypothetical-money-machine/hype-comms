@@ -488,6 +488,12 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      # desktop-release.mjs imports semver and other lockfile packages; without npm ci the
+      # configure-s3 step fails with ERR_MODULE_NOT_FOUND before any bucket write.
+      - name: Install dependencies
+        shell: bash
+        run: npm ci --no-audit --prefer-offline
+
       - name: Install verified GitHub CLI
         shell: bash
         run: node scripts/install-github-cli.mjs
