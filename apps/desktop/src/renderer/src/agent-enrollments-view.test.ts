@@ -191,7 +191,9 @@ describe("AgentEnrollmentsView", () => {
     expect(screen.getByText("Hermes (@hermes) · Agent")).toBeTruthy();
     expect(screen.getByText("atlas-runtime")).toBeTruthy();
     expect(screen.getByText("Launch room")).toBeTruthy();
-    expect(screen.getByText(MISSING_CHANNEL_ID)).toBeTruthy();
+    expect(
+      screen.getByText(`Private channel not visible to you (${MISSING_CHANNEL_ID})`),
+    ).toBeTruthy();
     expect(screen.getByText(`Human ${MISSING_REQUESTER_ID}`)).toBeTruthy();
     expect(screen.getByText("None requested")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Settled request" })).toBeNull();
@@ -229,10 +231,20 @@ describe("AgentEnrollmentsView", () => {
 
     const approve = screen.getByRole("button", { name: "Approve" });
     fireEvent.click(approve);
-    fireEvent.click(approve);
+    expect(reviewAgentEnrollment).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Approve Atlas? This grants the fixed agent profile",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(reviewAgentEnrollment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    const confirm = screen.getByRole("button", { name: "Confirm approval" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
     expect(reviewAgentEnrollment).toHaveBeenCalledTimes(1);
     expect(reviewAgentEnrollment).toHaveBeenCalledWith(ENROLLMENT_ID, "approve");
-    expect(approve.hasAttribute("disabled")).toBe(true);
+    expect(confirm.textContent).toBe("Approving…");
+    expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
 
     await act(async () => {
       reviewGate.resolve(reviewed(request, "approve"));
@@ -244,6 +256,86 @@ describe("AgentEnrollmentsView", () => {
     expect(screen.getByRole("status").textContent).toContain(
       "Approved Atlas. The agent can now finish joining.",
     );
+  });
+
+  it("labels only the selected rejection while its review is in flight", async () => {
+    const request = enrollment();
+    const reviewGate = deferred<AgentEnrollmentResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(request))
+      .mockResolvedValueOnce(response());
+    const reviewAgentEnrollment = vi.fn(() => reviewGate.promise);
+    render(view(clientWith(listAgentEnrollments, reviewAgentEnrollment)));
+    await screen.findByRole("heading", { name: "Atlas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+
+    expect(screen.getByRole("button", { name: "Rejecting…" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Approve" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => {
+      reviewGate.resolve(reviewed(request, "reject"));
+      await reviewGate.promise;
+    });
+    await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps a completed review notice across navigation, then clears it on the next departure", async () => {
+    const request = enrollment();
+    const reviewGate = deferred<AgentEnrollmentResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(request))
+      .mockResolvedValue(response());
+    const client = clientWith(listAgentEnrollments, () => reviewGate.promise);
+    const { rerender } = render(view(client));
+    await screen.findByRole("heading", { name: "Atlas" });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
+
+    rerender(view(client, false));
+    await act(async () => {
+      reviewGate.resolve(reviewed(request, "approve"));
+      await reviewGate.promise;
+    });
+    const success = "Approved Atlas. The agent can now finish joining.";
+    await waitFor(() => expect(screen.getByText(success)).toBeTruthy());
+
+    rerender(view(client));
+    await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("status").textContent).toContain(success);
+
+    rerender(view(client, false));
+    await waitFor(() => expect(screen.queryByText(success)).toBeNull());
+  });
+
+  it("keeps a review error that settles while the queue is hidden", async () => {
+    const request = enrollment();
+    const reviewGate = deferred<AgentEnrollmentResponse>();
+    const client = clientWith(
+      async () => response(request),
+      () => reviewGate.promise,
+    );
+    const { rerender } = render(view(client));
+    await screen.findByRole("heading", { name: "Atlas" });
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+
+    rerender(view(client, false));
+    await act(async () => {
+      reviewGate.reject(
+        new Error(
+          "Error invoking remote method 'workspace:agent-enrollment-review': " +
+            "WorkspaceRequestError: Agent enrollment can no longer be reviewed",
+        ),
+      );
+      await reviewGate.promise.catch(() => undefined);
+    });
+
+    rerender(view(client));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Agent enrollment can no longer be reviewed",
+    );
+    expect(screen.getByRole("alert").textContent).not.toContain("Error invoking remote method");
   });
 
   it("does not report approval when the request expires during review", async () => {
@@ -259,6 +351,7 @@ describe("AgentEnrollmentsView", () => {
     await screen.findByRole("heading", { name: "Atlas" });
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
 
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Atlas expired before it could be approved.",
@@ -319,16 +412,47 @@ describe("AgentEnrollmentsView", () => {
 
     setVisibility("visible");
     document.dispatchEvent(new Event("visibilitychange"));
-    await act(async () => Promise.resolve());
-    expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
     window.dispatchEvent(new Event("focus"));
-    await act(async () => Promise.resolve());
-    expect(listAgentEnrollments).toHaveBeenCalledTimes(4);
+    await act(async () => vi.advanceTimersByTime(99));
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
 
     rerender(view(client, false));
     window.dispatchEvent(new Event("focus"));
     await act(async () => vi.advanceTimersByTime(60_000));
-    expect(listAgentEnrollments).toHaveBeenCalledTimes(4);
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not schedule a poll while a review is in flight", async () => {
+    vi.useFakeTimers();
+    const request = enrollment();
+    const staleList = deferred<ListAgentEnrollmentsResponse>();
+    const reviewGate = deferred<AgentEnrollmentResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(request))
+      .mockImplementationOnce(() => staleList.promise)
+      .mockResolvedValueOnce(response());
+    render(view(clientWith(listAgentEnrollments, () => reviewGate.promise)));
+    await act(async () => Promise.resolve());
+    expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await act(async () => {
+      staleList.resolve(response(request));
+      await staleList.promise;
+    });
+    await act(async () => vi.advanceTimersByTime(60_000));
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      reviewGate.resolve(reviewed(request, "reject"));
+      await reviewGate.promise;
+      await Promise.resolve();
+    });
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
   });
 
   it("coalesces overlapping refresh requests into one trailing read", async () => {
@@ -373,6 +497,7 @@ describe("AgentEnrollmentsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(listAgentEnrollments).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull());
 
     await act(async () => {

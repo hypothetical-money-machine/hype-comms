@@ -8,6 +8,7 @@ import type {
 } from "@hype-comms/contracts";
 
 import type { DesktopApi } from "../../shared/desktop-api";
+import { ipcErrorMessage } from "./ipc-error-message";
 
 export type AgentEnrollmentsClient = Pick<
   DesktopApi,
@@ -31,13 +32,10 @@ interface ReviewNotice {
   readonly message: string;
 }
 
-const POLL_DELAY_MS = 30_000;
+type ReviewDecision = "approve" | "reject";
 
-function errorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof Error) || error.message === "") return fallback;
-  const message = error.message.replace(/^Error invoking remote method '[^']*': Error: /, "");
-  return message === "" ? fallback : message;
-}
+const POLL_DELAY_MS = 30_000;
+const ATTENTION_REFRESH_DELAY_MS = 100;
 
 function formatDateTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -57,7 +55,7 @@ function requesterName(enrollment: AgentEnrollment, members: readonly User[]): s
     : `${member.displayName} (@${member.username}) · ${kind}`;
 }
 
-function restrictedChannelName(
+function restrictedChannelLabel(
   channelId: string,
   conversations: HumanWorkspaceBootstrapResponse["conversations"],
 ): string {
@@ -67,7 +65,7 @@ function restrictedChannelName(
   if (conversation?.name !== null && conversation?.name !== undefined) return conversation.name;
   if (conversation?.slug !== null && conversation?.slug !== undefined)
     return `#${conversation.slug}`;
-  return channelId;
+  return `Private channel not visible to you (${channelId})`;
 }
 
 function pendingEnrollments(response: ListAgentEnrollmentsResponse): readonly AgentEnrollment[] {
@@ -78,15 +76,22 @@ function EnrollmentCard({
   enrollment,
   members,
   conversations,
-  busy,
+  confirmingApproval,
+  reviewingDecision,
+  onBeginApproval,
+  onCancelApproval,
   onReview,
 }: {
   readonly enrollment: AgentEnrollment;
   readonly members: readonly User[];
   readonly conversations: HumanWorkspaceBootstrapResponse["conversations"];
-  readonly busy: boolean;
-  readonly onReview: (enrollment: AgentEnrollment, decision: "approve" | "reject") => void;
+  readonly confirmingApproval: boolean;
+  readonly reviewingDecision: ReviewDecision | null;
+  readonly onBeginApproval: (enrollmentId: string) => void;
+  readonly onCancelApproval: () => void;
+  readonly onReview: (enrollment: AgentEnrollment, decision: ReviewDecision) => void;
 }) {
+  const busy = reviewingDecision !== null;
   return (
     <article className="agent-enrollment-card" aria-busy={busy}>
       <header className="agent-enrollment-card-header">
@@ -125,29 +130,43 @@ function EnrollmentCard({
             ) : (
               <ul>
                 {enrollment.restrictedChannelIds.map((channelId) => (
-                  <li key={channelId}>{restrictedChannelName(channelId, conversations)}</li>
+                  <li key={channelId}>{restrictedChannelLabel(channelId, conversations)}</li>
                 ))}
               </ul>
             )}
           </dd>
         </div>
       </dl>
+      {confirmingApproval && (
+        <p className="agent-enrollment-confirmation" role="status">
+          Approve {enrollment.displayName}? This grants the fixed agent profile, including
+          permission to invite more agents.
+        </p>
+      )}
       <div className="agent-enrollment-actions">
         <button
           type="button"
-          className="agent-enrollment-reject"
+          className={confirmingApproval ? "agent-enrollment-cancel" : "agent-enrollment-reject"}
           disabled={busy}
-          onClick={() => onReview(enrollment, "reject")}
+          onClick={confirmingApproval ? onCancelApproval : () => onReview(enrollment, "reject")}
         >
-          {busy ? "Reviewing…" : "Reject"}
+          {confirmingApproval ? "Cancel" : reviewingDecision === "reject" ? "Rejecting…" : "Reject"}
         </button>
         <button
           type="button"
           className="agent-enrollment-approve"
           disabled={busy}
-          onClick={() => onReview(enrollment, "approve")}
+          onClick={
+            confirmingApproval
+              ? () => onReview(enrollment, "approve")
+              : () => onBeginApproval(enrollment.id)
+          }
         >
-          {busy ? "Reviewing…" : "Approve"}
+          {confirmingApproval
+            ? reviewingDecision === "approve"
+              ? "Approving…"
+              : "Confirm approval"
+            : "Approve"}
         </button>
       </div>
     </article>
@@ -166,7 +185,10 @@ export function AgentEnrollmentsView({
   readonly active: boolean;
 }) {
   const [state, setState] = useState<EnrollmentListState>({ status: "idle" });
-  const [busyEnrollmentIds, setBusyEnrollmentIds] = useState<ReadonlySet<string>>(new Set());
+  const [reviewingDecisions, setReviewingDecisions] = useState<ReadonlyMap<string, ReviewDecision>>(
+    new Map(),
+  );
+  const [confirmingApprovalId, setConfirmingApprovalId] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<ReviewNotice | null>(null);
   const mounted = useRef(false);
   const activeRef = useRef(active);
@@ -175,13 +197,20 @@ export function AgentEnrollmentsView({
   const listRun = useRef<ListRun | null>(null);
   const trailingRefresh = useRef(false);
   const pollTimer = useRef<number | null>(null);
-  const busyIds = useRef(new Set<string>());
+  const attentionRefreshTimer = useRef<number | null>(null);
+  const reviewingIds = useRef(new Map<string, ReviewDecision>());
   const requestListRef = useRef<() => void>(() => undefined);
 
   const clearPoll = useCallback((): void => {
     if (pollTimer.current === null) return;
     window.clearTimeout(pollTimer.current);
     pollTimer.current = null;
+  }, []);
+
+  const clearAttentionRefresh = useCallback((): void => {
+    if (attentionRefreshTimer.current === null) return;
+    window.clearTimeout(attentionRefreshTimer.current);
+    attentionRefreshTimer.current = null;
   }, []);
 
   const schedulePoll = useCallback(
@@ -191,6 +220,7 @@ export function AgentEnrollmentsView({
         !mounted.current ||
         !activeRef.current ||
         generation.current !== expectedGeneration ||
+        reviewingIds.current.size > 0 ||
         document.visibilityState === "hidden"
       ) {
         return;
@@ -213,6 +243,10 @@ export function AgentEnrollmentsView({
   const requestList = useCallback((): void => {
     if (!mounted.current || !activeRef.current) return;
     clearPoll();
+    if (reviewingIds.current.size > 0) {
+      trailingRefresh.current = true;
+      return;
+    }
     if (listRun.current !== null) {
       trailingRefresh.current = true;
       return;
@@ -253,7 +287,7 @@ export function AgentEnrollmentsView({
         }
         setState({
           status: "error",
-          message: errorMessage(error, "Could not load agent requests."),
+          message: ipcErrorMessage(error, "Could not load agent requests."),
         });
       })
       .finally(() => {
@@ -267,25 +301,35 @@ export function AgentEnrollmentsView({
         schedulePoll(generation.current);
       });
   }, [clearPoll, client, schedulePoll]);
-  requestListRef.current = requestList;
+
+  useEffect(() => {
+    requestListRef.current = requestList;
+  }, [requestList]);
+
+  const beginApproval = useCallback((enrollmentId: string): void => {
+    if (reviewingIds.current.has(enrollmentId)) return;
+    setReviewNotice(null);
+    setConfirmingApprovalId(enrollmentId);
+  }, []);
+
+  const cancelApproval = useCallback((): void => {
+    setConfirmingApprovalId(null);
+  }, []);
 
   const review = useCallback(
-    (enrollment: AgentEnrollment, decision: "approve" | "reject"): void => {
-      if (!mounted.current || !activeRef.current || busyIds.current.has(enrollment.id)) return;
-      busyIds.current.add(enrollment.id);
-      setBusyEnrollmentIds(new Set(busyIds.current));
+    (enrollment: AgentEnrollment, decision: ReviewDecision): void => {
+      if (!mounted.current || !activeRef.current || reviewingIds.current.has(enrollment.id)) return;
+      reviewingIds.current.set(enrollment.id, decision);
+      setReviewingDecisions(new Map(reviewingIds.current));
       setReviewNotice(null);
       clearPoll();
       // Lists that began before the review must not restore this row after the decision settles.
       mutationRevision.current += 1;
-      const reviewGeneration = generation.current;
 
       void client
         .reviewAgentEnrollment(enrollment.id, decision)
         .then((response) => {
-          if (!mounted.current || !activeRef.current || generation.current !== reviewGeneration) {
-            return;
-          }
+          if (!mounted.current) return;
           const expectedStatus = decision === "approve" ? "ready_to_redeem" : "rejected";
           setState((previous) =>
             previous.status === "ready" || previous.status === "refreshing"
@@ -321,20 +365,24 @@ export function AgentEnrollmentsView({
           }
         })
         .catch((error: unknown) => {
-          if (!mounted.current || !activeRef.current || generation.current !== reviewGeneration) {
-            return;
-          }
+          if (!mounted.current) return;
           setReviewNotice({
             tone: "error",
-            message: errorMessage(error, `Could not ${decision} ${enrollment.displayName}.`),
+            message: ipcErrorMessage(error, `Could not ${decision} ${enrollment.displayName}.`),
           });
         })
         .finally(() => {
           // This also invalidates a list that began while the review request was in flight.
           mutationRevision.current += 1;
-          busyIds.current.delete(enrollment.id);
-          if (mounted.current) setBusyEnrollmentIds(new Set(busyIds.current));
-          if (mounted.current && activeRef.current) requestListRef.current();
+          reviewingIds.current.delete(enrollment.id);
+          if (mounted.current) {
+            setReviewingDecisions(new Map(reviewingIds.current));
+            setConfirmingApprovalId((current) => (current === enrollment.id ? null : current));
+          }
+          if (mounted.current && activeRef.current) {
+            trailingRefresh.current = false;
+            requestListRef.current();
+          }
         });
     },
     [clearPoll, client],
@@ -347,48 +395,62 @@ export function AgentEnrollmentsView({
       activeRef.current = false;
       generation.current += 1;
       trailingRefresh.current = false;
+      clearAttentionRefresh();
       clearPoll();
     };
-  }, [clearPoll]);
+  }, [clearAttentionRefresh, clearPoll]);
 
   useEffect(() => {
     const currentGeneration = generation.current + 1;
     generation.current = currentGeneration;
     activeRef.current = active;
     trailingRefresh.current = false;
+    clearAttentionRefresh();
     clearPoll();
     if (active) {
       setState({ status: "loading" });
       requestListRef.current();
+    } else if (reviewingIds.current.size === 0) {
+      setConfirmingApprovalId(null);
+      setReviewNotice(null);
     }
     return () => {
       if (generation.current === currentGeneration) generation.current += 1;
       activeRef.current = false;
       trailingRefresh.current = false;
+      clearAttentionRefresh();
       clearPoll();
     };
-  }, [active, clearPoll, client]);
+  }, [active, clearAttentionRefresh, clearPoll, client]);
 
   useEffect(() => {
-    const refreshIfVisible = (): void => {
-      if (activeRef.current && document.visibilityState !== "hidden") {
-        requestListRef.current();
-      }
+    const refreshAfterAttentionSettles = (): void => {
+      clearAttentionRefresh();
+      clearPoll();
+      if (!activeRef.current || document.visibilityState === "hidden") return;
+      attentionRefreshTimer.current = window.setTimeout(() => {
+        attentionRefreshTimer.current = null;
+        if (activeRef.current && document.visibilityState !== "hidden") {
+          requestListRef.current();
+        }
+      }, ATTENTION_REFRESH_DELAY_MS);
     };
     const onVisibilityChange = (): void => {
       if (document.visibilityState === "hidden") {
+        clearAttentionRefresh();
         clearPoll();
       } else {
-        refreshIfVisible();
+        refreshAfterAttentionSettles();
       }
     };
-    window.addEventListener("focus", refreshIfVisible);
+    window.addEventListener("focus", refreshAfterAttentionSettles);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.removeEventListener("focus", refreshIfVisible);
+      window.removeEventListener("focus", refreshAfterAttentionSettles);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      clearAttentionRefresh();
     };
-  }, [clearPoll]);
+  }, [clearAttentionRefresh, clearPoll]);
 
   const enrollments =
     state.status === "ready" || state.status === "refreshing" ? state.enrollments : [];
@@ -446,7 +508,10 @@ export function AgentEnrollmentsView({
                   enrollment={enrollment}
                   members={members}
                   conversations={conversations}
-                  busy={busyEnrollmentIds.has(enrollment.id)}
+                  confirmingApproval={confirmingApprovalId === enrollment.id}
+                  reviewingDecision={reviewingDecisions.get(enrollment.id) ?? null}
+                  onBeginApproval={beginApproval}
+                  onCancelApproval={cancelApproval}
                   onReview={review}
                 />
               </li>
