@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_PRODUCTION_API_ORIGIN } from "../shared/api-origin";
+import {
+  DEFAULT_PRODUCTION_API_ORIGIN,
+  OFFICIAL_PRODUCTION_API_ORIGIN,
+} from "../shared/api-origin";
 import {
   DOWNLOAD_STALL_TIMEOUT_MS,
   INITIAL_UPDATE_CHECK_DELAY_MS,
@@ -129,7 +132,7 @@ function createController(
     updatesAllowed: overrides.updatesAllowed ?? true,
     isProductionBuild: overrides.isProductionBuild ?? true,
     isPackaged: overrides.isPackaged ?? true,
-    apiOrigin: overrides.apiOrigin ?? DEFAULT_PRODUCTION_API_ORIGIN,
+    apiOrigin: overrides.apiOrigin ?? OFFICIAL_PRODUCTION_API_ORIGIN,
     platform: overrides.platform ?? "win32",
     ...(overrides.appImagePath === undefined ? {} : { appImagePath: overrides.appImagePath }),
     hasMacDeveloperIdSignature: overrides.hasMacDeveloperIdSignature ?? true,
@@ -153,6 +156,10 @@ describe("UpdateController support", () => {
     ["a DEV package", { isProductionBuild: false }],
     ["development", { isPackaged: false }],
     ["a non-production API package", { apiOrigin: "https://staging.example" }],
+    [
+      "an unconfigured production package still aimed at the reserved placeholder",
+      { apiOrigin: DEFAULT_PRODUCTION_API_ORIGIN },
+    ],
     ["a Linux deb package", { platform: "linux" as const }],
     [
       "a macOS package without a Developer ID signature",
