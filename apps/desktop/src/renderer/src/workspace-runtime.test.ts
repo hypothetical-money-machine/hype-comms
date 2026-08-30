@@ -1324,6 +1324,10 @@ class FakeDesktopApi implements DesktopApi {
     throw new Error("Agent enrollment review is not used by WorkspaceRuntime");
   }
 
+  async cancelAgentEnrollment(): Promise<AgentEnrollmentResponse> {
+    throw new Error("Agent enrollment cancellation is not used by WorkspaceRuntime");
+  }
+
   async listConversations(
     input: Partial<ListConversationsQuery> = {},
   ): Promise<ListConversationsResponse> {

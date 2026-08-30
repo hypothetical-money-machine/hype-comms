@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import type {
   AgentEnrollment,
@@ -12,13 +12,17 @@ import { ipcErrorMessage } from "./ipc-error-message";
 
 export type AgentEnrollmentsClient = Pick<
   DesktopApi,
-  "listAgentEnrollments" | "reviewAgentEnrollment"
+  "cancelAgentEnrollment" | "listAgentEnrollments" | "reviewAgentEnrollment"
 >;
 
 type EnrollmentListState =
-  | { readonly status: "idle" }
-  | { readonly status: "loading" }
-  | { readonly status: "error"; readonly message: string }
+  | { readonly status: "idle"; readonly enrollments: readonly AgentEnrollment[] }
+  | { readonly status: "loading"; readonly enrollments: readonly AgentEnrollment[] }
+  | {
+      readonly status: "error";
+      readonly message: string;
+      readonly enrollments: readonly AgentEnrollment[];
+    }
   | { readonly status: "ready"; readonly enrollments: readonly AgentEnrollment[] }
   | { readonly status: "refreshing"; readonly enrollments: readonly AgentEnrollment[] };
 
@@ -32,7 +36,20 @@ interface ReviewNotice {
   readonly message: string;
 }
 
-type ReviewDecision = "approve" | "reject";
+type EnrollmentMutationAction = "approve" | "reject" | "cancel";
+type ConfirmationAction = Extract<EnrollmentMutationAction, "approve" | "cancel">;
+
+interface Confirmation {
+  readonly enrollmentId: string;
+  readonly action: ConfirmationAction;
+}
+
+interface EnrollmentMutationStore {
+  readonly begin: (enrollmentId: string, action: EnrollmentMutationAction) => boolean;
+  readonly finish: (enrollmentId: string) => void;
+  readonly getSnapshot: () => ReadonlyMap<string, EnrollmentMutationAction>;
+  readonly subscribe: (listener: () => void) => () => void;
+}
 
 const POLL_DELAY_MS = 30_000;
 const ATTENTION_REFRESH_DELAY_MS = 100;
@@ -55,10 +72,42 @@ function requesterName(enrollment: AgentEnrollment, members: readonly User[]): s
     : `${member.displayName} (@${member.username}) · ${kind}`;
 }
 
+function createEnrollmentMutationStore(): EnrollmentMutationStore {
+  let snapshot: ReadonlyMap<string, EnrollmentMutationAction> = new Map();
+  const listeners = new Set<() => void>();
+  const publish = (next: ReadonlyMap<string, EnrollmentMutationAction>): void => {
+    snapshot = next;
+    for (const listener of listeners) listener();
+  };
+  return {
+    begin: (enrollmentId, action) => {
+      if (snapshot.has(enrollmentId)) return false;
+      publish(new Map(snapshot).set(enrollmentId, action));
+      return true;
+    },
+    finish: (enrollmentId) => {
+      if (!snapshot.has(enrollmentId)) return;
+      const next = new Map(snapshot);
+      next.delete(enrollmentId);
+      publish(next);
+    },
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
 function restrictedChannelLabel(
   channelId: string,
+  enrollment: AgentEnrollment,
   conversations: HumanWorkspaceBootstrapResponse["conversations"],
 ): string {
+  const projected = enrollment.restrictedChannels?.find(
+    (channel) => channel.conversationId === channelId,
+  );
+  if (projected !== undefined) return projected.name;
   const conversation = conversations.find(
     (summary) => summary.conversation.id === channelId,
   )?.conversation;
@@ -68,30 +117,34 @@ function restrictedChannelLabel(
   return `Private channel not visible to you (${channelId})`;
 }
 
-function pendingEnrollments(response: ListAgentEnrollmentsResponse): readonly AgentEnrollment[] {
-  return response.enrollments.filter((enrollment) => enrollment.status === "pending_approval");
+function openEnrollments(response: ListAgentEnrollmentsResponse): readonly AgentEnrollment[] {
+  return response.enrollments.filter(
+    (enrollment) =>
+      enrollment.status === "pending_approval" || enrollment.status === "ready_to_redeem",
+  );
 }
 
 function EnrollmentCard({
   enrollment,
   members,
   conversations,
-  confirmingApproval,
-  reviewingDecision,
-  onBeginApproval,
-  onCancelApproval,
-  onReview,
+  confirmationAction,
+  mutationAction,
+  onBeginConfirmation,
+  onCancelConfirmation,
+  onMutate,
 }: {
   readonly enrollment: AgentEnrollment;
   readonly members: readonly User[];
   readonly conversations: HumanWorkspaceBootstrapResponse["conversations"];
-  readonly confirmingApproval: boolean;
-  readonly reviewingDecision: ReviewDecision | null;
-  readonly onBeginApproval: (enrollmentId: string) => void;
-  readonly onCancelApproval: () => void;
-  readonly onReview: (enrollment: AgentEnrollment, decision: ReviewDecision) => void;
+  readonly confirmationAction: ConfirmationAction | null;
+  readonly mutationAction: EnrollmentMutationAction | null;
+  readonly onBeginConfirmation: (enrollmentId: string, action: ConfirmationAction) => void;
+  readonly onCancelConfirmation: () => void;
+  readonly onMutate: (enrollment: AgentEnrollment, action: EnrollmentMutationAction) => void;
 }) {
-  const busy = reviewingDecision !== null;
+  const busy = mutationAction !== null;
+  const readyToJoin = enrollment.status === "ready_to_redeem";
   return (
     <article className="agent-enrollment-card" aria-busy={busy}>
       <header className="agent-enrollment-card-header">
@@ -99,7 +152,11 @@ function EnrollmentCard({
           <h3>{enrollment.displayName}</h3>
           <p>@{enrollment.username}</p>
         </div>
-        <span className="agent-enrollment-status">Pending approval</span>
+        <span
+          className={`agent-enrollment-status${readyToJoin ? " agent-enrollment-status-ready" : ""}`}
+        >
+          {readyToJoin ? "Ready to join" : "Pending approval"}
+        </span>
       </header>
       <dl className="agent-enrollment-details">
         <div>
@@ -130,44 +187,105 @@ function EnrollmentCard({
             ) : (
               <ul>
                 {enrollment.restrictedChannelIds.map((channelId) => (
-                  <li key={channelId}>{restrictedChannelLabel(channelId, conversations)}</li>
+                  <li key={channelId}>
+                    {restrictedChannelLabel(channelId, enrollment, conversations)}
+                  </li>
                 ))}
               </ul>
             )}
           </dd>
         </div>
       </dl>
-      {confirmingApproval && (
-        <p className="agent-enrollment-confirmation" role="status">
-          Approve {enrollment.displayName}? This grants the fixed agent profile, including
-          permission to invite more agents.
+      {confirmationAction !== null && (
+        <p
+          className={`agent-enrollment-confirmation${
+            confirmationAction === "cancel" ? " agent-enrollment-confirmation-danger" : ""
+          }`}
+          role="status"
+        >
+          {confirmationAction === "approve" ? (
+            <>
+              Approve {enrollment.displayName}? This grants the fixed agent profile, including
+              permission to invite more agents.
+            </>
+          ) : (
+            <>
+              Cancel {enrollment.displayName}&apos;s invitation? The teammate will no longer be able
+              to join with this enrollment.
+            </>
+          )}
         </p>
       )}
       <div className="agent-enrollment-actions">
-        <button
-          type="button"
-          className={confirmingApproval ? "agent-enrollment-cancel" : "agent-enrollment-reject"}
-          disabled={busy}
-          onClick={confirmingApproval ? onCancelApproval : () => onReview(enrollment, "reject")}
-        >
-          {confirmingApproval ? "Cancel" : reviewingDecision === "reject" ? "Rejecting…" : "Reject"}
-        </button>
-        <button
-          type="button"
-          className="agent-enrollment-approve"
-          disabled={busy}
-          onClick={
-            confirmingApproval
-              ? () => onReview(enrollment, "approve")
-              : () => onBeginApproval(enrollment.id)
-          }
-        >
-          {confirmingApproval
-            ? reviewingDecision === "approve"
-              ? "Approving…"
-              : "Confirm approval"
-            : "Approve"}
-        </button>
+        {readyToJoin ? (
+          <>
+            {confirmationAction === "cancel" && (
+              <button
+                type="button"
+                className="agent-enrollment-cancel"
+                disabled={busy}
+                onClick={onCancelConfirmation}
+              >
+                Keep invitation
+              </button>
+            )}
+            <button
+              type="button"
+              className="agent-enrollment-cancel-invitation"
+              disabled={busy}
+              onClick={
+                confirmationAction === "cancel"
+                  ? () => onMutate(enrollment, "cancel")
+                  : () => onBeginConfirmation(enrollment.id, "cancel")
+              }
+            >
+              {mutationAction === "cancel"
+                ? "Cancelling…"
+                : confirmationAction === "cancel"
+                  ? "Confirm cancellation"
+                  : "Cancel invitation"}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={
+                confirmationAction === "approve"
+                  ? "agent-enrollment-cancel"
+                  : "agent-enrollment-reject"
+              }
+              disabled={busy}
+              onClick={
+                confirmationAction === "approve"
+                  ? onCancelConfirmation
+                  : () => onMutate(enrollment, "reject")
+              }
+            >
+              {confirmationAction === "approve"
+                ? "Cancel"
+                : mutationAction === "reject"
+                  ? "Rejecting…"
+                  : "Reject"}
+            </button>
+            <button
+              type="button"
+              className="agent-enrollment-approve"
+              disabled={busy}
+              onClick={
+                confirmationAction === "approve"
+                  ? () => onMutate(enrollment, "approve")
+                  : () => onBeginConfirmation(enrollment.id, "approve")
+              }
+            >
+              {confirmationAction === "approve"
+                ? mutationAction === "approve"
+                  ? "Approving…"
+                  : "Confirm approval"
+                : "Approve"}
+            </button>
+          </>
+        )}
       </div>
     </article>
   );
@@ -184,11 +302,14 @@ export function AgentEnrollmentsView({
   readonly conversations: HumanWorkspaceBootstrapResponse["conversations"];
   readonly active: boolean;
 }) {
-  const [state, setState] = useState<EnrollmentListState>({ status: "idle" });
-  const [reviewingDecisions, setReviewingDecisions] = useState<ReadonlyMap<string, ReviewDecision>>(
-    new Map(),
+  const [state, setState] = useState<EnrollmentListState>({ status: "idle", enrollments: [] });
+  const [mutationStore] = useState(createEnrollmentMutationStore);
+  const mutationActions = useSyncExternalStore(
+    mutationStore.subscribe,
+    mutationStore.getSnapshot,
+    mutationStore.getSnapshot,
   );
-  const [confirmingApprovalId, setConfirmingApprovalId] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [reviewNotice, setReviewNotice] = useState<ReviewNotice | null>(null);
   const mounted = useRef(false);
   const activeRef = useRef(active);
@@ -198,7 +319,6 @@ export function AgentEnrollmentsView({
   const trailingRefresh = useRef(false);
   const pollTimer = useRef<number | null>(null);
   const attentionRefreshTimer = useRef<number | null>(null);
-  const reviewingIds = useRef(new Map<string, ReviewDecision>());
   const requestListRef = useRef<() => void>(() => undefined);
 
   const clearPoll = useCallback((): void => {
@@ -220,7 +340,7 @@ export function AgentEnrollmentsView({
         !mounted.current ||
         !activeRef.current ||
         generation.current !== expectedGeneration ||
-        reviewingIds.current.size > 0 ||
+        mutationStore.getSnapshot().size > 0 ||
         document.visibilityState === "hidden"
       ) {
         return;
@@ -237,13 +357,13 @@ export function AgentEnrollmentsView({
         }
       }, POLL_DELAY_MS);
     },
-    [clearPoll],
+    [clearPoll, mutationStore],
   );
 
   const requestList = useCallback((): void => {
     if (!mounted.current || !activeRef.current) return;
     clearPoll();
-    if (reviewingIds.current.size > 0) {
+    if (mutationStore.getSnapshot().size > 0) {
       trailingRefresh.current = true;
       return;
     }
@@ -258,9 +378,9 @@ export function AgentEnrollmentsView({
     };
     listRun.current = run;
     setState((previous) =>
-      previous.status === "ready" || previous.status === "refreshing"
+      previous.enrollments.length > 0
         ? { status: "refreshing", enrollments: previous.enrollments }
-        : { status: "loading" },
+        : { status: "loading", enrollments: [] },
     );
 
     void client
@@ -274,7 +394,7 @@ export function AgentEnrollmentsView({
         ) {
           return;
         }
-        setState({ status: "ready", enrollments: pendingEnrollments(response) });
+        setState({ status: "ready", enrollments: openEnrollments(response) });
       })
       .catch((error: unknown) => {
         if (
@@ -285,10 +405,11 @@ export function AgentEnrollmentsView({
         ) {
           return;
         }
-        setState({
+        setState((previous) => ({
           status: "error",
           message: ipcErrorMessage(error, "Could not load agent requests."),
-        });
+          enrollments: previous.enrollments,
+        }));
       })
       .finally(() => {
         if (listRun.current === run) listRun.current = null;
@@ -300,62 +421,83 @@ export function AgentEnrollmentsView({
         }
         schedulePoll(generation.current);
       });
-  }, [clearPoll, client, schedulePoll]);
+  }, [clearPoll, client, mutationStore, schedulePoll]);
 
   useEffect(() => {
     requestListRef.current = requestList;
   }, [requestList]);
 
-  const beginApproval = useCallback((enrollmentId: string): void => {
-    if (reviewingIds.current.has(enrollmentId)) return;
-    setReviewNotice(null);
-    setConfirmingApprovalId(enrollmentId);
+  const beginConfirmation = useCallback(
+    (enrollmentId: string, action: ConfirmationAction): void => {
+      if (mutationStore.getSnapshot().has(enrollmentId)) return;
+      setReviewNotice(null);
+      setConfirmation({ enrollmentId, action });
+    },
+    [mutationStore],
+  );
+
+  const cancelConfirmation = useCallback((): void => {
+    setConfirmation(null);
   }, []);
 
-  const cancelApproval = useCallback((): void => {
-    setConfirmingApprovalId(null);
-  }, []);
-
-  const review = useCallback(
-    (enrollment: AgentEnrollment, decision: ReviewDecision): void => {
-      if (!mounted.current || !activeRef.current || reviewingIds.current.has(enrollment.id)) return;
-      reviewingIds.current.set(enrollment.id, decision);
-      setReviewingDecisions(new Map(reviewingIds.current));
+  const mutateEnrollment = useCallback(
+    (enrollment: AgentEnrollment, action: EnrollmentMutationAction): void => {
+      if (!mounted.current || !activeRef.current) return;
+      if (!mutationStore.begin(enrollment.id, action)) return;
       setReviewNotice(null);
       clearPoll();
-      // Lists that began before the review must not restore this row after the decision settles.
+      // Lists that began before the mutation must not restore stale row state after it settles.
       mutationRevision.current += 1;
 
-      void client
-        .reviewAgentEnrollment(enrollment.id, decision)
+      const mutation =
+        action === "cancel"
+          ? client.cancelAgentEnrollment(enrollment.id)
+          : client.reviewAgentEnrollment(enrollment.id, action);
+      void mutation
         .then((response) => {
           if (!mounted.current) return;
-          const expectedStatus = decision === "approve" ? "ready_to_redeem" : "rejected";
-          setState((previous) =>
-            previous.status === "ready" || previous.status === "refreshing"
-              ? {
-                  status: previous.status,
-                  enrollments:
-                    response.enrollment.status === "pending_approval"
-                      ? previous.enrollments
-                      : previous.enrollments.filter((candidate) => candidate.id !== enrollment.id),
-                }
-              : previous,
-          );
+          const expectedStatus =
+            action === "approve"
+              ? "ready_to_redeem"
+              : action === "reject"
+                ? "rejected"
+                : "cancelled";
+          const returned = response.enrollment;
+          const returnedIsOpen =
+            returned.status === "pending_approval" || returned.status === "ready_to_redeem";
+          const replacement =
+            returnedIsOpen &&
+            returned.restrictedChannels === undefined &&
+            enrollment.restrictedChannels !== undefined
+              ? { ...returned, restrictedChannels: enrollment.restrictedChannels }
+              : returned;
+          setState((previous) => ({
+            ...previous,
+            enrollments: returnedIsOpen
+              ? previous.enrollments.map((candidate) =>
+                  candidate.id === enrollment.id ? replacement : candidate,
+                )
+              : previous.enrollments.filter((candidate) => candidate.id !== enrollment.id),
+          }));
           if (response.enrollment.status === expectedStatus) {
             setReviewNotice({
               tone: "success",
               message:
-                decision === "approve"
-                  ? `Approved ${enrollment.displayName}. The agent can now finish joining.`
-                  : `Rejected ${enrollment.displayName}.`,
+                action === "approve"
+                  ? `Approved ${enrollment.displayName}. You can cancel the invitation until the teammate joins.`
+                  : action === "reject"
+                    ? `Rejected ${enrollment.displayName}.`
+                    : `Cancelled ${enrollment.displayName}'s invitation. The teammate can no longer join with it.`,
             });
           } else if (response.enrollment.status === "expired") {
             setReviewNotice({
               tone: "error",
-              message: `${enrollment.displayName} expired before it could be ${
-                decision === "approve" ? "approved" : "rejected"
-              }.`,
+              message:
+                action === "cancel"
+                  ? `${enrollment.displayName} expired before the invitation could be cancelled.`
+                  : `${enrollment.displayName} expired before it could be ${
+                      action === "approve" ? "approved" : "rejected"
+                    }.`,
             });
           } else {
             setReviewNotice({
@@ -368,16 +510,22 @@ export function AgentEnrollmentsView({
           if (!mounted.current) return;
           setReviewNotice({
             tone: "error",
-            message: ipcErrorMessage(error, `Could not ${decision} ${enrollment.displayName}.`),
+            message: ipcErrorMessage(
+              error,
+              action === "cancel"
+                ? `Could not cancel ${enrollment.displayName}'s invitation.`
+                : `Could not ${action} ${enrollment.displayName}.`,
+            ),
           });
         })
         .finally(() => {
-          // This also invalidates a list that began while the review request was in flight.
+          // This also invalidates a list that began while the mutation was in flight.
           mutationRevision.current += 1;
-          reviewingIds.current.delete(enrollment.id);
+          mutationStore.finish(enrollment.id);
           if (mounted.current) {
-            setReviewingDecisions(new Map(reviewingIds.current));
-            setConfirmingApprovalId((current) => (current === enrollment.id ? null : current));
+            setConfirmation((current) =>
+              current?.enrollmentId === enrollment.id ? null : current,
+            );
           }
           if (mounted.current && activeRef.current) {
             trailingRefresh.current = false;
@@ -385,7 +533,7 @@ export function AgentEnrollmentsView({
           }
         });
     },
-    [clearPoll, client],
+    [clearPoll, client, mutationStore],
   );
 
   useEffect(() => {
@@ -408,10 +556,10 @@ export function AgentEnrollmentsView({
     clearAttentionRefresh();
     clearPoll();
     if (active) {
-      setState({ status: "loading" });
+      setState({ status: "loading", enrollments: [] });
       requestListRef.current();
-    } else if (reviewingIds.current.size === 0) {
-      setConfirmingApprovalId(null);
+    } else if (mutationStore.getSnapshot().size === 0) {
+      setConfirmation(null);
       setReviewNotice(null);
     }
     return () => {
@@ -421,7 +569,7 @@ export function AgentEnrollmentsView({
       clearAttentionRefresh();
       clearPoll();
     };
-  }, [active, clearAttentionRefresh, clearPoll, client]);
+  }, [active, clearAttentionRefresh, clearPoll, client, mutationStore]);
 
   useEffect(() => {
     const refreshAfterAttentionSettles = (): void => {
@@ -452,8 +600,7 @@ export function AgentEnrollmentsView({
     };
   }, [clearAttentionRefresh, clearPoll]);
 
-  const enrollments =
-    state.status === "ready" || state.status === "refreshing" ? state.enrollments : [];
+  const enrollments = state.enrollments;
 
   return (
     <section
@@ -467,7 +614,8 @@ export function AgentEnrollmentsView({
           <h2 id="agent-enrollments-title">Agent requests</h2>
           <p className="unreads-subtitle">
             Approval grants the fixed default agent profile, including permission to request further
-            agent enrollments. The joining agent keeps its own credential.
+            agent enrollments. Approved invitations remain here until the teammate joins, expires,
+            or you cancel them. The joining agent keeps its own credential.
           </p>
         </div>
         <button type="button" className="communication-paths-refresh" onClick={requestList}>
@@ -499,7 +647,7 @@ export function AgentEnrollmentsView({
         {enrollments.length > 0 && (
           <ol
             className="agent-enrollment-list"
-            aria-label="Pending agent requests"
+            aria-label="Open agent requests"
             aria-busy={state.status === "refreshing"}
           >
             {enrollments.map((enrollment) => (
@@ -508,11 +656,13 @@ export function AgentEnrollmentsView({
                   enrollment={enrollment}
                   members={members}
                   conversations={conversations}
-                  confirmingApproval={confirmingApprovalId === enrollment.id}
-                  reviewingDecision={reviewingDecisions.get(enrollment.id) ?? null}
-                  onBeginApproval={beginApproval}
-                  onCancelApproval={cancelApproval}
-                  onReview={review}
+                  confirmationAction={
+                    confirmation?.enrollmentId === enrollment.id ? confirmation.action : null
+                  }
+                  mutationAction={mutationActions.get(enrollment.id) ?? null}
+                  onBeginConfirmation={beginConfirmation}
+                  onCancelConfirmation={cancelConfirmation}
+                  onMutate={mutateEnrollment}
                 />
               </li>
             ))}

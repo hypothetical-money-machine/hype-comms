@@ -25,6 +25,8 @@ export const DEFAULT_AGENT_SCOPES = ["workspace:read", "messages:write"] as cons
  */
 export const DEFAULT_AGENT_AGENCY_PROFILE = "default-agency-v1" as const;
 export const AGENT_EFFECTIVE_SCOPES_CAPABILITY = "agent-effective-scopes-v1" as const;
+export const AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY =
+  "agent-enrollment-review-channels-v1" as const;
 export const DEFAULT_AGENCY_AGENT_SCOPES = [
   "workspace:read",
   "messages:write",
@@ -211,6 +213,13 @@ const requestedRestrictedChannelIdsSchema = z
   .max(100)
   .refine((ids) => new Set(ids).size === ids.length, "Restricted channel IDs must be unique");
 
+export const agentEnrollmentRestrictedChannelSchema = z
+  .object({
+    conversationId: entityIdSchema,
+    name: z.string().trim().min(1).max(100),
+  })
+  .strict();
+
 export const requestAgentEnrollmentSchema = createAgentRequestSchema
   .extend({
     label: agentTokenSchema.shape.label,
@@ -231,6 +240,7 @@ export const agentEnrollmentSchema = z
     requestedBy: entityIdSchema,
     requestedByKind: z.enum(["human", "agent"]),
     restrictedChannelIds: requestedRestrictedChannelIdsSchema,
+    restrictedChannels: z.array(agentEnrollmentRestrictedChannelSchema).max(100).optional(),
     expiresAt: isoDateTimeSchema,
     reviewedBy: entityIdSchema.nullable(),
     reviewedAt: isoDateTimeSchema.nullable(),
@@ -260,6 +270,27 @@ export const agentEnrollmentSchema = z
     }
     if ((enrollment.reviewedBy === null) !== (enrollment.reviewedAt === null)) {
       context.addIssue({ code: "custom", message: "Review metadata must be complete" });
+    }
+    if (enrollment.restrictedChannels !== undefined) {
+      if (enrollment.status !== "pending_approval" && enrollment.status !== "ready_to_redeem") {
+        context.addIssue({
+          code: "custom",
+          path: ["restrictedChannels"],
+          message: "Only open enrollments carry restricted channel review details",
+        });
+      }
+      const projectedIds = enrollment.restrictedChannels.map((channel) => channel.conversationId);
+      if (
+        new Set(projectedIds).size !== projectedIds.length ||
+        projectedIds.length !== enrollment.restrictedChannelIds.length ||
+        projectedIds.some((id) => !enrollment.restrictedChannelIds.includes(id))
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["restrictedChannels"],
+          message: "Restricted channel review details must match the requested channel IDs",
+        });
+      }
     }
   });
 
@@ -306,6 +337,9 @@ export type AgentEnrollmentCredentialVerifier = z.infer<
 >;
 export type RequestAgentEnrollment = z.infer<typeof requestAgentEnrollmentSchema>;
 export type AgentEnrollment = z.infer<typeof agentEnrollmentSchema>;
+export type AgentEnrollmentRestrictedChannel = z.infer<
+  typeof agentEnrollmentRestrictedChannelSchema
+>;
 export type AgentEnrollmentResponse = z.infer<typeof agentEnrollmentResponseSchema>;
 export type ListAgentEnrollmentsResponse = z.infer<typeof listAgentEnrollmentsResponseSchema>;
 export type ReviewAgentEnrollmentRequest = z.infer<typeof reviewAgentEnrollmentRequestSchema>;

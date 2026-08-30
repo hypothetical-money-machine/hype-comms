@@ -1,5 +1,6 @@
 import {
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   AGENT_ENROLLMENT_AUTHORIZATION_SCHEME,
   agentEnrollmentPolicyResponseSchema,
   agentEnrollmentNoBodyRequestSchema,
@@ -210,6 +211,16 @@ function supportsAgentEffectiveScopes(value: string | string[] | undefined): boo
   const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
   return parsed.data.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
+}
+
+function supportsAgentEnrollmentReviewChannels(value: string | string[] | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "string") {
+    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  }
+  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
+  return parsed.data.includes(AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY);
 }
 
 function withoutTitle<T extends { readonly title?: unknown }>(user: T): Omit<T, "title"> {
@@ -533,11 +544,15 @@ export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
     return reply.code(201).send(agentEnrollmentResponseSchema.parse({ enrollment }));
   });
 
-  app.get("/agent-enrollments", async (request) => {
+  app.get("/agent-enrollments", async (request, reply) => {
+    void reply.header("cache-control", "no-store");
     const identity = await requireAuthenticatedIdentity(request, service);
     requireAgentScope(identity, "agents:invite");
     return listAgentEnrollmentsResponseSchema.parse({
-      enrollments: await requireEnrollmentModule().list(enrollmentActor(identity)),
+      enrollments: await requireEnrollmentModule().list(
+        enrollmentActor(identity),
+        supportsAgentEnrollmentReviewChannels(request.headers["x-hype-comms-capabilities"]),
+      ),
     });
   });
 

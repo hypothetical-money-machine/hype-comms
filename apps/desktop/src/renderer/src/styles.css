@@ -5883,6 +5883,12 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
   white-space: nowrap;
 }
 
+.agent-enrollment-status-ready {
+  border-color: color-mix(in srgb, var(--theme-text-success) 45%, var(--theme-border-default));
+  background: color-mix(in srgb, var(--theme-text-success) 9%, var(--theme-surface-card));
+  color: var(--theme-text-success);
+}
+
 .agent-enrollment-details {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5956,6 +5962,11 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
   margin-top: 10px;
 }
 
+.agent-enrollment-confirmation-danger {
+  border-color: color-mix(in srgb, var(--theme-text-danger) 38%, var(--theme-border-default));
+  background: color-mix(in srgb, var(--theme-text-danger) 7%, var(--theme-surface-card));
+}
+
 .agent-enrollment-actions button {
   min-width: 88px;
   padding: 8px 13px;
@@ -5977,13 +5988,15 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
 }
 
 .agent-enrollment-reject,
+.agent-enrollment-cancel-invitation,
 .agent-enrollment-cancel {
   border: 1px solid var(--theme-border-default);
   background: transparent;
   color: var(--theme-text-secondary);
 }
 
-.agent-enrollment-reject:hover:not(:disabled) {
+.agent-enrollment-reject:hover:not(:disabled),
+.agent-enrollment-cancel-invitation:hover:not(:disabled) {
   border-color: var(--theme-border-danger);
   background: color-mix(in srgb, var(--theme-text-danger) 7%, var(--theme-surface-card));
   color: var(--theme-text-danger);

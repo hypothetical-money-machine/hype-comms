@@ -1819,6 +1819,16 @@ function registerIpcHandlers(): void {
     },
   );
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel);
+  ipcMain.handle(
+    DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
+    async (event, enrollmentId: unknown) => {
+      if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollment cancel sender");
+      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+      return workspaceTransport.cancelAgentEnrollment(entityIdSchema.parse(enrollmentId));
+    },
+  );
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
   ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationsList, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace conversations sender");

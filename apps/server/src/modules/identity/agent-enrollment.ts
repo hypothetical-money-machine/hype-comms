@@ -4,6 +4,7 @@ import {
   DEFAULT_AGENT_AGENCY_PROFILE,
   DEFAULT_AGENCY_AGENT_SCOPES,
   agentEnrollmentPolicyResponseSchema,
+  agentEnrollmentRestrictedChannelSchema,
   agentEnrollmentResponseSchema,
   agentEnrollmentSchema,
   entityIdSchema,
@@ -11,6 +12,7 @@ import {
   type AgentEnrollment,
   type AgentEnrollmentPolicy,
   type AgentEnrollmentPolicyMode,
+  type AgentEnrollmentRestrictedChannel,
   type AgentScope,
   type AgentTokenSecret,
   type EntityId,
@@ -88,6 +90,12 @@ interface ExistingTokenRow extends QueryResultRow {
 
 interface EnrollmentCredentialRow extends QueryResultRow {
   readonly credential_verifier: unknown;
+}
+
+interface EnrollmentRestrictedChannelRow extends QueryResultRow {
+  readonly enrollment_id: unknown;
+  readonly conversation_id: unknown;
+  readonly name: unknown;
 }
 
 const enrollmentCredentialVerifierBufferSchema = z
@@ -525,11 +533,18 @@ export class AgentEnrollmentModule {
     return response.enrollment;
   }
 
-  async list(actor: AgentEnrollmentActor): Promise<AgentEnrollment[]> {
+  async list(
+    actor: AgentEnrollmentActor,
+    includeRestrictedChannelReviewDetails = false,
+  ): Promise<AgentEnrollment[]> {
     return this.#transaction(async (client) => {
-      await this.#requireStatusReader(client, actor);
-      await this.#expireWorkspaceEnrollments(client, actor.workspaceId, this.#clock());
       const owner = actor.kind === "human" && actor.role === "owner";
+      if (owner && includeRestrictedChannelReviewDetails) {
+        await this.#requireOwner(client, actor, true);
+      } else {
+        await this.#requireStatusReader(client, actor);
+      }
+      await this.#expireWorkspaceEnrollments(client, actor.workspaceId, this.#clock());
       const result = await client.query<EnrollmentRow>(
         enrollmentSelect(
           `enrollment.workspace_id = $1${owner ? "" : " AND enrollment.requested_by = $2"}`,
@@ -537,7 +552,46 @@ export class AgentEnrollmentModule {
         ),
         owner ? [actor.workspaceId] : [actor.workspaceId, actor.userId],
       );
-      return result.rows.map(mapEnrollment);
+      const enrollments = result.rows.map(mapEnrollment);
+      if (!owner || !includeRestrictedChannelReviewDetails) return enrollments;
+      const openEnrollmentIds = enrollments
+        .filter(
+          (enrollment) =>
+            enrollment.status === "pending_approval" || enrollment.status === "ready_to_redeem",
+        )
+        .map((enrollment) => enrollment.id);
+      if (openEnrollmentIds.length === 0) return enrollments;
+
+      const channels = await client.query<EnrollmentRestrictedChannelRow>(
+        `SELECT seat.enrollment_id, seat.conversation_id, conversation.name
+           FROM agent_enrollment_restricted_channels AS seat
+           JOIN conversations AS conversation
+             ON conversation.id = seat.conversation_id
+            AND conversation.workspace_id = seat.workspace_id
+          WHERE seat.workspace_id = $1
+            AND seat.enrollment_id = ANY($2::uuid[])
+          ORDER BY seat.enrollment_id, seat.conversation_id`,
+        [actor.workspaceId, openEnrollmentIds],
+      );
+      const channelsByEnrollment = new Map<EntityId, AgentEnrollmentRestrictedChannel[]>();
+      for (const row of channels.rows) {
+        const enrollmentId = entityIdSchema.parse(row.enrollment_id);
+        const channel = agentEnrollmentRestrictedChannelSchema.parse({
+          conversationId: row.conversation_id,
+          name: row.name,
+        });
+        const projected = channelsByEnrollment.get(enrollmentId) ?? [];
+        projected.push(channel);
+        channelsByEnrollment.set(enrollmentId, projected);
+      }
+      return enrollments.map((enrollment) =>
+        enrollment.status === "pending_approval" || enrollment.status === "ready_to_redeem"
+          ? agentEnrollmentSchema.parse({
+              ...enrollment,
+              restrictedChannels: channelsByEnrollment.get(enrollment.id) ?? [],
+            })
+          : enrollment,
+      );
     });
   }
 

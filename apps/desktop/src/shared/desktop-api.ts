@@ -210,6 +210,7 @@ export interface DesktopApi
     enrollmentId: string,
     decision: ReviewAgentEnrollmentRequest["decision"],
   ) => Promise<AgentEnrollmentResponse>;
+  readonly cancelAgentEnrollment: (enrollmentId: string) => Promise<AgentEnrollmentResponse>;
   /** Updates the current member's profile title. Passing null clears the title. */
   readonly updateProfile: (title: string | null) => Promise<User>;
   /**

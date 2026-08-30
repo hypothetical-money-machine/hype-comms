@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AgentEnrollment,
   AgentEnrollmentResponse,
@@ -110,8 +110,16 @@ function clientWith(
     enrollmentId,
     decision,
   ) => reviewed(enrollment({ id: enrollmentId }), decision),
+  cancelAgentEnrollment: AgentEnrollmentsClient["cancelAgentEnrollment"] = async (
+    enrollmentId,
+  ) => ({
+    enrollment: {
+      ...enrollment({ id: enrollmentId, status: "ready_to_redeem" }),
+      status: "cancelled",
+    },
+  }),
 ): AgentEnrollmentsClient {
-  return { listAgentEnrollments, reviewAgentEnrollment };
+  return { cancelAgentEnrollment, listAgentEnrollments, reviewAgentEnrollment };
 }
 
 function deferred<T>(): {
@@ -162,7 +170,13 @@ describe("AgentEnrollmentsView", () => {
     expect(listAgentEnrollments).not.toHaveBeenCalled();
   });
 
-  it("renders pending requests with requester, dates, and every restricted channel", async () => {
+  it("renders open requests with owner-projected private channel names", async () => {
+    const projected = enrollment({
+      restrictedChannels: [
+        { conversationId: CHANNEL_ID, name: "Launch room" },
+        { conversationId: MISSING_CHANNEL_ID, name: "Private roadmap" },
+      ],
+    });
     const missingRequester = enrollment({
       id: SECOND_ENROLLMENT_ID,
       username: "luna",
@@ -171,42 +185,69 @@ describe("AgentEnrollmentsView", () => {
       requestedBy: MISSING_REQUESTER_ID,
       requestedByKind: "human",
       restrictedChannelIds: [],
+      restrictedChannels: [],
     });
-    const alreadyReviewed = enrollment({
+    const readyToJoin = enrollment({
       id: REVIEWED_ENROLLMENT_ID,
-      username: "settled",
-      displayName: "Settled request",
+      username: "ready",
+      displayName: "Ready teammate",
       status: "ready_to_redeem",
+      restrictedChannelIds: [],
+      restrictedChannels: [],
+    });
+    const rejected = enrollment({
+      id: "10000000-0000-4000-8000-000000000010",
+      username: "rejected",
+      displayName: "Rejected request",
+      status: "rejected",
       restrictedChannelIds: [],
     });
     const listAgentEnrollments = vi.fn(async () =>
-      response(enrollment(), missingRequester, alreadyReviewed),
+      response(projected, missingRequester, readyToJoin, rejected),
     );
 
     render(view(clientWith(listAgentEnrollments)));
 
     expect(screen.getByRole("status").textContent).toContain("Loading agent requests");
-    await screen.findByRole("heading", { name: "Atlas" });
-    expect(screen.getByText("@atlas")).toBeTruthy();
-    expect(screen.getByText("Hermes (@hermes) · Agent")).toBeTruthy();
-    expect(screen.getByText("atlas-runtime")).toBeTruthy();
-    expect(screen.getByText("Launch room")).toBeTruthy();
-    expect(
-      screen.getByText(`Private channel not visible to you (${MISSING_CHANNEL_ID})`),
-    ).toBeTruthy();
-    expect(screen.getByText(`Human ${MISSING_REQUESTER_ID}`)).toBeTruthy();
-    expect(screen.getByText("None requested")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Settled request" })).toBeNull();
+    const atlasCard = (await screen.findByRole("heading", { name: "Atlas" })).closest("article");
+    if (atlasCard === null) throw new Error("Atlas card is missing");
+    expect(within(atlasCard).getByText("@atlas")).toBeTruthy();
+    expect(within(atlasCard).getByText("Hermes (@hermes) · Agent")).toBeTruthy();
+    expect(within(atlasCard).getByText("atlas-runtime")).toBeTruthy();
+    expect(within(atlasCard).getByText("Launch room")).toBeTruthy();
+    expect(within(atlasCard).getByText("Private roadmap")).toBeTruthy();
+    const lunaCard = screen.getByRole("heading", { name: "Luna" }).closest("article");
+    if (lunaCard === null) throw new Error("Luna card is missing");
+    expect(within(lunaCard).getByText(`Human ${MISSING_REQUESTER_ID}`)).toBeTruthy();
+    expect(within(lunaCard).getByText("None requested")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Ready teammate" })).toBeTruthy();
+    expect(screen.getByText("Ready to join")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel invitation" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Rejected request" })).toBeNull();
     expect(document.querySelector(`time[datetime="${NOW}"]`)).not.toBeNull();
     expect(document.querySelector(`time[datetime="${EXPIRES_AT}"]`)).not.toBeNull();
     expect(screen.getByText(/permission to request further agent enrollments/)).toBeTruthy();
   });
 
-  it("clears the pending rows when a refresh fails", async () => {
+  it("keeps the UUID fallback for an older server without channel details", async () => {
+    const legacy = enrollment({
+      restrictedChannelIds: [MISSING_CHANNEL_ID],
+      restrictedChannels: undefined,
+    });
+    render(view(clientWith(async () => response(legacy))));
+
+    await screen.findByRole("heading", { name: "Atlas" });
+    expect(
+      screen.getByText(`Private channel not visible to you (${MISSING_CHANNEL_ID})`),
+    ).toBeTruthy();
+  });
+
+  it("keeps pending rows visible, reports a failed refresh, and recovers", async () => {
     const listAgentEnrollments = vi
       .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
       .mockResolvedValueOnce(response(enrollment()))
-      .mockRejectedValueOnce(new Error("An active workspace owner session is required"));
+      .mockRejectedValueOnce(new Error("An active workspace owner session is required"))
+      .mockResolvedValueOnce(response());
     render(view(clientWith(listAgentEnrollments)));
     await screen.findByRole("heading", { name: "Atlas" });
 
@@ -215,17 +256,30 @@ describe("AgentEnrollmentsView", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "An active workspace owner session is required",
     );
-    expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("approves once per row, removes the row, and refreshes the queue", async () => {
+  it("approves once per row, keeps the ready invitation, and refreshes the queue", async () => {
     const request = enrollment();
+    const approved = reviewed(request, "approve").enrollment;
     const reviewGate = deferred<AgentEnrollmentResponse>();
     const listAgentEnrollments = vi
       .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
       .mockResolvedValueOnce(response(request))
-      .mockResolvedValueOnce(response());
-    const reviewAgentEnrollment = vi.fn(() => reviewGate.promise);
+      .mockResolvedValueOnce(response(approved));
+    const confirmRef: { current: HTMLElement | null } = { current: null };
+    let attemptedReentry = false;
+    const reviewAgentEnrollment = vi.fn(() => {
+      if (!attemptedReentry) {
+        attemptedReentry = true;
+        if (confirmRef.current !== null) fireEvent.click(confirmRef.current);
+      }
+      return reviewGate.promise;
+    });
     render(view(clientWith(listAgentEnrollments, reviewAgentEnrollment)));
     await screen.findByRole("heading", { name: "Atlas" });
 
@@ -239,7 +293,7 @@ describe("AgentEnrollmentsView", () => {
     expect(reviewAgentEnrollment).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     const confirm = screen.getByRole("button", { name: "Confirm approval" });
-    fireEvent.click(confirm);
+    confirmRef.current = confirm;
     fireEvent.click(confirm);
     expect(reviewAgentEnrollment).toHaveBeenCalledTimes(1);
     expect(reviewAgentEnrollment).toHaveBeenCalledWith(ENROLLMENT_ID, "approve");
@@ -247,14 +301,16 @@ describe("AgentEnrollmentsView", () => {
     expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
 
     await act(async () => {
-      reviewGate.resolve(reviewed(request, "approve"));
+      reviewGate.resolve({ enrollment: approved });
       await reviewGate.promise;
     });
 
     await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(2));
-    expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
+    expect(screen.getByText("Ready to join")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel invitation" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain(
-      "Approved Atlas. The agent can now finish joining.",
+      "Approved Atlas. You can cancel the invitation until the teammate joins.",
     );
   });
 
@@ -280,6 +336,94 @@ describe("AgentEnrollmentsView", () => {
     await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(2));
   });
 
+  it("confirms and cancels a ready invitation once", async () => {
+    const ready = reviewed(enrollment(), "approve").enrollment;
+    const cancelled = { ...ready, status: "cancelled" } as const;
+    const cancelGate = deferred<AgentEnrollmentResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(ready))
+      .mockResolvedValueOnce(response());
+    const confirmRef: { current: HTMLElement | null } = { current: null };
+    let attemptedReentry = false;
+    const cancelAgentEnrollment = vi.fn(() => {
+      if (!attemptedReentry) {
+        attemptedReentry = true;
+        if (confirmRef.current !== null) fireEvent.click(confirmRef.current);
+      }
+      return cancelGate.promise;
+    });
+    render(view(clientWith(listAgentEnrollments, undefined, cancelAgentEnrollment)));
+    await screen.findByRole("heading", { name: "Atlas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel invitation" }));
+    expect(cancelAgentEnrollment).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Cancel Atlas's invitation? The teammate will no longer be able to join",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Keep invitation" }));
+    expect(cancelAgentEnrollment).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel invitation" }));
+    const confirm = screen.getByRole("button", { name: "Confirm cancellation" });
+    confirmRef.current = confirm;
+    fireEvent.click(confirm);
+    expect(cancelAgentEnrollment).toHaveBeenCalledTimes(1);
+    expect(cancelAgentEnrollment).toHaveBeenCalledWith(ENROLLMENT_ID);
+    expect(confirm.textContent).toBe("Cancelling…");
+    expect(screen.getByRole("button", { name: "Keep invitation" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    await act(async () => {
+      cancelGate.resolve({ enrollment: cancelled });
+      await cancelGate.promise;
+    });
+
+    await waitFor(() => expect(listAgentEnrollments).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Cancelled Atlas's invitation. The teammate can no longer join with it.",
+    );
+  });
+
+  it("keeps a cancellation race visible until the authoritative list removes the row", async () => {
+    const ready = reviewed(enrollment(), "approve").enrollment;
+    const active = {
+      ...ready,
+      status: "active",
+      activatedAgentUserId: SECOND_ENROLLMENT_ID,
+      activatedAgentTokenId: REVIEWED_ENROLLMENT_ID,
+      activatedAt: NOW,
+    } as const;
+    const reconciledList = deferred<ListAgentEnrollmentsResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(ready))
+      .mockImplementationOnce(() => reconciledList.promise);
+    const cancelAgentEnrollment = vi.fn(async () => {
+      throw new Error("Agent enrollment can no longer be cancelled");
+    });
+    render(view(clientWith(listAgentEnrollments, undefined, cancelAgentEnrollment)));
+    await screen.findByRole("heading", { name: "Atlas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel invitation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm cancellation" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Agent enrollment can no longer be cancelled",
+    );
+    expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
+    await act(async () => {
+      reconciledList.resolve(response(active));
+      await reconciledList.promise;
+    });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull());
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Agent enrollment can no longer be cancelled",
+    );
+  });
+
   it("keeps a completed review notice across navigation, then clears it on the next departure", async () => {
     const request = enrollment();
     const reviewGate = deferred<AgentEnrollmentResponse>();
@@ -298,7 +442,7 @@ describe("AgentEnrollmentsView", () => {
       reviewGate.resolve(reviewed(request, "approve"));
       await reviewGate.promise;
     });
-    const success = "Approved Atlas. The agent can now finish joining.";
+    const success = "Approved Atlas. You can cancel the invitation until the teammate joins.";
     await waitFor(() => expect(screen.getByText(success)).toBeTruthy());
 
     rerender(view(client));
@@ -424,7 +568,7 @@ describe("AgentEnrollmentsView", () => {
     expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
   });
 
-  it("does not schedule a poll while a review is in flight", async () => {
+  it("does not schedule a poll while a mutation is in flight", async () => {
     vi.useFakeTimers();
     const request = enrollment();
     const staleList = deferred<ListAgentEnrollmentsResponse>();
@@ -481,8 +625,9 @@ describe("AgentEnrollmentsView", () => {
     expect(listAgentEnrollments).toHaveBeenCalledTimes(2);
   });
 
-  it("does not let a stale pre-review list restore an approved row", async () => {
+  it("does not let a stale pre-review list replace an approved row", async () => {
     const request = enrollment();
+    const approved = reviewed(request, "approve").enrollment;
     const staleList = deferred<ListAgentEnrollmentsResponse>();
     const postReviewList = deferred<ListAgentEnrollmentsResponse>();
     const listAgentEnrollments = vi
@@ -490,7 +635,7 @@ describe("AgentEnrollmentsView", () => {
       .mockResolvedValueOnce(response(request))
       .mockImplementationOnce(() => staleList.promise)
       .mockImplementationOnce(() => postReviewList.promise);
-    const reviewAgentEnrollment = vi.fn(async () => reviewed(request, "approve"));
+    const reviewAgentEnrollment = vi.fn(async () => ({ enrollment: approved }));
     render(view(clientWith(listAgentEnrollments, reviewAgentEnrollment)));
     await screen.findByRole("heading", { name: "Atlas" });
 
@@ -498,18 +643,51 @@ describe("AgentEnrollmentsView", () => {
     expect(listAgentEnrollments).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm approval" }));
-    await waitFor(() => expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull());
+    await screen.findByText("Ready to join");
 
     await act(async () => {
       staleList.resolve(response(request));
       await staleList.promise;
     });
     expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Ready to join")).toBeTruthy();
+
+    await act(async () => {
+      postReviewList.resolve(response(approved));
+      await postReviewList.promise;
+    });
+    expect(screen.getByText("Ready to join")).toBeTruthy();
+  });
+
+  it("does not let a stale pre-cancellation list restore a cancelled row", async () => {
+    const ready = reviewed(enrollment(), "approve").enrollment;
+    const cancelled = { ...ready, status: "cancelled" } as const;
+    const staleList = deferred<ListAgentEnrollmentsResponse>();
+    const postCancelList = deferred<ListAgentEnrollmentsResponse>();
+    const listAgentEnrollments = vi
+      .fn<AgentEnrollmentsClient["listAgentEnrollments"]>()
+      .mockResolvedValueOnce(response(ready))
+      .mockImplementationOnce(() => staleList.promise)
+      .mockImplementationOnce(() => postCancelList.promise);
+    const cancelAgentEnrollment = vi.fn(async () => ({ enrollment: cancelled }));
+    render(view(clientWith(listAgentEnrollments, undefined, cancelAgentEnrollment)));
+    await screen.findByRole("heading", { name: "Atlas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel invitation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm cancellation" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull());
+
+    await act(async () => {
+      staleList.resolve(response(ready));
+      await staleList.promise;
+    });
+    expect(listAgentEnrollments).toHaveBeenCalledTimes(3);
     expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull();
 
     await act(async () => {
-      postReviewList.resolve(response());
-      await postReviewList.promise;
+      postCancelList.resolve(response());
+      await postCancelList.promise;
     });
     expect(screen.queryByRole("heading", { name: "Atlas" })).toBeNull();
   });

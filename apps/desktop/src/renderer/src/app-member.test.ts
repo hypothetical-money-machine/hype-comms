@@ -177,6 +177,9 @@ function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = boot
     reviewAgentEnrollment: async () => {
       throw new Error("unused");
     },
+    cancelAgentEnrollment: async () => {
+      throw new Error("unused");
+    },
     listConversations: async () => ({
       conversations: workspaceBootstrap.conversations,
       nextCursor: null,

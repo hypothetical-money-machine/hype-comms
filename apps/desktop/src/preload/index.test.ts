@@ -71,6 +71,7 @@ const PENDING_AGENT_ENROLLMENT = {
   requestedBy: USER_ID,
   requestedByKind: "human",
   restrictedChannelIds: [CONVERSATION_ID],
+  restrictedChannels: [{ conversationId: CONVERSATION_ID, name: "Private launch" }],
   expiresAt: "2026-07-25T12:00:00.000Z",
   reviewedBy: null,
   reviewedAt: null,
@@ -305,6 +306,34 @@ describe("preload agent enrollment review boundary", () => {
       desktopApi.reviewAgentEnrollment(ENROLLMENT_ID, "allow" as never),
     ).rejects.toThrow();
 
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("cancels an enrollment through the exact IPC channel and validates the response", async () => {
+    const cancelled = {
+      ...PENDING_AGENT_ENROLLMENT,
+      status: "cancelled",
+      restrictedChannels: undefined,
+    } as const;
+    invoke.mockResolvedValueOnce({ enrollment: cancelled });
+
+    await expect(desktopApi.cancelAgentEnrollment(ENROLLMENT_ID)).resolves.toEqual({
+      enrollment: cancelled,
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
+      ENROLLMENT_ID,
+    );
+  });
+
+  it("rejects malformed cancel output and invalid input before it crosses IPC", async () => {
+    invoke.mockResolvedValueOnce({
+      enrollment: { ...PENDING_AGENT_ENROLLMENT, credential: "must-not-cross-ipc" },
+    });
+    await expect(desktopApi.cancelAgentEnrollment(ENROLLMENT_ID)).rejects.toThrow();
+
+    invoke.mockClear();
+    await expect(desktopApi.cancelAgentEnrollment("not-an-id")).rejects.toThrow();
     expect(invoke).not.toHaveBeenCalled();
   });
 });

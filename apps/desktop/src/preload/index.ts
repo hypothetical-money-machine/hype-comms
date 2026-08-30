@@ -547,6 +547,13 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         ),
       );
     },
+    cancelAgentEnrollment: async (enrollmentId: string) =>
+      agentEnrollmentResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
+          entityIdSchema.parse(enrollmentId),
+        ),
+      ),
     updateProfile: async (title: string | null): Promise<User> =>
       updateProfileResponseSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceProfileUpdate, title),

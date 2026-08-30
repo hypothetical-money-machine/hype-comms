@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import {
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
@@ -107,6 +108,7 @@ const CLIENT_CAPABILITIES = [
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
 ].join(",");
 
@@ -259,6 +261,7 @@ export class WorkspaceTransport {
   async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
     const response = await this.session.fetch(this.#url("/v1/agent-enrollments").href, {
       method: "GET",
+      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return listAgentEnrollmentsResponseSchema.parse(await this.#payload(response));
   }
@@ -271,8 +274,22 @@ export class WorkspaceTransport {
       this.#url(`/v1/agent-enrollments/${encodeURIComponent(enrollmentId)}/review`).href,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": crypto.randomUUID(),
+        },
         body: JSON.stringify({ decision }),
+      },
+    );
+    return agentEnrollmentResponseSchema.parse(await this.#payload(response));
+  }
+
+  async cancelAgentEnrollment(enrollmentId: string): Promise<AgentEnrollmentResponse> {
+    const response = await this.#fetchIdempotentMutation(
+      this.#url(`/v1/agent-enrollments/${encodeURIComponent(enrollmentId)}/cancel`).href,
+      {
+        method: "POST",
+        headers: { "idempotency-key": crypto.randomUUID() },
       },
     );
     return agentEnrollmentResponseSchema.parse(await this.#payload(response));

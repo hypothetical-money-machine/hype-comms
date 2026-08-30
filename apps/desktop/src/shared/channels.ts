@@ -40,6 +40,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceAdminCommunicationPaths: "workspace:admin-communication-paths",
   workspaceAgentEnrollmentsList: "workspace:agent-enrollments-list",
   workspaceAgentEnrollmentReview: "workspace:agent-enrollment-review",
+  workspaceAgentEnrollmentCancel: "workspace:agent-enrollment-cancel",
   workspaceConversationsList: "workspace:conversations-list",
   workspaceMessagesList: "workspace:messages-list",
   workspaceMessageGet: "workspace:message-get",
