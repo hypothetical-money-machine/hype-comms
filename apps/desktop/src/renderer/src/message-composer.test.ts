@@ -21,6 +21,13 @@ const pendingAttachment: Attachment = {
   createdAt: "2026-08-04T12:00:00.000Z",
 };
 
+const secondPendingAttachment: Attachment = {
+  ...pendingAttachment,
+  id: "10000000-0000-4000-8000-000000000011",
+  fileName: "launch-diagram.png",
+  contentType: "image/png",
+};
+
 afterEach(cleanup);
 
 function renderComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]> = {}) {
@@ -160,13 +167,14 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("lets a pending attachment send without a draft", () => {
+  it("lets multiple pending attachments send without a draft", () => {
     const { props } = renderComposer({
       draft: "",
-      pendingAttachments: [pendingAttachment],
+      pendingAttachments: [pendingAttachment, secondPendingAttachment],
       onAttach: vi.fn().mockResolvedValue(undefined),
     });
     expect(screen.getByText("launch-notes.pdf")).toBeTruthy();
+    expect(screen.getByText("launch-diagram.png")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(props.onSubmit).toHaveBeenCalledOnce();
@@ -175,9 +183,29 @@ describe("MessageComposer", () => {
   it("exposes an attach action that does not submit the draft", () => {
     const onAttach = vi.fn().mockResolvedValue(undefined);
     const { props } = renderComposer({ draft: "A useful update", onAttach });
-    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
     expect(onAttach).toHaveBeenCalledOnce();
     expect(props.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not send a draft while files are attaching", async () => {
+    let finishAttachment: (() => void) | undefined;
+    const attachmentInProgress = new Promise<void>((resolve) => {
+      finishAttachment = resolve;
+    });
+    const onAttach = vi.fn(() => attachmentInProgress);
+    const { props } = renderComposer({ onAttach });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+
+    finishAttachment?.();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
+    );
   });
 });
 

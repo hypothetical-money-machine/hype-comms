@@ -50,6 +50,7 @@ export function MessageComposer({
   pendingAttachments = [],
   disabled,
   attachDisabled = false,
+  attachmentUploadInProgress = false,
   error,
   inputId = "message",
   inputLabel = "Message",
@@ -71,6 +72,7 @@ export function MessageComposer({
   readonly pendingAttachments?: readonly Attachment[];
   readonly disabled: boolean;
   readonly attachDisabled?: boolean;
+  readonly attachmentUploadInProgress?: boolean;
   readonly error: string;
   readonly inputId?: string;
   readonly inputLabel?: string;
@@ -98,8 +100,12 @@ export function MessageComposer({
   const [cursor, setCursor] = useState(draft.length);
   const [dismissed, setDismissed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const attachmentUploadBusy = isAttaching || attachmentUploadInProgress;
   const sendDisabled =
-    disabled || isSubmitting || (draft.trim() === "" && pendingAttachments.length === 0);
+    disabled ||
+    isSubmitting ||
+    attachmentUploadBusy ||
+    (draft.trim() === "" && pendingAttachments.length === 0);
 
   const mentionQuery = mentionQueryAt(draft, cursor);
   const matches = useMemo(
@@ -249,7 +255,7 @@ export function MessageComposer({
     <form
       className={variantClassName === undefined ? "composer" : `composer ${variantClassName}`}
       onSubmit={submit}
-      aria-busy={isSubmitting || isAttaching}
+      aria-busy={isSubmitting || attachmentUploadBusy}
     >
       <p
         className={typingText === "" ? "typing-indicator idle" : "typing-indicator active"}
@@ -367,7 +373,7 @@ export function MessageComposer({
         <button
           type="button"
           className="composer-attach"
-          disabled={disabled || attachDisabled || isAttaching}
+          disabled={disabled || attachDisabled || attachmentUploadBusy}
           onClick={() => {
             if (attaching.current) return;
             attaching.current = true;
@@ -382,7 +388,7 @@ export function MessageComposer({
             })();
           }}
         >
-          Attach
+          Attach files
         </button>
       )}
       <button type="submit" disabled={sendDisabled}>

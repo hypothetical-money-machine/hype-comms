@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -25,6 +27,7 @@ import { WorkspaceTransport, WorkspaceRequestError } from "./workspace-transport
 
 const API_ORIGIN = "https://chat.example";
 const NOW = "2026-07-24T12:00:00.000Z";
+const UPLOAD_FIXTURE_PATH = fileURLToPath(new URL("../../package.json", import.meta.url));
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000003";
 const CLIENT_MESSAGE_ID = "10000000-0000-4000-8000-000000000010";
 const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
@@ -308,6 +311,26 @@ describe("WorkspaceTransport bootstrap compatibility", () => {
     const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
 
     await expect(transport.bootstrap()).resolves.toEqual(BOOTSTRAP_RESPONSE);
+  });
+});
+
+describe("WorkspaceTransport file uploads", () => {
+  it("does not continue after the signed-in scope changes", async () => {
+    const requests: { readonly method: string; readonly url: string }[] = [];
+    let scopeIsCurrent = true;
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ method: init.method ?? "GET", url });
+      scopeIsCurrent = false;
+      return jsonResponse({});
+    });
+    const assertCurrentScope = (): void => {
+      if (!scopeIsCurrent) throw new Error("File upload session changed");
+    };
+
+    await expect(
+      transport.uploadLocalFile(CONVERSATION_ID, UPLOAD_FIXTURE_PATH, assertCurrentScope),
+    ).rejects.toThrow("File upload session changed");
+    expect(requests).toEqual([{ method: "POST", url: "https://chat.example/v1/files/uploads" }]);
   });
 });
 
