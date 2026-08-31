@@ -32,6 +32,20 @@ describe("conversation indicators", () => {
     ).toBeTruthy();
   });
 
+  it("includes humans-only access in a channel button's accessible name", () => {
+    render(
+      createElement(
+        "button",
+        null,
+        createElement(ChannelIcon, { access: "humans", channelMode: "chat" }),
+        createElement("span", null, "People Planning"),
+      ),
+    );
+
+    const button = screen.getByRole("button", { name: "Humans-only channel: People Planning" });
+    expect(button.querySelector(".channel-human-access-badge")).toBeTruthy();
+  });
+
   it("uses a neutral decorative avatar for direct messages", () => {
     const { container } = render(createElement(DirectMessageIcon));
 

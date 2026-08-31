@@ -132,6 +132,64 @@ describe("ChannelMembersDialog", () => {
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
   });
 
+  it("explains humans-only access without membership controls", async () => {
+    render(
+      createElement(ChannelMembersDialog, {
+        source: "channel",
+        channelName: "people-planning",
+        conversationId: CONVERSATION_ID,
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner, agent, bot],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        load: vi.fn().mockResolvedValue({
+          ...initial,
+          access: "humans",
+          canManage: false,
+        }),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+      }),
+    );
+
+    expect(await screen.findByText("Humans only")).toBeTruthy();
+    expect(
+      screen.getByText(/all people in the workspace can read and send messages/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/agents and bots cannot access this channel/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+
+  it("describes announcement participation for humans-only access", async () => {
+    render(
+      createElement(ChannelMembersDialog, {
+        source: "channel",
+        channelName: "people-updates",
+        channelMode: "announcement",
+        conversationId: CONVERSATION_ID,
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        load: vi.fn().mockResolvedValue({
+          ...initial,
+          access: "humans",
+          canManage: false,
+        }),
+        upsert: vi.fn(),
+        remove: vi.fn(),
+      }),
+    );
+
+    expect(
+      await screen.findByText(/read, reply in threads, and react.*owners can post bulletins/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/agents and bots cannot access this channel/i)).toBeTruthy();
+  });
+
   it("renders member titles in the directory and available-member select", async () => {
     const titledOwner: User = { ...owner, title: "Boss" };
     const titledMember: User = { ...member, title: "Helper" };

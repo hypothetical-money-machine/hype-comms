@@ -65,7 +65,7 @@ describeWithPostgres("BotService", () => {
     pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
     await runMigrations(pool);
     service = new BotService(pool, () => now);
-    workspaceRepository = new WorkspaceRepository(pool);
+    workspaceRepository = new WorkspaceRepository(pool, { humansOnlyChannelsEnabled: true });
   });
 
   beforeEach(async () => {
@@ -318,6 +318,49 @@ describeWithPostgres("BotService", () => {
            FROM bot_channel_grants
           WHERE bot_user_id = $1 AND conversation_id = $2`,
         [issued.bot.id, announcementId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  it("rejects humans-only channels before creating or extending a bot", async () => {
+    const created = await workspaceRepository.createChannel(owner, {
+      name: "People",
+      slug: "people",
+      topic: "Humans only",
+      access: "humans",
+    });
+    const humansOnlyChannelId = created.conversation.conversation.id;
+    expect(created.conversation.conversation.access).toBe("humans");
+
+    await expect(
+      service.createBot(ownerId, {
+        username: "people-bot",
+        displayName: "People Bot",
+        channelSlugs: ["people"],
+        scopes: ["tasks:read"],
+        expiresAt,
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query("SELECT 1 FROM users WHERE username = 'people-bot'"),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    const issued = await service.createBot(ownerId, {
+      username: "release-bot",
+      displayName: "Release Bot",
+      channelSlugs: ["general"],
+      scopes: ["tasks:read"],
+      expiresAt,
+    });
+    await expect(
+      service.grantChannels(ownerId, issued.bot.username, ["people"]),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query(
+        `SELECT 1
+           FROM bot_channel_grants
+          WHERE bot_user_id = $1 AND conversation_id = $2`,
+        [issued.bot.id, humansOnlyChannelId],
       ),
     ).resolves.toMatchObject({ rowCount: 0 });
   });

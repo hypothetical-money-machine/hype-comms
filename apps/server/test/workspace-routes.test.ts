@@ -6,6 +6,7 @@ import {
   ATTACHMENT_CONTENT_SHA256_HEADER,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -181,6 +182,7 @@ class FakeWorkspaceRepository {
       directMessages: true,
       mentions: true,
       announcementChannels: true,
+      humansOnlyChannels: true,
     },
   }));
   readonly agentWakeBootstrap = vi.fn(async () => ({
@@ -770,6 +772,98 @@ describe("event capability routes", () => {
     }
   });
 
+  it("projects humans-only access for capable clients and rejects legacy creation", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const bootstrap = await repository.bootstrap();
+    const humansOnlySummary = {
+      ...bootstrap.conversations[0]!,
+      conversation: {
+        ...bootstrap.conversations[0]!.conversation,
+        name: "People",
+        slug: "people",
+        access: "humans" as const,
+      },
+    };
+    repository.bootstrap.mockResolvedValue({
+      ...bootstrap,
+      conversations: [humansOnlySummary],
+      featureFlags: { ...bootstrap.featureFlags, humansOnlyChannels: true },
+    });
+    repository.listChannelMembers.mockResolvedValue({
+      conversationId,
+      access: "humans",
+      members: [{ user: currentUser.user, role: "member", joinedAt: now }],
+      canManage: false,
+    });
+    const app = await reactionApp(repository);
+    const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
+    const capableHeaders = {
+      ...legacyHeaders,
+      "x-hype-comms-capabilities": HUMANS_ONLY_CHANNELS_CAPABILITY,
+    };
+
+    for (const request of [
+      { method: "GET", url: "/v1/bootstrap" },
+      { method: "GET", url: "/v1/conversations?limit=50" },
+      { method: "PATCH", url: `/v1/channels/${conversationId}`, payload: { isArchived: true } },
+    ] as const) {
+      const legacy = await app.inject({ ...request, headers: legacyHeaders });
+      const capable = await app.inject({ ...request, headers: capableHeaders });
+      expect(legacy.statusCode).toBeLessThan(300);
+      expect(capable.statusCode).toBeLessThan(300);
+      const legacySummary =
+        request.method === "GET" ? legacy.json().conversations[0] : legacy.json().conversation;
+      const capableSummary =
+        request.method === "GET" ? capable.json().conversations[0] : capable.json().conversation;
+      expect(legacySummary.conversation.access).toBe("members");
+      expect(capableSummary.conversation.access).toBe("humans");
+    }
+
+    const legacyBootstrap = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap",
+      headers: legacyHeaders,
+    });
+    const capableBootstrap = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap",
+      headers: capableHeaders,
+    });
+    expect(legacyBootstrap.json().featureFlags).not.toHaveProperty("humansOnlyChannels");
+    expect(capableBootstrap.json().featureFlags.humansOnlyChannels).toBe(true);
+
+    const legacyMembers = await app.inject({
+      method: "GET",
+      url: `/v1/channels/${conversationId}/members`,
+      headers: legacyHeaders,
+    });
+    const capableMembers = await app.inject({
+      method: "GET",
+      url: `/v1/channels/${conversationId}/members`,
+      headers: capableHeaders,
+    });
+    expect(legacyMembers.json()).toMatchObject({ access: "members", canManage: false });
+    expect(capableMembers.json()).toMatchObject({ access: "humans", canManage: false });
+
+    const input = { name: "People", slug: "people", topic: null, access: "humans" };
+    const legacyCreate = await app.inject({
+      method: "POST",
+      url: "/v1/channels",
+      headers: legacyHeaders,
+      payload: input,
+    });
+    const capableCreate = await app.inject({
+      method: "POST",
+      url: "/v1/channels",
+      headers: capableHeaders,
+      payload: input,
+    });
+    expect(legacyCreate.statusCode).toBe(400);
+    expect(capableCreate.statusCode).toBe(201);
+    expect(capableCreate.json().conversation.conversation.access).toBe("humans");
+    expect(repository.createChannel).toHaveBeenCalledTimes(1);
+  });
+
   it("negotiates event payloads independently for sync and realtime", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
@@ -778,7 +872,8 @@ describe("event capability routes", () => {
       "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
         `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ` +
-        `${EPHEMERAL_ACTIVITY_CAPABILITY}, ${GROUP_DIRECT_MESSAGES_CAPABILITY}`,
+        `${EPHEMERAL_ACTIVITY_CAPABILITY}, ${GROUP_DIRECT_MESSAGES_CAPABILITY}, ` +
+        HUMANS_ONLY_CHANNELS_CAPABILITY,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -804,6 +899,7 @@ describe("event capability routes", () => {
         memberProfiles: false,
         ephemeralActivity: true,
         groupDirectMessages: true,
+        humansOnlyChannels: true,
       },
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
@@ -818,6 +914,7 @@ describe("event capability routes", () => {
         memberProfiles: false,
         ephemeralActivity: true,
         groupDirectMessages: true,
+        humansOnlyChannels: true,
       },
     );
   });
@@ -853,6 +950,7 @@ describe("event capability routes", () => {
         memberProfiles: false,
         ephemeralActivity: false,
         groupDirectMessages: false,
+        humansOnlyChannels: false,
       },
     );
     expect(malformed.statusCode).toBe(400);

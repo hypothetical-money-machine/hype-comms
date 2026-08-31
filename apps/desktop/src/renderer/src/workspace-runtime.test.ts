@@ -342,6 +342,7 @@ function bootstrapAt(
       directMessages: true,
       mentions: true,
       announcementChannels: false,
+      humansOnlyChannels: false,
     },
     ...overrides,
   };
@@ -2017,6 +2018,7 @@ describe("WorkspaceRuntime", () => {
         directMessages: true,
         mentions: true,
         announcementChannels: true,
+        humansOnlyChannels: false,
       },
     });
     const cache = new FakeWorkspaceCache();

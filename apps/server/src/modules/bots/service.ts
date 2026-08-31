@@ -70,6 +70,7 @@ interface ChannelRow extends QueryResultRow {
   readonly id: unknown;
   readonly slug: unknown;
   readonly channel_mode: unknown;
+  readonly human_only: unknown;
 }
 
 interface ManageableChannelRow extends ChannelRow {
@@ -95,6 +96,7 @@ const channelRowSchema = z
     id: entityIdSchema,
     slug: channelSlugSchema,
     channel_mode: z.enum(["chat", "announcement"]),
+    human_only: z.boolean(),
   })
   .strict();
 const manageableChannelRowSchema = channelRowSchema
@@ -697,6 +699,7 @@ export class BotService {
               conversation.name,
               conversation.slug,
               conversation.channel_mode,
+              conversation.human_only,
               conversation.is_archived,
               conversation.created_by,
               actor_membership.role AS actor_role
@@ -728,6 +731,9 @@ export class BotService {
     }
     if (channel.channel_mode === "announcement") {
       throw new ApiError(404, "NOT_FOUND", "Webhooks are not available in announcement channels");
+    }
+    if (channel.human_only) {
+      throw new ApiError(404, "NOT_FOUND", "Webhooks are not available in humans-only channels");
     }
     return channel;
   }
@@ -901,7 +907,7 @@ export class BotService {
     channelSlugs: readonly string[],
   ): Promise<readonly z.infer<typeof channelRowSchema>[]> {
     const result = await client.query<ChannelRow>(
-      `SELECT id, slug, channel_mode
+      `SELECT id, slug, channel_mode, human_only
          FROM conversations
         WHERE workspace_id = $1
           AND kind = 'channel'
@@ -917,6 +923,9 @@ export class BotService {
     }
     if (channels.some((channel) => channel.channel_mode === "announcement")) {
       throw new ApiError(404, "NOT_FOUND", "Bots are not available in announcement channels");
+    }
+    if (channels.some((channel) => channel.human_only)) {
+      throw new ApiError(404, "NOT_FOUND", "Bots are not available in humans-only channels");
     }
     return channels;
   }

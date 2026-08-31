@@ -744,7 +744,20 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .channel-icon {
+  position: relative;
   color: var(--theme-text-muted);
+}
+
+.channel-human-access-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--theme-surface-elevated);
+  color: var(--theme-text-accent);
 }
 
 .ai-channel-nav-icon {

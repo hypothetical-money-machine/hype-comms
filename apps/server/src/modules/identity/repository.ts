@@ -335,6 +335,100 @@ function mapAgentDirectoryUser(user: Agent["user"]): User {
   return userSchema.parse({ ...user, kind: "human" });
 }
 
+export async function lockHumanActivationSyncAudienceMemberships(
+  client: PoolClient,
+  workspaceId: EntityId,
+): Promise<void> {
+  // Audience rows reference workspace memberships. NO KEY UPDATE stabilizes status and role
+  // while remaining compatible with the foreign key's KEY SHARE check during event fanout.
+  await client.query(
+    `SELECT membership.user_id
+       FROM workspace_memberships AS membership
+       JOIN users AS user_account ON user_account.id = membership.user_id
+      WHERE membership.workspace_id = $1
+        AND (
+          user_account.kind = 'human'
+          OR (user_account.kind = 'agent' AND membership.status = 'active')
+        )
+      ORDER BY membership.user_id
+      FOR NO KEY UPDATE OF membership`,
+    [workspaceId],
+  );
+}
+
+/**
+ * Publish the directory and humans-only roster changes caused by activating a human. Call this
+ * after the active membership upsert, on the same transaction, so its seating trigger has run.
+ */
+export async function publishHumanActivationSyncEvents(
+  client: PoolClient,
+  workspaceId: EntityId,
+  activatedUserId: EntityId,
+): Promise<void> {
+  const memberResult = await client.query<UserRow>(
+    `SELECT user_account.id,
+            user_account.email,
+            user_account.kind,
+            user_account.username,
+            user_account.display_name,
+            user_account.avatar_url,
+            user_account.title,
+            user_account.created_at,
+            user_account.updated_at
+       FROM users AS user_account
+       JOIN workspace_memberships AS membership
+         ON membership.workspace_id = $1
+        AND membership.user_id = user_account.id
+      WHERE user_account.id = $2
+        AND user_account.kind = 'human'
+        AND membership.status = 'active'`,
+    [workspaceId, activatedUserId],
+  );
+  const memberRow = memberResult.rows[0];
+  if (memberRow === undefined) {
+    throw new Error("Activated human is not an active workspace member");
+  }
+  const member = mapPublicUser(memberRow);
+
+  const conversationResult = await client.query<{ id: string } & QueryResultRow>(
+    `SELECT id
+       FROM conversations
+      WHERE workspace_id = $1
+        AND human_only
+      ORDER BY id`,
+    [workspaceId],
+  );
+  const audienceResult = await client.query<{ user_id: string } & QueryResultRow>(
+    `SELECT membership.user_id
+       FROM workspace_memberships AS membership
+       JOIN users AS user_account ON user_account.id = membership.user_id
+      WHERE membership.workspace_id = $1
+        AND membership.status = 'active'
+        AND user_account.kind = 'human'
+      ORDER BY membership.user_id`,
+    [workspaceId],
+  );
+  const audienceUserIds = audienceResult.rows.map((row) => row.user_id);
+
+  await insertSyncEvent(client, {
+    workspaceId,
+    actorUserId: activatedUserId,
+    type: "member.updated",
+    conversationId: null,
+    payload: { member },
+  });
+  for (const conversation of conversationResult.rows) {
+    await insertSyncEvent(client, {
+      workspaceId,
+      actorUserId: activatedUserId,
+      type: "channel.membership_changed",
+      conversationId: conversation.id,
+      payload: { memberId: activatedUserId, action: "added" },
+      audienceUserIds,
+    });
+  }
+}
+
 function mapAgentToken(row: AgentTokenRow, includeEffectiveScopes = false): AgentToken {
   return agentTokenSchema.parse({
     id: row.id,
@@ -603,6 +697,23 @@ export class IdentityRepository {
     );
   }
 
+  async lockHumansOnlyConversations(workspaceId: EntityId): Promise<void> {
+    await this.#database.query(
+      `SELECT id
+         FROM conversations
+        WHERE workspace_id = $1
+          AND human_only
+        ORDER BY id
+        FOR UPDATE`,
+      [workspaceId],
+    );
+  }
+
+  async lockActivationSyncAudienceMemberships(workspaceId: EntityId): Promise<void> {
+    const client = this.#requireTransactionalClient("lockActivationSyncAudienceMemberships");
+    await lockHumanActivationSyncAudienceMemberships(client, workspaceId);
+  }
+
   async lockWorkspaceIdentity(): Promise<void> {
     await this.#database.query("SELECT pg_advisory_xact_lock($1::bigint)", ["3247861932147782"]);
   }
@@ -648,6 +759,14 @@ export class IdentityRepository {
       );
     }
     return mapMembership(result.rows[0] as MembershipRow);
+  }
+
+  async publishHumanActivationSyncEvents(
+    workspaceId: EntityId,
+    activatedUserId: EntityId,
+  ): Promise<void> {
+    const client = this.#requireTransactionalClient("publishHumanActivationSyncEvents");
+    await publishHumanActivationSyncEvents(client, workspaceId, activatedUserId);
   }
 
   async findMembership(

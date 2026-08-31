@@ -6,6 +6,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -43,9 +44,11 @@ import {
   upsertChannelMemberRequestSchema,
 } from "@hype-comms/contracts";
 import type {
+  AgentScope,
+  ChannelMembersResponse,
+  ChannelMembershipMutationResponse,
   ConversationMutationResponse,
   ConversationSummary,
-  AgentScope,
   ListConversationsResponse,
   User,
   WorkspaceBootstrapResponse,
@@ -162,6 +165,7 @@ function workspaceClientCapabilities(
     memberProfiles: supported.includes(MEMBER_PROFILES_CAPABILITY),
     ephemeralActivity: supported.includes(EPHEMERAL_ACTIVITY_CAPABILITY),
     groupDirectMessages: supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+    humansOnlyChannels: supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
   };
 }
 
@@ -169,10 +173,16 @@ function missingDirectConversationWriteScope(): ApiError {
   return new ApiError(403, "FORBIDDEN", "Agent token requires the conversations:write scope");
 }
 
-function projectConversationSummary(summary: ConversationSummary, supportsAnnouncements: boolean) {
-  if (supportsAnnouncements) return summary;
+function projectConversationSummary(
+  summary: ConversationSummary,
+  supportsAnnouncements: boolean,
+  supportsHumansOnlyChannels: boolean,
+) {
   const conversation: Partial<ConversationSummary["conversation"]> = { ...summary.conversation };
-  delete conversation.channelMode;
+  if (!supportsAnnouncements) delete conversation.channelMode;
+  if (!supportsHumansOnlyChannels && conversation.access === "humans") {
+    conversation.access = "members";
+  }
   return { ...summary, conversation };
 }
 
@@ -180,6 +190,7 @@ function projectConversationSummaries(
   summaries: readonly ConversationSummary[],
   supportsAnnouncements: boolean,
   supportsGroupDirectMessages: boolean,
+  supportsHumansOnlyChannels: boolean,
 ) {
   if (
     !supportsGroupDirectMessages &&
@@ -187,7 +198,9 @@ function projectConversationSummaries(
   ) {
     throw new GroupDirectClientUpgradeRequiredError();
   }
-  return summaries.map((summary) => projectConversationSummary(summary, supportsAnnouncements));
+  return summaries.map((summary) =>
+    projectConversationSummary(summary, supportsAnnouncements, supportsHumansOnlyChannels),
+  );
 }
 
 function withoutTitle(user: User): Omit<User, "title"> {
@@ -204,14 +217,33 @@ function projectMembers<T extends { readonly members: readonly User[] }>(
   return { ...response, members: response.members.map(withoutTitle) };
 }
 
-function projectChannelMembers<T extends { readonly members: readonly { readonly user: User }[] }>(
-  response: T,
-  capable: boolean,
+function projectChannelMembers(
+  response: ChannelMembersResponse,
+  supportsMemberProfiles: boolean,
+  supportsHumansOnlyChannels: boolean,
 ) {
-  if (capable) return response;
   return {
     ...response,
-    members: response.members.map((member) => ({ ...member, user: withoutTitle(member.user) })),
+    access:
+      !supportsHumansOnlyChannels && response.access === "humans" ? "members" : response.access,
+    members: supportsMemberProfiles
+      ? response.members
+      : response.members.map((member) => ({ ...member, user: withoutTitle(member.user) })),
+  };
+}
+
+function projectChannelMembershipMutation(
+  response: ChannelMembershipMutationResponse,
+  supportsMemberProfiles: boolean,
+  supportsHumansOnlyChannels: boolean,
+) {
+  return {
+    ...response,
+    channelMembers: projectChannelMembers(
+      response.channelMembers,
+      supportsMemberProfiles,
+      supportsHumansOnlyChannels,
+    ),
   };
 }
 
@@ -236,6 +268,7 @@ function projectBootstrap(
   supportsAnnouncements: boolean,
   supportsMemberProfiles: boolean,
   supportsGroupDirectMessages: boolean,
+  supportsHumansOnlyChannels: boolean,
   effectiveAgentScopes: readonly AgentScope[] | null,
 ) {
   const currentUser =
@@ -247,12 +280,13 @@ function projectBootstrap(
     response.conversations,
     supportsAnnouncements,
     supportsGroupDirectMessages,
+    supportsHumansOnlyChannels,
   );
-  if (supportsAnnouncements) return { ...response, currentUser, members, conversations };
   const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
     ...response.featureFlags,
   };
-  delete featureFlags.announcementChannels;
+  if (!supportsAnnouncements) delete featureFlags.announcementChannels;
+  if (!supportsHumansOnlyChannels) delete featureFlags.humansOnlyChannels;
   return {
     ...response,
     currentUser,
@@ -266,6 +300,7 @@ function projectConversationList(
   response: ListConversationsResponse,
   supportsAnnouncements: boolean,
   supportsGroupDirectMessages: boolean,
+  supportsHumansOnlyChannels: boolean,
 ) {
   return {
     ...response,
@@ -273,6 +308,7 @@ function projectConversationList(
       response.conversations,
       supportsAnnouncements,
       supportsGroupDirectMessages,
+      supportsHumansOnlyChannels,
     ),
   };
 }
@@ -280,11 +316,16 @@ function projectConversationList(
 function projectConversationMutation(
   response: ConversationMutationResponse,
   supportsAnnouncements: boolean,
+  supportsHumansOnlyChannels: boolean,
 ) {
   if (response.conversation === undefined) return response;
   return {
     ...response,
-    conversation: projectConversationSummary(response.conversation, supportsAnnouncements),
+    conversation: projectConversationSummary(
+      response.conversation,
+      supportsAnnouncements,
+      supportsHumansOnlyChannels,
+    ),
   };
 }
 
@@ -319,6 +360,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(MEMBER_PROFILES_CAPABILITY),
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
       identity.credentialType === "agent" && supported.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY)
         ? identity.authorizationScopes
         : null,
@@ -382,6 +424,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       ),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
     );
   });
 
@@ -401,16 +444,24 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const result = createChannelRequestSchema.safeParse(request.body);
     if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const capable = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
+    const supportsAnnouncements = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
+    const supportsHumansOnlyChannels = supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY);
+    if (result.data.access === "humans" && !supportsHumansOnlyChannels) {
+      throw new ApiError(400, "BAD_REQUEST", "Client does not support humans-only channels");
+    }
     const created = await repository.createChannel(
       identity,
       result.data,
       optionalIdempotencyKey(request.headers["idempotency-key"]),
-      capable,
+      supportsAnnouncements,
       request.id,
       defaultAgentAgencyEnabled,
     );
-    return reply.code(201).send(projectConversationMutation(created, capable));
+    return reply
+      .code(201)
+      .send(
+        projectConversationMutation(created, supportsAnnouncements, supportsHumansOnlyChannels),
+      );
   });
 
   app.patch("/channels/:id", async (request) => {
@@ -423,6 +474,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return projectConversationMutation(
       await repository.archiveChannel(identity, id),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
     );
   });
 
@@ -434,6 +486,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return projectChannelMembers(
       await repository.listChannelMembers(identity, id),
       supported.includes(MEMBER_PROFILES_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
     );
   });
 
@@ -443,14 +496,24 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     const { id, userId } = memberParameters(request.params);
     const body = upsertChannelMemberRequestSchema.safeParse(request.body);
     if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel member");
-    return repository.upsertChannelMember(identity, id, userId, body.data);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectChannelMembershipMutation(
+      await repository.upsertChannelMember(identity, id, userId, body.data),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+    );
   });
 
   app.delete("/channels/:id/members/:userId", async (request) => {
     const identity = await requireAuthenticatedIdentity(request, identityService);
     requireAgentScope(identity, "conversations:write");
     const { id, userId } = memberParameters(request.params);
-    return repository.removeChannelMember(identity, id, userId);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectChannelMembershipMutation(
+      await repository.removeChannelMember(identity, id, userId),
+      supported.includes(MEMBER_PROFILES_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+    );
   });
 
   app.put("/channels/:id/membership", async (request) => {
@@ -462,7 +525,12 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       throw new ApiError(400, "BAD_REQUEST", "Channel join does not accept a request body");
     }
     const { id } = parameters(request.params);
-    return repository.joinPublicChannel(identity, id);
+    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    return projectConversationMutation(
+      await repository.joinPublicChannel(identity, id),
+      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+    );
   });
 
   app.post("/direct-conversations", async (request, reply) => {
@@ -492,7 +560,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     return reply
       .code(201)
       .send(
-        projectConversationMutation(opened, supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY)),
+        projectConversationMutation(
+          opened,
+          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+          supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+        ),
       );
   });
 
@@ -518,6 +590,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
             requiredIdempotencyKey(request.headers["idempotency-key"]),
           ),
           supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+          supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
         ),
       );
   });

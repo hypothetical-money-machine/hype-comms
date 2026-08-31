@@ -5,6 +5,7 @@ import type {
   ChatSessionState,
   ConversationMutationResponse,
   HumanWorkspaceBootstrapResponse,
+  Message,
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
@@ -25,9 +26,12 @@ import type { ThemeRuntime } from "./theme-runtime";
 const USER_ID = "40000000-0000-4000-8000-000000000001";
 const PEER_ID = "40000000-0000-4000-8000-000000000002";
 const OTHER_ID = "40000000-0000-4000-8000-000000000003";
+const AGENT_ID = "40000000-0000-4000-8000-000000000004";
 const WORKSPACE_ID = "40000000-0000-4000-8000-000000000010";
 const GENERAL_ID = "40000000-0000-4000-8000-000000000020";
 const PEER_DM_ID = "40000000-0000-4000-8000-000000000021";
+const HUMANS_CHANNEL_ID = "40000000-0000-4000-8000-000000000022";
+const HUMANS_THREAD_ROOT_ID = "40000000-0000-4000-8000-000000000023";
 const NOW = "2026-08-23T12:00:00.000Z";
 
 const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }> = {
@@ -55,6 +59,11 @@ function user(id: string, displayName: string, title?: string | null): User {
 const currentUser = user(USER_ID, "Morgan", "Founder");
 const peer = user(PEER_ID, "Sam", "Product");
 const other = user(OTHER_ID, "Taylor");
+const agent: User = {
+  ...user(AGENT_ID, "Hermes"),
+  kind: "agent",
+  username: "hermes",
+};
 
 const bootstrap = {
   currentUser: {
@@ -104,8 +113,45 @@ const bootstrap = {
     directMessages: true,
     mentions: true,
     announcementChannels: false,
+    humansOnlyChannels: false,
   },
 } as unknown as HumanWorkspaceBootstrapResponse;
+
+const humansOnlyBootstrap = {
+  ...bootstrap,
+  members: [...bootstrap.members, agent],
+  conversations: [
+    ...bootstrap.conversations,
+    {
+      ...bootstrap.conversations[0],
+      conversation: {
+        ...bootstrap.conversations[0]!.conversation,
+        id: HUMANS_CHANNEL_ID,
+        name: "People Planning",
+        slug: "people-planning",
+        access: "humans",
+      },
+      participantIds: [USER_ID, PEER_ID],
+    },
+  ],
+  featureFlags: { ...bootstrap.featureFlags, humansOnlyChannels: true },
+} as unknown as HumanWorkspaceBootstrapResponse;
+
+const humansThreadRoot: Message = {
+  id: HUMANS_THREAD_ROOT_ID,
+  conversationId: HUMANS_CHANNEL_ID,
+  conversationSequence: "1",
+  version: 1,
+  clientMessageId: "40000000-0000-4000-8000-000000000024",
+  authorId: PEER_ID,
+  threadRootId: null,
+  body: "People planning belongs here",
+  bodyFormat: "hype_comms_markdown_v1",
+  editedAt: null,
+  deletedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
 
 const notificationState: NotificationState = {
   version: 1,
@@ -201,8 +247,8 @@ function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = boot
       throw new Error("unused");
     },
     createDirectConversation,
-    getConversationMessages: async () => ({
-      messages: [],
+    getConversationMessages: async ({ conversationId }: { conversationId: string }) => ({
+      messages: conversationId === HUMANS_CHANNEL_ID ? [humansThreadRoot] : [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: null,
@@ -211,7 +257,7 @@ function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = boot
       throw new Error("unused");
     },
     getMessageThread: async () => ({
-      root: null,
+      root: humansThreadRoot,
       replies: [],
       nextCursor: null,
     }),
@@ -349,6 +395,41 @@ describe("workspace member directory", () => {
     fireEvent.click(within(samRow).getByRole("button", { name: "Message" }));
 
     expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
+  });
+
+  it("labels humans-only channels and excludes agents from their mention picker", async () => {
+    await renderWorkspace(humansOnlyBootstrap);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    expect(screen.getByRole("radio", { name: /Humans only/u })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close channel creation" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /Humans-only channel: People Planning/u }));
+    expect(screen.getByRole("button", { name: "Humans only" })).toBeTruthy();
+
+    const composer = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.change(composer, {
+      target: { value: "@", selectionStart: 1, selectionEnd: 1 },
+    });
+
+    expect(screen.getByRole("option", { name: /Morgan/u })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Sam/u })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Hermes/u })).toBeNull();
+
+    fireEvent.change(composer, {
+      target: { value: "", selectionStart: 0, selectionEnd: 0 },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Reply in thread" }));
+    const threadComposer = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Reply",
+    });
+    fireEvent.change(threadComposer, {
+      target: { value: "@", selectionStart: 1, selectionEnd: 1 },
+    });
+
+    expect(screen.getByRole("option", { name: /Morgan/u })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Sam/u })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Hermes/u })).toBeNull();
   });
 });
 

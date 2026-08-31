@@ -1056,6 +1056,7 @@ export class AgentEnrollmentModule {
                 AND conversation.id = ANY($2::uuid[])
                 AND conversation.kind = 'channel'
                 AND conversation.channel_access = 'members'
+                AND NOT conversation.human_only
                 AND NOT conversation.is_archived
               ${lock ? "FOR SHARE OF conversation" : ""}`,
             [actor.workspaceId, [...conversationIds]],
@@ -1072,6 +1073,7 @@ export class AgentEnrollmentModule {
                 AND conversation.id = ANY($3::uuid[])
                 AND conversation.kind = 'channel'
                 AND conversation.channel_access = 'members'
+                AND NOT conversation.human_only
                 AND NOT conversation.is_archived
               ${lock ? "FOR SHARE OF conversation, membership" : ""}`,
             [actor.workspaceId, actor.userId, [...conversationIds]],

@@ -27,6 +27,8 @@ export type RealtimePrincipal =
       readonly ephemeralActivity?: boolean;
       /** False/absent for tickets issued to clients predating group direct messages. */
       readonly groupDirectMessages?: boolean;
+      /** False/absent for tickets issued to clients predating humans-only channels. */
+      readonly humansOnlyChannels?: boolean;
     }
   | {
       readonly userId: string;
@@ -52,6 +54,8 @@ export type RealtimePrincipal =
       readonly ephemeralActivity?: boolean;
       /** False/absent for tickets issued to clients predating group direct messages. */
       readonly groupDirectMessages?: boolean;
+      /** False/absent for tickets issued to clients predating humans-only channels. */
+      readonly humansOnlyChannels?: boolean;
     };
 
 /**
