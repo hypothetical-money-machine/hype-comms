@@ -17,6 +17,7 @@ import {
   HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
   HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
 } from "./demo-headless-smoke.mjs";
+import { DEMO_POSTGRES_MODE_MANAGED, DEMO_POSTGRES_MODE_SERVICE } from "./demo-environment.mjs";
 
 function launcher() {
   const child = new EventEmitter();
@@ -34,6 +35,7 @@ test("parses the self-contained local smoke command options", () => {
     messagePrefix: "Hype Comms headless automation smoke",
     timeoutMs: DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
     flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+    postgresMode: DEMO_POSTGRES_MODE_MANAGED,
   });
   assert.deepEqual(
     parseLocalHeadlessSmokeArguments([
@@ -46,6 +48,7 @@ test("parses the self-contained local smoke command options", () => {
       messagePrefix: "Round trip",
       timeoutMs: 5000,
       flow: HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+      postgresMode: DEMO_POSTGRES_MODE_MANAGED,
     },
   );
   assert.throws(
@@ -57,6 +60,42 @@ test("parses the self-contained local smoke command options", () => {
     parseLocalHeadlessSmokeArguments(["--flow=participated-thread"]).flow,
     HEADLESS_SMOKE_FLOW_PARTICIPATED_THREAD,
   );
+  assert.equal(
+    parseLocalHeadlessSmokeArguments(["--postgres=service"]).postgresMode,
+    DEMO_POSTGRES_MODE_SERVICE,
+  );
+  assert.throws(
+    () => parseLocalHeadlessSmokeArguments(["--postgres=remote"]),
+    /managed or service/u,
+  );
+});
+
+test("forwards the private PostgreSQL service without changing managed launcher arguments", async () => {
+  const projectRoot = path.resolve("/repo/hype-comms");
+  const child = launcher();
+  const spawns = [];
+
+  await runLocalHeadlessSmoke({
+    projectRoot,
+    postgresMode: DEMO_POSTGRES_MODE_SERVICE,
+    spawnProcess: (command, arguments_) => {
+      spawns.push([command, arguments_]);
+      return child;
+    },
+    waitForReady: async () => ({
+      manifestPath: path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH),
+    }),
+    readManifest: async () => ({ private: "manifest-only" }),
+    runSmoke: async () => ({ version: 1, event: "passed" }),
+    stopLauncher: async () => undefined,
+  });
+
+  assert.deepEqual(spawns, [
+    [
+      process.execPath,
+      ["scripts/demo.mjs", "--headless", "--postgres=service", "--cdp-base-port=9222"],
+    ],
+  ]);
 });
 
 test("waits for the versioned ready record and ignores normal launcher output", async () => {

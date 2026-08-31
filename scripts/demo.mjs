@@ -204,7 +204,7 @@ async function seed(demo) {
 
 async function main() {
   const options = parseDemoArguments(process.argv.slice(2));
-  const demo = deriveDemoEnvironment(process.env, projectRoot);
+  const demo = deriveDemoEnvironment(process.env, projectRoot, options.postgresMode);
   await ensurePrivateDemoDirectories(demo.paths);
   await writeRunMarker(demo.paths.runMarker);
   activeRunMarker = demo.paths.runMarker;
@@ -219,10 +219,14 @@ async function main() {
       removeHeadlessDevToolsActivePortFiles(demo.paths),
     ]);
   }
-  process.stdout.write("Starting the isolated demo PostgreSQL container…\n");
-  await runChecked("docker", demoComposeArguments("up", "-d", "--wait", "postgres"), {
-    env: demo.env,
-  });
+  if (demo.managesPostgres) {
+    process.stdout.write("Starting the isolated demo PostgreSQL container…\n");
+    await runChecked("docker", demoComposeArguments("up", "-d", "--wait", "postgres"), {
+      env: demo.env,
+    });
+  } else {
+    process.stdout.write("Using the isolated headless test PostgreSQL service.\n");
+  }
 
   const seeded = await seed(demo);
   const claire = demoClient(seeded, "claire");

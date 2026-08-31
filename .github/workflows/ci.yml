@@ -73,3 +73,30 @@ jobs:
           HYPE_COMMS_TEST_DATABASE_URL: postgresql://hype_comms:hype-comms-test-password@127.0.0.1:55432/hype_comms_test
         # Bound database concurrency so the hosted runner and service remain deterministic.
         run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000
+
+  headless-linux-smoke:
+    name: Headless Linux smoke (Ubuntu x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Run display-server-free demo smokes
+        run: npm run test:demo:headless:linux
+
+      - name: Upload headless Linux smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: headless-linux-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .dev-data/demo/docker-headless/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
