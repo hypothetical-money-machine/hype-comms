@@ -350,6 +350,31 @@ describe("workspace member directory", () => {
 
     expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
   });
+
+  it("opens a 1:1 from a People name click and dismisses the directory", async () => {
+    const client = await renderWorkspace();
+
+    fireEvent.click(screen.getByRole("button", { name: "People" }));
+    expect(screen.getByRole("heading", { name: "People" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Sam/ }));
+
+    expect(client.createDirectConversation).toHaveBeenCalledTimes(1);
+    expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "People" })).toBeNull());
+  });
+
+  it("opens a 1:1 from a People row click and dismisses the directory", async () => {
+    const client = await renderWorkspace();
+
+    fireEvent.click(screen.getByRole("button", { name: "People" }));
+    const samRow = screen.getByText("Sam").closest("li");
+    if (samRow === null) throw new Error("Sam directory row was not rendered");
+    fireEvent.click(samRow);
+
+    expect(client.createDirectConversation).toHaveBeenCalledTimes(1);
+    expect(client.createDirectConversation).toHaveBeenCalledWith({ memberId: PEER_ID });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "People" })).toBeNull());
+  });
 });
 
 describe("owner administration", () => {

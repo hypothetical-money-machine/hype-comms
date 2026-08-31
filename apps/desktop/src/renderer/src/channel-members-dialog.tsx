@@ -75,6 +75,35 @@ function canMessage(user: User): boolean {
   return user.kind !== "bot";
 }
 
+function DirectoryIdentity({
+  currentUserId,
+  presence,
+  user,
+}: {
+  readonly currentUserId: string;
+  readonly presence: PresenceState;
+  readonly user: User;
+}) {
+  return (
+    <>
+      <span className="member-avatar-presence">
+        <Avatar user={user} />
+        <PresenceIndicator state={presence} />
+      </span>
+      <div className="channel-member-identity">
+        <strong>
+          {user.displayName}
+          {user.id === currentUserId ? " (you)" : ""}
+        </strong>
+        <span>@{user.username}</span>
+        {user.title !== null && user.title !== undefined && (
+          <span className="channel-member-title">{user.title}</span>
+        )}
+      </div>
+    </>
+  );
+}
+
 export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const {
     currentUserId,
@@ -266,28 +295,48 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
           <ul className="channel-member-list">
             {directory.map((entry) => {
               const kind = kindLabel(entry.user.kind);
+              const messageable = canMessage(entry.user);
+              const openDirectMessage = (): void => {
+                if (!messageable || busyUserId !== null) return;
+                onMessage(entry.user.id);
+              };
+              const identity = (
+                <DirectoryIdentity
+                  currentUserId={currentUserId}
+                  presence={presenceByUser[entry.user.id] ?? "offline"}
+                  user={entry.user}
+                />
+              );
               return (
-                <li key={entry.user.id}>
-                  <span className="member-avatar-presence">
-                    <Avatar user={entry.user} />
-                    <PresenceIndicator state={presenceByUser[entry.user.id] ?? "offline"} />
-                  </span>
-                  <div className="channel-member-identity">
-                    <strong>
-                      {entry.user.displayName}
-                      {entry.user.id === currentUserId ? " (you)" : ""}
-                    </strong>
-                    <span>@{entry.user.username}</span>
-                    {entry.user.title !== null && entry.user.title !== undefined && (
-                      <span className="channel-member-title">{entry.user.title}</span>
-                    )}
-                  </div>
+                <li
+                  key={entry.user.id}
+                  className={messageable ? "channel-member-row messageable" : "channel-member-row"}
+                  onClick={openDirectMessage}
+                >
+                  {messageable ? (
+                    <button
+                      type="button"
+                      className="channel-member-open"
+                      disabled={busyUserId !== null}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openDirectMessage();
+                      }}
+                    >
+                      {identity}
+                    </button>
+                  ) : (
+                    identity
+                  )}
                   {kind !== null && <span className="member-kind">{kind}</span>}
                   {showChannelRole && entry.role !== null && (
                     <span className={`channel-role ${entry.role}`}>{entry.role}</span>
                   )}
-                  <div className="channel-member-actions">
-                    {canMessage(entry.user) && (
+                  <div
+                    className="channel-member-actions"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    {messageable && (
                       <button
                         type="button"
                         disabled={busyUserId !== null}
