@@ -1336,6 +1336,14 @@ export class WorkspaceRuntime {
     };
   }
 
+  /** Checks whether a notification can navigate in the current workspace without changing state. */
+  canHandleNotificationAction(
+    action: NotificationAction,
+    currentContext: NotificationContext,
+  ): boolean {
+    return this.#isNotificationActionNavigable(action, currentContext, this.#generation);
+  }
+
   /**
    * Reauthorizes and hydrates one exact body-free native-notification target.
    *
@@ -1348,10 +1356,9 @@ export class WorkspaceRuntime {
     currentContext: NotificationContext,
   ): Promise<"discarded" | "fallback" | "opened"> {
     const generation = this.#generation;
-    if (!this.#isCurrentNotificationAction(action, currentContext, generation)) return "discarded";
-    // Revoked or otherwise unauthorized targets are discarded. The explanatory fallback below
-    // is only for a message that cannot be restored inside a still-authorized conversation.
-    if (!this.#isConversationAuthorized(action.conversationId)) return "discarded";
+    if (!this.#isNotificationActionNavigable(action, currentContext, generation)) {
+      return "discarded";
+    }
     if (this.#isRetractedMessage(action.messageId)) {
       return (await this.#fallbackNotificationAction(action, currentContext, generation))
         ? "fallback"
@@ -1417,6 +1424,17 @@ export class WorkspaceRuntime {
       action.sessionGeneration === currentContext.sessionGeneration &&
       action.userId === currentContext.userId &&
       action.workspaceId === currentContext.workspaceId
+    );
+  }
+
+  #isNotificationActionNavigable(
+    action: NotificationAction,
+    currentContext: NotificationContext,
+    generation: number,
+  ): boolean {
+    return (
+      this.#isCurrentNotificationAction(action, currentContext, generation) &&
+      this.#isConversationAuthorized(action.conversationId)
     );
   }
 

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -90,5 +90,19 @@ describe("UpdateControl", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(harness.checkForUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("does not restart when a page leave check is declined", async () => {
+    const harness = createClient(() => Promise.resolve({ status: "idle" }));
+    const beforeRestart = vi.fn<() => Promise<boolean>>().mockResolvedValue(false);
+    render(createElement(UpdateControl, { client: harness.client, beforeRestart }));
+
+    act(() => {
+      harness.emit({ status: "ready", version: "2.0.0" });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+
+    await waitFor(() => expect(beforeRestart).toHaveBeenCalledOnce());
+    expect(harness.restartToInstallUpdate).not.toHaveBeenCalled();
   });
 });

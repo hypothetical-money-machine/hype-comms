@@ -18,7 +18,7 @@ interface ConversationSwitcherProps {
   readonly conversations: readonly SwitcherConversation[];
   readonly selectedConversationId: string | null;
   readonly platform: DesktopPlatform;
-  readonly onSelect: (conversationId: string) => void;
+  readonly onSelect: (conversationId: string) => void | boolean | Promise<void | boolean>;
   readonly onOpenChange?: (open: boolean) => void;
 }
 
@@ -69,8 +69,14 @@ export function ConversationSwitcher({
 
   const choose = useCallback(
     (conversationId: string) => {
-      onSelect(conversationId);
-      closeSwitcher(false);
+      const selected = onSelect(conversationId);
+      if (selected === undefined || typeof selected === "boolean") {
+        if (selected !== false) closeSwitcher(false);
+        return;
+      }
+      void selected.then((didSelect) => {
+        if (didSelect !== false) closeSwitcher(false);
+      });
     },
     [closeSwitcher, onSelect],
   );

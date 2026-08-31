@@ -8,7 +8,7 @@ interface WorkspaceSearchProps {
   readonly members: readonly User[];
   readonly conversationName: (conversationId: string) => string;
   readonly search: (query: string, after?: string) => Promise<MessageSearchResponse>;
-  readonly openResult: (result: MessageSearchResult) => Promise<void>;
+  readonly openResult: (result: MessageSearchResult) => Promise<void | boolean>;
   readonly onOpenChange?: (open: boolean) => void;
 }
 
@@ -186,8 +186,12 @@ export function WorkspaceSearch({
                           onClick={() => {
                             const generation = requestGeneration.current;
                             void openResult(result)
-                              .then(() => {
-                                if (openState.current && generation === requestGeneration.current) {
+                              .then((opened) => {
+                                if (
+                                  opened !== false &&
+                                  openState.current &&
+                                  generation === requestGeneration.current
+                                ) {
                                   closeSearch(false);
                                 }
                               })

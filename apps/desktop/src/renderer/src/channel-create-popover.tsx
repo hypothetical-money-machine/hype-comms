@@ -20,7 +20,7 @@ interface ChannelCreatePopoverProps {
     topic: string | null,
     access: ChannelAccess,
     channelMode: ChannelMode,
-  ) => Promise<void>;
+  ) => Promise<void | boolean>;
   readonly onOpenChange?: (open: boolean) => void;
 }
 
@@ -157,7 +157,7 @@ export function ChannelCreatePopover({
     setCreating(true);
     setError("");
     try {
-      await onCreate(
+      const created = await onCreate(
         displayName,
         slug,
         topic.trim() === "" ? null : topic.trim(),
@@ -166,7 +166,7 @@ export function ChannelCreatePopover({
       );
       creatingRef.current = false;
       setCreating(false);
-      dismiss();
+      if (created !== false) dismiss();
     } catch (submitError) {
       setError(errorMessage(submitError));
       creatingRef.current = false;

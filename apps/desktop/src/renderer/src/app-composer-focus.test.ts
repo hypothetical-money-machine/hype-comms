@@ -7,9 +7,12 @@ import type {
   HumanWorkspaceBootstrapResponse,
   Message,
   NotificationAction,
+  NotificationActionAcknowledgement,
   NotificationContext,
   NotificationState,
+  ProductRealtimeEvent,
   RealtimeSessionScope,
+  ScopedProductRealtimeEvent,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -31,6 +34,7 @@ const ROOT_MESSAGE_ID = "30000000-0000-4000-8000-000000000005";
 const REPLY_MESSAGE_ID = "30000000-0000-4000-8000-000000000006";
 const LAUNCH_MESSAGE_ID = "30000000-0000-4000-8000-000000000009";
 const GENERAL_MESSAGE_ID = "30000000-0000-4000-8000-000000000010";
+const REVOKED_CONVERSATION_ID = "30000000-0000-4000-8000-000000000013";
 const NOW = "2026-08-10T12:00:00.000Z";
 
 const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }> = {
@@ -172,6 +176,22 @@ function openMessageAction(message: Message): NotificationAction {
   };
 }
 
+function membershipRemoval(conversationId: string): ProductRealtimeEvent {
+  return {
+    version: 1,
+    id: "30000000-0000-4000-8000-000000000014",
+    type: "channel.membership_changed",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId,
+    workspaceSequence: "11",
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { memberId: USER_ID, action: "removed" },
+  };
+}
+
 const notificationState: NotificationState = {
   version: 1,
   devicePreference: "enabled",
@@ -193,12 +213,27 @@ const aiChannelState: AiChannelState = {
 
 interface Harness {
   readonly client: DesktopApi;
+  readonly acknowledgedNotificationActions: readonly NotificationAction[];
   readonly pushNotificationAction: (action: NotificationAction) => void;
+  readonly pushWorkspaceEvent: (event: ProductRealtimeEvent) => void;
 }
 
 function createHarness(): Harness {
   let realtimeStarts = 0;
+  let realtimeScope: RealtimeSessionScope | null = null;
+  let snapshotCursor = bootstrap.syncCursor;
+  const revokedConversationIds = new Set<string>();
   const actionListeners = new Set<(action: NotificationAction) => void>();
+  const workspaceEventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
+  const acknowledgedNotificationActions: NotificationAction[] = [];
+
+  const currentBootstrap = (): HumanWorkspaceBootstrapResponse => ({
+    ...bootstrap,
+    conversations: bootstrap.conversations.filter(
+      (summary) => !revokedConversationIds.has(summary.conversation.id),
+    ),
+    syncCursor: snapshotCursor,
+  });
 
   const client = {
     platform: "linux",
@@ -218,10 +253,10 @@ function createHarness(): Harness {
         scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
         reason: "credential_store_unavailable",
       }) as const,
-    getWorkspaceBootstrap: async () => bootstrap,
+    getWorkspaceBootstrap: async () => currentBootstrap(),
     listWorkspaceMembers: async () => ({ members: [] }),
     listConversations: async () => ({
-      conversations: bootstrap.conversations,
+      conversations: currentBootstrap().conversations,
       nextCursor: null,
       hasMore: false,
     }),
@@ -266,25 +301,33 @@ function createHarness(): Harness {
       }) as const,
     startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
       realtimeStarts += 1;
-      return Object.freeze({
+      realtimeScope = Object.freeze({
         userId: session.userId,
         workspaceId: session.workspaceId,
         epoch: realtimeStarts,
       });
+      return realtimeScope;
     },
     activateWorkspaceRealtime: async () => undefined,
-    stopWorkspaceRealtime: async () => undefined,
+    stopWorkspaceRealtime: async () => {
+      realtimeScope = null;
+    },
     acknowledgeWorkspaceEvent: async () => undefined,
     getRealtimeState: async () => "offline",
     onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: () => () => undefined,
+    onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => {
+      workspaceEventListeners.add(listener);
+      return () => workspaceEventListeners.delete(listener);
+    },
     getNotificationContext: async (): Promise<NotificationContext> => activeContext,
     reportNotificationActivity: async () => undefined,
     drainNotificationActions: async (ready: unknown) => ({
       ...(ready as Record<string, unknown>),
       actions: [],
     }),
-    acknowledgeNotificationAction: async () => undefined,
+    acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
+      acknowledgedNotificationActions.push(acknowledgement.action);
+    },
     onNotificationAction: (listener: (action: NotificationAction) => void) => {
       actionListeners.add(listener);
       return () => actionListeners.delete(listener);
@@ -305,8 +348,21 @@ function createHarness(): Harness {
 
   return {
     client: client as unknown as DesktopApi,
+    acknowledgedNotificationActions,
     pushNotificationAction(action) {
       for (const listener of actionListeners) listener(action);
+    },
+    pushWorkspaceEvent(event) {
+      if (realtimeScope === null) throw new Error("Workspace realtime has not started");
+      if (
+        event.type === "channel.membership_changed" &&
+        event.payload.action === "removed" &&
+        event.payload.memberId === USER_ID
+      ) {
+        revokedConversationIds.add(event.conversationId);
+        snapshotCursor = event.workspaceSequence;
+      }
+      for (const listener of workspaceEventListeners) listener({ scope: realtimeScope, event });
     },
   };
 }
@@ -463,9 +519,8 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("leaves focus inside an open modal when the selection changes underneath it", async () => {
-    // WorkspaceSearch commits the selection before its dialog closes, and PreferencesDialog can
-    // see a background selection reassignment; both portal an aria-modal dialog into the body
-    // while the composer stays mounted behind them, so a detached node is a faithful stand-in.
+    // WorkspaceSearch commits the selection before its dialog closes while the composer stays
+    // mounted behind it, so a detached node is a faithful stand-in.
     const harness = await renderWorkspace();
     const dialog = document.createElement("section");
     dialog.setAttribute("role", "dialog");
@@ -505,17 +560,104 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("focuses the thread composer for a reply notification arriving over Preferences", async () => {
-    // Closing Preferences restores focus to its trigger; that restore must happen before the
-    // navigation records its focus intents, or the restore's focusin would expire them and
-    // leave focus stuck on the trigger.
     const harness = await renderWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
-    await screen.findByRole("dialog");
+    const preferences = await screen.findByTestId("preferences-page");
+    expect(preferences.hidden).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "Preferences" })).toBeNull();
 
     act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
 
     const replyComposer = await screen.findByRole("textbox", { name: "Reply" });
     await waitFor(() => expect(document.activeElement).toBe(replyComposer));
+    expect(preferences.hidden).toBe(true);
+  });
+
+  it("returns a clean theme designer to Preferences before following a notification", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+    await screen.findByRole("textbox", { name: "Reply" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    expect(screen.getByRole("heading", { name: "Preferences" })).toBeTruthy();
+    expect(screen.queryByText("Live preview")).toBeNull();
+  });
+
+  it("retries a notification after navigation from a dirty theme draft is declined", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
+
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    });
+    expect(preferences.hidden).toBe(false);
+
+    await act(async () => {
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    });
+    act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(preferences.hidden).toBe(true));
+    await screen.findByRole("textbox", { name: "Reply" });
+  });
+
+  it("keeps a dirty theme draft when a notification target is no longer authorized", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const roseAccent = screen.getByRole("button", { name: "Rose accent" });
+    fireEvent.click(roseAccent);
+
+    const staleAction = {
+      ...openMessageAction(threadReply),
+      conversationId: REVOKED_CONVERSATION_ID,
+    };
+    act(() => harness.pushNotificationAction(staleAction));
+
+    await waitFor(() => {
+      expect(harness.acknowledgedNotificationActions).toEqual([staleAction]);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "Discard your changes?" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    expect(preferences.hidden).toBe(false);
+    expect(roseAccent.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("keeps a dirty theme draft when its notification target is revoked during confirmation", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const roseAccent = screen.getByRole("button", { name: "Rose accent" });
+    fireEvent.click(roseAccent);
+
+    const action = openMessageAction(threadReply);
+    act(() => harness.pushNotificationAction(action));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+
+    act(() => harness.pushWorkspaceEvent(membershipRemoval(LAUNCH_ID)));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => {
+      expect(harness.acknowledgedNotificationActions).toEqual([action]);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "Discard your changes?" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    expect(preferences.hidden).toBe(false);
+    expect(roseAccent.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("expires a deferred intent when the dialog closes by restoring its trigger", async () => {

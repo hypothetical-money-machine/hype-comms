@@ -84,6 +84,18 @@ describe("WorkspaceSearch", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("keeps the search open when opening a result is declined", async () => {
+    const openResult = vi.fn().mockResolvedValue(false);
+    renderSearch(undefined, openResult);
+    submitQuery("quarterly avalanche");
+
+    expect(await screen.findByText("Quarterly avalanche review")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Quarterly avalanche review/ }));
+
+    await waitFor(() => expect(openResult).toHaveBeenCalledWith(result));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
   it("appends a cursor page without discarding earlier results", async () => {
     const secondResult: MessageSearchResult = {
       message: { ...result.message, id: USER_ID, body: "Quarterly avalanche follow-up" },

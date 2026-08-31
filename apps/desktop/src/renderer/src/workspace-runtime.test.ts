@@ -6095,6 +6095,29 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.messages).toContainEqual(threadReply);
   });
 
+  it("preflights only notification targets the current workspace can navigate", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const before = runtime.state;
+
+    expect(runtime.canHandleNotificationAction(notificationAction, notificationContext)).toBe(true);
+    expect(
+      runtime.canHandleNotificationAction(
+        { ...notificationAction, conversationId: CREATED_CHANNEL_ID },
+        notificationContext,
+      ),
+    ).toBe(false);
+    expect(
+      runtime.canHandleNotificationAction(
+        { ...notificationAction, sessionGeneration: notificationContext.sessionGeneration - 1 },
+        notificationContext,
+      ),
+    ).toBe(false);
+    expect(api.messageByIdRequests).toEqual([]);
+    expect(runtime.state).toBe(before);
+  });
+
   it("discards notification actions outside the current session generation and scope", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
