@@ -401,7 +401,8 @@ describe("workspace member directory", () => {
     const client = await renderWorkspace();
 
     fireEvent.click(screen.getByRole("button", { name: "People" }));
-    expect(screen.getByRole("heading", { name: "People" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "People" })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "People" })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Sam/ }));
 
     expect(client.createDirectConversation).toHaveBeenCalledTimes(1);

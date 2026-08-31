@@ -724,6 +724,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
+  const previousSelectedConversationId = useRef<string | null>(runtimeState.selectedConversationId);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks" | "files">("chat");
@@ -1157,10 +1158,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         );
 
   useEffect(() => {
-    setPeopleSource(null);
+    const previous = previousSelectedConversationId.current;
+    const next = runtimeState.selectedConversationId;
+    previousSelectedConversationId.current = next;
+    if (previous === next) return;
     setPaneView("chat");
     setTimelineAtLiveTail(false);
     setThreadAtLiveTail(false);
+    // The first assignment is workspace load, not a user switch. Dismissing People there
+    // races first paint and closes the directory the user just opened from the header.
+    if (previous !== null) setPeopleSource(null);
   }, [runtimeState.selectedConversationId]);
 
   useEffect(() => {
