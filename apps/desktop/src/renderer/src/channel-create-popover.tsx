@@ -14,6 +14,7 @@ import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface ChannelCreatePopoverProps {
   readonly canCreateAnnouncements?: boolean;
+  readonly canCreateHumansOnly?: boolean;
   readonly onCreate: (
     name: string,
     slug: string,
@@ -44,6 +45,7 @@ const ARROW_MARGIN = 18;
 
 export function ChannelCreatePopover({
   canCreateAnnouncements = false,
+  canCreateHumansOnly = false,
   onCreate,
   onOpenChange,
 }: ChannelCreatePopoverProps) {
@@ -321,6 +323,26 @@ export function ChannelCreatePopover({
                     </small>
                   </span>
                 </label>
+                {canCreateHumansOnly && (
+                  <label>
+                    <input
+                      type="radio"
+                      name="channel-access"
+                      value="humans"
+                      checked={access === "humans"}
+                      disabled={creating}
+                      onChange={() => setAccess("humans")}
+                    />
+                    <span>
+                      <strong>Humans only</strong>
+                      <small>
+                        {channelMode === "announcement"
+                          ? "All people in the workspace can read, reply, and react. Agents and bots cannot access."
+                          : "All people in the workspace can read and send. Agents and bots cannot access."}
+                      </small>
+                    </span>
+                  </label>
+                )}
                 <label>
                   <input
                     type="radio"

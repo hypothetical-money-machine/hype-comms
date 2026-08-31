@@ -49,6 +49,7 @@ export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
 export const AGENT_CONTEXT_PACK_CAPABILITY = "agent-context-pack-v1";
 export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
 export const GROUP_DIRECT_MESSAGES_CAPABILITY = "group-direct-messages-v1";
+export const HUMANS_ONLY_CHANNELS_CAPABILITY = "humans-only-channels-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()
@@ -156,6 +157,7 @@ export const workspaceBootstrapResponseSchema = z
         mentions: z.literal(true),
         // Defaults keep bootstrap responses and encrypted caches from older servers readable.
         announcementChannels: z.boolean().default(false),
+        humansOnlyChannels: z.boolean().default(false),
       })
       .strict(),
   })

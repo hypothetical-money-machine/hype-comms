@@ -18,6 +18,8 @@ import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/em
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
+import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 import { SignInThrottle } from "../src/throttle.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
@@ -192,6 +194,95 @@ describeWithPostgres("IdentityService and identity routes", () => {
     });
   });
 
+  it("syncs humans-only seats when an invitation activates a human", async () => {
+    const owner = await seedOwner();
+    const agent = await service.createAgent(owner.id, {
+      username: "sync-agent",
+      displayName: "Sync Agent",
+    });
+    const ownerSession = await signIn("owner@example.com");
+    const ownerIdentity = await service.authenticateContext(ownerSession.token);
+    if (ownerIdentity === null) throw new Error("Owner session was not authenticated");
+    const workspaceRepository = new WorkspaceRepository(pool, {
+      humansOnlyChannelsEnabled: true,
+    });
+    const bootstrap = await workspaceRepository.bootstrap(ownerIdentity);
+    const created = await workspaceRepository.createChannel(ownerIdentity, {
+      name: "People Planning",
+      slug: "people-planning",
+      topic: null,
+      access: "humans",
+    });
+    const second = await workspaceRepository.createChannel(ownerIdentity, {
+      name: "People Leads",
+      slug: "people-leads",
+      topic: null,
+      access: "humans",
+    });
+    const conversationIds = [
+      created.conversation.conversation.id,
+      second.conversation.conversation.id,
+    ].sort();
+    const email = emailSchema.parse("new-human@example.com");
+
+    await service.createInvitation(owner.id, email, "member");
+    await signIn(email);
+    const member = await repository.findUserByEmail(email);
+    if (member === null) throw new Error("Invited member was not created");
+
+    const sync = await workspaceRepository.sync(ownerIdentity, bootstrap.syncCursor, 100, {
+      humansOnlyChannels: true,
+    });
+    const memberUpdates = sync.events.filter((event) => event.type === "member.updated");
+    const membershipChanges = sync.events.filter(
+      (event) => event.type === "channel.membership_changed",
+    );
+    expect(memberUpdates).toEqual([
+      expect.objectContaining({
+        conversationId: null,
+        payload: { member: expect.objectContaining({ id: member.id }) },
+      }),
+    ]);
+    expect(membershipChanges).toEqual(
+      conversationIds.map((conversationId) =>
+        expect.objectContaining({
+          conversationId,
+          payload: { memberId: member.id, action: "added" },
+        }),
+      ),
+    );
+    const memberUpdate = memberUpdates[0];
+    if (memberUpdate === undefined) throw new Error("Member update was not published");
+    const memberUpdateAudience = await pool.query<{ user_id: string }>(
+      `SELECT user_id
+         FROM sync_event_audiences
+        WHERE event_id = $1
+        ORDER BY user_id`,
+      [memberUpdate.id],
+    );
+    expect(memberUpdateAudience.rows.map((row) => row.user_id)).toEqual(
+      [owner.id, member.id, agent.user.id].sort(),
+    );
+    for (const event of membershipChanges) {
+      const audience = await pool.query<{ user_id: string }>(
+        `SELECT user_id
+           FROM sync_event_audiences
+          WHERE event_id = $1
+          ORDER BY user_id`,
+        [event.id],
+      );
+      expect(audience.rows.map((row) => row.user_id)).toEqual([owner.id, member.id].sort());
+    }
+
+    await service.createInvitation(owner.id, email, "member");
+    await signIn(email, "127.0.0.2");
+    await expect(
+      workspaceRepository.sync(ownerIdentity, sync.nextCursor, 100, {
+        humansOnlyChannels: true,
+      }),
+    ).resolves.toMatchObject({ events: [], highWaterCursor: sync.highWaterCursor });
+  });
+
   it("reactivates a revoked member when they are invited again", async () => {
     const owner = await seedOwner();
     const email = emailSchema.parse("returning@example.com");
@@ -202,6 +293,25 @@ describeWithPostgres("IdentityService and identity routes", () => {
     if (member === null || ownerMembership === null) {
       throw new Error("Seeded identities are missing");
     }
+    const channelId = randomUUID();
+    await pool.query(
+      `INSERT INTO conversations
+         (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+       VALUES ($1, $2, 'channel', 'Returning People', 'returning-people', 'members', $3, true)`,
+      [channelId, ownerMembership.workspaceId, owner.id],
+    );
+    await expect(
+      pool.query(
+        `SELECT role
+           FROM conversation_memberships
+          WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+        [channelId, member.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ role: "member" }] });
+    const beforeReactivation = await pool.query<{ last_event_sequence: string }>(
+      "SELECT last_event_sequence::text FROM workspaces WHERE id = $1",
+      [ownerMembership.workspaceId],
+    );
     await repository.upsertMembership({
       workspaceId: ownerMembership.workspaceId,
       userId: member.id,
@@ -220,6 +330,231 @@ describeWithPostgres("IdentityService and identity routes", () => {
       email,
       role: "member",
     });
+    const events = await pool.query<{
+      event_type: string;
+      conversation_id: string | null;
+      payload: unknown;
+    }>(
+      `SELECT event_type, conversation_id, payload
+         FROM sync_events
+        WHERE workspace_id = $1
+          AND workspace_sequence > $2
+        ORDER BY workspace_sequence`,
+      [ownerMembership.workspaceId, beforeReactivation.rows[0]?.last_event_sequence ?? "0"],
+    );
+    expect(events.rows).toEqual([
+      {
+        event_type: "member.updated",
+        conversation_id: null,
+        payload: { member: expect.objectContaining({ id: member.id }) },
+      },
+      {
+        event_type: "channel.membership_changed",
+        conversation_id: channelId,
+        payload: { memberId: member.id, action: "added" },
+      },
+    ]);
+  });
+
+  it("locks humans-only conversations before redeeming a returning member's invitation", async () => {
+    const owner = await seedOwner();
+    const email = emailSchema.parse("locked-returning@example.com");
+    const memberId = randomUUID();
+    const channelId = randomUUID();
+    const ownerMembership = await repository.findActiveMembershipByUserId(owner.id);
+    if (ownerMembership === null) throw new Error("Owner membership was not seeded");
+    await repository.insertUser({
+      id: memberId,
+      email,
+      username: "locked-returning",
+      displayName: "Locked Returning Member",
+      avatarUrl: null,
+      title: null,
+    });
+    await repository.upsertMembership({
+      workspaceId: ownerMembership.workspaceId,
+      userId: memberId,
+      role: "member",
+      status: "revoked",
+    });
+    await service.createInvitation(owner.id, email, "member");
+    const token = await requestToken(email);
+    await pool.query(
+      `INSERT INTO conversations
+         (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+       VALUES ($1, $2, 'channel', 'People', 'people', 'members', $3, true)`,
+      [channelId, ownerMembership.workspaceId, owner.id],
+    );
+
+    const mutation = await pool.connect();
+    let redemption: ReturnType<IdentityService["redeemMagicLink"]> | undefined;
+    try {
+      await mutation.query("BEGIN");
+      await mutation.query("SET LOCAL statement_timeout = '2s'");
+      await mutation.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [channelId]);
+
+      redemption = service.redeemMagicLink(token, "Returning member test");
+      void redemption.catch(() => undefined);
+
+      let waitingOnConversation = false;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const activity = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_stat_activity AS activity
+              WHERE activity.pid <> pg_backend_pid()
+                AND activity.datname = current_database()
+                AND activity.state = 'active'
+                AND activity.wait_event_type = 'Lock'
+                AND activity.query LIKE '%FROM conversations%human_only%FOR UPDATE%'
+                AND EXISTS (
+                  SELECT 1
+                    FROM pg_locks AS relation_lock
+                    JOIN pg_class AS relation ON relation.oid = relation_lock.relation
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                   WHERE relation_lock.pid = activity.pid
+                     AND relation_lock.granted
+                     AND relation.relname = 'conversations'
+                     AND namespace.nspname = $1
+                )
+           ) AS waiting`,
+          [schemaName],
+        );
+        if (activity.rows[0]?.waiting === true) {
+          waitingOnConversation = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingOnConversation).toBe(true);
+
+      await mutation.query(
+        `SELECT 1
+           FROM workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2
+          FOR UPDATE`,
+        [ownerMembership.workspaceId, memberId],
+      );
+      await mutation.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [
+        ownerMembership.workspaceId,
+      ]);
+      await mutation.query("COMMIT");
+
+      await expect(redemption).resolves.toMatchObject({ token: expect.any(String) });
+    } finally {
+      await mutation.query("ROLLBACK").catch(() => undefined);
+      mutation.release();
+      await redemption?.catch(() => undefined);
+    }
+
+    await expect(
+      repository.findMembership(ownerMembership.workspaceId, memberId),
+    ).resolves.toMatchObject({ role: "member", status: "active" });
+    await expect(
+      pool.query(
+        `SELECT role
+           FROM conversation_memberships
+          WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+        [channelId, memberId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ role: "member" }] });
+  });
+
+  it("keeps activation audience locks compatible with concurrent event fanout", async () => {
+    const owner = await seedOwner();
+    const ownerSession = await signIn("owner@example.com");
+    const currentOwner = await service.authenticate(ownerSession.token);
+    const memberId = randomUUID();
+    const ownerMembership = await repository.findActiveMembershipByUserId(owner.id);
+    if (currentOwner === null || ownerMembership === null) {
+      throw new Error("Owner identity was not seeded");
+    }
+    await repository.insertUser({
+      id: memberId,
+      email: emailSchema.parse("lock-compatible@example.com"),
+      username: "lock-compatible",
+      displayName: "Lock Compatible",
+      avatarUrl: null,
+      title: null,
+    });
+    await repository.upsertMembership({
+      workspaceId: ownerMembership.workspaceId,
+      userId: memberId,
+      role: "member",
+      status: "revoked",
+    });
+
+    const blocker = await pool.connect();
+    const activation = await pool.connect();
+    const transactionalRepository = new IdentityRepository(activation);
+    let workspaceLock: Promise<boolean> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await activation.query("BEGIN");
+      await blocker.query("SET LOCAL statement_timeout = '2s'");
+      await activation.query("SET LOCAL statement_timeout = '2s'");
+      await blocker.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [
+        ownerMembership.workspaceId,
+      ]);
+      await transactionalRepository.lockHumansOnlyConversations(ownerMembership.workspaceId);
+      await transactionalRepository.lockActivationSyncAudienceMemberships(
+        ownerMembership.workspaceId,
+      );
+      await transactionalRepository.lockWorkspaceMembership(ownerMembership.workspaceId, memberId);
+
+      workspaceLock = transactionalRepository.lockWorkspace(ownerMembership.workspaceId);
+      void workspaceLock.catch(() => undefined);
+      let waitingOnWorkspace = false;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const activity = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_stat_activity AS activity
+              WHERE activity.pid <> pg_backend_pid()
+                AND activity.datname = current_database()
+                AND activity.state = 'active'
+                AND activity.wait_event_type = 'Lock'
+                AND activity.query LIKE '%SELECT id FROM workspaces WHERE id = $1 FOR UPDATE%'
+                AND EXISTS (
+                  SELECT 1
+                    FROM pg_locks AS relation_lock
+                    JOIN pg_class AS relation ON relation.oid = relation_lock.relation
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                   WHERE relation_lock.pid = activity.pid
+                     AND relation_lock.granted
+                     AND relation.relname = 'workspaces'
+                     AND namespace.nspname = $1
+                )
+           ) AS waiting`,
+          [schemaName],
+        );
+        if (activity.rows[0]?.waiting === true) {
+          waitingOnWorkspace = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingOnWorkspace).toBe(true);
+
+      await expect(
+        insertSyncEvent(blocker, {
+          workspaceId: ownerMembership.workspaceId,
+          actorUserId: owner.id,
+          type: "member.updated",
+          conversationId: null,
+          payload: { member: currentOwner.user },
+        }),
+      ).resolves.toMatchObject({ type: "member.updated" });
+      await blocker.query("COMMIT");
+      await expect(workspaceLock).resolves.toBe(true);
+      await activation.query("COMMIT");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await activation.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      activation.release();
+      await workspaceLock?.catch(() => undefined);
+    }
   });
 
   it("derives unique usernames with deterministic numeric collision suffixes", async () => {

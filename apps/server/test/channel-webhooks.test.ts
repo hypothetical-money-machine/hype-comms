@@ -79,7 +79,7 @@ describeWithPostgres("per-channel incoming webhooks", () => {
       publicApiUrl,
     );
     botService = new BotService(pool, () => new Date(now), publicApiUrl);
-    workspaceRepository = new WorkspaceRepository(pool);
+    workspaceRepository = new WorkspaceRepository(pool, { humansOnlyChannelsEnabled: true });
   });
 
   beforeEach(async () => {
@@ -361,6 +361,53 @@ describeWithPostgres("per-channel incoming webhooks", () => {
       expect(denied.statusCode).toBe(403);
       expect(apiErrorEnvelopeSchema.parse(denied.json()).error.code).toBe("FORBIDDEN");
     }
+  });
+
+  it("rejects humans-only channels before provisioning a webhook bot", async () => {
+    const creator = await identityService.authenticateContext(creatorSessionToken);
+    if (creator === null) throw new Error("Expected creator authentication");
+    const created = await workspaceRepository.createChannel(creator, {
+      name: "People",
+      slug: "people",
+      topic: "Humans only",
+      access: "humans",
+    });
+    const humansOnlyChannelId = created.conversation.conversation.id;
+    expect(created.conversation.conversation.access).toBe("humans");
+
+    const app = await appWithWebhookThrottle();
+    const response = await app.inject({
+      method: "POST",
+      url: `/v1/channels/${humansOnlyChannelId}/webhook`,
+      headers: sessionCookie(creatorSessionToken),
+      payload: {},
+    });
+    expect(response.statusCode).toBe(404);
+    expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("NOT_FOUND");
+
+    const persisted = await pool.query<{
+      webhook_count: number;
+      grant_count: number;
+      credential_count: number;
+      bot_count: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::integer
+            FROM channel_webhooks
+           WHERE conversation_id = $1) AS webhook_count,
+         (SELECT count(*)::integer
+            FROM bot_channel_grants
+           WHERE conversation_id = $1) AS grant_count,
+         (SELECT count(*)::integer FROM bot_credentials) AS credential_count,
+         (SELECT count(*)::integer FROM users WHERE kind = 'bot') AS bot_count`,
+      [humansOnlyChannelId],
+    );
+    expect(persisted.rows[0]).toEqual({
+      webhook_count: 0,
+      grant_count: 0,
+      credential_count: 0,
+      bot_count: 0,
+    });
   });
 
   it("requires idempotency, rejects malformed and oversized payloads, and bounds a sender", async () => {

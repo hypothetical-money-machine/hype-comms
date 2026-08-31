@@ -766,6 +766,35 @@ describe("transport contracts", () => {
     ).toMatchObject({ conversation: { slug: "general" } });
   });
 
+  it("represents humans-only channels without allowing channel access on direct messages", () => {
+    const humansOnly = {
+      ...CONVERSATION_SUMMARY.conversation,
+      access: "humans" as const,
+    };
+    expect(conversationSchema.parse(humansOnly)).toMatchObject({
+      kind: "channel",
+      access: "humans",
+    });
+    expect(
+      createChannelOperationSchema.parse({
+        name: "People",
+        slug: "people",
+        topic: null,
+        access: "humans",
+        idempotencyKey: "10000000-0000-4000-8000-000000000099",
+      }),
+    ).toMatchObject({ access: "humans" });
+    expect(() =>
+      conversationSchema.parse({
+        ...humansOnly,
+        kind: "direct_message",
+        name: null,
+        slug: null,
+        topic: null,
+      }),
+    ).toThrow(/Channel access is only valid for channels/);
+  });
+
   it("requires unique participants and a complete direct-conversation audience", () => {
     const base = {
       conversation: {

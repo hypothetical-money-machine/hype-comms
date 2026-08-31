@@ -151,6 +151,61 @@ describe("ChannelCreatePopover", () => {
     );
   });
 
+  it("offers humans-only access only when enabled and submits it explicitly", async () => {
+    const onCreate = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    render(
+      createElement(ChannelCreatePopover, {
+        canCreateHumansOnly: true,
+        onCreate,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Channel name" }), {
+      target: { value: "People Planning" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /humans only/i }));
+    expect(
+      screen.getByText(
+        "All people in the workspace can read and send. Agents and bots cannot access.",
+      ),
+    ).toBeTruthy();
+    fireEvent.submit(screen.getByRole("dialog"));
+
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith(
+        "People Planning",
+        "people-planning",
+        null,
+        "humans",
+        "chat",
+      ),
+    );
+  });
+
+  it("uses announcement-specific wording for humans-only access", () => {
+    render(
+      createElement(ChannelCreatePopover, {
+        canCreateAnnouncements: true,
+        canCreateHumansOnly: true,
+        onCreate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+    fireEvent.click(screen.getByRole("radio", { name: /announcement/i }));
+
+    expect(
+      screen.getByRole("radio", { name: /humans only.*read, reply, and react/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/agents and bots cannot access/i)).toBeTruthy();
+  });
+
+  it("hides humans-only access when the feature is unavailable", () => {
+    const { trigger } = renderPopover();
+    open(trigger);
+
+    expect(screen.queryByRole("radio", { name: /humans only/i })).toBeNull();
+  });
+
   it("trims and submits an optional channel topic", async () => {
     const { onCreate, trigger } = renderPopover();
     fireEvent.change(open(trigger), { target: { value: "Product Feedback" } });

@@ -19,6 +19,7 @@ import {
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
+  type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
@@ -2894,6 +2895,279 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
+  it("projects humans-only channel events by capability and hides them from agents", async () => {
+    const agentId = randomUUID();
+    const agentTokenId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, kind, email, username, display_name)
+       VALUES ($1, 'agent', NULL, 'restricted-agent', 'Restricted Agent')`,
+      [agentId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, agentId],
+    );
+    await pool.query(
+      `INSERT INTO agents (user_id, workspace_id, created_by)
+       VALUES ($1, $2, $3)`,
+      [agentId, workspaceId, ownerId],
+    );
+    const currentAgent: AgentCurrentPrincipal = {
+      type: "agent",
+      user: {
+        id: agentId,
+        kind: "agent",
+        username: "restricted-agent",
+        displayName: "Restricted Agent",
+        avatarUrl: null,
+        title: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      workspaceId,
+      role: "member",
+      scopes: ["workspace:read"],
+    };
+    const agent: AuthenticatedAgentIdentity = {
+      currentUser: currentAgent,
+      authorizationScopes: ["workspace:read"],
+      principalKind: "agent",
+      agentTokenId,
+    };
+    const disabledRepository = repository;
+    const disabledBootstrap = await disabledRepository.bootstrap(owner);
+    expect(disabledBootstrap.featureFlags.humansOnlyChannels).toBe(false);
+    await expect(
+      disabledRepository.createChannel(owner, {
+        name: "People",
+        slug: "people",
+        topic: "Humans only",
+        access: "humans",
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ humansOnlyChannelsEnabled: true }),
+    );
+    const enabledBootstrap = await repository.bootstrap(owner);
+    expect(enabledBootstrap.featureFlags.humansOnlyChannels).toBe(true);
+    expect((await disabledRepository.bootstrap(owner)).featureFlags.humansOnlyChannels).toBe(true);
+    const beforeCreate = enabledBootstrap.syncCursor;
+
+    const created = await repository.createChannel(owner, {
+      name: "People",
+      slug: "people",
+      topic: "Humans only",
+      access: "humans",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await expect(
+      repository.createChannel(agent, {
+        name: "Agent people",
+        slug: "agent-people",
+        topic: null,
+        access: "humans",
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+
+    const lateHumanId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, kind, email, username, display_name)
+       VALUES ($1, 'human', 'late-human@example.test', 'late-human', 'Late Human')`,
+      [lateHumanId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, lateHumanId],
+    );
+    const lateHuman = identity(currentUser(lateHumanId, "late-human", "Late Human", "member"));
+    expect(
+      (
+        await repository.listConversations(lateHuman, undefined, CONVERSATION_PAGE_DEFAULT_LIMIT)
+      ).conversations.some((summary) => summary.conversation.id === conversationId),
+    ).toBe(true);
+    await expect(
+      repository.sendMessage(lateHuman, conversationId, {
+        ...message(randomUUID(), "I joined later"),
+        mentionedUserIds: [],
+      }),
+    ).resolves.toMatchObject({ message: { authorId: lateHumanId } });
+    await expect(
+      repository.sendMessage(owner, conversationId, {
+        ...message(randomUUID(), "Hello @restricted-agent"),
+        mentionedUserIds: [agentId],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    await expect(
+      repository.createTask(
+        owner,
+        conversationId,
+        taskInput("Agent-only assignment", { assigneeId: agentId }),
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+
+    const sent = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "For human teammates"),
+      mentionedUserIds: [],
+    });
+    expect(created.conversation).toMatchObject({
+      membershipRole: "member",
+      conversation: { access: "humans" },
+    });
+    const roster = await repository.listChannelMembers(owner, conversationId);
+    expect(roster).toMatchObject({ access: "humans", canManage: false });
+    expect(roster.members.map((channelMember) => channelMember.user.id)).toEqual(
+      expect.arrayContaining([ownerId, memberId, observerId, lateHumanId]),
+    );
+    expect(roster.members.some((channelMember) => channelMember.user.id === agentId)).toBe(false);
+
+    await pool.query(
+      "ALTER TABLE conversation_memberships DISABLE TRIGGER conversation_memberships_validate_humans_only",
+    );
+    try {
+      await pool.query(
+        `INSERT INTO conversation_memberships
+           (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+        [conversationId, workspaceId, agentId],
+      );
+    } finally {
+      await pool.query(
+        "ALTER TABLE conversation_memberships ENABLE TRIGGER conversation_memberships_validate_humans_only",
+      );
+    }
+    const rejectedClientMessageId = randomUUID();
+    const sequenceBeforeRejectedSend = await pool.query<{ last_event_sequence: string }>(
+      "SELECT last_event_sequence::text FROM workspaces WHERE id = $1",
+      [workspaceId],
+    );
+    await expect(
+      repository.sendMessage(agent, conversationId, {
+        ...message(rejectedClientMessageId, "Forged agent seat"),
+        mentionedUserIds: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    await expect(
+      pool.query(
+        `SELECT 1
+           FROM messages
+          WHERE author_id = $1 AND client_message_id = $2`,
+        [agentId, rejectedClientMessageId],
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(
+      pool.query<{ last_event_sequence: string }>(
+        "SELECT last_event_sequence::text FROM workspaces WHERE id = $1",
+        [workspaceId],
+      ),
+    ).resolves.toMatchObject({ rows: sequenceBeforeRejectedSend.rows });
+
+    const agentConversations = await repository.listConversations(
+      agent,
+      undefined,
+      CONVERSATION_PAGE_DEFAULT_LIMIT,
+    );
+    expect(
+      agentConversations.conversations.some(
+        (summary) => summary.conversation.id === conversationId,
+      ),
+    ).toBe(false);
+    expect(
+      (await repository.agentWakeBootstrap(agent)).conversations.some(
+        (conversation) => conversation.conversationId === conversationId,
+      ),
+    ).toBe(false);
+    expect(
+      (await repository.searchMessages(agent, "human teammates", undefined, 50)).results,
+    ).toEqual([]);
+    await expect(repository.joinPublicChannel(agent, conversationId)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+    await expect(repository.messageById(agent, sent.message.id)).rejects.toMatchObject({
+      statusCode: 404,
+      code: "NOT_FOUND",
+    } satisfies Partial<ApiError>);
+
+    await repository.archiveChannel(owner, conversationId);
+    const channelEventAccess = (
+      events: readonly WorkspaceEvent[],
+      type: "channel.created" | "channel.archived",
+    ) => {
+      const event = events.find(
+        (candidate) => candidate.type === type && candidate.conversationId === conversationId,
+      );
+      expect(event?.type).toBe(type);
+      return event?.type === "channel.created" || event?.type === "channel.archived"
+        ? event.payload.conversation.access
+        : undefined;
+    };
+    const expectLegacyHumansOnlyProjection = async (after: string) => {
+      const [legacySync, legacyRealtime] = await Promise.all([
+        repository.sync(member, after, 100),
+        repository.syncPrincipal({ workspaceId, userId: memberId }, after, 100),
+      ]);
+      expect(channelEventAccess(legacySync.events, "channel.created")).toBe("members");
+      expect(channelEventAccess(legacySync.events, "channel.archived")).toBe("members");
+      expect(channelEventAccess(legacyRealtime.events, "channel.created")).toBe("members");
+      expect(channelEventAccess(legacyRealtime.events, "channel.archived")).toBe("members");
+    };
+    const expectCapableHumansOnlyProjection = async (after: string) => {
+      const [capableSync, capableRealtime] = await Promise.all([
+        repository.sync(member, after, 100, { humansOnlyChannels: true }),
+        repository.syncPrincipal(
+          { workspaceId, userId: memberId, humansOnlyChannels: true },
+          after,
+          100,
+        ),
+      ]);
+      expect(channelEventAccess(capableSync.events, "channel.created")).toBe("humans");
+      expect(channelEventAccess(capableSync.events, "channel.archived")).toBe("humans");
+      expect(channelEventAccess(capableRealtime.events, "channel.created")).toBe("humans");
+      expect(channelEventAccess(capableRealtime.events, "channel.archived")).toBe("humans");
+    };
+
+    await expectLegacyHumansOnlyProjection(beforeCreate);
+    await expectCapableHumansOnlyProjection(beforeCreate);
+
+    // Newly stored events persist access: "members". Rewrite to "humans" so the shared
+    // sync/realtime mapper must project the legacy enum when the capability is absent.
+    await pool.query(
+      `UPDATE sync_events
+          SET payload = jsonb_set(payload, '{conversation,access}', '"humans"')
+        WHERE conversation_id = $1
+          AND event_type IN ('channel.created', 'channel.archived')`,
+      [conversationId],
+    );
+    await expectLegacyHumansOnlyProjection(beforeCreate);
+    await expectCapableHumansOnlyProjection(beforeCreate);
+
+    const forgedRemoval = await (async () => {
+      const client = await pool.connect();
+      try {
+        return await insertSyncEvent(client, {
+          workspaceId,
+          actorUserId: ownerId,
+          type: "channel.membership_changed",
+          conversationId,
+          payload: { memberId: agentId, action: "removed" },
+          audienceUserIds: [agentId],
+        });
+      } finally {
+        client.release();
+      }
+    })();
+    const agentSync = await repository.sync(agent, beforeCreate, 100, {
+      humansOnlyChannels: true,
+    });
+    expect(agentSync.events.some((event) => event.id === forgedRemoval.id)).toBe(false);
+    expect(agentSync.events.some((event) => event.conversationId === conversationId)).toBe(false);
+  });
+
   it("always retains an owner for a member-only channel", async () => {
     const created = await repository.createChannel(owner, {
       name: "Steering",
@@ -3004,6 +3278,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       memberProfiles: false,
       ephemeralActivity: false,
       groupDirectMessages: false,
+      humansOnlyChannels: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
@@ -3017,6 +3292,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       memberProfiles: true,
       ephemeralActivity: true,
       groupDirectMessages: true,
+      humansOnlyChannels: true,
     });
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
@@ -3032,6 +3308,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       memberProfiles: true,
       ephemeralActivity: true,
       groupDirectMessages: true,
+      humansOnlyChannels: true,
     });
   });
 

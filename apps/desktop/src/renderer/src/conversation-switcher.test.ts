@@ -9,6 +9,36 @@ import { ConversationSwitcher, type SwitcherConversation } from "./conversation-
 const conversations: readonly SwitcherConversation[] = [
   { id: "general", name: "# General", kind: "channel", isArchived: false },
   { id: "design", name: "# Design", kind: "channel", isArchived: false },
+  {
+    id: "people-planning",
+    name: "# People Planning",
+    kind: "channel",
+    isArchived: false,
+    access: "humans",
+  },
+  {
+    id: "company-news",
+    name: "# Company News",
+    kind: "channel",
+    isArchived: false,
+    access: "workspace",
+    channelMode: "announcement",
+  },
+  {
+    id: "past-people-planning",
+    name: "# Past People Planning",
+    kind: "channel",
+    isArchived: true,
+    access: "humans",
+  },
+  {
+    id: "old-company-news",
+    name: "# Old Company News",
+    kind: "channel",
+    isArchived: true,
+    access: "workspace",
+    channelMode: "announcement",
+  },
   { id: "claire", name: "Claire", kind: "direct_message", isArchived: false },
   {
     id: "group",
@@ -151,5 +181,51 @@ describe("ConversationSwitcher", () => {
 
     const result = screen.getByRole("button", { name: /Claire, Woots.*Group conversation/u });
     expect(result.querySelector(".group-direct-message-avatar")).toBeTruthy();
+  });
+
+  it("identifies humans-only channels in search results", () => {
+    renderSwitcher();
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Jump to a conversation" }), {
+      target: { value: "People Planning" },
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Humans-only channel: # People Planning" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Humans-only channel")).toBeTruthy();
+  });
+
+  it("announces the channel type once for announcement results", () => {
+    renderSwitcher();
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Jump to a conversation" }), {
+      target: { value: "Company News" },
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Announcement channel: # Company News" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Announcement channel")).toBeTruthy();
+  });
+
+  it("keeps archived state in typed channel result names", () => {
+    renderSwitcher();
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    const searchbox = screen.getByRole("searchbox", { name: "Jump to a conversation" });
+
+    fireEvent.change(searchbox, { target: { value: "Past People Planning" } });
+    expect(
+      screen.getByRole("button", {
+        name: "Archived humans-only channel: # Past People Planning",
+      }),
+    ).toBeTruthy();
+
+    fireEvent.change(searchbox, { target: { value: "Old Company News" } });
+    expect(
+      screen.getByRole("button", {
+        name: "Archived announcement channel: # Old Company News",
+      }),
+    ).toBeTruthy();
   });
 });

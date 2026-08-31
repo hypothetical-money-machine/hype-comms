@@ -8,6 +8,7 @@ import {
   DEFAULT_AGENT_AGENCY_PROFILE,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
@@ -41,6 +42,7 @@ const CLIENT_CAPABILITIES = [
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
@@ -112,6 +114,7 @@ const BOOTSTRAP_RESPONSE = {
     directMessages: true,
     mentions: true,
     announcementChannels: false,
+    humansOnlyChannels: false,
   },
 } as const;
 
@@ -288,6 +291,7 @@ describe("WorkspaceTransport bootstrap compatibility", () => {
       ...BOOTSTRAP_RESPONSE.featureFlags,
     };
     delete legacyFeatureFlags.announcementChannels;
+    delete legacyFeatureFlags.humansOnlyChannels;
     const legacyConversation: {
       -readonly [
         Key in keyof (typeof BOOTSTRAP_RESPONSE.conversations)[number]["conversation"]

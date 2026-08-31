@@ -1269,6 +1269,40 @@ describeWithPostgres("AgentEnrollmentModule", () => {
     ).toEqual([]);
   });
 
+  it("rejects humans-only channels as agent enrollment seats", async () => {
+    const ownerIdentity = await identityService.authenticateContext(ownerSessionToken);
+    if (ownerIdentity === null) throw new Error("Owner session did not authenticate");
+    const workspaceRepository = new WorkspaceRepository(pool, {
+      humansOnlyChannelsEnabled: true,
+    });
+    const people = await workspaceRepository.createChannel(ownerIdentity, {
+      name: "People",
+      slug: "people",
+      topic: null,
+      access: "humans",
+    });
+    const peopleId = people.conversation.conversation.id;
+    const candidate = candidateInput("human-seat-child", [peopleId]);
+
+    await expect(
+      enrollment.request(ownerActor(), candidate.request, "human-seat-child-key"),
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "FORBIDDEN",
+      message: "Every requested restricted channel must be valid and visible to the requester",
+    });
+    expect(
+      (
+        await pool.query(
+          `SELECT 1
+             FROM agent_enrollments
+            WHERE workspace_id = $1 AND username = $2`,
+          [workspaceId, candidate.request.username],
+        )
+      ).rowCount,
+    ).toBe(0);
+  });
+
   it("retries a forced request/revocation deadlock and always leaves the inviter token revoked", async () => {
     const inviter = await identityService.createAgent(ownerId, {
       username: "racing-inviter",

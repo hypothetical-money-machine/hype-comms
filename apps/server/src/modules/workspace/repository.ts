@@ -78,6 +78,7 @@ import {
   type ChannelMembersResponse,
   type CommunicationPathsResponse,
   type Conversation,
+  type ChannelAccess,
   type ConversationMutationResponse,
   type ConversationSummary,
   type CreateChannelRequest,
@@ -160,6 +161,7 @@ interface WorkspaceRow extends QueryResultRow {
   updated_at: Date | string;
   last_event_sequence: string;
   announcement_channels_available: boolean;
+  humans_only_channels_available: boolean;
 }
 
 interface UserRow extends QueryResultRow {
@@ -181,6 +183,7 @@ interface ConversationRow extends QueryResultRow {
   slug: string | null;
   topic: string | null;
   channel_access: "workspace" | "members" | null;
+  human_only: boolean;
   channel_mode: "chat" | "announcement" | null;
   is_archived: boolean;
   created_by: string | null;
@@ -346,6 +349,7 @@ interface EventRow extends QueryResultRow {
   occurred_at: Date | string;
   visible: boolean;
   participated_thread_notification: boolean;
+  conversation_human_only: boolean;
 }
 
 interface TicketRow extends QueryResultRow {
@@ -362,6 +366,7 @@ interface TicketRow extends QueryResultRow {
   member_profiles: boolean;
   ephemeral_activity: boolean;
   group_direct_messages: boolean;
+  humans_only_channels: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -398,6 +403,8 @@ export interface WorkspaceRepositoryHooks {
   readonly afterAgentWakeBootstrapCursorRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
+  /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
+  readonly humansOnlyChannelsEnabled?: boolean;
   /** Structured operational record; message bodies are deliberately never included. */
   readonly onAnnouncementAudit?: (record: AnnouncementAuditRecord) => void;
   /** Test seam for holding the message-delivery conversation lock. */
@@ -436,6 +443,7 @@ export interface WorkspacePrincipal {
   readonly memberProfiles?: boolean;
   readonly ephemeralActivity?: boolean;
   readonly groupDirectMessages?: boolean;
+  readonly humansOnlyChannels?: boolean;
 }
 
 export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
@@ -484,6 +492,24 @@ function mapConversation(row: ConversationRow): Conversation {
     name: row.name,
     slug: row.slug,
     topic: row.topic,
+    access: row.human_only ? "humans" : row.channel_access,
+    channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
+    isArchived: row.is_archived,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  });
+}
+
+/** Keep durable events readable by servers whose strict access enum predates humans-only. */
+function mapStoredConversation(row: ConversationRow): Conversation {
+  return conversationSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    kind: row.kind,
+    name: row.name,
+    slug: row.slug,
+    topic: row.topic,
     access: row.channel_access,
     channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
     isArchived: row.is_archived,
@@ -520,7 +546,13 @@ function conversationVisibilitySql(
             )
             OR (
               ${alias}.kind = 'channel'
+              AND ${alias}.human_only
+              AND visible_actor.kind = 'human'
+            )
+            OR (
+              ${alias}.kind = 'channel'
               AND ${alias}.channel_access = 'members'
+              AND NOT ${alias}.human_only
               AND EXISTS (
                 SELECT 1
                   FROM conversation_memberships AS visible_membership
@@ -546,6 +578,7 @@ function conversationVisibilitySql(
     )
     OR (
       ${alias}.kind = 'channel'
+      AND NOT ${alias}.human_only
       AND EXISTS (
         SELECT 1
           FROM bot_channel_grants AS visible_bot_grant
@@ -988,6 +1021,10 @@ export class WorkspaceRepository {
     return this.hooks.announcementChannelsEnabled ?? false;
   }
 
+  get humansOnlyChannelsEnabled(): boolean {
+    return this.hooks.humansOnlyChannelsEnabled ?? false;
+  }
+
   /** Persist the one-way cutover before this process begins serving default-agency traffic. */
   async enableDefaultAgentAgency(): Promise<void> {
     await this.pool.query(
@@ -1010,11 +1047,20 @@ export class WorkspaceRepository {
         [identity.currentUser.workspaceId],
       );
     }
+    if (this.humansOnlyChannelsEnabled) {
+      await this.pool.query(
+        `UPDATE workspaces
+            SET humans_only_channels_available = true
+          WHERE id = $1
+            AND humans_only_channels_available = false`,
+        [identity.currentUser.workspaceId],
+      );
+    }
     return this.#transaction(
       async (client) => {
         const workspaceResult = await client.query<WorkspaceRow>(
           `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence,
-                  announcement_channels_available
+                  announcement_channels_available, humans_only_channels_available
            FROM workspaces
           WHERE id = $1`,
           [identity.currentUser.workspaceId],
@@ -1045,6 +1091,7 @@ export class WorkspaceRepository {
             directMessages: true,
             mentions: true,
             announcementChannels: workspace.announcement_channels_available,
+            humansOnlyChannels: workspace.humans_only_channels_available,
           },
         });
       },
@@ -1289,7 +1336,7 @@ export class WorkspaceRepository {
                ON conversation.workspace_id = $1
               AND conversation.kind = 'channel'
               AND conversation.is_archived = false
-              AND conversation.channel_access = 'workspace'
+              AND (conversation.channel_access = 'workspace' OR conversation.human_only)
               AND actor.kind = 'human'
             UNION
            SELECT conversation_membership.user_id AS user_id,
@@ -1302,6 +1349,7 @@ export class WorkspaceRepository {
              JOIN actor ON actor.user_id = conversation_membership.user_id
             WHERE conversation_membership.workspace_id = $1
               AND conversation_membership.left_at IS NULL
+              AND NOT conversation.human_only
          ),
          dm_source AS (
            SELECT conversation.dm_user_low_id AS member_a_id,
@@ -1578,7 +1626,18 @@ export class WorkspaceRepository {
     const response = await this.#transaction(async (client) => {
       const create = async (): Promise<ConversationMutationResponse> => {
         const channelMode = input.channelMode ?? "chat";
-        const principal = await this.#requireActivePrincipal(client, identity);
+        const principal =
+          input.access === "humans"
+            ? await this.#requireHumansOnlyCreator(client, identity)
+            : await this.#requireActivePrincipal(client, identity);
+        const storedAccess: Exclude<ChannelAccess, "humans"> =
+          input.access === "humans" ? "members" : input.access;
+        if (
+          input.access === "humans" &&
+          !(await this.#humansOnlyChannelsAvailable(client, identity.currentUser.workspaceId))
+        ) {
+          throw new ApiError(403, "FORBIDDEN", "Humans-only channels are unavailable");
+        }
         if (channelMode === "announcement") {
           const announcementChannelsAvailable = await this.#announcementChannelsAvailable(
             client,
@@ -1605,8 +1664,8 @@ export class WorkspaceRepository {
           .query<ConversationRow>(
             `INSERT INTO conversations
            (id, workspace_id, kind, name, slug, topic, channel_access, channel_mode, created_by,
-            agent_membership_required)
-         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7, $8, $9)
+            agent_membership_required, human_only)
+         VALUES ($1, $2, 'channel', $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
             [
               randomUUID(),
@@ -1614,10 +1673,11 @@ export class WorkspaceRepository {
               input.name,
               input.slug,
               input.topic,
-              input.access,
+              storedAccess,
               channelMode,
               identity.currentUser.user.id,
               defaultAgentAgencyEnabled,
+              input.access === "humans",
             ],
           )
           .catch((error: unknown) => {
@@ -1645,7 +1705,7 @@ export class WorkspaceRepository {
           type: "channel.created",
           conversation: row,
           payload: {
-            conversation: mapConversation(row),
+            conversation: mapStoredConversation(row),
             participantIds: audienceUserIds,
           },
           audienceUserIds,
@@ -1893,7 +1953,7 @@ export class WorkspaceRepository {
         type: "channel.archived",
         conversation: row,
         payload: {
-          conversation: mapConversation(row),
+          conversation: mapStoredConversation(row),
           participantIds: audienceUserIds,
         },
         audienceUserIds,
@@ -1940,7 +2000,7 @@ export class WorkspaceRepository {
           type: "direct_conversation.created",
           conversation: row,
           payload: {
-            conversation: mapConversation(row),
+            conversation: mapStoredConversation(row),
             participantIds,
           },
           audienceUserIds: participantIds,
@@ -2014,7 +2074,7 @@ export class WorkspaceRepository {
           const event = await this.#insertEvent(client, identity, {
             type: "direct_conversation.created",
             conversation,
-            payload: { conversation: mapConversation(conversation), participantIds },
+            payload: { conversation: mapStoredConversation(conversation), participantIds },
             audienceUserIds: participantIds,
           });
           return conversationMutationResponseSchema.parse({
@@ -3538,7 +3598,9 @@ export class WorkspaceRepository {
         `SELECT conversation.is_archived,
                 CASE
                   WHEN $4::text = 'bot' THEN
-                    conversation.kind = 'channel' AND EXISTS (
+                    conversation.kind = 'channel'
+                    AND NOT conversation.human_only
+                    AND EXISTS (
                       SELECT 1
                         FROM bot_channel_grants AS grant_record
                        WHERE grant_record.conversation_id = conversation.id
@@ -3554,6 +3616,7 @@ export class WorkspaceRepository {
                        AND group_membership.user_id = $2
                        AND group_membership.left_at IS NULL
                   )
+                  WHEN conversation.human_only THEN $4::text = 'human'
                   WHEN conversation.channel_access = 'workspace' THEN
                     $4::text = 'human' OR EXISTS (
                       SELECT 1
@@ -3563,12 +3626,12 @@ export class WorkspaceRepository {
                          AND public_membership.left_at IS NULL
                     )
                   WHEN conversation.channel_access = 'members' THEN EXISTS (
-                    SELECT 1
-                      FROM conversation_memberships AS channel_membership
+                      SELECT 1
+                        FROM conversation_memberships AS channel_membership
                      WHERE channel_membership.conversation_id = conversation.id
-                       AND channel_membership.user_id = $2
-                       AND channel_membership.left_at IS NULL
-                  )
+                         AND channel_membership.user_id = $2
+                         AND channel_membership.left_at IS NULL
+                    )
                   ELSE false
                 END AS conversation_visible
            FROM conversations AS conversation
@@ -4040,6 +4103,14 @@ export class WorkspaceRepository {
       }
       const rows = await client.query<EventRow>(
         `SELECT event.*,
+                coalesce(
+                  (
+                    SELECT conversation.human_only
+                      FROM conversations AS conversation
+                     WHERE conversation.id = event.conversation_id
+                  ),
+                  false
+                ) AS conversation_human_only,
                 (
                   $7::boolean
                   AND EXISTS (
@@ -4070,6 +4141,12 @@ export class WorkspaceRepository {
                       event.event_type = 'channel.membership_changed'
                       AND event.payload ->> 'action' = 'removed'
                       AND event.payload ->> 'memberId' = $2::text
+                      AND NOT EXISTS (
+                        SELECT 1
+                          FROM conversations AS removed_membership_conversation
+                         WHERE removed_membership_conversation.id = event.conversation_id
+                           AND removed_membership_conversation.human_only
+                      )
                     )
                   )
                   AND (
@@ -4144,6 +4221,7 @@ export class WorkspaceRepository {
               principal.readStateEvents ?? false,
               principal.participatedThreadNotifications ?? false,
               principal.memberProfiles ?? false,
+              principal.humansOnlyChannels ?? false,
             ),
           ),
         nextCursor,
@@ -4174,6 +4252,7 @@ export class WorkspaceRepository {
       memberProfiles = false,
       ephemeralActivity = false,
       groupDirectMessages = false,
+      humansOnlyChannels = false,
     } = capabilities;
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -4188,8 +4267,8 @@ export class WorkspaceRepository {
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
           participated_thread_notifications, message_retract_events, member_profiles,
-          ephemeral_activity, group_direct_messages)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+          ephemeral_activity, group_direct_messages, humans_only_channels)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -4207,6 +4286,7 @@ export class WorkspaceRepository {
         memberProfiles,
         ephemeralActivity,
         groupDirectMessages,
+        humansOnlyChannels,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -4236,7 +4316,8 @@ export class WorkspaceRepository {
                    ticket.message_retract_events,
                    ticket.member_profiles,
                    ticket.ephemeral_activity,
-                   ticket.group_direct_messages
+                   ticket.group_direct_messages,
+                   ticket.humans_only_channels
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -4250,7 +4331,8 @@ export class WorkspaceRepository {
               ticket.message_retract_events,
               ticket.member_profiles,
               ticket.ephemeral_activity,
-              ticket.group_direct_messages
+              ticket.group_direct_messages,
+              ticket.humans_only_channels
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -4306,6 +4388,7 @@ export class WorkspaceRepository {
         memberProfiles: row.member_profiles,
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
+        humansOnlyChannels: row.humans_only_channels,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -4323,6 +4406,7 @@ export class WorkspaceRepository {
         memberProfiles: row.member_profiles,
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
+        humansOnlyChannels: row.humans_only_channels,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -4515,6 +4599,7 @@ export class WorkspaceRepository {
                       OR (
                         anchor.kind = 'channel'
                         AND anchor.channel_access = 'members'
+                        AND NOT anchor.human_only
                         AND EXISTS (
                           SELECT 1
                             FROM conversation_memberships AS anchor_membership
@@ -4791,6 +4876,37 @@ export class WorkspaceRepository {
     return principal;
   }
 
+  async #requireHumansOnlyCreator(
+    client: PoolClient,
+    identity: AuthenticatedIdentity,
+  ): Promise<{ readonly role: "owner" | "member"; readonly kind: "human" }> {
+    const result = await client.query<
+      {
+        user_id: string;
+        role: "owner" | "member";
+        status: "invited" | "active" | "revoked";
+        kind: "human";
+      } & QueryResultRow
+    >(
+      `SELECT membership.user_id, membership.role, membership.status, user_account.kind
+         FROM workspace_memberships AS membership
+         JOIN users AS user_account ON user_account.id = membership.user_id
+        WHERE membership.workspace_id = $1
+          AND user_account.kind = 'human'
+        ORDER BY membership.user_id
+        FOR UPDATE OF membership`,
+      [identity.currentUser.workspaceId],
+    );
+    const principal = result.rows.find((row) => row.user_id === identity.currentUser.user.id);
+    if (principal === undefined || principal.status !== "active") {
+      throw new ApiError(403, "FORBIDDEN", "Only humans can create humans-only channels");
+    }
+    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
+      identity.currentUser.workspaceId,
+    ]);
+    return { role: principal.role, kind: principal.kind };
+  }
+
   async #requireActiveConversationParticipants(
     client: PoolClient,
     identity: AuthenticatedIdentity,
@@ -4890,7 +5006,11 @@ export class WorkspaceRepository {
       true,
     );
     await this.#requireActivePrincipal(client, identity);
-    if (conversation.kind !== "channel" || conversation.channel_access !== "members") {
+    if (
+      conversation.kind !== "channel" ||
+      conversation.channel_access !== "members" ||
+      conversation.human_only
+    ) {
       throw new ApiError(404, "NOT_FOUND", "Managed channel not found");
     }
     const role = await this.#membershipRole(client, identity, conversation);
@@ -4929,8 +5049,21 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversation: ConversationRow,
   ): Promise<ChannelMembersResponse> {
-    const result =
-      conversation.channel_access === "workspace"
+    const result = conversation.human_only
+      ? await client.query<ChannelMemberRow>(
+          `SELECT user_account.id, user_account.kind, user_account.username,
+                    user_account.display_name, user_account.avatar_url, user_account.title,
+                    user_account.created_at, user_account.updated_at,
+                    'member'::text AS role, workspace_membership.created_at AS joined_at
+               FROM workspace_memberships AS workspace_membership
+               JOIN users AS user_account ON user_account.id = workspace_membership.user_id
+              WHERE workspace_membership.workspace_id = $1
+                AND workspace_membership.status = 'active'
+                AND user_account.kind = 'human'
+              ORDER BY lower(user_account.display_name), user_account.id`,
+          [conversation.workspace_id],
+        )
+      : conversation.channel_access === "workspace"
         ? await client.query<ChannelMemberRow>(
             `SELECT user_account.id, user_account.kind, user_account.username,
                     user_account.display_name,
@@ -4985,6 +5118,7 @@ export class WorkspaceRepository {
                     AND membership.left_at IS NULL
                     AND workspace_membership.status = 'active'
                     AND user_account.kind IN ('human', 'agent')
+                    AND (NOT $2::boolean OR user_account.kind = 'human')
                  UNION ALL
                  SELECT user_account.id, user_account.kind, user_account.username,
                         user_account.display_name, user_account.avatar_url, user_account.title,
@@ -4998,20 +5132,22 @@ export class WorkspaceRepository {
                   WHERE grant_record.conversation_id = $1
                     AND workspace_membership.status = 'active'
                     AND user_account.kind = 'bot'
+                    AND NOT $2::boolean
                ) AS audience
               ORDER BY lower(audience.display_name), audience.id`,
-            [conversation.id],
+            [conversation.id, conversation.human_only],
           );
     const role = await this.#membershipRole(client, identity, conversation);
     return channelMembersResponseSchema.parse({
       conversationId: conversation.id,
-      access: conversation.channel_access,
+      access: conversation.human_only ? "humans" : conversation.channel_access,
       members: result.rows.map((row) => ({
         user: mapUser(row),
         role: row.role,
         joinedAt: iso(row.joined_at),
       })),
-      canManage: conversation.channel_access === "members" && role === "owner",
+      canManage:
+        conversation.channel_access === "members" && !conversation.human_only && role === "owner",
     });
   }
 
@@ -5034,6 +5170,19 @@ export class WorkspaceRepository {
             AND user_account.kind IN ('human', 'agent')
           ORDER BY membership.user_id`,
         [conversation.id],
+      );
+      return result.rows.map((row) => row.user_id);
+    }
+    if (conversation.human_only) {
+      const result = await client.query<{ user_id: string } & QueryResultRow>(
+        `SELECT membership.user_id
+           FROM workspace_memberships AS membership
+           JOIN users AS user_account ON user_account.id = membership.user_id
+          WHERE membership.workspace_id = $1
+            AND membership.status = 'active'
+            AND user_account.kind = 'human'
+          ORDER BY membership.user_id`,
+        [conversation.workspace_id],
       );
       return result.rows.map((row) => row.user_id);
     }
@@ -5081,6 +5230,7 @@ export class WorkspaceRepository {
               AND membership.left_at IS NULL
               AND workspace_membership.status = 'active'
               AND user_account.kind IN ('human', 'agent')
+              AND (NOT $2::boolean OR user_account.kind = 'human')
            UNION
            SELECT grant_record.bot_user_id AS user_id
              FROM bot_channel_grants AS grant_record
@@ -5091,9 +5241,10 @@ export class WorkspaceRepository {
             WHERE grant_record.conversation_id = $1
               AND workspace_membership.status = 'active'
               AND user_account.kind = 'bot'
+              AND NOT $2::boolean
          ) AS audience
         ORDER BY audience.user_id`,
-      [conversation.id],
+      [conversation.id, conversation.human_only],
     );
     return result.rows.map((row) => row.user_id);
   }
@@ -5369,6 +5520,28 @@ export class WorkspaceRepository {
     return workspace.announcement_channels_available;
   }
 
+  async #humansOnlyChannelsAvailable(client: PoolClient, workspaceId: string): Promise<boolean> {
+    if (this.humansOnlyChannelsEnabled) {
+      await client.query(
+        `UPDATE workspaces
+            SET humans_only_channels_available = true
+          WHERE id = $1
+            AND humans_only_channels_available = false`,
+        [workspaceId],
+      );
+    }
+    const result = await client.query<{ humans_only_channels_available: boolean } & QueryResultRow>(
+      `SELECT humans_only_channels_available
+         FROM workspaces
+        WHERE id = $1
+        FOR UPDATE`,
+      [workspaceId],
+    );
+    const workspace = result.rows[0];
+    if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    return workspace.humans_only_channels_available;
+  }
+
   async #nextWorkspaceSequence(client: PoolClient, workspaceId: string): Promise<string> {
     return nextWorkspaceSequence(client, workspaceId);
   }
@@ -5390,8 +5563,9 @@ export class WorkspaceRepository {
     readStateEvents: boolean,
     participatedThreadNotifications: boolean,
     memberProfiles: boolean,
+    humansOnlyChannels: boolean,
   ): WorkspaceEvent {
-    const event = workspaceEventSchema.parse({
+    let event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
       type: row.event_type,
@@ -5404,6 +5578,14 @@ export class WorkspaceRepository {
       delivery: "at_least_once",
       payload: row.payload,
     });
+    if (humansOnlyChannels && row.conversation_human_only) {
+      event = this.#humansOnlyChannelEvent(event);
+    } else if (!humansOnlyChannels) {
+      // HTTP already converts access: "humans" → "members" for clients that did not negotiate
+      // humans-only-channels-v1. Realtime and HTTP sync share this mapper; leave the stored
+      // payload canonical while projecting the legacy enum so 0.1.35 clients do not drop the event.
+      event = this.#legacyHumansOnlyChannelEvent(event);
+    }
     if (event.type === "message.created") {
       // Never trust shared event JSON to carry a recipient-specific reason. Rebuild the payload
       // from canonical message fields and add the reason only from the scoped relation selected
@@ -5445,6 +5627,29 @@ export class WorkspaceRepository {
       ...event,
       payload: { ...event.payload, conversation },
     } as unknown as WorkspaceEvent;
+  }
+
+  #humansOnlyChannelEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (event.type !== "channel.created" && event.type !== "channel.archived") return event;
+    return workspaceEventSchema.parse({
+      ...event,
+      payload: {
+        ...event.payload,
+        conversation: { ...event.payload.conversation, access: "humans" },
+      },
+    });
+  }
+
+  #legacyHumansOnlyChannelEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (event.type !== "channel.created" && event.type !== "channel.archived") return event;
+    if (event.payload.conversation.access !== "humans") return event;
+    return workspaceEventSchema.parse({
+      ...event,
+      payload: {
+        ...event.payload,
+        conversation: { ...event.payload.conversation, access: "members" },
+      },
+    });
   }
 
   #legacyMemberProfileEvent(event: WorkspaceEvent): WorkspaceEvent {
