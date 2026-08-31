@@ -226,9 +226,9 @@ describe("isEphemeralAppImageMountPath", () => {
         "/home/wren/squashfs-root",
       ),
     ).toBe(true);
-    expect(
-      isEphemeralAppImageMountPath("/home/wren/Apps/Hype Comms.AppImage", undefined),
-    ).toBe(false);
+    expect(isEphemeralAppImageMountPath("/home/wren/Apps/Hype Comms.AppImage", undefined)).toBe(
+      false,
+    );
     expect(
       isEphemeralAppImageMountPath("/opt/Hype Comms/hype-comms", "/tmp/.mount_HypeCoXXXXXX"),
     ).toBe(false);
@@ -286,8 +286,7 @@ describe("registerAppImageProtocolHandler", () => {
 describe("installAndQueryLinuxProtocolHandler", () => {
   const MIME = "x-scheme-handler/hype-comms";
   const APPIMAGE_DESKTOP = "com.hypemm.hypecomms.appimage.desktop";
-  const DESKTOP_PATH =
-    "/home/wren/.local/share/applications/com.hypemm.hypecomms.appimage.desktop";
+  const DESKTOP_PATH = "/home/wren/.local/share/applications/com.hypemm.hypecomms.appimage.desktop";
 
   function defaultCommand(
     command: string,
@@ -304,9 +303,7 @@ describe("installAndQueryLinuxProtocolHandler", () => {
     target.runCommand.mockImplementation(async (command, commandArguments) =>
       defaultCommand(command, commandArguments),
     );
-    target.readFile.mockResolvedValue(
-      'Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n',
-    );
+    target.readFile.mockResolvedValue('Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n');
     target.fileIsExecutable.mockResolvedValue(true);
 
     const result = await installAndQueryLinuxProtocolHandler(INSTALL_INPUT, target);
@@ -321,11 +318,7 @@ describe("installAndQueryLinuxProtocolHandler", () => {
     const written = target.writeFile.mock.calls[0]?.[1] ?? "";
     expect(written).toContain("MimeType=x-scheme-handler/hype-comms;");
     expect(written).toContain("[Desktop Entry]");
-    expect(target.runCommand).toHaveBeenCalledWith("xdg-mime", [
-      "default",
-      APPIMAGE_DESKTOP,
-      MIME,
-    ]);
+    expect(target.runCommand).toHaveBeenCalledWith("xdg-mime", ["default", APPIMAGE_DESKTOP, MIME]);
     expect(target.fileIsExecutable).toHaveBeenCalledWith("/home/wren/Apps/Hype Comms.AppImage");
   });
 
@@ -361,11 +354,7 @@ describe("installAndQueryLinuxProtocolHandler", () => {
       DESKTOP_PATH,
       expect.stringContaining(`Exec="${extracted}" %u`),
     );
-    expect(target.runCommand).toHaveBeenCalledWith("xdg-mime", [
-      "default",
-      APPIMAGE_DESKTOP,
-      MIME,
-    ]);
+    expect(target.runCommand).toHaveBeenCalledWith("xdg-mime", ["default", APPIMAGE_DESKTOP, MIME]);
   });
 
   it("does not steal a working deb handler when the extracted binary is the fallback", async () => {
@@ -402,9 +391,7 @@ describe("installAndQueryLinuxProtocolHandler", () => {
     target.runCommand.mockImplementation(async (command, commandArguments) =>
       defaultCommand(command, commandArguments),
     );
-    target.readFile.mockResolvedValue(
-      'Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n',
-    );
+    target.readFile.mockResolvedValue('Exec="/home/wren/Apps/Hype Comms.AppImage" %u\n');
     target.fileIsExecutable.mockResolvedValue(true);
 
     const result = await installAndQueryLinuxProtocolHandler(INSTALL_INPUT, target);
@@ -635,11 +622,7 @@ describe("AppImage protocol install against a real applications directory", () =
       expect(contents).toContain(`Exec=${quoteExecArgument(appImagePath)} %u`);
       expect(commands).toContainEqual({
         command: "xdg-mime",
-        args: [
-          "default",
-          "com.hypemm.hypecomms.appimage.desktop",
-          "x-scheme-handler/hype-comms",
-        ],
+        args: ["default", "com.hypemm.hypecomms.appimage.desktop", "x-scheme-handler/hype-comms"],
       });
     } finally {
       await fs.rm(scratch, { recursive: true, force: true });
