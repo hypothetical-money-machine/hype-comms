@@ -7,6 +7,8 @@ import test from "node:test";
 
 import {
   DEMO_COMPOSE_PROJECT,
+  DEMO_POSTGRES_MODE_MANAGED,
+  DEMO_POSTGRES_MODE_SERVICE,
   HEADLESS_DEMO_MANIFEST_KIND,
   HEADLESS_DEMO_MANIFEST_VERSION,
   HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV,
@@ -61,7 +63,33 @@ test("derives an isolated loopback database and never inherits the normal databa
   assert.equal(result.env.REMOTE_DEBUGGING_PORT, undefined);
   assert.equal(result.env.HYPE_COMMS_PORT, "3000");
   assert.equal(result.env.HYPE_COMMS_API_ORIGIN, "http://127.0.0.1:3000");
+  assert.equal(result.managesPostgres, true);
   assert.equal(result.paths.stateDirectory, path.join(root, ".dev-data", "demo"));
+});
+
+test("derives the fixed test-named database for the private Compose service", () => {
+  const result = deriveDemoEnvironment(
+    {
+      HYPE_COMMS_POSTGRES_PASSWORD: "container only",
+      HYPE_COMMS_DATABASE_URL: "postgres://production.example/important",
+      HYPE_COMMS_DEMO_POSTGRES_BIND_PORT: "55432",
+    },
+    "/workspace",
+    DEMO_POSTGRES_MODE_SERVICE,
+  );
+  const url = new URL(result.databaseUrl);
+
+  assert.equal(url.hostname, "postgres");
+  assert.equal(url.port, "5432");
+  assert.equal(url.pathname, "/hype_comms_demo_test");
+  assert.equal(url.username, "hype_comms");
+  assert.equal(url.password, "container%20only");
+  assert.equal(result.env.HYPE_COMMS_DATABASE_URL, result.databaseUrl);
+  assert.equal(result.managesPostgres, false);
+  assert.throws(
+    () => deriveDemoEnvironment({}, "/workspace", "external"),
+    /mode must be managed or service/u,
+  );
 });
 
 test("uses the dedicated Compose project for every lifecycle command", () => {
@@ -79,12 +107,17 @@ test("parses the headless demo mode and validates the paired CDP ports", () => {
     headless: false,
     seedOnly: false,
     cdpBasePort: 9222,
+    postgresMode: DEMO_POSTGRES_MODE_MANAGED,
   });
-  assert.deepEqual(parseDemoArguments(["--headless", "--cdp-base-port=9410"]), {
-    headless: true,
-    seedOnly: false,
-    cdpBasePort: 9410,
-  });
+  assert.deepEqual(
+    parseDemoArguments(["--headless", "--cdp-base-port=9410", "--postgres=service"]),
+    {
+      headless: true,
+      seedOnly: false,
+      cdpBasePort: 9410,
+      postgresMode: DEMO_POSTGRES_MODE_SERVICE,
+    },
+  );
   assert.equal(parseCdpBasePort("65534"), 65534);
   assert.throws(() => parseCdpBasePort("65535"), /leave room/);
   for (const port of ["2999", "3000", "5172", "5173"]) {
@@ -93,6 +126,11 @@ test("parses the headless demo mode and validates the paired CDP ports", () => {
   assert.throws(() => parseDemoArguments(["--cdp-base-port=9222"]), /requires --headless/);
   assert.throws(() => parseDemoArguments(["--headless", "--seed-only"]), /cannot be combined/);
   assert.throws(() => parseDemoArguments(["--headless", "--cdp-base-port=abc"]), /TCP port/);
+  assert.throws(() => parseDemoArguments(["--postgres=remote"]), /managed or service/u);
+  assert.throws(
+    () => parseDemoArguments(["--postgres=managed", "--postgres=service"]),
+    /only be supplied once/u,
+  );
 });
 
 test("creates private state and credential files", async () => {

@@ -2,7 +2,12 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_DEMO_CDP_BASE_PORT, parseCdpBasePort } from "./demo-environment.mjs";
+import {
+  DEFAULT_DEMO_CDP_BASE_PORT,
+  DEMO_POSTGRES_MODE_MANAGED,
+  DEMO_POSTGRES_MODE_SERVICE,
+  parseCdpBasePort,
+} from "./demo-environment.mjs";
 import {
   DEFAULT_MANIFEST_RELATIVE_PATH,
   DEFAULT_SMOKE_MESSAGE,
@@ -31,9 +36,11 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
   let messagePrefix = DEFAULT_SMOKE_MESSAGE;
   let timeoutMs = DEFAULT_LOCAL_SMOKE_TIMEOUT_MS;
   let flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE;
+  let postgresMode = DEMO_POSTGRES_MODE_MANAGED;
   let receivedMessage = false;
   let receivedTimeout = false;
   let receivedFlow = false;
+  let receivedPostgresMode = false;
 
   for (const argument of arguments_) {
     if (argument.startsWith("--cdp-base-port=")) {
@@ -57,10 +64,21 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
         throw new Error("--flow must be direct-message or participated-thread");
       }
       receivedFlow = true;
+    } else if (argument.startsWith("--postgres=")) {
+      if (receivedPostgresMode) throw new Error("--postgres may only be supplied once");
+      postgresMode = argument.slice("--postgres=".length);
+      if (
+        postgresMode !== DEMO_POSTGRES_MODE_MANAGED &&
+        postgresMode !== DEMO_POSTGRES_MODE_SERVICE
+      ) {
+        throw new Error("--postgres must be managed or service");
+      }
+      receivedPostgresMode = true;
     } else {
       throw new Error(
         "Usage: test:demo:headless [--cdp-base-port=<port>] [--message=<prefix>] " +
-          "[--timeout-ms=<ms>] [--flow=<direct-message|participated-thread>]",
+          "[--timeout-ms=<ms>] [--flow=<direct-message|participated-thread>] " +
+          "[--postgres=<managed|service>]",
       );
     }
   }
@@ -71,6 +89,7 @@ export function parseLocalHeadlessSmokeArguments(arguments_) {
     messagePrefix,
     timeoutMs,
     flow,
+    postgresMode,
   };
 }
 
@@ -246,6 +265,7 @@ export async function runLocalHeadlessSmoke({
   messagePrefix = DEFAULT_SMOKE_MESSAGE,
   timeoutMs = DEFAULT_LOCAL_SMOKE_TIMEOUT_MS,
   flow = HEADLESS_SMOKE_FLOW_DIRECT_MESSAGE,
+  postgresMode = DEMO_POSTGRES_MODE_MANAGED,
   nodeCommand = process.execPath,
   spawnProcess = spawn,
   readManifest = readHeadlessDemoManifest,
@@ -262,26 +282,26 @@ export async function runLocalHeadlessSmoke({
   ) {
     throw new Error("Headless smoke flow must be direct-message or participated-thread");
   }
+  if (postgresMode !== DEMO_POSTGRES_MODE_MANAGED && postgresMode !== DEMO_POSTGRES_MODE_SERVICE) {
+    throw new Error("Headless smoke PostgreSQL mode must be managed or service");
+  }
   const manifestPath = path.join(projectRoot, DEFAULT_MANIFEST_RELATIVE_PATH);
+  const launcherArguments = ["scripts/demo.mjs", "--headless"];
+  if (postgresMode === DEMO_POSTGRES_MODE_SERVICE) {
+    launcherArguments.push("--postgres=service");
+  }
+  launcherArguments.push(`--cdp-base-port=${String(parseCdpBasePort(String(cdpBasePort)))}`);
   let launcher;
 
   try {
     // Run the launcher directly so shutdown signals reach its cleanup handler rather than being
     // absorbed by an intermediate package-manager process.
-    launcher = spawnProcess(
-      nodeCommand,
-      [
-        "scripts/demo.mjs",
-        "--headless",
-        `--cdp-base-port=${String(parseCdpBasePort(String(cdpBasePort)))}`,
-      ],
-      {
-        cwd: projectRoot,
-        detached: process.platform !== "win32",
-        env: environment,
-        stdio: ["ignore", "pipe", "inherit"],
-      },
-    );
+    launcher = spawnProcess(nodeCommand, launcherArguments, {
+      cwd: projectRoot,
+      detached: process.platform !== "win32",
+      env: environment,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
     const ready = await waitForReady(launcher, {
       expectedManifestPath: manifestPath,
       timeoutMs,

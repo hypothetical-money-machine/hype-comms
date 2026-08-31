@@ -1,4 +1,13 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import {
   ATTACHMENTS_PER_MESSAGE_MAX,
@@ -62,7 +71,7 @@ import {
   NotificationSessionRuntime,
   notificationTransportFrom,
 } from "./notification-session-runtime";
-import { PreferencesDialog } from "./preferences-dialog";
+import { PreferencesPage, type PreferencesPageHandle } from "./preferences-page";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import { ThemeSelector } from "./theme-selector";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -84,7 +93,9 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
-type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin" | "agent-enrollments";
+type WorkspaceDestination =
+  "workspace" | "ai" | "unreads" | "admin" | "preferences" | "agent-enrollments";
+type NavigationGuard = (validateDiscard?: () => boolean) => boolean | Promise<boolean>;
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -131,8 +142,19 @@ export function visibleTimelineMessages(
   );
 }
 
-export function UpdateControl({ client }: { readonly client: UpdateClient }) {
+export function UpdateControl({
+  client,
+  beforeRestart,
+}: {
+  readonly client: UpdateClient;
+  readonly beforeRestart?: NavigationGuard;
+}) {
   const [update, setUpdate] = useState<UpdateState | null>(null);
+
+  const restart = async (): Promise<void> => {
+    if (beforeRestart !== undefined && !(await beforeRestart())) return;
+    await client.restartToInstallUpdate();
+  };
 
   useEffect(() => {
     let active = true;
@@ -184,7 +206,7 @@ export function UpdateControl({ client }: { readonly client: UpdateClient }) {
     <div className={`update-control ${update.status}`} role="status" aria-live="polite">
       <span>{message}</span>
       {update.status === "ready" && (
-        <button type="button" onClick={() => void client.restartToInstallUpdate()}>
+        <button type="button" onClick={() => void restart()}>
           Restart
         </button>
       )}
@@ -702,8 +724,6 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
-  const [showPreferences, setShowPreferences] = useState(false);
-  const preferencesTrigger = useRef<HTMLButtonElement>(null);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
   const [paneView, setPaneView] = useState<"chat" | "tasks" | "files">("chat");
@@ -711,6 +731,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     Readonly<Record<string, readonly Attachment[]>>
   >({});
   const [destination, setDestination] = useState<WorkspaceDestination>("workspace");
+  const preferencesPage = useRef<PreferencesPageHandle>(null);
+  const requestPreferencesNavigationRef = useRef<NavigationGuard>(() => true);
   const [aiChannelVisited, setAiChannelVisited] = useState(false);
   const [notificationContext, setNotificationContext] = useState<NotificationContext | null>(null);
   const notificationBindingGeneration = useRef(0);
@@ -719,15 +741,22 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     if (notificationTransport === null) return null;
     return new NotificationSessionRuntime(notificationTransport, {
       handleNotificationAction: async (action, context) => {
-        // Close dialogs before the navigation commits: their close handlers restore focus to
-        // their triggers, and that focusin must land before the navigation records its focus
-        // intents — after, it would expire them.
+        let invalidatedWhileConfirming = false;
+        const validateNotificationAction = (): boolean => {
+          const valid = runtime.canHandleNotificationAction(action, context);
+          if (!valid) invalidatedWhileConfirming = true;
+          return valid;
+        };
+        if (!validateNotificationAction()) return true;
+        if (!(await requestPreferencesNavigationRef.current(validateNotificationAction))) {
+          return invalidatedWhileConfirming ? true : false;
+        }
         setPeopleSource(null);
-        setShowPreferences(false);
         const result = await runtime.handleNotificationAction(action, context);
-        if (result === "discarded") return;
+        if (result === "discarded") return true;
         setDestination("workspace");
         setPaneView("chat");
+        return true;
       },
     });
   }, [notificationTransport, runtime]);
@@ -760,47 +789,90 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const compact = useCompactModeEnabled(compactMode);
   const chrome = useCompactChrome(compact);
 
-  const selectConversation = useCallback(
-    (conversationId: string): void => {
-      setDestination("workspace");
-      runtime.selectConversation(conversationId);
+  const requestPreferencesNavigation = useCallback(
+    (validateDiscard?: () => boolean): boolean | Promise<boolean> => {
+      if (destination !== "preferences") return true;
+      return preferencesPage.current?.requestNavigationAway(validateDiscard) ?? true;
     },
-    [runtime],
+    [destination],
+  );
+
+  useLayoutEffect(() => {
+    requestPreferencesNavigationRef.current = requestPreferencesNavigation;
+  }, [requestPreferencesNavigation]);
+
+  const runPreferencesNavigation = useCallback(
+    (navigation: () => void): boolean | Promise<boolean> => {
+      const allowed = requestPreferencesNavigation();
+      if (typeof allowed === "boolean") {
+        if (!allowed) return false;
+        navigation();
+        return true;
+      }
+      return allowed.then((confirmed) => {
+        if (!confirmed) return false;
+        navigation();
+        return true;
+      });
+    },
+    [requestPreferencesNavigation],
+  );
+
+  const selectConversation = useCallback(
+    (conversationId: string, onSelected?: () => void): boolean | Promise<boolean> =>
+      runPreferencesNavigation(() => {
+        setDestination("workspace");
+        runtime.selectConversation(conversationId);
+        onSelected?.();
+      }),
+    [runPreferencesNavigation, runtime],
   );
 
   const openAiChannel = useCallback((): void => {
-    setAiChannelVisited(true);
-    setDestination("ai");
-    setPaneView("chat");
-    setPeopleSource(null);
-    setShowPreferences(false);
-    runtime.closeThread();
-  }, [runtime]);
+    runPreferencesNavigation(() => {
+      setAiChannelVisited(true);
+      setDestination("ai");
+      setPaneView("chat");
+      setPeopleSource(null);
+      runtime.closeThread();
+    });
+  }, [runPreferencesNavigation, runtime]);
 
   const openUnreads = useCallback((): void => {
-    setDestination("unreads");
+    runPreferencesNavigation(() => {
+      setDestination("unreads");
+      setPaneView("chat");
+      setPeopleSource(null);
+      runtime.closeThread();
+      chrome.collapse();
+    });
+  }, [chrome, runPreferencesNavigation, runtime]);
+
+  const openCommunicationPaths = useCallback((): void => {
+    runPreferencesNavigation(() => {
+      setDestination("admin");
+      setPaneView("chat");
+      setPeopleSource(null);
+      runtime.closeThread();
+    });
+  }, [runPreferencesNavigation, runtime]);
+
+  const openPreferences = useCallback((): void => {
+    setDestination("preferences");
     setPaneView("chat");
     setPeopleSource(null);
-    setShowPreferences(false);
     runtime.closeThread();
     chrome.collapse();
   }, [chrome, runtime]);
 
-  const openCommunicationPaths = useCallback((): void => {
-    setDestination("admin");
-    setPaneView("chat");
-    setPeopleSource(null);
-    setShowPreferences(false);
-    runtime.closeThread();
-  }, [runtime]);
-
   const openAgentEnrollments = useCallback((): void => {
-    setDestination("agent-enrollments");
-    setPaneView("chat");
-    setPeopleSource(null);
-    setShowPreferences(false);
-    runtime.closeThread();
-  }, [runtime]);
+    runPreferencesNavigation(() => {
+      setDestination("agent-enrollments");
+      setPaneView("chat");
+      setPeopleSource(null);
+      runtime.closeThread();
+    });
+  }, [runPreferencesNavigation, runtime]);
 
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
@@ -1440,9 +1512,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     }
     if (composerUnavailable || threadOpen) return;
     const active = document.activeElement;
-    // Deferring while focus sits inside an aria-modal dialog keeps focus traps (workspace
-    // search, preferences) intact when a selection commit lands before the dialog closes; the
-    // dialog's close handler below completes or expires the intent.
+    // Deferring while focus sits inside an aria-modal dialog keeps workspace search and discard
+    // confirmations intact when a selection commit lands before the dialog closes.
     if (active?.closest('[aria-modal="true"]') != null) return;
     const input = composerInput.current;
     if (input === null) return;
@@ -1471,10 +1542,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     [attemptComposerFocus],
   );
 
-  // Retry point: a sidebar dialog (workspace search, preferences) closed. A search jump closes
-  // by unmounting its focused innards, stranding focus on <body>; an Escape/close restores the
-  // trigger's focus instead. A restored close ends the deferral without a landing, so pending
-  // intents expire rather than firing at some later retry point.
+  // Retry point: the workspace search dialog closed. A search jump closes by unmounting its
+  // focused innards, stranding focus on <body>; an Escape/close restores the trigger's focus
+  // instead. A restored close ends the deferral without a landing, so pending intents expire
+  // rather than firing at some later retry point.
   //
   // Dialog components hold this callback in effect deps (useOpenChangeNotifier), and that
   // effect's cleanup reports a close — so an identity change while a dialog is open would fire
@@ -1695,9 +1766,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   };
 
   const openTaskSource = (task: Task): void => {
-    setDestination("workspace");
-    setPaneView("chat");
-    runtime.openTaskSource(task);
+    runPreferencesNavigation(() => {
+      setDestination("workspace");
+      setPaneView("chat");
+      runtime.openTaskSource(task);
+    });
   };
 
   const sendThreadReply = async (): Promise<void> => {
@@ -1744,9 +1817,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   };
 
   const openAttachmentSource = (attachment: Attachment): void => {
-    setDestination("workspace");
-    setPaneView("chat");
-    runtime.openAttachmentSource(attachment);
+    runPreferencesNavigation(() => {
+      setDestination("workspace");
+      setPaneView("chat");
+      runtime.openAttachmentSource(attachment);
+    });
   };
 
   const createChannel = useCallback(
@@ -1756,11 +1831,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       topic: string | null,
       access: ChannelAccess,
       channelMode: ChannelMode,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
+      const allowed = requestPreferencesNavigation();
+      if (!(typeof allowed === "boolean" ? allowed : await allowed)) return false;
       setDestination("workspace");
       await runtime.createChannel(name, slug, topic, access, channelMode);
+      return true;
     },
-    [runtime],
+    [requestPreferencesNavigation, runtime],
   );
 
   const loadChannelMembers = useCallback(
@@ -1782,13 +1860,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const startDirectMessage = useCallback(
     async (memberId: string) => {
       try {
+        const allowed = requestPreferencesNavigation();
+        if (!(typeof allowed === "boolean" ? allowed : await allowed)) return;
         setDestination("workspace");
         await runtime.createDirectConversation(memberId);
       } catch (error) {
         setComposerError(ipcErrorMessage(error, "Could not start the direct message"));
       }
     },
-    [runtime],
+    [requestPreferencesNavigation, runtime],
   );
 
   const messageDirectoryMember = useCallback(
@@ -1809,6 +1889,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     ) {
       return;
     }
+    if (!(await requestPreferencesNavigation())) return;
     setSigningOut(true);
     try {
       await runtime.stop();
@@ -1971,12 +2052,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             destination === "workspace" ? runtimeState.selectedConversationId : null
           }
           platform={client.platform}
-          onSelect={(conversationId) => {
-            selectConversation(conversationId);
-            // Picking a destination means "show me the channel": a pointer resting on the
-            // overlay would otherwise hold it open over the conversation it just selected.
-            chrome.collapse();
-          }}
+          onSelect={(conversationId) =>
+            selectConversation(conversationId, () => {
+              // Picking a destination means "show me the channel": a pointer resting on the
+              // overlay would otherwise hold it open over the conversation it just selected.
+              chrome.collapse();
+            })
+          }
           onOpenChange={chrome.onPopoverOpenChange}
         />
 
@@ -1992,9 +2074,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           }}
           search={(query, after) => runtime.searchMessages(query, after)}
           openResult={async (result) => {
+            const allowed = requestPreferencesNavigation();
+            if (!(typeof allowed === "boolean" ? allowed : await allowed)) return false;
             setDestination("workspace");
             await runtime.openSearchResult(result);
             chrome.collapse();
+            return true;
           }}
           onOpenChange={onWorkspaceDialogOpenChange}
         />
@@ -2171,17 +2256,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
         <footer className="sidebar-footer">
           <button
-            ref={preferencesTrigger}
-            className="preferences-trigger"
+            className={
+              destination === "preferences" ? "preferences-trigger active" : "preferences-trigger"
+            }
             type="button"
-            aria-haspopup="dialog"
-            aria-expanded={showPreferences}
-            aria-controls="preferences-dialog"
-            onClick={() => setShowPreferences(true)}
+            aria-current={destination === "preferences" ? "page" : undefined}
+            onClick={openPreferences}
           >
             Preferences
           </button>
-          <UpdateControl client={client} />
+          <UpdateControl client={client} beforeRestart={requestPreferencesNavigation} />
           <ClientVersion client={client} />
         </footer>
       </aside>
@@ -2191,6 +2275,19 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         items={unreadItems}
         active={destination === "unreads"}
         onOpen={selectConversation}
+      />
+      <PreferencesPage
+        key={`preferences:${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+        ref={preferencesPage}
+        active={destination === "preferences"}
+        theme={theme}
+        compactMode={compactMode}
+        fencedBlockquotes={fencedBlockquotes}
+        sidebarPosition={sidebarPosition}
+        notifications={notificationTransport ?? undefined}
+        platform={client.platform}
+        currentUser={bootstrap.currentUser.user}
+        onUpdateProfile={(title) => runtime.updateProfileTitle(title)}
       />
       {bootstrap.currentUser.role === "owner" && (
         <>
@@ -2781,20 +2878,6 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           remove={removeChannelMember}
         />
       )}
-      <PreferencesDialog
-        open={showPreferences}
-        theme={theme}
-        compactMode={compactMode}
-        fencedBlockquotes={fencedBlockquotes}
-        sidebarPosition={sidebarPosition}
-        notifications={notificationTransport ?? undefined}
-        platform={client.platform}
-        triggerRef={preferencesTrigger}
-        currentUser={bootstrap.currentUser.user}
-        onUpdateProfile={(title) => runtime.updateProfileTitle(title)}
-        onClose={() => setShowPreferences(false)}
-        onOpenChange={onWorkspaceDialogOpenChange}
-      />
     </main>
   );
 }

@@ -62,7 +62,10 @@ describe("ConversationSwitcher", () => {
   });
 
   it("filters conversations and supports arrow-key selection", () => {
-    const { onSelect } = renderSwitcher();
+    const { onSelect } = renderSwitcher(
+      "darwin",
+      vi.fn(() => true),
+    );
     fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
     const searchbox = screen.getByRole("searchbox", { name: "Jump to a conversation" });
 
@@ -73,6 +76,20 @@ describe("ConversationSwitcher", () => {
 
     expect(onSelect).toHaveBeenCalledWith("design");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("stays open when a selection declines navigation", async () => {
+    const onSelect = vi.fn().mockResolvedValue(false);
+    renderSwitcher("darwin", onSelect);
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    const searchbox = screen.getByRole("searchbox", { name: "Jump to a conversation" });
+
+    fireEvent.change(searchbox, { target: { value: "Design" } });
+    fireEvent.keyDown(searchbox, { key: "Enter" });
+
+    await waitFor(() => expect(onSelect).toHaveBeenCalledWith("design"));
+    expect(screen.getByRole("dialog", { name: "Jump to a conversation" })).toBeTruthy();
+    expect(document.activeElement).toBe(searchbox);
   });
 
   it("reports open state through onOpenChange", () => {

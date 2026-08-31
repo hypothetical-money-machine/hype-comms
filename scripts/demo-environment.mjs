@@ -11,6 +11,8 @@ export const HEADLESS_DEMO_MANIFEST_VERSION = 1;
 export const HEADLESS_DEMO_MANIFEST_KIND = "hype-comms-headless-demo";
 export const HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV =
   "HYPE_COMMS_DESKTOP_HEADLESS_NOTIFICATION_ARTIFACT_DIRECTORY";
+export const DEMO_POSTGRES_MODE_MANAGED = "managed";
+export const DEMO_POSTGRES_MODE_SERVICE = "service";
 
 const HEADLESS_DEMO_CLIENT_PROFILES = ["claire", "woots"];
 const TCP_PORT_MAX = 65_535;
@@ -185,6 +187,8 @@ export function parseDemoArguments(arguments_) {
   let headless = false;
   let seedOnly = false;
   let cdpBasePort;
+  let postgresMode = DEMO_POSTGRES_MODE_MANAGED;
+  let receivedPostgresMode = false;
 
   for (const argument of arguments_) {
     if (argument === "--headless") {
@@ -202,6 +206,18 @@ export function parseDemoArguments(arguments_) {
       cdpBasePort = parseCdpBasePort(argument.slice("--cdp-base-port=".length));
       continue;
     }
+    if (argument.startsWith("--postgres=")) {
+      if (receivedPostgresMode) throw new Error("--postgres may only be supplied once");
+      postgresMode = argument.slice("--postgres=".length);
+      if (
+        postgresMode !== DEMO_POSTGRES_MODE_MANAGED &&
+        postgresMode !== DEMO_POSTGRES_MODE_SERVICE
+      ) {
+        throw new Error("--postgres must be managed or service");
+      }
+      receivedPostgresMode = true;
+      continue;
+    }
     throw new Error(`Unknown demo argument: ${argument}`);
   }
 
@@ -216,6 +232,7 @@ export function parseDemoArguments(arguments_) {
     headless,
     seedOnly,
     cdpBasePort: cdpBasePort ?? DEFAULT_DEMO_CDP_BASE_PORT,
+    postgresMode,
   };
 }
 
@@ -360,11 +377,21 @@ export function createHeadlessDemoReadyRecord(paths, manifest) {
   };
 }
 
-export function deriveDemoEnvironment(baseEnv, projectRoot) {
+export function deriveDemoEnvironment(
+  baseEnv,
+  projectRoot,
+  postgresMode = DEMO_POSTGRES_MODE_MANAGED,
+) {
+  if (postgresMode !== DEMO_POSTGRES_MODE_MANAGED && postgresMode !== DEMO_POSTGRES_MODE_SERVICE) {
+    throw new Error("Demo PostgreSQL mode must be managed or service");
+  }
   const password = baseEnv.HYPE_COMMS_POSTGRES_PASSWORD?.trim() ?? "";
   if (password === "") throw new Error("HYPE_COMMS_POSTGRES_PASSWORD is required for the demo");
   const portText =
-    baseEnv.HYPE_COMMS_DEMO_POSTGRES_BIND_PORT?.trim() ?? String(DEFAULT_DEMO_POSTGRES_BIND_PORT);
+    postgresMode === DEMO_POSTGRES_MODE_SERVICE
+      ? "5432"
+      : (baseEnv.HYPE_COMMS_DEMO_POSTGRES_BIND_PORT?.trim() ??
+        String(DEFAULT_DEMO_POSTGRES_BIND_PORT));
   if (!/^[0-9]+$/.test(portText)) {
     throw new Error("HYPE_COMMS_DEMO_POSTGRES_BIND_PORT must be a TCP port");
   }
@@ -373,7 +400,11 @@ export function deriveDemoEnvironment(baseEnv, projectRoot) {
     throw new Error("HYPE_COMMS_DEMO_POSTGRES_BIND_PORT must be a TCP port");
   }
 
-  const databaseUrl = new URL(`postgres://127.0.0.1:${String(port)}/hype_comms`);
+  const databaseUrl = new URL(
+    postgresMode === DEMO_POSTGRES_MODE_SERVICE
+      ? "postgres://postgres:5432/hype_comms_demo_test"
+      : `postgres://127.0.0.1:${String(port)}/hype_comms`,
+  );
   databaseUrl.username = "hype_comms";
   databaseUrl.password = password;
   const paths = demoPaths(projectRoot);
@@ -397,7 +428,13 @@ export function deriveDemoEnvironment(baseEnv, projectRoot) {
   delete env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV];
   delete env.ELECTRON_CLI_ARGS;
   delete env.REMOTE_DEBUGGING_PORT;
-  return { env, port, databaseUrl: databaseUrl.toString(), paths };
+  return {
+    env,
+    port,
+    databaseUrl: databaseUrl.toString(),
+    managesPostgres: postgresMode === DEMO_POSTGRES_MODE_MANAGED,
+    paths,
+  };
 }
 
 export function demoComposeArguments(...arguments_) {

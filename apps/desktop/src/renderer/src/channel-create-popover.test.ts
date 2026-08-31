@@ -114,6 +114,20 @@ describe("ChannelCreatePopover", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
 
+  it("retains the form when creation is declined", async () => {
+    const onCreate = vi.fn().mockResolvedValue(false);
+    const { trigger } = renderPopover(onCreate);
+    const input = open(trigger);
+    fireEvent.change(input, { target: { value: "Design" } });
+    fireEvent.submit(screen.getByRole("dialog"));
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    expect(screen.getByRole("dialog", { name: "Create a channel" })).toBeTruthy();
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Channel name" }).value).toBe(
+      "Design",
+    );
+  });
+
   it("previews normalized Unicode and explains emoji-only names", () => {
     const { trigger } = renderPopover();
     const input = open(trigger);

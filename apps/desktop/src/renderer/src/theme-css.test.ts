@@ -225,8 +225,11 @@ describe("renderer theme CSS", () => {
     const hiddenAiChannelRule = /\.ai-channel\[hidden\]\s*\{(?<body>[^}]*)\}/u.exec(styles);
     const hiddenUnreadsRule = /\.unreads-view\[hidden\]\s*\{(?<body>[^}]*)\}/u.exec(styles);
 
+    const hiddenPreferencesRule = /\.preferences-page\[hidden\]\s*\{(?<body>[^}]*)\}/u.exec(styles);
+
     expect(hiddenConversationRule?.groups?.body).toContain("display: none");
     expect(hiddenAiChannelRule?.groups?.body).toContain("display: none");
     expect(hiddenUnreadsRule?.groups?.body).toContain("display: none");
+    expect(hiddenPreferencesRule?.groups?.body).toContain("display: none");
   });
 });
