@@ -212,28 +212,32 @@ export class WorkspaceTransport {
     return new URL(pathname, this.apiOrigin);
   }
 
+  /** Fetch, abandoning the request if the calling scope is replaced on either side of the await. */
+  async #fetchInScope(
+    url: string,
+    init: RequestInit,
+    assertCurrentScope: RequestScopeGuard,
+  ): Promise<Response> {
+    assertCurrentScope();
+    const response = await this.session.fetch(url, init);
+    assertCurrentScope();
+    return response;
+  }
+
   async #fetchIdempotentMutation(
     url: string,
     init: RequestInit,
     assertCurrentScope: RequestScopeGuard = alwaysCurrentRequestScope,
   ): Promise<Response> {
-    assertCurrentScope();
     let response: Response;
     try {
-      response = await this.session.fetch(url, init);
+      response = await this.#fetchInScope(url, init, assertCurrentScope);
     } catch (error) {
       if (!isNetworkFailure(error)) throw error;
-      assertCurrentScope();
-      const retry = await this.session.fetch(url, init);
-      assertCurrentScope();
-      return retry;
+      return this.#fetchInScope(url, init, assertCurrentScope);
     }
-    assertCurrentScope();
     if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
-      assertCurrentScope();
-      const retry = await this.session.fetch(url, init);
-      assertCurrentScope();
-      return retry;
+      return this.#fetchInScope(url, init, assertCurrentScope);
     }
     return response;
   }
@@ -726,16 +730,15 @@ export class WorkspaceTransport {
         ),
       ),
     );
-    assertCurrentScope();
-    const uploaded = await this.session.fetch(
+    const uploaded = await this.#fetchInScope(
       this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/content`).href,
       {
         method: "PUT",
         headers: { "content-type": contentType },
         body: bytes,
       },
+      assertCurrentScope,
     );
-    assertCurrentScope();
     if (!uploaded.ok) {
       throw new WorkspaceRequestError(
         `Workspace request failed (${uploaded.status})`,

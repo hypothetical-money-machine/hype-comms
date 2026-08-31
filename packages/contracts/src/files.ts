@@ -98,16 +98,22 @@ export const listMessageAttachmentsRequestSchema = z
   })
   .strict();
 
+/** An attachment list bounded by `min`/`max`, rejecting a repeated attachment ID. */
+export function uniqueAttachmentsSchema(max: number, min = 0) {
+  return z
+    .array(attachmentSchema)
+    .min(min)
+    .max(max)
+    .refine(
+      (attachments) =>
+        new Set(attachments.map((attachment) => attachment.id)).size === attachments.length,
+      "Attachment IDs must be unique",
+    );
+}
+
 export const listMessageAttachmentsResponseSchema = z
   .object({
-    attachments: z
-      .array(attachmentSchema)
-      .max(100 * ATTACHMENTS_PER_MESSAGE_MAX)
-      .refine(
-        (attachments) =>
-          new Set(attachments.map((attachment) => attachment.id)).size === attachments.length,
-        "Attachment IDs must be unique",
-      ),
+    attachments: uniqueAttachmentsSchema(100 * ATTACHMENTS_PER_MESSAGE_MAX),
   })
   .strict();
 

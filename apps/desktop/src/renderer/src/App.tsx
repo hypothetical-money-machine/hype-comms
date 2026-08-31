@@ -99,7 +99,6 @@ type NavigationGuard = (validateDiscard?: () => boolean) => boolean | Promise<bo
 
 interface AttachmentUploadReservation {
   readonly generation: number;
-  readonly maxFiles: number;
 }
 
 interface AppProps {
@@ -1731,13 +1730,10 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     }));
   };
 
-  const beginAttachmentUpload = (
-    key: string,
-    maxFiles: number,
-  ): AttachmentUploadReservation | null => {
+  const beginAttachmentUpload = (key: string): AttachmentUploadReservation | null => {
     const reservations = attachmentUploadReservations.current;
     if (reservations.has(key)) return null;
-    const reservation = { generation: attachmentUploadGeneration.current, maxFiles };
+    const reservation = { generation: attachmentUploadGeneration.current };
     reservations.set(key, reservation);
     setAttachingComposerKeys(new Set(reservations.keys()));
     return reservation;
@@ -1764,16 +1760,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       setAttachmentError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
       return;
     }
-    const reservation = beginAttachmentUpload(key, remainingFiles);
+    const reservation = beginAttachmentUpload(key);
     if (reservation === null) return;
     try {
       const result = await runtime.attachFiles(conversationId, remainingFiles);
       if (reservation.generation !== attachmentUploadGeneration.current) return;
       if (result.status === "cancelled") return;
       if (result.status === "completed" || result.status === "partial") {
-        if (result.attachments.length > reservation.maxFiles) {
-          throw new Error("File upload result exceeded the requested limit");
-        }
         replacePendingAttachments(key, (pending) => {
           const existingIds = new Set(pending.map((attachment) => attachment.id));
           const available = Math.max(ATTACHMENTS_PER_MESSAGE_MAX - pending.length, 0);
@@ -1788,16 +1781,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       if (result.status === "completed") {
         setComposerError("");
         setThreadComposerError("");
-      } else if (result.status === "failed" && result.reason === "selection_limit") {
+      } else if (result.status === "partial") {
+        setAttachmentError(result.message);
+      } else if (result.reason === "selection_limit") {
         setAttachmentError(
           `You can select up to ${String(remainingFiles)} ${remainingFiles === 1 ? "more file" : "more files"}`,
         );
-      } else if (result.status === "partial") {
-        setAttachmentError(result.message);
-      } else if (result.status === "failed" && result.reason === "upload_failed") {
-        setAttachmentError(result.message);
       } else {
-        setAttachmentError("Could not attach the selected files");
+        setAttachmentError(result.message);
       }
     } catch (error) {
       if (reservation.generation !== attachmentUploadGeneration.current) return;

@@ -93,7 +93,7 @@ import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
 import {
-  AttachmentUploadScopeChangedError,
+  assertCurrentUploadScope,
   attachmentUploadRequestSchema,
 } from "../shared/attachment-upload";
 import { DESKTOP_CHANNELS } from "../shared/channels";
@@ -1911,9 +1911,6 @@ function registerIpcHandlers(): void {
       workspaceTransport === transport &&
       authIntentGeneration === uploadAuthIntentGeneration &&
       session.state === sessionState;
-    const assertCurrentUploadScope = (): void => {
-      if (!isCurrentUploadScope()) throw new AttachmentUploadScopeChangedError();
-    };
     const request = attachmentUploadRequestSchema.parse(input);
     const window = mainWindow;
     const selection =
@@ -1924,7 +1921,9 @@ function registerIpcHandlers(): void {
       selection,
       request,
       (conversationId, filePath) =>
-        transport.uploadLocalFile(conversationId, filePath, assertCurrentUploadScope),
+        transport.uploadLocalFile(conversationId, filePath, () =>
+          assertCurrentUploadScope(isCurrentUploadScope),
+        ),
       isCurrentUploadScope,
     );
   });

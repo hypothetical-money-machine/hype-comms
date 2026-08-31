@@ -1,19 +1,11 @@
 import {
   ATTACHMENTS_PER_MESSAGE_MAX,
-  attachmentSchema,
   entityIdSchema,
+  uniqueAttachmentsSchema,
 } from "@hype-comms/contracts";
 import { z } from "zod";
 
-const attachmentBatchSchema = z
-  .array(attachmentSchema)
-  .min(1)
-  .max(ATTACHMENTS_PER_MESSAGE_MAX)
-  .refine(
-    (attachments) =>
-      new Set(attachments.map((attachment) => attachment.id)).size === attachments.length,
-    "Attachment IDs must be unique",
-  );
+const attachmentBatchSchema = uniqueAttachmentsSchema(ATTACHMENTS_PER_MESSAGE_MAX, 1);
 
 const attachmentUploadFailureMessageSchema = z.string().trim().min(1).max(500);
 
@@ -26,6 +18,11 @@ export class AttachmentUploadScopeChangedError extends Error {
     super(ATTACHMENT_UPLOAD_SCOPE_CHANGED_MESSAGE);
     this.name = "AttachmentUploadScopeChangedError";
   }
+}
+
+/** Abandon an in-flight upload whose account or transport was replaced while it ran. */
+export function assertCurrentUploadScope(isCurrentScope: () => boolean): void {
+  if (!isCurrentScope()) throw new AttachmentUploadScopeChangedError();
 }
 
 export const attachmentUploadRequestSchema = z

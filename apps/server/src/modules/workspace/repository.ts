@@ -4508,9 +4508,9 @@ export class WorkspaceRepository {
 
         // Delete bytes before their database records. A storage failure rolls the transaction back,
         // so a later maintenance pass can retry instead of leaving an untracked object behind.
-        for (const attachment of expired.rows) {
-          await store.remove(attachment.workspace_id, attachment.id);
-        }
+        await Promise.all(
+          expired.rows.map((attachment) => store.remove(attachment.workspace_id, attachment.id)),
+        );
         await client.query("DELETE FROM attachments WHERE id = ANY($1::uuid[])", [
           expired.rows.map((attachment) => attachment.id),
         ]);

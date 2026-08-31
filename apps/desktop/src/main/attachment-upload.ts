@@ -2,7 +2,7 @@ import type { Attachment } from "@hype-comms/contracts";
 import type { OpenDialogOptions } from "electron";
 
 import {
-  AttachmentUploadScopeChangedError,
+  assertCurrentUploadScope,
   type AttachmentUploadRequest,
   type AttachmentUploadResult,
 } from "../shared/attachment-upload";
@@ -23,10 +23,6 @@ function uploadFailureMessage(error: unknown): string {
     return error.message.trim().slice(0, 500);
   }
   return "Could not attach the selected file";
-}
-
-function assertCurrentUploadScope(isCurrentScope: () => boolean): void {
-  if (!isCurrentScope()) throw new AttachmentUploadScopeChangedError();
 }
 
 /**
