@@ -38,7 +38,7 @@ interface PreferencesPageProps {
 }
 
 export interface PreferencesPageHandle {
-  requestNavigationAway: () => Promise<boolean>;
+  requestNavigationAway: (validateDiscard?: () => boolean) => Promise<boolean>;
 }
 
 const FOCUSABLE_SELECTOR = [
@@ -73,6 +73,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const designerTriggerRef = useRef<HTMLButtonElement>(null);
     const previousView = useRef<"preferences" | "designer">("preferences");
     const leaveResolver = useRef<((confirmed: boolean) => void) | null>(null);
+    const leaveDiscardValidation = useRef<(() => boolean) | null>(null);
     const [view, setView] = useState<"preferences" | "designer">("preferences");
     const [designerDirty, setDesignerDirty] = useState(false);
     const [designerSaving, setDesignerSaving] = useState(false);
@@ -81,6 +82,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const resolvePendingLeave = useCallback((confirmed: boolean): void => {
       const resolve = leaveResolver.current;
       leaveResolver.current = null;
+      leaveDiscardValidation.current = null;
       resolve?.(confirmed);
     }, []);
 
@@ -109,20 +111,36 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
       setView("preferences");
     }, []);
 
-    const requestNavigationAway = useCallback((): Promise<boolean> => {
-      if (designerSaving || discardAction !== null || leaveResolver.current !== null) {
-        return Promise.resolve(false);
-      }
-      if (view !== "designer") return Promise.resolve(true);
-      if (!designerDirty) return Promise.resolve(true);
+    const requestNavigationAway = useCallback(
+      (validateDiscard?: () => boolean): Promise<boolean> => {
+        if (designerSaving || discardAction !== null || leaveResolver.current !== null) {
+          return Promise.resolve(false);
+        }
+        if (view !== "designer") return Promise.resolve(true);
+        if (!designerDirty) return Promise.resolve(true);
 
-      discardReturnFocusRef.current =
-        document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      return new Promise<boolean>((resolve) => {
-        leaveResolver.current = resolve;
-        setDiscardAction("leave");
-      });
-    }, [designerDirty, designerSaving, discardAction, view]);
+        discardReturnFocusRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        return new Promise<boolean>((resolve) => {
+          leaveResolver.current = resolve;
+          leaveDiscardValidation.current = validateDiscard ?? null;
+          setDiscardAction("leave");
+        });
+      },
+      [designerDirty, designerSaving, discardAction, view],
+    );
+
+    const discardChanges = useCallback((): void => {
+      const action = discardAction;
+      if (action === "leave" && leaveDiscardValidation.current?.() === false) {
+        cancelDiscard();
+        return;
+      }
+      setDesignerDirty(false);
+      setDiscardAction(null);
+      setView("preferences");
+      if (action === "leave") resolvePendingLeave(true);
+    }, [cancelDiscard, discardAction, resolvePendingLeave]);
 
     useImperativeHandle(ref, () => ({ requestNavigationAway }), [requestNavigationAway]);
 
@@ -304,17 +322,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
                   <button ref={discardKeepEditingRef} type="button" onClick={cancelDiscard}>
                     Keep editing
                   </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => {
-                      const action = discardAction;
-                      setDesignerDirty(false);
-                      setDiscardAction(null);
-                      setView("preferences");
-                      if (action === "leave") resolvePendingLeave(true);
-                    }}
-                  >
+                  <button type="button" className="danger" onClick={discardChanges}>
                     Discard changes
                   </button>
                 </div>

@@ -10,7 +10,9 @@ import type {
   NotificationActionAcknowledgement,
   NotificationContext,
   NotificationState,
+  ProductRealtimeEvent,
   RealtimeSessionScope,
+  ScopedProductRealtimeEvent,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -174,6 +176,22 @@ function openMessageAction(message: Message): NotificationAction {
   };
 }
 
+function membershipRemoval(conversationId: string): ProductRealtimeEvent {
+  return {
+    version: 1,
+    id: "30000000-0000-4000-8000-000000000014",
+    type: "channel.membership_changed",
+    occurredAt: NOW,
+    workspaceId: WORKSPACE_ID,
+    conversationId,
+    workspaceSequence: "11",
+    conversationSequence: null,
+    entityVersion: 1,
+    delivery: "at_least_once",
+    payload: { memberId: USER_ID, action: "removed" },
+  };
+}
+
 const notificationState: NotificationState = {
   version: 1,
   devicePreference: "enabled",
@@ -197,12 +215,25 @@ interface Harness {
   readonly client: DesktopApi;
   readonly acknowledgedNotificationActions: readonly NotificationAction[];
   readonly pushNotificationAction: (action: NotificationAction) => void;
+  readonly pushWorkspaceEvent: (event: ProductRealtimeEvent) => void;
 }
 
 function createHarness(): Harness {
   let realtimeStarts = 0;
+  let realtimeScope: RealtimeSessionScope | null = null;
+  let snapshotCursor = bootstrap.syncCursor;
+  const revokedConversationIds = new Set<string>();
   const actionListeners = new Set<(action: NotificationAction) => void>();
+  const workspaceEventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
   const acknowledgedNotificationActions: NotificationAction[] = [];
+
+  const currentBootstrap = (): HumanWorkspaceBootstrapResponse => ({
+    ...bootstrap,
+    conversations: bootstrap.conversations.filter(
+      (summary) => !revokedConversationIds.has(summary.conversation.id),
+    ),
+    syncCursor: snapshotCursor,
+  });
 
   const client = {
     platform: "linux",
@@ -222,10 +253,10 @@ function createHarness(): Harness {
         scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
         reason: "credential_store_unavailable",
       }) as const,
-    getWorkspaceBootstrap: async () => bootstrap,
+    getWorkspaceBootstrap: async () => currentBootstrap(),
     listWorkspaceMembers: async () => ({ members: [] }),
     listConversations: async () => ({
-      conversations: bootstrap.conversations,
+      conversations: currentBootstrap().conversations,
       nextCursor: null,
       hasMore: false,
     }),
@@ -270,18 +301,24 @@ function createHarness(): Harness {
       }) as const,
     startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
       realtimeStarts += 1;
-      return Object.freeze({
+      realtimeScope = Object.freeze({
         userId: session.userId,
         workspaceId: session.workspaceId,
         epoch: realtimeStarts,
       });
+      return realtimeScope;
     },
     activateWorkspaceRealtime: async () => undefined,
-    stopWorkspaceRealtime: async () => undefined,
+    stopWorkspaceRealtime: async () => {
+      realtimeScope = null;
+    },
     acknowledgeWorkspaceEvent: async () => undefined,
     getRealtimeState: async () => "offline",
     onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: () => () => undefined,
+    onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => {
+      workspaceEventListeners.add(listener);
+      return () => workspaceEventListeners.delete(listener);
+    },
     getNotificationContext: async (): Promise<NotificationContext> => activeContext,
     reportNotificationActivity: async () => undefined,
     drainNotificationActions: async (ready: unknown) => ({
@@ -314,6 +351,18 @@ function createHarness(): Harness {
     acknowledgedNotificationActions,
     pushNotificationAction(action) {
       for (const listener of actionListeners) listener(action);
+    },
+    pushWorkspaceEvent(event) {
+      if (realtimeScope === null) throw new Error("Workspace realtime has not started");
+      if (
+        event.type === "channel.membership_changed" &&
+        event.payload.action === "removed" &&
+        event.payload.memberId === USER_ID
+      ) {
+        revokedConversationIds.add(event.conversationId);
+        snapshotCursor = event.workspaceSequence;
+      }
+      for (const listener of workspaceEventListeners) listener({ scope: realtimeScope, event });
     },
   };
 }
@@ -580,6 +629,30 @@ describe("main composer focus on conversation changes", () => {
 
     await waitFor(() => {
       expect(harness.acknowledgedNotificationActions).toEqual([staleAction]);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "Discard your changes?" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    expect(preferences.hidden).toBe(false);
+    expect(roseAccent.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("keeps a dirty theme draft when its notification target is revoked during confirmation", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const roseAccent = screen.getByRole("button", { name: "Rose accent" });
+    fireEvent.click(roseAccent);
+
+    const action = openMessageAction(threadReply);
+    act(() => harness.pushNotificationAction(action));
+    expect(await screen.findByRole("alertdialog", { name: "Discard your changes?" })).toBeTruthy();
+
+    act(() => harness.pushWorkspaceEvent(membershipRemoval(LAUNCH_ID)));
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => {
+      expect(harness.acknowledgedNotificationActions).toEqual([action]);
     });
     expect(screen.queryByRole("alertdialog", { name: "Discard your changes?" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();

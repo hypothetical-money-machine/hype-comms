@@ -92,7 +92,7 @@ import {
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
 type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin" | "preferences";
-type NavigationGuard = () => boolean | Promise<boolean>;
+type NavigationGuard = (validateDiscard?: () => boolean) => boolean | Promise<boolean>;
 
 interface AppProps {
   readonly client: DesktopApi;
@@ -728,8 +728,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     if (notificationTransport === null) return null;
     return new NotificationSessionRuntime(notificationTransport, {
       handleNotificationAction: async (action, context) => {
-        if (!runtime.canHandleNotificationAction(action, context)) return true;
-        if (!(await requestPreferencesNavigationRef.current())) return false;
+        let invalidatedWhileConfirming = false;
+        const validateNotificationAction = (): boolean => {
+          const valid = runtime.canHandleNotificationAction(action, context);
+          if (!valid) invalidatedWhileConfirming = true;
+          return valid;
+        };
+        if (!validateNotificationAction()) return true;
+        if (!(await requestPreferencesNavigationRef.current(validateNotificationAction))) {
+          return invalidatedWhileConfirming ? true : false;
+        }
         setPeopleSource(null);
         const result = await runtime.handleNotificationAction(action, context);
         if (result === "discarded") return true;
@@ -768,10 +776,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const compact = useCompactModeEnabled(compactMode);
   const chrome = useCompactChrome(compact);
 
-  const requestPreferencesNavigation = useCallback((): boolean | Promise<boolean> => {
-    if (destination !== "preferences") return true;
-    return preferencesPage.current?.requestNavigationAway() ?? true;
-  }, [destination]);
+  const requestPreferencesNavigation = useCallback(
+    (validateDiscard?: () => boolean): boolean | Promise<boolean> => {
+      if (destination !== "preferences") return true;
+      return preferencesPage.current?.requestNavigationAway(validateDiscard) ?? true;
+    },
+    [destination],
+  );
 
   useLayoutEffect(() => {
     requestPreferencesNavigationRef.current = requestPreferencesNavigation;
