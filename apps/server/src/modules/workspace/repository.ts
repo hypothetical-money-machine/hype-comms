@@ -146,6 +146,7 @@ import {
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
+const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -267,6 +268,11 @@ interface AttachmentRow extends QueryResultRow {
   content_received_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface ExpiredPendingAttachmentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
 }
 
 interface ReadableAttachmentRow extends AttachmentRow {
@@ -4479,6 +4485,39 @@ export class WorkspaceRepository {
       `DELETE FROM realtime_tickets
         WHERE expires_at < clock_timestamp() - interval '1 hour'`,
     );
+    await this.#deleteExpiredPendingAttachments();
+  }
+
+  async #deleteExpiredPendingAttachments(): Promise<void> {
+    const store = this.hooks.attachmentStore;
+    if (store === undefined) return;
+
+    while (true) {
+      const deleted = await this.#transaction(async (client) => {
+        const expired = await client.query<ExpiredPendingAttachmentRow>(
+          `SELECT id, workspace_id
+             FROM attachments
+            WHERE status = 'pending'
+              AND upload_expires_at <= clock_timestamp()
+            ORDER BY upload_expires_at, id
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED`,
+          [ATTACHMENT_CLEANUP_BATCH_SIZE],
+        );
+        if (expired.rows.length === 0) return 0;
+
+        // Delete bytes before their database records. A storage failure rolls the transaction back,
+        // so a later maintenance pass can retry instead of leaving an untracked object behind.
+        for (const attachment of expired.rows) {
+          await store.remove(attachment.workspace_id, attachment.id);
+        }
+        await client.query("DELETE FROM attachments WHERE id = ANY($1::uuid[])", [
+          expired.rows.map((attachment) => attachment.id),
+        ]);
+        return expired.rows.length;
+      });
+      if (deleted < ATTACHMENT_CLEANUP_BATCH_SIZE) return;
+    }
   }
 
   async #members(client: PoolClient, workspaceId: string) {

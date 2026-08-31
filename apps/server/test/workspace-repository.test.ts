@@ -3560,6 +3560,38 @@ describeWithPostgres("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it("removes an expired pending upload and its stored bytes", async () => {
+    const bytes = Buffer.from("scope change left this upload pending");
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName: "pending.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+
+    await repository.deleteExpiredState();
+
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(attachmentStore.read(workspaceId, staged.attachment.id)).rejects.toThrow(
+      "File is not available",
+    );
+  });
+
   it("decides group attachment read capability before loading stored bytes", async () => {
     const group = await repository.createGroupDirectConversation(
       owner,
