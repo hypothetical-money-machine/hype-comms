@@ -159,12 +159,8 @@ import {
   reportMainProcessEvent,
 } from "./main-process-log";
 import {
-  appImageDesktopFileName,
-  createAppImageDesktopFilePlan,
   createLinuxProtocolRegistrationTarget,
-  queryProtocolHandlerBinding,
-  registerAppImageProtocolHandler,
-  userApplicationsDirectory,
+  installAndQueryLinuxProtocolHandler,
 } from "./linux-protocol-registration";
 import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import {
@@ -274,8 +270,10 @@ let protocolHandlerState: ProtocolHandlerState = {
 let protocolHandlerProbe: Promise<ProtocolHandlerState> | null = null;
 
 /**
- * On Linux the xdg database, not Electron, decides whether hype-comms:// URLs reach this app. An
- * AppImage installs no desktop entry, so this self-registers one pointing at $APPIMAGE; the deb
+ * On Linux the xdg database, not Electron, decides whether hype-comms:// URLs reach this app.
+ * electron-builder only stamps MimeType onto an uninstalled `.desktop` inside the AppImage, so this
+ * writes a user-level entry and claims `xdg-mime default`. `$APPIMAGE` is the durable Exec when the
+ * runtime set it; an extracted packaged binary is used when that path is not a FUSE mount. The deb
  * already installs its entry, so that path only verifies. The result feeds the sign-in card so a
  * missing handler warns before AuthKit strands the user in the browser (issue #75).
  */
@@ -283,38 +281,25 @@ async function probeLinuxProtocolHandler(): Promise<ProtocolHandlerState> {
   if (process.platform !== "linux" || !app.isPackaged) {
     return protocolHandlerState;
   }
-  const target = createLinuxProtocolRegistrationTarget();
-  const appImagePath = process.env.APPIMAGE;
-  if (appImagePath !== undefined && appImagePath !== "") {
-    const plan = createAppImageDesktopFilePlan({
+  const { binding } = await installAndQueryLinuxProtocolHandler(
+    {
       scheme: __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__,
       installedDesktopName: __HYPE_COMMS_DESKTOP_NAME__,
       productName: __HYPE_COMMS_PRODUCT_NAME__,
-      appImagePath,
+      appImagePath: process.env.APPIMAGE,
+      packagedExecutablePath: process.execPath,
+      appDir: process.env.APPDIR,
       homeDirectory: homedir(),
       xdgDataHome: process.env.XDG_DATA_HOME,
-    });
-    if (plan === null) {
-      reportMainProcessError("The AppImage path cannot be written to a desktop entry");
-    } else {
-      try {
-        await registerAppImageProtocolHandler(plan, target);
-      } catch (error) {
-        reportMainProcessError("Could not self-register the AppImage protocol handler", error);
-      }
-    }
-  }
-  const selfRegisteredName = appImageDesktopFileName(__HYPE_COMMS_DESKTOP_NAME__);
-  const binding = await queryProtocolHandlerBinding(
-    `x-scheme-handler/${__HYPE_COMMS_AUTH_PROTOCOL_SCHEME__}`,
-    [__HYPE_COMMS_DESKTOP_NAME__, selfRegisteredName],
-    target,
+    },
+    createLinuxProtocolRegistrationTarget(),
     {
-      desktopFileName: selfRegisteredName,
-      desktopFilePath: path.join(
-        userApplicationsDirectory(homedir(), process.env.XDG_DATA_HOME),
-        selfRegisteredName,
-      ),
+      onInvalidPath: () => {
+        reportMainProcessError("The AppImage path cannot be written to a desktop entry");
+      },
+      onRegisterError: (error) => {
+        reportMainProcessError("Could not self-register the AppImage protocol handler", error);
+      },
     },
   );
   protocolHandlerState = { ...protocolHandlerState, binding };
