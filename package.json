@@ -16,7 +16,7 @@
   "allowScripts": {
     "electron-winstaller@5.4.0": true,
     "esbuild@0.25.12": true,
-    "esbuild@0.28.1": true
+    "esbuild@0.28.2": true
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -26,6 +26,7 @@
     "demo:headless": "node --env-file-if-exists=.env.local scripts/demo.mjs --headless",
     "demo:headless:smoke": "node --env-file-if-exists=.env.local scripts/demo-headless-smoke.mjs",
     "test:demo:headless": "node --env-file-if-exists=.env.local scripts/demo-headless-local-smoke.mjs",
+    "test:demo:headless:linux": "node scripts/demo-headless-docker-smoke.mjs",
     "demo:reset": "node --env-file-if-exists=.env.local scripts/demo-reset.mjs",
     "dev": "node --env-file-if-exists=.env.local scripts/dev.mjs",
     "dev:join": "node --env-file-if-exists=.env.local scripts/dev-join.mjs",

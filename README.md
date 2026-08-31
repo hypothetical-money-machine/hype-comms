@@ -148,8 +148,10 @@ normal Compose volume or standard Electron profiles.
 
 ### Headless agent captures
 
+#### Local desktop session
+
 For local agent-driven UI checks, the real Electron renderer can run without showing native
-windows. It still needs a local desktop session; this is not a display-server-free browser mode.
+windows. This path needs a running X11 or Wayland desktop session; it is not display-server-free.
 
 For the complete, opt-in local round trip—start the demo, send Claire → Woots, capture a Woots
 PNG and Claire WebM, then stop the demo—run:
@@ -205,6 +207,30 @@ CDP is development-only and loopback-only. Treat the endpoint and manifest like 
 capabilities: do not expose either outside the machine. The capture helper uses fixed CSS-scale
 PNG settings and Playwright 1.59's explicit `page.screencast` WebM API; headless renderers are
 excluded from read tracking even while an agent drives their controls.
+
+#### Display-server-free Linux
+
+On Linux, the Docker smoke can run on a machine with no graphical session. Use the repository's
+normal Node.js and npm toolchain plus Docker Engine with the Docker Compose plugin:
+
+```bash
+npm run test:demo:headless:linux
+```
+
+The default command runs both the `direct-message` and `participated-thread` flows. Run one flow
+with its selector:
+
+```bash
+npm run test:demo:headless:linux -- --flow=direct-message
+npm run test:demo:headless:linux -- --flow=participated-thread
+```
+
+The host Node.js process starts and cleans up Compose. The Electron, server, and PostgreSQL smoke
+runs inside pinned containers that supply Xvfb, D-Bus, Node.js, Electron, and Electron's Linux
+libraries. It needs no host X11 or Wayland display, D-Bus session, Xvfb installation, or Electron
+runtime libraries. Each run saves its PNG, WebM, and notification captures under
+`.dev-data/demo/docker-headless/<run-id>/<flow>/`, then removes its temporary Compose services and
+volumes.
 
 The API applies forward-only migrations on startup. Migration filenames and checksums are
 recorded under an advisory lock; add a new numbered file and never edit an applied migration.
