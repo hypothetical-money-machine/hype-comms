@@ -2484,6 +2484,24 @@ html[data-sidebar-position="right"] .sidebar {
   border-bottom: 1px solid var(--theme-border-subtle);
 }
 
+.channel-member-list li.messageable {
+  cursor: pointer;
+}
+
+.channel-members-dialog .channel-member-open {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+  flex: 1 1 8rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .channel-member-identity {
   display: grid;
   min-width: 0;

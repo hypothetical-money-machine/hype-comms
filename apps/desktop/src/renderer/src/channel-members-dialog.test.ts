@@ -158,7 +158,7 @@ describe("ChannelMembersDialog", () => {
     expect(screen.getByRole("option", { name: "Member · Helper" })).toBeTruthy();
   });
 
-  it("messages humans and agents from a channel directory without treating the row as navigation", async () => {
+  it("messages humans and agents from a channel directory, including name and row clicks", async () => {
     const onMessage = vi.fn();
     render(
       createElement(ChannelMembersDialog, {
@@ -192,6 +192,24 @@ describe("ChannelMembersDialog", () => {
     expect(messageButtons).toHaveLength(2);
     fireEvent.click(messageButtons[1]!);
     expect(onMessage).toHaveBeenCalledWith(AGENT_ID);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Hermes Agent/ }));
+    expect(onMessage).toHaveBeenNthCalledWith(2, AGENT_ID);
+    expect(onMessage).toHaveBeenCalledTimes(2);
+
+    const ownerRow = screen.getByText("Owner (you)").closest("li");
+    if (ownerRow === null) throw new Error("Owner row was not rendered");
+    fireEvent.click(ownerRow);
+    expect(onMessage).toHaveBeenNthCalledWith(3, OWNER_ID);
+    expect(onMessage).toHaveBeenCalledTimes(3);
+
+    fireEvent.click(screen.getByText("Release Bot"));
+    const botRow = screen.getByText("Release Bot").closest("li");
+    if (botRow === null) throw new Error("Bot row was not rendered");
+    fireEvent.click(botRow);
+    expect(screen.queryByRole("button", { name: /Release Bot/ })).toBeNull();
+    expect(onMessage).toHaveBeenCalledTimes(3);
   });
 
   it("lists the workspace directory without loading channel membership", () => {
@@ -219,6 +237,19 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Message" })[0]!);
     expect(onMessage).toHaveBeenCalledWith(OWNER_ID);
     expect(screen.getAllByRole("button", { name: "Message" })).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: /Hermes Agent/ }));
+    expect(onMessage).toHaveBeenNthCalledWith(2, AGENT_ID);
+
+    const agentRow = screen.getByText("Hermes Agent").closest("li");
+    if (agentRow === null) throw new Error("Agent row was not rendered");
+    fireEvent.click(agentRow);
+    expect(onMessage).toHaveBeenNthCalledWith(3, AGENT_ID);
+    expect(onMessage).toHaveBeenCalledTimes(3);
+
+    fireEvent.click(screen.getByText("Release Bot"));
+    expect(screen.queryByRole("button", { name: /Release Bot/ })).toBeNull();
+    expect(onMessage).toHaveBeenCalledTimes(3);
   });
 
   it("names the close control after the dialog variant", async () => {
@@ -265,7 +296,9 @@ describe("ChannelMembersDialog", () => {
     );
 
     const close = screen.getByRole("button", { name: "Close people" });
+    const openOwner = screen.getByRole("button", { name: /Owner \(you\)/ });
     const done = screen.getByRole("button", { name: "Done" });
+    expect(openOwner).toBeTruthy();
     expect(document.activeElement).toBe(close);
 
     fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
