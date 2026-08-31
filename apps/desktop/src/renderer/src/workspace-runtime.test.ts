@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
+  AgentEnrollmentResponse,
   AiChannelState,
   Attachment,
   CacheCryptoStatus,
@@ -21,6 +22,7 @@ import type {
   DirectConversationRequest,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListAgentEnrollmentsResponse,
   ListMembersResponse,
   ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
@@ -1312,6 +1314,18 @@ class FakeDesktopApi implements DesktopApi {
 
   async getCommunicationPaths(): Promise<CommunicationPathsResponse> {
     return { generatedAt: "2026-01-01T00:00:00.000Z", members: [...this.members], paths: [] };
+  }
+
+  async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
+    return { enrollments: [] };
+  }
+
+  async reviewAgentEnrollment(): Promise<AgentEnrollmentResponse> {
+    throw new Error("Agent enrollment review is not used by WorkspaceRuntime");
+  }
+
+  async cancelAgentEnrollment(): Promise<AgentEnrollmentResponse> {
+    throw new Error("Agent enrollment cancellation is not used by WorkspaceRuntime");
   }
 
   async listConversations(

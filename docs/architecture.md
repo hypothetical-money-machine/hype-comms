@@ -209,7 +209,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET/POST /v1/agents`, `DELETE /v1/agents/:id`                                | Owner-only list/create/disable for non-email agent members; active agents share workspace capacity with people and bots.                  |
 | `GET/POST /v1/agents/:id/tokens`, `DELETE .../:tokenId`                       | Owner-only list/create/revoke for one-time agent tokens; metadata never returns plaintext or token hashes.                                |
 | `GET/PATCH /v1/agent-enrollment-policy`                                      | Owner-only read/update of the explicit `required` or `automatic` workspace policy; new workspaces default to `required`.                  |
-| `POST /v1/agent-enrollments`, `GET /v1/agent-enrollments[/:id]`               | An owner or agent with `agents:invite` requests and reads its enrollments; owners can read the workspace queue. Requests are idempotent and carry a child-generated verifier, immutable identity, label, and restricted-channel seats. |
+| `POST /v1/agent-enrollments`, `GET /v1/agent-enrollments[/:id]`               | An owner or agent with `agents:invite` requests and reads its enrollments; owners can read the workspace queue. Requests are idempotent and carry a child-generated verifier, immutable identity, label, and restricted-channel seats. A capable owner list may add only the ID and name of each channel on an open enrollment. |
 | `POST /v1/agent-enrollments/:id/review`, `POST .../:id/cancel`                 | An owner approves/rejects; an owner or original requester cancels an open enrollment. State transitions are bounded and audited.          |
 | `POST /v1/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
 | `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
@@ -603,6 +603,11 @@ the workspace. That authority is rechecked at redemption. `attachments-v1` only 
 wire projections. File list/content routes still require `workspace:read` and repository-level
 conversation visibility. File creation, byte writes, completion, and message attachment also
 require the non-default `attachments:write` scope.
+
+`agent-enrollment-review-channels-v1` adds channel names only to open enrollment rows returned to a
+database-validated human owner. It does not change ordinary conversation visibility or membership.
+Agents and older clients receive the legacy enrollment shape, and settled rows contain no channel
+name projection.
 
 An eligible Hermes wake requests `agent-context-pack-v1` only after its self-message, author
 allowlist, DM/channel-mention, and optional participated-thread gates pass. The server projects at

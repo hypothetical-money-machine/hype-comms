@@ -29,6 +29,7 @@ import {
 
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
+import { AgentEnrollmentsView } from "./agent-enrollments-view";
 import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
@@ -82,6 +83,7 @@ import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
 import { useConversationDrafts } from "./use-conversation-drafts";
+import { ipcErrorMessage } from "./ipc-error-message";
 import { WorkspaceSearch } from "./workspace-search";
 import type { OutboxItem } from "./workspace-cache";
 import {
@@ -91,7 +93,8 @@ import {
 } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
-type WorkspaceDestination = "workspace" | "ai" | "unreads" | "admin" | "preferences";
+type WorkspaceDestination =
+  "workspace" | "ai" | "unreads" | "admin" | "preferences" | "agent-enrollments";
 type NavigationGuard = (validateDiscard?: () => boolean) => boolean | Promise<boolean>;
 
 interface AppProps {
@@ -106,13 +109,6 @@ type UpdateClient = Pick<
   DesktopApi,
   "getUpdateState" | "checkForUpdates" | "restartToInstallUpdate" | "onUpdateStateChanged"
 >;
-
-function errorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof Error) || error.message === "") return fallback;
-  // Electron prefixes IPC rejections with the transport detail; the card only needs the message.
-  const message = error.message.replace(/^Error invoking remote method '[^']*': Error: /, "");
-  return message === "" ? fallback : message;
-}
 
 export function recoverableAuthenticatedSession(
   session: ChatSessionState,
@@ -300,7 +296,7 @@ export function SignIn({
         }
         setCapabilities(nextCapabilities);
       }
-      setStatus(errorMessage(error, "Could not start WorkOS sign-in"));
+      setStatus(ipcErrorMessage(error, "Could not start WorkOS sign-in"));
     } finally {
       setAuthKitStarting(false);
     }
@@ -319,7 +315,7 @@ export function SignIn({
           : `${delivery.message} Open the private sign-in link an administrator sends you.`,
       );
     } catch (error) {
-      setStatus(errorMessage(error, "Could not request a sign-in link"));
+      setStatus(ipcErrorMessage(error, "Could not request a sign-in link"));
     } finally {
       setRequesting(false);
     }
@@ -414,6 +410,23 @@ function CommunicationPathsIcon() {
         strokeLinecap="round"
         strokeWidth="1.6"
       />
+    </svg>
+  );
+}
+
+function AgentRequestsIcon() {
+  return (
+    <svg
+      className="agent-requests-nav-icon"
+      viewBox="0 0 20 20"
+      aria-hidden="true"
+      strokeWidth="1.6"
+    >
+      <path d="M10 2.5v3M8.5 2.5h3" />
+      <rect x="4" y="5.5" width="12" height="10" rx="3" />
+      <circle cx="8" cy="10" r="1" />
+      <circle cx="12" cy="10" r="1" />
+      <path d="M7.5 13h5" />
     </svg>
   );
 }
@@ -852,6 +865,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     chrome.collapse();
   }, [chrome, runtime]);
 
+  const openAgentEnrollments = useCallback((): void => {
+    runPreferencesNavigation(() => {
+      setDestination("agent-enrollments");
+      setPaneView("chat");
+      setPeopleSource(null);
+      runtime.closeThread();
+    });
+  }, [runPreferencesNavigation, runtime]);
+
   useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
@@ -972,6 +994,16 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   }, [applySession, client, notificationSession, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
+  const currentUserRole = bootstrap?.currentUser.role;
+  useEffect(() => {
+    if (
+      currentUserRole !== undefined &&
+      currentUserRole !== "owner" &&
+      (destination === "admin" || destination === "agent-enrollments")
+    ) {
+      setDestination("workspace");
+    }
+  }, [currentUserRole, destination]);
   // Every runtime error used to be readable only before a bootstrap existed, which hid realtime
   // and sync failures for the entire life of a session.
   const workspaceNotice =
@@ -1677,7 +1709,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       setComposerError("");
       setThreadComposerError("");
     } catch (error) {
-      const message = errorMessage(error, "Could not attach the file");
+      const message = ipcErrorMessage(error, "Could not attach the file");
       if (key === conversationId) setComposerError(message);
       else setThreadComposerError(message);
     }
@@ -1712,7 +1744,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       replacePendingAttachments(conversationId, () => []);
       setComposerError("");
     } catch (error) {
-      setComposerError(errorMessage(error, "Could not queue the message"));
+      setComposerError(ipcErrorMessage(error, "Could not queue the message"));
     }
   };
 
@@ -1729,7 +1761,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       setPaneView("tasks");
       setComposerError("");
     } catch (error) {
-      setComposerError(errorMessage(error, "Could not create a task from this message"));
+      setComposerError(ipcErrorMessage(error, "Could not create a task from this message"));
     }
   };
 
@@ -1780,7 +1812,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
       if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
     } catch (error) {
-      setThreadComposerError(errorMessage(error, "Could not queue the reply"));
+      setThreadComposerError(ipcErrorMessage(error, "Could not queue the reply"));
     }
   };
 
@@ -1833,7 +1865,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setDestination("workspace");
         await runtime.createDirectConversation(memberId);
       } catch (error) {
-        setComposerError(errorMessage(error, "Could not start the direct message"));
+        setComposerError(ipcErrorMessage(error, "Could not start the direct message"));
       }
     },
     [requestPreferencesNavigation, runtime],
@@ -2116,6 +2148,21 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   <span className="conversation-label-text">Communication paths</span>
                 </span>
               </button>
+              <button
+                className={
+                  destination === "agent-enrollments"
+                    ? "conversation agent-requests-destination active"
+                    : "conversation agent-requests-destination"
+                }
+                type="button"
+                aria-current={destination === "agent-enrollments" ? "page" : undefined}
+                onClick={openAgentEnrollments}
+              >
+                <span className="conversation-label">
+                  <AgentRequestsIcon />
+                  <span className="conversation-label-text">Agent requests</span>
+                </span>
+              </button>
             </>
           )}
 
@@ -2243,14 +2290,23 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         onUpdateProfile={(title) => runtime.updateProfileTitle(title)}
       />
       {bootstrap.currentUser.role === "owner" && (
-        <CommunicationPathsView
-          // Keyed by the authenticated identity so the cached aggregate can never survive a
-          // session change into another workspace, even across a direct signed-in transition.
-          key={`${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
-          client={client}
-          members={bootstrap.members}
-          active={destination === "admin"}
-        />
+        <>
+          <CommunicationPathsView
+            // Keyed by the authenticated identity so the cached aggregate can never survive a
+            // session change into another workspace, even across a direct signed-in transition.
+            key={`communication-paths:${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+            client={client}
+            members={bootstrap.members}
+            active={destination === "admin"}
+          />
+          <AgentEnrollmentsView
+            key={`agent-enrollments:${bootstrap.currentUser.user.id}:${bootstrap.currentUser.workspaceId}`}
+            client={client}
+            members={bootstrap.members}
+            conversations={bootstrap.conversations}
+            active={destination === "agent-enrollments"}
+          />
+        </>
       )}
       <section className="conversation-pane" hidden={destination !== "workspace"}>
         <header className="conversation-header">

@@ -778,7 +778,8 @@ html[data-sidebar-position="right"] .sidebar {
   color: var(--theme-text-accent);
 }
 
-.communication-paths-nav-icon {
+.communication-paths-nav-icon,
+.agent-requests-nav-icon {
   width: 19px;
   height: 19px;
   flex: 0 0 auto;
@@ -789,6 +790,10 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .communication-paths-destination.active .communication-paths-nav-icon {
+  color: var(--theme-text-accent);
+}
+
+.agent-requests-destination.active .agent-requests-nav-icon {
   color: var(--theme-text-accent);
 }
 
@@ -5803,4 +5808,237 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
 
 .communication-paths-refresh:hover {
   background: var(--theme-surface-hover);
+}
+
+.agent-enrollments-view {
+  display: grid;
+  grid-area: conversation;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--theme-surface-content);
+}
+
+.agent-enrollments-view[hidden] {
+  display: none;
+}
+
+.agent-enrollments-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--density-unreads-list-padding);
+}
+
+.agent-enrollment-list {
+  display: grid;
+  width: min(900px, 100%);
+  gap: 12px;
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-enrollment-card {
+  padding: 18px;
+  border: 1px solid var(--theme-border-subtle);
+  border-radius: 12px;
+  background: var(--theme-surface-card);
+  box-shadow: var(--theme-shadow-card);
+}
+
+.agent-enrollment-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-enrollment-card-header h3,
+.agent-enrollment-card-header p {
+  margin: 0;
+}
+
+.agent-enrollment-card-header h3 {
+  color: var(--theme-text-strong);
+  font-size: 17px;
+}
+
+.agent-enrollment-card-header p {
+  margin-top: 3px;
+  color: var(--theme-text-subtle);
+  font-size: 12px;
+}
+
+.agent-enrollment-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--theme-text-warning) 45%, var(--theme-border-default));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--theme-text-warning) 9%, var(--theme-surface-card));
+  color: var(--theme-text-warning);
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.agent-enrollment-status-ready {
+  border-color: color-mix(in srgb, var(--theme-text-success) 45%, var(--theme-border-default));
+  background: color-mix(in srgb, var(--theme-text-success) 9%, var(--theme-surface-card));
+  color: var(--theme-text-success);
+}
+
+.agent-enrollment-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 18px 0 0;
+}
+
+.agent-enrollment-details > div {
+  min-width: 0;
+}
+
+.agent-enrollment-details dt {
+  margin-bottom: 4px;
+  color: var(--theme-text-subtle);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-enrollment-details dd {
+  margin: 0;
+  color: var(--theme-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.agent-enrollment-channels {
+  grid-column: 1 / -1;
+}
+
+.agent-enrollment-channels ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-enrollment-channels li {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-muted);
+  font-size: 11px;
+}
+
+.agent-enrollment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--theme-border-subtle);
+}
+
+.agent-enrollment-confirmation {
+  margin: 18px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--theme-action-primary) 38%, var(--theme-border-default));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--theme-action-primary) 8%, var(--theme-surface-card));
+  color: var(--theme-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-enrollment-confirmation + .agent-enrollment-actions {
+  margin-top: 10px;
+}
+
+.agent-enrollment-confirmation-danger {
+  border-color: color-mix(in srgb, var(--theme-text-danger) 38%, var(--theme-border-default));
+  background: color-mix(in srgb, var(--theme-text-danger) 7%, var(--theme-surface-card));
+}
+
+.agent-enrollment-actions button {
+  min-width: 88px;
+  padding: 8px 13px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.agent-enrollment-approve {
+  border: 1px solid var(--theme-action-primary);
+  background: var(--theme-action-primary);
+  color: var(--theme-action-primary-text);
+}
+
+.agent-enrollment-approve:hover:not(:disabled) {
+  border-color: var(--theme-action-primary-hover);
+  background: var(--theme-action-primary-hover);
+}
+
+.agent-enrollment-reject,
+.agent-enrollment-cancel-invitation,
+.agent-enrollment-cancel {
+  border: 1px solid var(--theme-border-default);
+  background: transparent;
+  color: var(--theme-text-secondary);
+}
+
+.agent-enrollment-reject:hover:not(:disabled),
+.agent-enrollment-cancel-invitation:hover:not(:disabled) {
+  border-color: var(--theme-border-danger);
+  background: color-mix(in srgb, var(--theme-text-danger) 7%, var(--theme-surface-card));
+  color: var(--theme-text-danger);
+}
+
+.agent-enrollment-cancel:hover:not(:disabled) {
+  background: var(--theme-surface-hover);
+}
+
+.agent-enrollments-error,
+.agent-enrollments-review-success,
+.agent-enrollments-review-error {
+  width: min(900px, 100%);
+  margin: 0 auto 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 9px;
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-enrollments-error,
+.agent-enrollments-review-error {
+  border-color: var(--theme-border-danger);
+  color: var(--theme-text-danger);
+}
+
+.agent-enrollments-review-success {
+  border-color: color-mix(in srgb, var(--theme-text-success) 45%, var(--theme-border-default));
+  color: var(--theme-text-success);
+}
+
+.agent-enrollments-empty-state {
+  min-height: 100%;
+}
+
+@media (max-width: 880px) {
+  .agent-enrollment-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-enrollment-channels {
+    grid-column: auto;
+  }
 }

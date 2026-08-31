@@ -46,6 +46,11 @@ upload, write or complete bytes, or attach staged bytes to a message. The explic
 `attachments:write` scope is reserved for owner-selected credentials and migrated credentials that
 already had upload access through `messages:write`.
 
+The desktop advertises `agent-enrollment-review-channels-v1` when it reads the enrollment queue.
+For an active human owner, the server adds only the channel ID and name for seats already named by
+an open enrollment. This lets the owner identify a private channel without granting visibility or
+membership. Agents, older clients, and settled enrollment rows do not receive these names.
+
 ## File access without a desktop
 
 The CLI adapter advertises `attachments-v1` and retains the ordinary conversation authorization
@@ -73,6 +78,9 @@ cleanup. Opening or interpreting the downloaded file remains the agent runtime's
 
 ## Owner controls and rollout
 
+- The desktop owner queue can approve or reject a pending enrollment. An approved invitation stays
+  visible as `Ready to join` and can be cancelled until the teammate redeems it. Cancellation and
+  redemption lock the same row, so only the first operation succeeds.
 - An owner can revoke one credential without disabling its agent. Other credentials for that agent
   continue to work.
 - Disabling an agent revokes all of its credentials and active workspace membership, closes its

@@ -15,6 +15,7 @@ import {
   NOTIFICATION_STATE_IPC_MAX_BYTES,
   advanceReadCursorResponseSchema,
   addReactionResponseSchema,
+  agentEnrollmentResponseSchema,
   authCapabilitiesSchema,
   aiChannelGenerationRequestSchema,
   aiChannelPermissionResponseSchema,
@@ -38,6 +39,7 @@ import {
   chatSessionStateSchema,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
+  listAgentEnrollmentsResponseSchema,
   listMembersResponseSchema,
   attachmentSchema,
   conversationFilesQuerySchema,
@@ -75,6 +77,7 @@ import {
   scopedTypingActivityUpdateSchema,
   requestMagicLinkSchema,
   removeReactionResponseSchema,
+  reviewAgentEnrollmentRequestSchema,
   sendAttemptResultSchema,
   sendMessageOperationSchema,
   sequenceSchema,
@@ -114,6 +117,7 @@ import {
   type ReactionEmoji,
   type RealtimeAcknowledgement,
   type RealtimeSessionScope,
+  type ReviewAgentEnrollmentRequest,
   type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
   type ScopedTypingActivityUpdate,
@@ -524,6 +528,31 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
     getCommunicationPaths: async () =>
       communicationPathsResponseSchema.parse(
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths),
+      ),
+    listAgentEnrollments: async () =>
+      listAgentEnrollmentsResponseSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList),
+      ),
+    reviewAgentEnrollment: async (
+      enrollmentId: string,
+      decision: ReviewAgentEnrollmentRequest["decision"],
+    ) => {
+      const parsedId = entityIdSchema.parse(enrollmentId);
+      const parsedDecision = reviewAgentEnrollmentRequestSchema.parse({ decision }).decision;
+      return agentEnrollmentResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceAgentEnrollmentReview,
+          parsedId,
+          parsedDecision,
+        ),
+      );
+    },
+    cancelAgentEnrollment: async (enrollmentId: string) =>
+      agentEnrollmentResponseSchema.parse(
+        await ipcRenderer.invoke(
+          DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
+          entityIdSchema.parse(enrollmentId),
+        ),
       ),
     updateProfile: async (title: string | null): Promise<User> =>
       updateProfileResponseSchema.parse(

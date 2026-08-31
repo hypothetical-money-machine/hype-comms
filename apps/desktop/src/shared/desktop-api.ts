@@ -1,6 +1,7 @@
 import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
+  AgentEnrollmentResponse,
   AuthCapabilities,
   AiChannelGenerationRequest,
   AiChannelPermissionResponse,
@@ -24,6 +25,7 @@ import type {
   ConversationFilesQuery,
   ListConversationsQuery,
   ListConversationsResponse,
+  ListAgentEnrollmentsResponse,
   ListMembersResponse,
   ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
@@ -52,6 +54,7 @@ import type {
   RealtimeAcknowledgement,
   RealtimeConnectionState,
   RealtimeSessionScope,
+  ReviewAgentEnrollmentRequest,
   ScopedProductRealtimeEvent,
   ScopedEphemeralActivityFrame,
   ScopedTypingActivityUpdate,
@@ -201,6 +204,13 @@ export interface DesktopApi
    * message volume. The server rejects non-owners, so callers must gate the UI on the role.
    */
   readonly getCommunicationPaths: () => Promise<CommunicationPathsResponse>;
+  /** Owner-only review queue for agent enrollment requests in this workspace. */
+  readonly listAgentEnrollments: () => Promise<ListAgentEnrollmentsResponse>;
+  readonly reviewAgentEnrollment: (
+    enrollmentId: string,
+    decision: ReviewAgentEnrollmentRequest["decision"],
+  ) => Promise<AgentEnrollmentResponse>;
+  readonly cancelAgentEnrollment: (enrollmentId: string) => Promise<AgentEnrollmentResponse>;
   /** Updates the current member's profile title. Passing null clears the title. */
   readonly updateProfile: (title: string | null) => Promise<User>;
   /**

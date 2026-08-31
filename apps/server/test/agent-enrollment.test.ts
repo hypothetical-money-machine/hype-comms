@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   ATTACHMENTS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   DEFAULT_AGENCY_AGENT_SCOPES,
   agentCurrentPrincipalSchema,
   agentEnrollmentResponseSchema,
@@ -14,6 +15,8 @@ import {
   conversationMutationResponseSchema,
   createFileUploadResponseSchema,
   messageHistoryResponseSchema,
+  listAgentEnrollmentsResponseSchema,
+  listConversationsResponseSchema,
   redeemAgentEnrollmentResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
@@ -701,6 +704,126 @@ describeWithPostgres("AgentEnrollmentModule", () => {
     });
   });
 
+  it("projects private channel names only to capable active owners", async () => {
+    await pool.query(
+      "DELETE FROM conversation_memberships WHERE conversation_id = $1 AND user_id = $2",
+      [restrictedId, ownerId],
+    );
+    const ownerRequest = await enrollment.request(
+      ownerActor(),
+      candidateInput("owner-private-review", [restrictedId]).request,
+      "owner-private-review",
+    );
+    await enrollment.review(ownerActor(), ownerRequest.id, "approve");
+    const emptyRequest = await enrollment.request(
+      ownerActor(),
+      candidateInput("owner-empty-review").request,
+      "owner-empty-review",
+    );
+
+    const inviter = await identityService.createAgent(ownerId, {
+      username: "private-channel-inviter",
+      displayName: "Private Channel Inviter",
+    });
+    const token = await identityService.createAgentToken(ownerId, inviter.user.id, {
+      label: "Private channel invite requests",
+      scopes: [...DEFAULT_AGENCY_AGENT_SCOPES],
+    });
+    await pool.query(
+      `INSERT INTO conversation_memberships
+         (conversation_id, workspace_id, user_id, role)
+       VALUES ($1, $2, $3, 'member')`,
+      [restrictedId, workspaceId, inviter.user.id],
+    );
+    const authenticated = await identityService.authenticateAgentContext(token.token);
+    if (authenticated === null) throw new Error("Private channel inviter did not authenticate");
+    const agentActor: AgentEnrollmentActor = {
+      userId: inviter.user.id,
+      workspaceId,
+      kind: "agent",
+      role: "member",
+      agentTokenId: authenticated.agentTokenId,
+      scopes: authenticated.currentUser.scopes,
+    };
+    const agentRequest = await enrollment.request(
+      agentActor,
+      candidateInput("agent-private-review", [restrictedId]).request,
+      "agent-private-review",
+    );
+
+    const app = await buildApp({
+      cookieSecure: false,
+      identity: {
+        service: identityService,
+        agentEnrollment: enrollment,
+        agentProvisioningEnabled: true,
+      },
+      workspace: {
+        repository: new WorkspaceRepository(pool),
+        realtimeHub: new RealtimeEventHub(pool),
+      },
+    });
+    apps.push(app);
+    const legacyOwnerResponse = await app.inject({
+      method: "GET",
+      url: "/v1/agent-enrollments",
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+    });
+    const capableOwnerResponse = await app.inject({
+      method: "GET",
+      url: "/v1/agent-enrollments",
+      headers: {
+        cookie: `hype_comms_session=${ownerSessionToken}`,
+        "x-hype-comms-capabilities": AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
+      },
+    });
+    const capableAgentResponse = await app.inject({
+      method: "GET",
+      url: "/v1/agent-enrollments",
+      headers: {
+        authorization: `Bearer ${token.token}`,
+        "x-hype-comms-capabilities": AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
+      },
+    });
+    const ordinaryConversationsResponse = await app.inject({
+      method: "GET",
+      url: "/v1/conversations?limit=50",
+      headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
+    });
+
+    expect(legacyOwnerResponse.statusCode).toBe(200);
+    const legacyOwner = listAgentEnrollmentsResponseSchema.parse(legacyOwnerResponse.json());
+    expect(legacyOwner.enrollments.find((item) => item.id === ownerRequest.id)).not.toHaveProperty(
+      "restrictedChannels",
+    );
+
+    expect(capableOwnerResponse.statusCode).toBe(200);
+    expect(capableOwnerResponse.headers["cache-control"]).toBe("no-store");
+    const capableOwner = listAgentEnrollmentsResponseSchema.parse(capableOwnerResponse.json());
+    expect(
+      capableOwner.enrollments.find((item) => item.id === ownerRequest.id)?.restrictedChannels,
+    ).toEqual([{ conversationId: restrictedId, name: "Secret" }]);
+    expect(
+      capableOwner.enrollments.find((item) => item.id === emptyRequest.id)?.restrictedChannels,
+    ).toEqual([]);
+
+    expect(capableAgentResponse.statusCode).toBe(200);
+    const capableAgent = listAgentEnrollmentsResponseSchema.parse(capableAgentResponse.json());
+    expect(capableAgent.enrollments).toHaveLength(1);
+    expect(capableAgent.enrollments[0]?.id).toBe(agentRequest.id);
+    expect(capableAgent.enrollments[0]).not.toHaveProperty("restrictedChannels");
+
+    expect(ordinaryConversationsResponse.statusCode).toBe(200);
+    const ordinaryConversations = listConversationsResponseSchema.parse(
+      ordinaryConversationsResponse.json(),
+    );
+    expect(
+      ordinaryConversations.conversations.some(
+        (summary) => summary.conversation.id === restrictedId,
+      ),
+    ).toBe(false);
+  });
+
   it("expires, rejects, and cancels without activating a candidate", async () => {
     const expiring = candidateInput("expiring-child");
     const expiringRequest = await enrollment.request(ownerActor(), expiring.request, "expiry-key");
@@ -754,6 +877,46 @@ describeWithPostgres("AgentEnrollmentModule", () => {
       code: "CONFLICT",
     });
     expect((await pool.query("SELECT id FROM agent_tokens")).rows).toEqual([]);
+  });
+
+  it("serializes cancellation against redemption so only one can win", async () => {
+    const candidate = candidateInput("cancel-redeem-race");
+    const requested = await enrollment.request(
+      ownerActor(),
+      candidate.request,
+      "cancel-redeem-race",
+    );
+    await enrollment.review(ownerActor(), requested.id, "approve");
+
+    const results = await Promise.allSettled([
+      enrollment.cancel(ownerActor(), requested.id),
+      enrollment.redeem(requested.id, candidate.token),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ reason: { statusCode: 409, code: "CONFLICT" } });
+
+    const final = await enrollment.get(ownerActor(), requested.id);
+    const agents = await pool.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM agents WHERE workspace_id = $1",
+      [workspaceId],
+    );
+    const tokens = await pool.query<{ count: number }>(
+      "SELECT count(*)::integer AS count FROM agent_tokens WHERE workspace_id = $1",
+      [workspaceId],
+    );
+    if (final.status === "cancelled") {
+      expect(final.activatedAgentUserId).toBeNull();
+      expect(agents.rows[0]?.count).toBe(0);
+      expect(tokens.rows[0]?.count).toBe(0);
+    } else {
+      expect(final.status).toBe("active");
+      expect(final.activatedAgentUserId).not.toBeNull();
+      expect(agents.rows[0]?.count).toBe(1);
+      expect(tokens.rows[0]?.count).toBe(1);
+    }
   });
 
   it("records every lifecycle reason with its actor and without credential material", async () => {

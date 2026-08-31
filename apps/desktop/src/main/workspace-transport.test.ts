@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  DEFAULT_AGENT_AGENCY_PROFILE,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
@@ -40,6 +42,7 @@ const CLIENT_CAPABILITIES = [
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
 ].join(",");
 
@@ -192,6 +195,43 @@ const TASK: Task = {
   createdAt: NOW,
   updatedAt: NOW,
 };
+
+const ENROLLMENT_ID = "10000000-0000-4000-8000-000000000015";
+const REQUESTING_AGENT_ID = "10000000-0000-4000-8000-000000000016";
+const AGENT_ENROLLMENT = {
+  id: ENROLLMENT_ID,
+  workspaceId: CURRENT_USER.workspaceId,
+  profile: DEFAULT_AGENT_AGENCY_PROFILE,
+  status: "pending_approval",
+  username: "new-agent",
+  displayName: "New Agent",
+  label: "Teammate enrollment",
+  requestedBy: REQUESTING_AGENT_ID,
+  requestedByKind: "agent",
+  restrictedChannelIds: [CONVERSATION_ID],
+  expiresAt: "2026-07-25T12:00:00.000Z",
+  reviewedBy: null,
+  reviewedAt: null,
+  activatedAgentUserId: null,
+  activatedAgentTokenId: null,
+  activatedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+} as const;
+const REVIEWED_AGENT_ENROLLMENT = {
+  ...AGENT_ENROLLMENT,
+  status: "ready_to_redeem",
+  reviewedBy: CURRENT_USER.user.id,
+  reviewedAt: NOW,
+} as const;
+const PROJECTED_AGENT_ENROLLMENT = {
+  ...AGENT_ENROLLMENT,
+  restrictedChannels: [{ conversationId: CONVERSATION_ID, name: "Private launch" }],
+} as const;
+const CANCELLED_AGENT_ENROLLMENT = {
+  ...REVIEWED_AGENT_ENROLLMENT,
+  status: "cancelled",
+} as const;
 
 class MemoryCookies implements SessionCookieStore {
   readonly values = new Map<string, string>();
@@ -961,6 +1001,223 @@ describe("WorkspaceTransport updateProfile", () => {
     await expect(transport.updateProfile("Engineering Lead")).rejects.toThrow(
       new WorkspaceRequestError("Workspace request failed (429)", 429, 5_000),
     );
+  });
+});
+
+describe("WorkspaceTransport agent enrollments", () => {
+  it("lists, reviews, and cancels enrollments through the exact owner routes", async () => {
+    const requests: {
+      method: string;
+      url: string;
+      body: string | null;
+      contentType: string | null;
+      capabilities: string | null;
+      idempotencyKey: string | null;
+    }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      const headers = new Headers(init.headers);
+      requests.push({
+        method: init.method ?? "GET",
+        url,
+        body: typeof init.body === "string" ? init.body : null,
+        contentType: headers.get("content-type"),
+        capabilities: headers.get("x-hype-comms-capabilities"),
+        idempotencyKey: headers.get("idempotency-key"),
+      });
+      if (init.method === "GET") {
+        return jsonResponse({ enrollments: [PROJECTED_AGENT_ENROLLMENT] });
+      }
+      return url.endsWith("/cancel")
+        ? jsonResponse({ enrollment: CANCELLED_AGENT_ENROLLMENT })
+        : jsonResponse({ enrollment: REVIEWED_AGENT_ENROLLMENT });
+    });
+
+    await expect(transport.listAgentEnrollments()).resolves.toEqual({
+      enrollments: [PROJECTED_AGENT_ENROLLMENT],
+    });
+    await expect(transport.reviewAgentEnrollment(ENROLLMENT_ID, "approve")).resolves.toEqual({
+      enrollment: REVIEWED_AGENT_ENROLLMENT,
+    });
+    await expect(transport.cancelAgentEnrollment(ENROLLMENT_ID)).resolves.toEqual({
+      enrollment: CANCELLED_AGENT_ENROLLMENT,
+    });
+
+    expect(requests).toEqual([
+      {
+        method: "GET",
+        url: "https://chat.example/v1/agent-enrollments",
+        body: null,
+        contentType: null,
+        capabilities: CLIENT_CAPABILITIES,
+        idempotencyKey: null,
+      },
+      {
+        method: "POST",
+        url: `https://chat.example/v1/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/review`,
+        body: JSON.stringify({ decision: "approve" }),
+        contentType: "application/json",
+        capabilities: expect.any(String),
+        idempotencyKey: expect.any(String),
+      },
+      {
+        method: "POST",
+        url: `https://chat.example/v1/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/cancel`,
+        body: null,
+        contentType: null,
+        capabilities: expect.any(String),
+        idempotencyKey: expect.any(String),
+      },
+    ]);
+  });
+
+  it("rejects malformed successful list, review, and cancel responses", async () => {
+    const malformedList = transportAnswering(() =>
+      jsonResponse({
+        enrollments: [{ ...AGENT_ENROLLMENT, credentialVerifier: "must-not-cross-desktop" }],
+      }),
+    );
+    const malformedReview = transportAnswering(() =>
+      jsonResponse({ enrollment: { ...REVIEWED_AGENT_ENROLLMENT, unexpected: true } }),
+    );
+    const malformedCancel = transportAnswering(() =>
+      jsonResponse({ enrollment: { ...CANCELLED_AGENT_ENROLLMENT, credential: "must-not-cross" } }),
+    );
+
+    await expect(malformedList.listAgentEnrollments()).rejects.toThrow();
+    await expect(malformedReview.reviewAgentEnrollment(ENROLLMENT_ID, "reject")).rejects.toThrow();
+    await expect(malformedCancel.cancelAgentEnrollment(ENROLLMENT_ID)).rejects.toThrow();
+  });
+
+  it("inherits the shared request timeout and recovers after a timed-out list", async () => {
+    const timeoutSignal = new AbortController().signal;
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
+    let attempts = 0;
+    const { transport } = createTransport(async (_url, init) => {
+      expect(init.signal).toBe(timeoutSignal);
+      attempts += 1;
+      if (attempts === 1) {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      return jsonResponse({ enrollments: [PROJECTED_AGENT_ENROLLMENT] });
+    });
+
+    try {
+      await expect(transport.listAgentEnrollments()).rejects.toThrow(
+        "The operation was aborted due to timeout",
+      );
+      await expect(transport.listAgentEnrollments()).resolves.toEqual({
+        enrollments: [PROJECTED_AGENT_ENROLLMENT],
+      });
+      expect(timeout).toHaveBeenCalledTimes(2);
+      expect(timeout).toHaveBeenNthCalledWith(1, 10_000);
+      expect(timeout).toHaveBeenNthCalledWith(2, 10_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("propagates a list authorization error", async () => {
+    const transport = transportAnswering(() =>
+      jsonResponse(
+        {
+          error: {
+            code: "FORBIDDEN",
+            message: "An active workspace owner session is required",
+            requestId: "req-enrollment-list",
+          },
+        },
+        403,
+      ),
+    );
+
+    await expect(transport.listAgentEnrollments()).rejects.toThrow(
+      new WorkspaceRequestError("An active workspace owner session is required", 403, null),
+    );
+  });
+
+  it("retries a server-failed review once with one idempotency key", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit }[] = [];
+    const { transport } = createTransport(async (url, init) => {
+      requests.push({ url, init });
+      return jsonResponse(
+        {
+          error: {
+            code: "SERVICE_UNAVAILABLE",
+            message: "Agent enrollment is unavailable",
+            requestId: "req-enrollment-review",
+          },
+        },
+        503,
+      );
+    });
+
+    await expect(transport.reviewAgentEnrollment(ENROLLMENT_ID, "reject")).rejects.toThrow(
+      new WorkspaceRequestError("Agent enrollment is unavailable", 503, null),
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
+      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
+    ]);
+    expect(requests.map((request) => request.init.body)).toEqual([
+      JSON.stringify({ decision: "reject" }),
+      JSON.stringify({ decision: "reject" }),
+    ]);
+    const idempotencyKeys = requests.map((request) =>
+      new Headers(request.init.headers).get("idempotency-key"),
+    );
+    expect(idempotencyKeys[0]).toEqual(expect.any(String));
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+  });
+
+  it("propagates a settled cancellation without retrying", async () => {
+    let attempts = 0;
+    const { transport } = createTransport(async () => {
+      attempts += 1;
+      return jsonResponse(
+        {
+          error: {
+            code: "CONFLICT",
+            message: "Agent enrollment can no longer be cancelled",
+            requestId: "req-enrollment-cancel",
+          },
+        },
+        409,
+      );
+    });
+
+    await expect(transport.cancelAgentEnrollment(ENROLLMENT_ID)).rejects.toThrow(
+      new WorkspaceRequestError("Agent enrollment can no longer be cancelled", 409, null),
+    );
+    expect(attempts).toBe(1);
+  });
+
+  it("retries a server-failed cancellation once with no body and one key", async () => {
+    const requests: RequestInit[] = [];
+    const { transport } = createTransport(async (_url, init) => {
+      requests.push(init);
+      return jsonResponse(
+        {
+          error: {
+            code: "SERVICE_UNAVAILABLE",
+            message: "Agent enrollment is unavailable",
+            requestId: "req-enrollment-cancel-retry",
+          },
+        },
+        503,
+      );
+    });
+
+    await expect(transport.cancelAgentEnrollment(ENROLLMENT_ID)).rejects.toThrow(
+      new WorkspaceRequestError("Agent enrollment is unavailable", 503, null),
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.body)).toEqual([undefined, undefined]);
+    const idempotencyKeys = requests.map((request) =>
+      new Headers(request.headers).get("idempotency-key"),
+    );
+    expect(idempotencyKeys[0]).toEqual(expect.any(String));
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
   });
 });
 

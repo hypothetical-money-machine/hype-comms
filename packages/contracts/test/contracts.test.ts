@@ -7,6 +7,7 @@ import {
   AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
   AGENT_CONTEXT_PACK_MAX_BYTES,
   AGENT_CONTEXT_PACK_MAX_LIMIT,
+  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
   ATTACHMENTS_CAPABILITY,
@@ -609,6 +610,7 @@ describe("agent contracts", () => {
       "agents:invite",
     ]);
     expect(DEFAULT_AGENT_AGENCY_PROFILE).toBe("default-agency-v1");
+    expect(AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY).toBe("agent-enrollment-review-channels-v1");
     expect(() => requestAgentEnrollmentSchema.parse({ ...request, unexpected: true })).toThrow();
     expect(() =>
       requestAgentEnrollmentSchema.parse({
@@ -639,6 +641,42 @@ describe("agent contracts", () => {
       updatedAt: NOW,
     } as const;
     expect(agentEnrollmentSchema.parse(enrollment)).toEqual(enrollment);
+    const projected = {
+      ...enrollment,
+      restrictedChannels: [{ conversationId: CONVERSATION_ID, name: "Private launch" }],
+    } as const;
+    expect(agentEnrollmentSchema.parse(projected)).toEqual(projected);
+    expect(() =>
+      agentEnrollmentSchema.parse({
+        ...projected,
+        restrictedChannels: [{ conversationId: WORKSPACE_ID, name: "Wrong channel" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      agentEnrollmentSchema.parse({
+        ...projected,
+        restrictedChannels: [
+          { conversationId: CONVERSATION_ID, name: "Private launch" },
+          { conversationId: CONVERSATION_ID, name: "Duplicate" },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      agentEnrollmentSchema.parse({
+        ...projected,
+        restrictedChannels: [
+          { conversationId: CONVERSATION_ID, name: "Private launch", topic: "must not cross" },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      agentEnrollmentSchema.parse({
+        ...projected,
+        status: "rejected",
+        reviewedBy: USER_ID,
+        reviewedAt: NOW,
+      }),
+    ).toThrow();
     expect(() =>
       agentEnrollmentSchema.parse({
         ...enrollment,
