@@ -5580,6 +5580,11 @@ export class WorkspaceRepository {
     });
     if (humansOnlyChannels && row.conversation_human_only) {
       event = this.#humansOnlyChannelEvent(event);
+    } else if (!humansOnlyChannels) {
+      // HTTP already converts access: "humans" → "members" for clients that did not negotiate
+      // humans-only-channels-v1. Realtime and HTTP sync share this mapper; leave the stored
+      // payload canonical while projecting the legacy enum so 0.1.35 clients do not drop the event.
+      event = this.#legacyHumansOnlyChannelEvent(event);
     }
     if (event.type === "message.created") {
       // Never trust shared event JSON to carry a recipient-specific reason. Rebuild the payload
@@ -5631,6 +5636,18 @@ export class WorkspaceRepository {
       payload: {
         ...event.payload,
         conversation: { ...event.payload.conversation, access: "humans" },
+      },
+    });
+  }
+
+  #legacyHumansOnlyChannelEvent(event: WorkspaceEvent): WorkspaceEvent {
+    if (event.type !== "channel.created" && event.type !== "channel.archived") return event;
+    if (event.payload.conversation.access !== "humans") return event;
+    return workspaceEventSchema.parse({
+      ...event,
+      payload: {
+        ...event.payload,
+        conversation: { ...event.payload.conversation, access: "members" },
       },
     });
   }

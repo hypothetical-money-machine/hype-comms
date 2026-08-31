@@ -19,6 +19,7 @@ import {
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
+  type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
@@ -3092,18 +3093,58 @@ describeWithPostgres("WorkspaceRepository", () => {
       code: "NOT_FOUND",
     } satisfies Partial<ApiError>);
 
-    const legacySync = await repository.sync(member, beforeCreate, 100);
-    const capableSync = await repository.sync(member, beforeCreate, 100, {
-      humansOnlyChannels: true,
-    });
-    const legacyCreated = legacySync.events.find(
-      (event) => event.type === "channel.created" && event.conversationId === conversationId,
+    await repository.archiveChannel(owner, conversationId);
+    const channelEventAccess = (
+      events: readonly WorkspaceEvent[],
+      type: "channel.created" | "channel.archived",
+    ) => {
+      const event = events.find(
+        (candidate) => candidate.type === type && candidate.conversationId === conversationId,
+      );
+      expect(event?.type).toBe(type);
+      return event?.type === "channel.created" || event?.type === "channel.archived"
+        ? event.payload.conversation.access
+        : undefined;
+    };
+    const expectLegacyHumansOnlyProjection = async (after: string) => {
+      const [legacySync, legacyRealtime] = await Promise.all([
+        repository.sync(member, after, 100),
+        repository.syncPrincipal({ workspaceId, userId: memberId }, after, 100),
+      ]);
+      expect(channelEventAccess(legacySync.events, "channel.created")).toBe("members");
+      expect(channelEventAccess(legacySync.events, "channel.archived")).toBe("members");
+      expect(channelEventAccess(legacyRealtime.events, "channel.created")).toBe("members");
+      expect(channelEventAccess(legacyRealtime.events, "channel.archived")).toBe("members");
+    };
+    const expectCapableHumansOnlyProjection = async (after: string) => {
+      const [capableSync, capableRealtime] = await Promise.all([
+        repository.sync(member, after, 100, { humansOnlyChannels: true }),
+        repository.syncPrincipal(
+          { workspaceId, userId: memberId, humansOnlyChannels: true },
+          after,
+          100,
+        ),
+      ]);
+      expect(channelEventAccess(capableSync.events, "channel.created")).toBe("humans");
+      expect(channelEventAccess(capableSync.events, "channel.archived")).toBe("humans");
+      expect(channelEventAccess(capableRealtime.events, "channel.created")).toBe("humans");
+      expect(channelEventAccess(capableRealtime.events, "channel.archived")).toBe("humans");
+    };
+
+    await expectLegacyHumansOnlyProjection(beforeCreate);
+    await expectCapableHumansOnlyProjection(beforeCreate);
+
+    // Newly stored events persist access: "members". Rewrite to "humans" so the shared
+    // sync/realtime mapper must project the legacy enum when the capability is absent.
+    await pool.query(
+      `UPDATE sync_events
+          SET payload = jsonb_set(payload, '{conversation,access}', '"humans"')
+        WHERE conversation_id = $1
+          AND event_type IN ('channel.created', 'channel.archived')`,
+      [conversationId],
     );
-    const capableCreated = capableSync.events.find(
-      (event) => event.type === "channel.created" && event.conversationId === conversationId,
-    );
-    expect(legacyCreated?.payload.conversation.access).toBe("members");
-    expect(capableCreated?.payload.conversation.access).toBe("humans");
+    await expectLegacyHumansOnlyProjection(beforeCreate);
+    await expectCapableHumansOnlyProjection(beforeCreate);
 
     const forgedRemoval = await (async () => {
       const client = await pool.connect();
