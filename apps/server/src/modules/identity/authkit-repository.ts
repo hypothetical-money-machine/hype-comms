@@ -22,6 +22,10 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { withTransaction } from "../../db/pool.js";
+import {
+  lockHumanActivationSyncAudienceMemberships,
+  publishHumanActivationSyncEvents,
+} from "./repository.js";
 import { issueToken } from "./tokens.js";
 
 const AUTHKIT_HANDOFF_TTL_MS = 5 * 60 * 1_000;
@@ -664,14 +668,16 @@ export class AuthKitRepository {
     const expiresAt = new Date(now.getTime() + AUTHKIT_HANDOFF_TTL_MS);
 
     try {
-      await withTransaction(this.#pool, async (client) => {
-        const admitted = await this.#resolveIdentity(client, {
-          providerSubject,
-          verifiedEmail,
-          now,
-        });
-        await client.query(
-          `INSERT INTO authkit_handoffs (
+      await withTransaction(
+        this.#pool,
+        async (client) => {
+          const admitted = await this.#resolveIdentity(client, {
+            providerSubject,
+            verifiedEmail,
+            now,
+          });
+          await client.query(
+            `INSERT INTO authkit_handoffs (
              id,
              code_hash,
              workspace_id,
@@ -682,18 +688,20 @@ export class AuthKitRepository {
              created_at
            )
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            randomUUID(),
-            issuedHandoff.hash,
-            admitted.workspaceId,
-            admitted.userId,
-            desktopCodeChallenge,
-            workosSessionId,
-            expiresAt,
-            now,
-          ],
-        );
-      });
+            [
+              randomUUID(),
+              issuedHandoff.hash,
+              admitted.workspaceId,
+              admitted.userId,
+              desktopCodeChallenge,
+              workosSessionId,
+              expiresAt,
+              now,
+            ],
+          );
+        },
+        { deadlockRetries: 2 },
+      );
     } catch (error) {
       if (isUniqueViolation(error)) throw new AuthKitAdmissionDeniedError();
       throw error;
@@ -970,13 +978,24 @@ export class AuthKitRepository {
     const user =
       (await this.#lockHumanUserByEmail(client, input.verifiedEmail)) ??
       (await this.#insertHumanUser(client, input.verifiedEmail));
+    await client.query(
+      `SELECT id
+         FROM conversations
+        WHERE workspace_id = $1
+          AND human_only
+        ORDER BY id
+        FOR UPDATE`,
+      [invitation.workspace_id],
+    );
+    await lockHumanActivationSyncAudienceMemberships(client, invitation.workspace_id);
     const membership = await this.#lockMembership(client, invitation.workspace_id, user.id);
+    const didActivateMembership = membership?.status !== "active";
     const workspace = await client.query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE", [
       invitation.workspace_id,
     ]);
     if (workspace.rows[0] === undefined) throw new AuthKitAdmissionDeniedError();
 
-    if (membership?.status !== "active") {
+    if (didActivateMembership) {
       const countResult = await client.query<CountRow>(
         `SELECT count(*)::integer AS count
            FROM workspace_memberships
@@ -1009,6 +1028,9 @@ export class AuthKitRepository {
            updated_at = EXCLUDED.updated_at`,
       [invitation.workspace_id, user.id, invitation.role, input.now],
     );
+    if (didActivateMembership) {
+      await publishHumanActivationSyncEvents(client, invitation.workspace_id, user.id);
+    }
     await this.#bindIdentity(client, {
       userId: user.id,
       providerSubject: input.providerSubject,

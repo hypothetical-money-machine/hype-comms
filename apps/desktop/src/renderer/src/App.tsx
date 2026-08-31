@@ -1013,6 +1013,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
+  const selectedConversationMembers = useMemo(() => {
+    if (bootstrap === null || selectedSummary === undefined) return [];
+    const participantIds = new Set(selectedSummary.participantIds);
+    return bootstrap.members.filter((member) => participantIds.has(member.id));
+  }, [bootstrap, selectedSummary]);
   const selectedIsPersonal =
     selectedSummary?.conversation.kind === "direct_message" &&
     selectedSummary.participantIds.length === 1 &&
@@ -2046,6 +2051,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             name: runtime.conversationName(summary),
             kind: summary.conversation.kind,
             isArchived: summary.conversation.isArchived,
+            access: summary.conversation.access,
             channelMode: summary.conversation.channelMode,
           }))}
           selectedConversationId={
@@ -2173,6 +2179,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 bootstrap.featureFlags.announcementChannels &&
                 bootstrap.currentUser.role === "owner"
               }
+              canCreateHumansOnly={bootstrap.featureFlags.humansOnlyChannels}
               onCreate={createChannel}
               onOpenChange={chrome.onPopoverOpenChange}
             />
@@ -2380,7 +2387,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   >
                     {selectedSummary.conversation.access === "members"
                       ? `${String(selectedSummary.participantIds.length)} members`
-                      : "Everyone"}
+                      : selectedSummary.conversation.access === "humans"
+                        ? "Humans only"
+                        : "Everyone"}
                   </button>
                   {selectedSummary.conversation.slug !== "general" &&
                     !selectedSummary.conversation.isArchived &&
@@ -2619,7 +2628,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
-                members={bootstrap.members}
+                members={selectedConversationMembers}
                 currentUserId={currentUserId}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
@@ -2826,7 +2835,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               inputId="thread-message-composer"
               inputLabel="Reply"
               inputRef={attachThreadComposerInput}
-              members={bootstrap.members}
+              members={selectedConversationMembers}
               currentUserId={currentUserId}
               placeholder="Reply in thread"
               submitLabel="Reply"
@@ -2865,6 +2874,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
           channelName={
             selectedSummary.conversation.name ?? selectedSummary.conversation.slug ?? "channel"
           }
+          channelMode={selectedSummary.conversation.channelMode}
           conversationId={selectedSummary.conversation.id}
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}

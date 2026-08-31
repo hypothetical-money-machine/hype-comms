@@ -3,16 +3,36 @@ import type { ChannelAccess, ChannelMode } from "@hype-comms/contracts";
 export function ChannelIcon({
   access,
   channelMode,
+  className = "",
 }: {
   readonly access: ChannelAccess | null;
   readonly channelMode: ChannelMode | null;
+  readonly className?: string;
 }) {
+  const classes = ["conversation-type-icon", "channel-icon", className]
+    .filter((value) => value !== "")
+    .join(" ");
+  const accessiblePrefix =
+    channelMode === "announcement"
+      ? access === "humans"
+        ? "Humans-only announcement channel: "
+        : "Announcement channel: "
+      : access === "humans"
+        ? "Humans-only channel: "
+        : null;
+
   return (
     <>
-      <span className="conversation-type-icon channel-icon" aria-hidden="true">
+      <span className={classes} aria-hidden="true">
         {channelMode === "announcement" ? "📣" : access === "members" ? "🔒" : "#"}
+        {access === "humans" && (
+          <svg className="channel-human-access-badge" viewBox="0 0 10 10" focusable="false">
+            <circle cx="5" cy="3" r="2" fill="currentColor" />
+            <path d="M1.5 9c.3-2.5 1.5-3.7 3.5-3.7S8.2 6.5 8.5 9" fill="currentColor" />
+          </svg>
+        )}
       </span>
-      {channelMode === "announcement" && <span className="sr-only">Announcement channel: </span>}
+      {accessiblePrefix !== null && <span className="sr-only">{accessiblePrefix}</span>}
     </>
   );
 }

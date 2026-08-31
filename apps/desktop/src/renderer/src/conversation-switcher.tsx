@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { DesktopPlatform } from "../../shared/desktop-api";
-import type { ChannelMode } from "@hype-comms/contracts";
-import { DirectMessageIcon, GroupDirectMessageIcon } from "./conversation-indicators";
+import type { ChannelAccess, ChannelMode } from "@hype-comms/contracts";
+import { ChannelIcon, DirectMessageIcon, GroupDirectMessageIcon } from "./conversation-indicators";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 export interface SwitcherConversation {
@@ -11,7 +11,23 @@ export interface SwitcherConversation {
   readonly name: string;
   readonly kind: "channel" | "direct_message" | "group_direct_message";
   readonly isArchived: boolean;
+  readonly access?: ChannelAccess | null;
   readonly channelMode?: ChannelMode | null;
+}
+
+function conversationKindLabel(conversation: SwitcherConversation): string {
+  if (conversation.kind === "group_direct_message") return "Group conversation";
+  if (conversation.kind === "direct_message") return "Direct message";
+
+  const label =
+    conversation.channelMode === "announcement"
+      ? conversation.access === "humans"
+        ? "Humans-only announcement channel"
+        : "Announcement channel"
+      : conversation.access === "humans"
+        ? "Humans-only channel"
+        : "Channel";
+  return conversation.isArchived ? `Archived ${label.toLocaleLowerCase()}` : label;
 }
 
 interface ConversationSwitcherProps {
@@ -191,6 +207,15 @@ export function ConversationSwitcher({
                         }}
                         className={index === selectedIndex ? "selected" : undefined}
                         type="button"
+                        aria-label={
+                          conversation.kind === "channel" &&
+                          (conversation.access === "humans" ||
+                            conversation.channelMode === "announcement")
+                            ? `${conversationKindLabel(conversation)}: ${conversation.name}${
+                                conversation.id === selectedConversationId ? " Current" : ""
+                              }`
+                            : undefined
+                        }
                         aria-current={
                           conversation.id === selectedConversationId ? "page" : undefined
                         }
@@ -198,12 +223,11 @@ export function ConversationSwitcher({
                         onClick={() => choose(conversation.id)}
                       >
                         {conversation.kind === "channel" ? (
-                          <span
-                            className="quick-switcher-icon conversation-type-icon channel-icon"
-                            aria-hidden="true"
-                          >
-                            {conversation.channelMode === "announcement" ? "📣" : "#"}
-                          </span>
+                          <ChannelIcon
+                            access={conversation.access ?? null}
+                            channelMode={conversation.channelMode ?? null}
+                            className="quick-switcher-icon"
+                          />
                         ) : conversation.kind === "group_direct_message" ? (
                           <GroupDirectMessageIcon className="quick-switcher-icon" />
                         ) : (
@@ -212,16 +236,16 @@ export function ConversationSwitcher({
                         <span className="quick-switcher-name" title={conversation.name}>
                           {conversation.name}
                         </span>
-                        <small>
-                          {conversation.isArchived
-                            ? "Archived channel"
-                            : conversation.kind === "channel"
-                              ? conversation.channelMode === "announcement"
-                                ? "Announcement channel"
-                                : "Channel"
-                              : conversation.kind === "group_direct_message"
-                                ? "Group conversation"
-                                : "Direct message"}
+                        <small
+                          aria-hidden={
+                            conversation.kind === "channel" &&
+                            (conversation.access === "humans" ||
+                              conversation.channelMode === "announcement")
+                              ? true
+                              : undefined
+                          }
+                        >
+                          {conversationKindLabel(conversation)}
                         </small>
                         {conversation.id === selectedConversationId && (
                           <span className="quick-switcher-current">Current</span>

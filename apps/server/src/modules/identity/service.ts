@@ -583,45 +583,54 @@ export class IdentityService {
     email: Email,
     now: Date,
   ): Promise<IdentityUser> {
-    return this.#repository.transaction(async (repository) => {
-      // Serialize redemption before resolving a possibly-new user, then use membership before
-      // workspace for an existing row. The invitation lock also prevents concurrent links for
-      // the same invitation from racing user creation before either reaches the workspace lock.
-      const invitation = await repository.findInvitationById(invitationId, true);
-      if (
-        invitation === null ||
-        invitation.email !== email ||
-        invitation.status !== "pending" ||
-        isExpired(invitation.expiresAt, now)
-      ) {
-        throw unauthenticated();
-      }
-      const user =
-        (await repository.findUserByEmail(email)) ?? (await this.#insertUser(repository, email));
-      // Existing memberships use the same membership-before-workspace order as delivery and
-      // revocation. A new user has no row to lock and cannot be an authenticated sender yet.
-      await repository.lockWorkspaceMembership(invitation.workspaceId, user.id);
-      if (!(await repository.lockWorkspace(invitation.workspaceId))) throw unauthenticated();
+    return this.#repository.transaction(
+      async (repository) => {
+        // Serialize redemption before resolving a possibly-new user, then use membership before
+        // workspace for an existing row. The invitation lock also prevents concurrent links for
+        // the same invitation from racing user creation before either reaches the workspace lock.
+        const invitation = await repository.findInvitationById(invitationId, true);
+        if (
+          invitation === null ||
+          invitation.email !== email ||
+          invitation.status !== "pending" ||
+          isExpired(invitation.expiresAt, now)
+        ) {
+          throw unauthenticated();
+        }
+        const user =
+          (await repository.findUserByEmail(email)) ?? (await this.#insertUser(repository, email));
+        // Delivery locks the conversation before the sender's membership. Match that order when a
+        // revoked human is reactivated so their existing session cannot form a lock cycle here.
+        await repository.lockHumansOnlyConversations(invitation.workspaceId);
+        await repository.lockActivationSyncAudienceMemberships(invitation.workspaceId);
+        await repository.lockWorkspaceMembership(invitation.workspaceId, user.id);
+        if (!(await repository.lockWorkspace(invitation.workspaceId))) throw unauthenticated();
 
-      const membership = await repository.findMembership(invitation.workspaceId, user.id);
-      if (
-        membership?.status !== "active" &&
-        (await repository.countActiveMembers(invitation.workspaceId)) >= MAX_ACTIVE_MEMBERS
-      ) {
-        throw new ApiError(409, "CONFLICT", "The workspace is at capacity");
-      }
-      const accepted = await repository.markInvitationAccepted(invitation.id, iso(now));
-      if (accepted === null) throw unauthenticated();
-      await repository.upsertMembership({
-        workspaceId: invitation.workspaceId,
-        userId: user.id,
-        // Invitation activation grants access; it must not alter the privileges of a membership
-        // that is already active. Non-active and missing memberships still receive the invited role.
-        role: membership?.status === "active" ? membership.role : invitation.role,
-        status: "active",
-      });
-      return user;
-    });
+        const membership = await repository.findMembership(invitation.workspaceId, user.id);
+        const didActivateMembership = membership?.status !== "active";
+        if (
+          didActivateMembership &&
+          (await repository.countActiveMembers(invitation.workspaceId)) >= MAX_ACTIVE_MEMBERS
+        ) {
+          throw new ApiError(409, "CONFLICT", "The workspace is at capacity");
+        }
+        const accepted = await repository.markInvitationAccepted(invitation.id, iso(now));
+        if (accepted === null) throw unauthenticated();
+        await repository.upsertMembership({
+          workspaceId: invitation.workspaceId,
+          userId: user.id,
+          // Invitation activation grants access; it must not alter the privileges of a membership
+          // that is already active. Non-active and missing memberships receive the invited role.
+          role: membership?.status === "active" ? membership.role : invitation.role,
+          status: "active",
+        });
+        if (didActivateMembership) {
+          await repository.publishHumanActivationSyncEvents(invitation.workspaceId, user.id);
+        }
+        return user;
+      },
+      { deadlockRetries: 2 },
+    );
   }
 
   async #insertUser(repository: IdentityRepository, email: Email): Promise<IdentityUser> {

@@ -85,7 +85,7 @@ export const invitationSchema = z
   .strict();
 
 export const conversationKindSchema = z.enum(["channel", "direct_message", "group_direct_message"]);
-export const channelAccessSchema = z.enum(["workspace", "members"]);
+export const channelAccessSchema = z.enum(["workspace", "humans", "members"]);
 export const channelModeSchema = z.enum(["chat", "announcement"]);
 
 export const conversationSchema = z
@@ -127,8 +127,15 @@ export const conversationSchema = z
         message: "Channel mode is only valid for channels",
       });
     }
+    if (conversation.kind !== "channel" && conversation.access !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["access"],
+        message: "Channel access is only valid for channels",
+      });
+    }
     if (conversation.kind === "group_direct_message") {
-      for (const field of ["name", "slug", "topic", "access"] as const) {
+      for (const field of ["name", "slug", "topic"] as const) {
         if (conversation[field] !== null) {
           context.addIssue({
             code: "custom",

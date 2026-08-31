@@ -119,6 +119,7 @@ async function main(): Promise<void> {
       };
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
+        humansOnlyChannelsEnabled: config.humansOnlyChannelsEnabled,
         attachmentStore,
         onAnnouncementAudit: (record) => {
           process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
