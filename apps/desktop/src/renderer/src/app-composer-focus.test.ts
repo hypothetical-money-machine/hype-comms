@@ -7,6 +7,7 @@ import type {
   HumanWorkspaceBootstrapResponse,
   Message,
   NotificationAction,
+  NotificationActionAcknowledgement,
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
@@ -31,6 +32,7 @@ const ROOT_MESSAGE_ID = "30000000-0000-4000-8000-000000000005";
 const REPLY_MESSAGE_ID = "30000000-0000-4000-8000-000000000006";
 const LAUNCH_MESSAGE_ID = "30000000-0000-4000-8000-000000000009";
 const GENERAL_MESSAGE_ID = "30000000-0000-4000-8000-000000000010";
+const REVOKED_CONVERSATION_ID = "30000000-0000-4000-8000-000000000013";
 const NOW = "2026-08-10T12:00:00.000Z";
 
 const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" }> = {
@@ -193,12 +195,14 @@ const aiChannelState: AiChannelState = {
 
 interface Harness {
   readonly client: DesktopApi;
+  readonly acknowledgedNotificationActions: readonly NotificationAction[];
   readonly pushNotificationAction: (action: NotificationAction) => void;
 }
 
 function createHarness(): Harness {
   let realtimeStarts = 0;
   const actionListeners = new Set<(action: NotificationAction) => void>();
+  const acknowledgedNotificationActions: NotificationAction[] = [];
 
   const client = {
     platform: "linux",
@@ -284,7 +288,9 @@ function createHarness(): Harness {
       ...(ready as Record<string, unknown>),
       actions: [],
     }),
-    acknowledgeNotificationAction: async () => undefined,
+    acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
+      acknowledgedNotificationActions.push(acknowledgement.action);
+    },
     onNotificationAction: (listener: (action: NotificationAction) => void) => {
       actionListeners.add(listener);
       return () => actionListeners.delete(listener);
@@ -305,6 +311,7 @@ function createHarness(): Harness {
 
   return {
     client: client as unknown as DesktopApi,
+    acknowledgedNotificationActions,
     pushNotificationAction(action) {
       for (const listener of actionListeners) listener(action);
     },
@@ -555,6 +562,29 @@ describe("main composer focus on conversation changes", () => {
 
     await waitFor(() => expect(preferences.hidden).toBe(true));
     await screen.findByRole("textbox", { name: "Reply" });
+  });
+
+  it("keeps a dirty theme draft when a notification target is no longer authorized", async () => {
+    const harness = await renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Preferences" }));
+    const preferences = screen.getByTestId("preferences-page");
+    fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
+    const roseAccent = screen.getByRole("button", { name: "Rose accent" });
+    fireEvent.click(roseAccent);
+
+    const staleAction = {
+      ...openMessageAction(threadReply),
+      conversationId: REVOKED_CONVERSATION_ID,
+    };
+    act(() => harness.pushNotificationAction(staleAction));
+
+    await waitFor(() => {
+      expect(harness.acknowledgedNotificationActions).toEqual([staleAction]);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "Discard your changes?" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Theme designer" })).toBeTruthy();
+    expect(preferences.hidden).toBe(false);
+    expect(roseAccent.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("expires a deferred intent when the dialog closes by restoring its trigger", async () => {

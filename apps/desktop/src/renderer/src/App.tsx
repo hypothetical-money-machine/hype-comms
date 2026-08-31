@@ -728,6 +728,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     if (notificationTransport === null) return null;
     return new NotificationSessionRuntime(notificationTransport, {
       handleNotificationAction: async (action, context) => {
+        if (!runtime.canHandleNotificationAction(action, context)) return true;
         if (!(await requestPreferencesNavigationRef.current())) return false;
         setPeopleSource(null);
         const result = await runtime.handleNotificationAction(action, context);
