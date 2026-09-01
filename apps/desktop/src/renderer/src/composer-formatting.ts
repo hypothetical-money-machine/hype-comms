@@ -17,14 +17,15 @@ export interface ComposerFormatResult {
 }
 
 /**
- * Italic uses `_` rather than `*` so its marker never collides with bold's `**` — toggling one
- * format off can then never eat the other's delimiters.
+ * Italic uses `*`, not `_`: underscores are word characters in usernames, so `_@name_` would fall
+ * out of the mention boundary scan and silently drop the mention's notification and agent wake.
+ * Sharing bold's character requires the run-parity checks in toggleInline so neither format eats
+ * the other's delimiters. Code spans live in toggleCode, which sizes its own fences.
  */
 const INLINE_MARKERS = {
   bold: "**",
-  italic: "_",
+  italic: "*",
   strikethrough: "~~",
-  code: "`",
 } as const;
 
 type InlineFormat = keyof typeof INLINE_MARKERS;
@@ -39,7 +40,27 @@ type LineFormat = keyof typeof LINE_RULES;
 
 const LINK_TEXT_PLACEHOLDER = "link text";
 const LINK_URL_PLACEHOLDER = "url";
-const URL_PATTERN = /^https?:\/\/\S+$/iu;
+// HTTPS only: the message renderer refuses to link anything else, so treating an http:// selection
+// as a destination would emit a permanently dead link.
+const URL_PATTERN = /^https:\/\/\S+$/iu;
+
+/** Length of the run of `char` at `index` — forward from it, or backward ending just before it. */
+function runLength(value: string, index: number, step: -1 | 1, char: string): number {
+  let count = 0;
+  for (
+    let i = step === -1 ? index - 1 : index;
+    i >= 0 && i < value.length && value[i] === char;
+    i += step
+  ) {
+    count += 1;
+  }
+  return count;
+}
+
+/** An odd asterisk run contains an italic marker; an even one belongs to bold, or is nothing. */
+function isItalicRun(run: number): boolean {
+  return run % 2 === 1;
+}
 
 function toggleInline(
   text: string,
@@ -51,7 +72,15 @@ function toggleInline(
   const width = marker.length;
   const selected = text.slice(start, end);
 
-  if (selected.length >= width * 2 && selected.startsWith(marker) && selected.endsWith(marker)) {
+  const selectionCarriesMarkers =
+    format === "italic"
+      ? selected.length >= 2 &&
+        isItalicRun(runLength(selected, 0, 1, "*")) &&
+        isItalicRun(runLength(selected, selected.length, -1, "*")) &&
+        runLength(selected, 0, 1, "*") + runLength(selected, selected.length, -1, "*") <=
+          selected.length
+      : selected.length >= width * 2 && selected.startsWith(marker) && selected.endsWith(marker);
+  if (selectionCarriesMarkers) {
     const inner = selected.slice(width, selected.length - width);
     return {
       text: `${text.slice(0, start)}${inner}${text.slice(end)}`,
@@ -60,11 +89,13 @@ function toggleInline(
     };
   }
 
-  if (
-    start >= width &&
-    text.slice(start - width, start) === marker &&
-    text.slice(end, end + width) === marker
-  ) {
+  const surroundedByMarkers =
+    format === "italic"
+      ? isItalicRun(runLength(text, start, -1, "*")) && isItalicRun(runLength(text, end, 1, "*"))
+      : start >= width &&
+        text.slice(start - width, start) === marker &&
+        text.slice(end, end + width) === marker;
+  if (surroundedByMarkers) {
     return {
       text: `${text.slice(0, start - width)}${selected}${text.slice(end + width)}`,
       selectionStart: start - width,
@@ -76,6 +107,55 @@ function toggleInline(
     text: `${text.slice(0, start)}${marker}${selected}${marker}${text.slice(end)}`,
     selectionStart: start + width,
     selectionEnd: end + width,
+  };
+}
+
+function longestBacktickRun(value: string): number {
+  let max = 0;
+  for (const run of value.match(/`+/gu) ?? []) max = Math.max(max, run.length);
+  return max;
+}
+
+/**
+ * Code spans cannot backslash-escape backticks, so a selection containing one needs a fence one
+ * backtick longer than its longest run, space-padded when the content itself edges on a backtick.
+ */
+function toggleCode(text: string, start: number, end: number): ComposerFormatResult {
+  const selected = text.slice(start, end);
+
+  const wrapped = /^(`+)( ?)([\s\S]*)\2\1$/u.exec(selected);
+  if (wrapped !== null) {
+    const [, fence, , inner] = wrapped;
+    if (fence !== undefined && inner !== undefined && longestBacktickRun(inner) < fence.length) {
+      return {
+        text: `${text.slice(0, start)}${inner}${text.slice(end)}`,
+        selectionStart: start,
+        selectionEnd: start + inner.length,
+      };
+    }
+  }
+
+  const before = /`+$/u.exec(text.slice(0, start))?.[0] ?? "";
+  const after = /^`+/u.exec(text.slice(end))?.[0] ?? "";
+  if (
+    before.length > 0 &&
+    before.length === after.length &&
+    longestBacktickRun(selected) < before.length
+  ) {
+    return {
+      text: `${text.slice(0, start - before.length)}${selected}${text.slice(end + after.length)}`,
+      selectionStart: start - before.length,
+      selectionEnd: end - before.length,
+    };
+  }
+
+  const fence = "`".repeat(longestBacktickRun(selected) + 1);
+  const pad = selected.startsWith("`") || selected.endsWith("`") ? " " : "";
+  const opening = `${fence}${pad}`;
+  return {
+    text: `${text.slice(0, start)}${opening}${selected}${pad}${fence}${text.slice(end)}`,
+    selectionStart: start + opening.length,
+    selectionEnd: end + opening.length,
   };
 }
 
@@ -127,7 +207,8 @@ function insertLink(text: string, start: number, end: number): ComposerFormatRes
   // Select whichever half still holds placeholder text so the user can type straight over it.
   const labelIsPlaceholder = selected === "" || selectedIsUrl;
   const label = labelIsPlaceholder ? LINK_TEXT_PLACEHOLDER : escapeLinkLabel(selected);
-  const url = selectedIsUrl ? selected : LINK_URL_PLACEHOLDER;
+  // Unescaped parentheses would close or truncate the Markdown destination early.
+  const url = selectedIsUrl ? selected.replace(/[()]/gu, "\\$&") : LINK_URL_PLACEHOLDER;
   const nextText = `${text.slice(0, start)}[${label}](${url})${text.slice(end)}`;
   const labelStart = start + 1;
   const urlStart = labelStart + label.length + 2;
@@ -152,8 +233,9 @@ export function applyComposerFormat(
     case "bold":
     case "italic":
     case "strikethrough":
-    case "code":
       return toggleInline(text, start, end, action);
+    case "code":
+      return toggleCode(text, start, end);
     case "link":
       return insertLink(text, start, end);
     case "bulleted-list":

@@ -33,19 +33,55 @@ describe("applyComposerFormat inline styles", () => {
     expect(result).toEqual({ text: "note ", selectionStart: 5, selectionEnd: 5 });
   });
 
-  it("uses underscore italics so bold markers stay unambiguous", () => {
-    const result = applyComposerFormat("**loud** word", 9, 13, "italic");
-    expect(result).toEqual({ text: "**loud** _word_", selectionStart: 10, selectionEnd: 14 });
+  it("uses single-asterisk italics so an italicized mention keeps its word boundary", () => {
+    const result = applyComposerFormat("ping @alex now", 5, 10, "italic");
+    expect(result).toEqual({ text: "ping *@alex* now", selectionStart: 6, selectionEnd: 11 });
   });
 
-  it("toggling italic inside bold leaves the bold markers alone", () => {
-    const result = applyComposerFormat("**_word_**", 3, 7, "italic");
+  it("italicizing inside bold nests the markers instead of eating bold's", () => {
+    const result = applyComposerFormat("**word**", 2, 6, "italic");
+    expect(result).toEqual({ text: "***word***", selectionStart: 3, selectionEnd: 7 });
+  });
+
+  it("removes only the italic layer from bold italic text", () => {
+    const result = applyComposerFormat("***word***", 3, 7, "italic");
     expect(result).toEqual({ text: "**word**", selectionStart: 2, selectionEnd: 6 });
+  });
+
+  it("removes only the bold layer from bold italic text", () => {
+    const result = applyComposerFormat("***word***", 3, 7, "bold");
+    expect(result).toEqual({ text: "*word*", selectionStart: 1, selectionEnd: 5 });
   });
 
   it("wraps strikethrough and inline code with their own markers", () => {
     expect(applyComposerFormat("old plan", 0, 8, "strikethrough").text).toBe("~~old plan~~");
     expect(applyComposerFormat("npm ci", 0, 6, "code").text).toBe("`npm ci`");
+  });
+
+  it("grows the code fence past embedded backticks", () => {
+    const result = applyComposerFormat("run `npm ci` now", 0, 16, "code");
+    expect(result.text).toBe("``run `npm ci` now``");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("run `npm ci` now");
+  });
+
+  it("unwraps a long-fenced selection back to its content", () => {
+    const result = applyComposerFormat("``run `npm ci` now``", 0, 20, "code");
+    expect(result).toEqual({ text: "run `npm ci` now", selectionStart: 0, selectionEnd: 16 });
+  });
+
+  it("pads the code fence when the selection itself edges on a backtick", () => {
+    const result = applyComposerFormat("cmd`", 0, 4, "code");
+    expect(result.text).toBe("`` cmd` ``");
+    const roundTrip = applyComposerFormat(result.text, 0, result.text.length, "code");
+    expect(roundTrip.text).toBe("cmd`");
+  });
+
+  it("unwraps a selection that includes its own single-backtick fences", () => {
+    expect(applyComposerFormat("`cmd`", 0, 5, "code")).toEqual({
+      text: "cmd",
+      selectionStart: 0,
+      selectionEnd: 3,
+    });
   });
 
   it("swaps selection bounds passed in reverse order", () => {
@@ -82,6 +118,18 @@ describe("applyComposerFormat links", () => {
     const result = applyComposerFormat("see docs] here", 4, 9, "link");
     expect(result.text).toBe("see [docs\\]](url) here");
     expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("url");
+  });
+
+  it("treats an http url as a label because the renderer links https only", () => {
+    const result = applyComposerFormat("http://example.com", 0, 18, "link");
+    expect(result.text).toBe("[http://example.com](url)");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("url");
+  });
+
+  it("escapes parentheses in a selected https destination", () => {
+    const result = applyComposerFormat("https://x.dev/a(b)", 0, 18, "link");
+    expect(result.text).toBe("[link text](https://x.dev/a\\(b\\))");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("link text");
   });
 });
 
