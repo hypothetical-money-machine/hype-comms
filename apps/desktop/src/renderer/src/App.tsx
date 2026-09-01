@@ -715,6 +715,33 @@ function isTextEntryControl(element: Element): boolean {
 // blocker cleared by a background event (snapshot reload trimming the thread, a reconnect
 // re-enabling the composer) minutes after the navigation must not move focus.
 const FOCUS_INTENT_TTL_MS = 15_000;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1_000;
+
+function attachmentOnlyMessageBody(attachments: readonly Attachment[]): string {
+  if (attachments.length === 0) return "";
+  if (attachments.length === 1) return attachments[0]?.fileName ?? "";
+  return `${String(attachments.length)} attachments`;
+}
+
+function withAttachmentUploadTimeout<T>(operation: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(
+      () => finish(() => reject(new Error("Attaching files timed out. You can try again."))),
+      ATTACHMENT_UPLOAD_TIMEOUT_MS,
+    );
+    void operation.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
 
 export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosition }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
@@ -1749,21 +1776,22 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const attachToComposer = async (key: string): Promise<void> => {
     const conversationId = runtimeState.selectedConversationId;
     if (conversationId === null) return;
-    if (attachmentUploadReservations.current.has(key)) return;
     const current = pendingAttachments[key] ?? [];
     const remainingFiles = ATTACHMENTS_PER_MESSAGE_MAX - current.length;
     const setAttachmentError = (message: string): void => {
       if (key === conversationId) setComposerError(message);
       else setThreadComposerError(message);
     };
-    if (remainingFiles === 0) {
+    if (remainingFiles <= 0) {
       setAttachmentError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
       return;
     }
     const reservation = beginAttachmentUpload(key);
     if (reservation === null) return;
     try {
-      const result = await runtime.attachFiles(conversationId, remainingFiles);
+      const result = await withAttachmentUploadTimeout(
+        runtime.attachFiles(conversationId, remainingFiles),
+      );
       if (reservation.generation !== attachmentUploadGeneration.current) return;
       if (result.status === "cancelled") return;
       if (result.status === "completed" || result.status === "partial") {
@@ -1785,7 +1813,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         setAttachmentError(result.message);
       } else if (result.reason === "selection_limit") {
         setAttachmentError(
-          `You can select up to ${String(remainingFiles)} ${remainingFiles === 1 ? "more file" : "more files"}`,
+          `You can select up to ${String(remainingFiles)} ${remainingFiles === 1 ? "file" : "files"}`,
         );
       } else {
         setAttachmentError(result.message);
@@ -1803,7 +1831,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     const submittedDraft = draft;
     const conversationId = runtimeState.selectedConversationId;
     const attachments = conversationId === null ? [] : (pendingAttachments[conversationId] ?? []);
-    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
+    const body = submittedDraft.trim() || attachmentOnlyMessageBody(attachments);
     if (
       body === "" ||
       conversationId === null ||
@@ -1871,7 +1899,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     const key =
       conversationId === null || threadRootId === null ? null : `${conversationId}:${threadRootId}`;
     const attachments = key === null ? [] : (pendingAttachments[key] ?? []);
-    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
+    const body = submittedDraft.trim() || attachmentOnlyMessageBody(attachments);
     if (
       body === "" ||
       conversationId === null ||

@@ -789,6 +789,15 @@ function sessionStateMatchesNotificationScope(
   );
 }
 
+function attachmentUploadScopeKey(state: ChatSessionState): string | null {
+  if (state.status === "signed-in") return `${state.userId}:${state.workspaceId}`;
+  if (state.status === "session-unavailable" && state.lastAuthenticatedSession !== undefined) {
+    const { userId, workspaceId } = state.lastAuthenticatedSession;
+    return `${userId}:${workspaceId}`;
+  }
+  return null;
+}
+
 function beginSessionReplacement(): void {
   macWindowlessRealtimeActive = false;
   workspaceRealtime?.resetSession();
@@ -1905,12 +1914,13 @@ function registerIpcHandlers(): void {
       throw new Error("A signed-in workspace session is required to attach files");
     }
     const sessionState = session.state;
+    const uploadScope = attachmentUploadScopeKey(sessionState);
     const uploadAuthIntentGeneration = authIntentGeneration;
     const isCurrentUploadScope = (): boolean =>
       chatSession === session &&
       workspaceTransport === transport &&
       authIntentGeneration === uploadAuthIntentGeneration &&
-      session.state === sessionState;
+      attachmentUploadScopeKey(session.state) === uploadScope;
     const request = attachmentUploadRequestSchema.parse(input);
     const window = mainWindow;
     const selection =

@@ -318,10 +318,12 @@ describe("WorkspaceTransport file uploads", () => {
   it("does not continue after the signed-in scope changes", async () => {
     const requests: { readonly method: string; readonly url: string }[] = [];
     let scopeIsCurrent = true;
+    const response = jsonResponse({});
+    const cancel = vi.spyOn(response.body!, "cancel");
     const { transport } = createTransport(async (url, init) => {
       requests.push({ method: init.method ?? "GET", url });
       scopeIsCurrent = false;
-      return jsonResponse({});
+      return response;
     });
     const assertCurrentScope = (): void => {
       if (!scopeIsCurrent) throw new Error("File upload session changed");
@@ -331,6 +333,7 @@ describe("WorkspaceTransport file uploads", () => {
       transport.uploadLocalFile(CONVERSATION_ID, UPLOAD_FIXTURE_PATH, assertCurrentScope),
     ).rejects.toThrow("File upload session changed");
     expect(requests).toEqual([{ method: "POST", url: "https://chat.example/v1/files/uploads" }]);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });
 

@@ -174,9 +174,23 @@ async function main(): Promise<void> {
     if (workspace !== undefined) {
       const repository = workspace.repository;
       const cleanWorkspaceState = () => {
-        void repository.deleteExpiredState().catch((error: unknown) => {
-          app.log.error({ err: error }, "Workspace retention cleanup failed");
-        });
+        void repository
+          .deleteExpiredState()
+          .then((failures) => {
+            for (const failure of failures) {
+              app.log.warn(
+                {
+                  err: failure.error,
+                  attachmentId: failure.attachmentId,
+                  workspaceId: failure.workspaceId,
+                },
+                "Attachment retention cleanup failed",
+              );
+            }
+          })
+          .catch((error: unknown) => {
+            app.log.error({ err: error }, "Workspace retention cleanup failed");
+          });
       };
       cleanWorkspaceState();
       const maintenance = setInterval(cleanWorkspaceState, 60 * 60 * 1_000);

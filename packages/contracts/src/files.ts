@@ -99,7 +99,13 @@ export const listMessageAttachmentsRequestSchema = z
   .strict();
 
 /** An attachment list bounded by `min`/`max`, rejecting a repeated attachment ID. */
-export function uniqueAttachmentsSchema(max: number, min = 0) {
+export function uniqueAttachmentsSchema({
+  min = 0,
+  max,
+}: {
+  readonly min?: number;
+  readonly max: number;
+}) {
   return z
     .array(attachmentSchema)
     .min(min)
@@ -113,7 +119,7 @@ export function uniqueAttachmentsSchema(max: number, min = 0) {
 
 export const listMessageAttachmentsResponseSchema = z
   .object({
-    attachments: uniqueAttachmentsSchema(100 * ATTACHMENTS_PER_MESSAGE_MAX),
+    attachments: uniqueAttachmentsSchema({ max: 100 * ATTACHMENTS_PER_MESSAGE_MAX }),
   })
   .strict();
 

@@ -220,7 +220,12 @@ export class WorkspaceTransport {
   ): Promise<Response> {
     assertCurrentScope();
     const response = await this.session.fetch(url, init);
-    assertCurrentScope();
+    try {
+      assertCurrentScope();
+    } catch (error) {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
     return response;
   }
 

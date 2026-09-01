@@ -147,6 +147,7 @@ import {
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
 const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
+const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -270,7 +271,7 @@ interface AttachmentRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
-interface ExpiredPendingAttachmentRow extends QueryResultRow {
+interface ExpiredAttachmentRow extends QueryResultRow {
   id: string;
   workspace_id: string;
 }
@@ -423,6 +424,12 @@ export interface WorkspaceRepositoryHooks {
   readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
   /** Local or remote object bytes for staged attachments. */
   readonly attachmentStore?: AttachmentStore;
+}
+
+export interface AttachmentCleanupFailure {
+  readonly attachmentId: string;
+  readonly workspaceId: string;
+  readonly error: unknown;
 }
 
 export interface AnnouncementAuditRecord {
@@ -4475,7 +4482,7 @@ export class WorkspaceRepository {
     return { status: "valid" };
   }
 
-  async deleteExpiredState(): Promise<void> {
+  async deleteExpiredState(): Promise<readonly AttachmentCleanupFailure[]> {
     await this.pool.query(
       `DELETE FROM sync_events
         WHERE created_at < clock_timestamp() - make_interval(days => $1)`,
@@ -4485,38 +4492,73 @@ export class WorkspaceRepository {
       `DELETE FROM realtime_tickets
         WHERE expires_at < clock_timestamp() - interval '1 hour'`,
     );
-    await this.#deleteExpiredPendingAttachments();
+    return [
+      ...(await this.#deleteExpiredAttachments("pending")),
+      ...(await this.#deleteExpiredAttachments("unclaimed-ready")),
+    ];
   }
 
-  async #deleteExpiredPendingAttachments(): Promise<void> {
+  async #deleteExpiredAttachments(
+    kind: "pending" | "unclaimed-ready",
+  ): Promise<AttachmentCleanupFailure[]> {
     const store = this.hooks.attachmentStore;
-    if (store === undefined) return;
+    if (store === undefined) return [];
+
+    const failures: AttachmentCleanupFailure[] = [];
 
     while (true) {
-      const deleted = await this.#transaction(async (client) => {
-        const expired = await client.query<ExpiredPendingAttachmentRow>(
-          `SELECT id, workspace_id
-             FROM attachments
-            WHERE status = 'pending'
-              AND upload_expires_at <= clock_timestamp()
-            ORDER BY upload_expires_at, id
-            LIMIT $1
-            FOR UPDATE SKIP LOCKED`,
-          [ATTACHMENT_CLEANUP_BATCH_SIZE],
-        );
-        if (expired.rows.length === 0) return 0;
+      const batch = await this.#transaction(async (client) => {
+        const expired =
+          kind === "pending"
+            ? await client.query<ExpiredAttachmentRow>(
+                `SELECT id, workspace_id
+                   FROM attachments
+                  WHERE status = 'pending'
+                    AND upload_expires_at <= clock_timestamp()
+                  ORDER BY upload_expires_at, id
+                  LIMIT $1
+                  FOR UPDATE SKIP LOCKED`,
+                [ATTACHMENT_CLEANUP_BATCH_SIZE],
+              )
+            : await client.query<ExpiredAttachmentRow>(
+                `SELECT id, workspace_id
+                   FROM attachments
+                  WHERE status = 'ready'
+                    AND message_id IS NULL
+                    AND content_received_at <= clock_timestamp() - make_interval(secs => $1)
+                  ORDER BY content_received_at, id
+                  LIMIT $2
+                  FOR UPDATE SKIP LOCKED`,
+                [UNCLAIMED_READY_ATTACHMENT_RETENTION_MS / 1_000, ATTACHMENT_CLEANUP_BATCH_SIZE],
+              );
+        if (expired.rows.length === 0) {
+          return { deleted: 0, selected: 0, failures: [] satisfies AttachmentCleanupFailure[] };
+        }
 
-        // Delete bytes before their database records. A storage failure rolls the transaction back,
-        // so a later maintenance pass can retry instead of leaving an untracked object behind.
-        await Promise.all(
-          expired.rows.map((attachment) => store.remove(attachment.workspace_id, attachment.id)),
-        );
-        await client.query("DELETE FROM attachments WHERE id = ANY($1::uuid[])", [
-          expired.rows.map((attachment) => attachment.id),
-        ]);
-        return expired.rows.length;
+        const deleted: string[] = [];
+        const batchFailures: AttachmentCleanupFailure[] = [];
+        for (const attachment of expired.rows) {
+          try {
+            // Keep the row until byte removal succeeds, so a later pass can retry safely.
+            await store.remove(attachment.workspace_id, attachment.id);
+            deleted.push(attachment.id);
+          } catch (error) {
+            batchFailures.push({
+              attachmentId: attachment.id,
+              workspaceId: attachment.workspace_id,
+              error,
+            });
+          }
+        }
+        if (deleted.length > 0) {
+          await client.query("DELETE FROM attachments WHERE id = ANY($1::uuid[])", [deleted]);
+        }
+        return { deleted: deleted.length, selected: expired.rows.length, failures: batchFailures };
       });
-      if (deleted < ATTACHMENT_CLEANUP_BATCH_SIZE) return;
+      failures.push(...batch.failures);
+      if (batch.selected < ATTACHMENT_CLEANUP_BATCH_SIZE || batch.deleted === 0) {
+        return failures;
+      }
     }
   }
 

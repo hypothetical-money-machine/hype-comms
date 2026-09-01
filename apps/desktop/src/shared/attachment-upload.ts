@@ -5,7 +5,10 @@ import {
 } from "@hype-comms/contracts";
 import { z } from "zod";
 
-const attachmentBatchSchema = uniqueAttachmentsSchema(ATTACHMENTS_PER_MESSAGE_MAX, 1);
+const attachmentBatchSchema = uniqueAttachmentsSchema({
+  min: 1,
+  max: ATTACHMENTS_PER_MESSAGE_MAX,
+});
 
 const attachmentUploadFailureMessageSchema = z.string().trim().min(1).max(500);
 
