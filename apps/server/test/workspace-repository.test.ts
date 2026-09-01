@@ -3560,6 +3560,38 @@ describeWithPostgres("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it("uses the database clock for attachment upload expiry", async () => {
+    const bytes = Buffer.from("database time");
+    const contentSha256 = sha256Hex(bytes);
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const staged = await repository.createFileUpload(
+        owner,
+        {
+          conversationId: generalId,
+          fileName: "database-time.txt",
+          contentType: "text/plain",
+          sizeBytes: bytes.byteLength,
+          contentSha256,
+        },
+        randomUUID(),
+      );
+
+      now.mockReturnValue(Date.parse("2200-01-01T00:00:00.000Z"));
+      await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+      await expect(
+        repository.completeFileUpload(
+          owner,
+          staged.attachment.id,
+          { sizeBytes: bytes.byteLength, contentSha256 },
+          randomUUID(),
+        ),
+      ).resolves.toMatchObject({ attachment: { status: "ready" } });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("removes an expired pending upload and its stored bytes", async () => {
     const bytes = Buffer.from("scope change left this upload pending");
     const contentSha256 = sha256Hex(bytes);

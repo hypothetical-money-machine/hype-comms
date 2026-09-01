@@ -271,6 +271,10 @@ interface AttachmentRow extends QueryResultRow {
   updated_at: Date | string;
 }
 
+interface UploadAttachmentRow extends AttachmentRow {
+  upload_expired: boolean;
+}
+
 interface ExpiredAttachmentRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -2457,13 +2461,15 @@ export class WorkspaceRepository {
           responseSchema: createFileUploadResponseSchema,
         },
         async () => {
-          const expiresAt = new Date(Date.now() + ATTACHMENT_UPLOAD_TTL_MS).toISOString();
           const inserted = await client.query<AttachmentRow>(
             `INSERT INTO attachments (
                id, workspace_id, conversation_id, uploaded_by, file_name, content_type,
                size_bytes, content_sha256, status, upload_expires_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+             VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, 'pending',
+               clock_timestamp() + ($9::bigint * interval '1 millisecond')
+             )
              RETURNING *`,
             [
               randomUUID(),
@@ -2474,14 +2480,17 @@ export class WorkspaceRepository {
               contentType,
               input.sizeBytes,
               sha256Buffer(input.contentSha256),
-              expiresAt,
+              ATTACHMENT_UPLOAD_TTL_MS,
             ],
           );
           const row = inserted.rows[0];
           if (row === undefined) throw new Error("Attachment insert returned no row");
+          if (row.upload_expires_at === null) {
+            throw new Error("Attachment upload was created without an expiry");
+          }
           return createFileUploadResponseSchema.parse({
             attachment: mapAttachment(row),
-            expiresAt,
+            expiresAt: iso(row.upload_expires_at),
           });
         },
       );
@@ -2498,8 +2507,9 @@ export class WorkspaceRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const locked = await client.query<AttachmentRow>(
-        `SELECT *
+      const locked = await client.query<UploadAttachmentRow>(
+        `SELECT *,
+                coalesce(upload_expires_at <= clock_timestamp(), true) AS upload_expired
            FROM attachments
           WHERE id = $1
             AND workspace_id = $2
@@ -2513,10 +2523,7 @@ export class WorkspaceRepository {
       if (row.status !== "pending") {
         throw new ApiError(409, "CONFLICT", "This upload can no longer receive content");
       }
-      if (
-        row.upload_expires_at !== null &&
-        new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
-      ) {
+      if (row.upload_expired) {
         throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
       }
       if (row.content_type !== contentType.trim()) {
@@ -2564,8 +2571,9 @@ export class WorkspaceRepository {
           responseSchema: completeFileUploadResponseSchema,
         },
         async () => {
-          const locked = await client.query<AttachmentRow>(
-            `SELECT *
+          const locked = await client.query<UploadAttachmentRow>(
+            `SELECT *,
+                    coalesce(upload_expires_at <= clock_timestamp(), true) AS upload_expired
                FROM attachments
               WHERE id = $1
                 AND workspace_id = $2
@@ -2582,10 +2590,7 @@ export class WorkspaceRepository {
           if (row.status !== "pending") {
             throw new ApiError(409, "CONFLICT", "This upload can no longer be completed");
           }
-          if (
-            row.upload_expires_at !== null &&
-            new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
-          ) {
+          if (row.upload_expired) {
             throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
           }
           if (row.content_received_at === null) {
