@@ -1,3 +1,4 @@
+import type { User } from "@hype-comms/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +7,7 @@ import {
   composerFormatShortcutLabel,
   type ComposerFormatAction,
 } from "./composer-formatting";
+import { mentionedMemberIds } from "./mentions";
 
 describe("applyComposerFormat inline styles", () => {
   it("wraps a selection in bold markers and keeps the words selected", () => {
@@ -82,6 +84,17 @@ describe("applyComposerFormat inline styles", () => {
       selectionStart: 0,
       selectionEnd: 3,
     });
+  });
+
+  it("round-trips the padded fence from the selection it returns", () => {
+    const wrapped = applyComposerFormat("cmd`", 0, 4, "code");
+    const unwrapped = applyComposerFormat(
+      wrapped.text,
+      wrapped.selectionStart,
+      wrapped.selectionEnd,
+      "code",
+    );
+    expect(unwrapped).toEqual({ text: "cmd`", selectionStart: 0, selectionEnd: 4 });
   });
 
   it("swaps selection bounds passed in reverse order", () => {
@@ -184,6 +197,41 @@ describe("applyComposerFormat line styles", () => {
   it("renumbers stale ordinals when a mixed selection becomes a numbered list", () => {
     const result = applyComposerFormat("7. one\ntwo", 0, 10, "numbered-list");
     expect(result.text).toBe("1. one\n2. two");
+  });
+});
+
+describe("applyComposerFormat mention preservation", () => {
+  const alex: User = {
+    id: "10000000-0000-4000-8000-000000000002",
+    kind: "human",
+    username: "alex",
+    displayName: "Alex Rivera",
+    avatarUrl: null,
+    createdAt: "2026-08-04T12:00:00.000Z",
+    updatedAt: "2026-08-04T12:00:00.000Z",
+  };
+
+  it("expands username-only formatting over the whole mention and keeps it detectable", () => {
+    const result = applyComposerFormat("ping @alex now", 6, 10, "italic");
+    expect(result).toEqual({ text: "ping *@alex* now", selectionStart: 6, selectionEnd: 11 });
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("expands a mid-username selection the same way", () => {
+    const result = applyComposerFormat("ping @alex now", 7, 9, "bold");
+    expect(result.text).toBe("ping **@alex** now");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("expands code formatting over the whole mention", () => {
+    const result = applyComposerFormat("@alex", 1, 5, "code");
+    expect(result.text).toBe("`@alex`");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("does not expand across word-glued addresses", () => {
+    const result = applyComposerFormat("mail hello@example now", 11, 18, "italic");
+    expect(result.text).toBe("mail hello@*example* now");
   });
 });
 

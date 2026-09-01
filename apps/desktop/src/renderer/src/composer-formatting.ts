@@ -62,6 +62,42 @@ function isItalicRun(run: number): boolean {
   return run % 2 === 1;
 }
 
+const MENTION_WORD = /[\p{L}\p{N}_-]/u;
+const MENTION_BOUNDARY = /[\p{L}\p{N}_]/u;
+
+/**
+ * The maximal `@token` span containing `index`, when the `@` sits at a mention boundary. Null when
+ * `index` is outside any such token or at its edge.
+ */
+function mentionTokenAt(text: string, index: number): { start: number; end: number } | null {
+  let at = index;
+  while (at > 0 && MENTION_WORD.test(text[at - 1] ?? "")) at -= 1;
+  if (at === 0 || text[at - 1] !== "@") return null;
+  const atSign = at - 1;
+  if (atSign > 0 && MENTION_BOUNDARY.test(text[atSign - 1] ?? "")) return null;
+  let end = index;
+  while (end < text.length && MENTION_WORD.test(text[end] ?? "")) end += 1;
+  return { start: atSign, end };
+}
+
+/**
+ * Markers dropped inside an `@username` token stop the mention scan from finding the literal
+ * contiguous mention, silently losing its notification and agent wake — so wrapping expands to
+ * cover the whole token instead of splitting it.
+ */
+function snapWrapRange(
+  text: string,
+  start: number,
+  end: number,
+): { readonly start: number; readonly end: number } {
+  const startToken = mentionTokenAt(text, start);
+  const endToken = mentionTokenAt(text, end);
+  return {
+    start: startToken !== null && start > startToken.start ? startToken.start : start,
+    end: endToken !== null && end < endToken.end ? endToken.end : end,
+  };
+}
+
 function toggleInline(
   text: string,
   start: number,
@@ -103,10 +139,12 @@ function toggleInline(
     };
   }
 
+  const range = snapWrapRange(text, start, end);
+  const wrapped = text.slice(range.start, range.end);
   return {
-    text: `${text.slice(0, start)}${marker}${selected}${marker}${text.slice(end)}`,
-    selectionStart: start + width,
-    selectionEnd: end + width,
+    text: `${text.slice(0, range.start)}${marker}${wrapped}${marker}${text.slice(range.end)}`,
+    selectionStart: range.start + width,
+    selectionEnd: range.end + width,
   };
 }
 
@@ -135,27 +173,37 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
     }
   }
 
-  const before = /`+$/u.exec(text.slice(0, start))?.[0] ?? "";
-  const after = /^`+/u.exec(text.slice(end))?.[0] ?? "";
+  // Fences just outside the selection, tolerating the symmetric space padding the wrap branch
+  // emits — the selection it returns excludes the pads, and re-toggling must still find the fence.
+  const beforeMatch = /(`+)( ?)$/u.exec(text.slice(0, start));
+  const afterMatch = /^( ?)(`+)/u.exec(text.slice(end));
+  const beforeFence = beforeMatch?.[1] ?? "";
+  const beforePad = beforeMatch?.[2] ?? "";
+  const afterPad = afterMatch?.[1] ?? "";
+  const afterFence = afterMatch?.[2] ?? "";
   if (
-    before.length > 0 &&
-    before.length === after.length &&
-    longestBacktickRun(selected) < before.length
+    beforeFence.length > 0 &&
+    beforeFence.length === afterFence.length &&
+    beforePad === afterPad &&
+    longestBacktickRun(selected) < beforeFence.length
   ) {
+    const removed = beforeFence.length + beforePad.length;
     return {
-      text: `${text.slice(0, start - before.length)}${selected}${text.slice(end + after.length)}`,
-      selectionStart: start - before.length,
-      selectionEnd: end - before.length,
+      text: `${text.slice(0, start - removed)}${selected}${text.slice(end + removed)}`,
+      selectionStart: start - removed,
+      selectionEnd: end - removed,
     };
   }
 
-  const fence = "`".repeat(longestBacktickRun(selected) + 1);
-  const pad = selected.startsWith("`") || selected.endsWith("`") ? " " : "";
+  const range = snapWrapRange(text, start, end);
+  const content = text.slice(range.start, range.end);
+  const fence = "`".repeat(longestBacktickRun(content) + 1);
+  const pad = content.startsWith("`") || content.endsWith("`") ? " " : "";
   const opening = `${fence}${pad}`;
   return {
-    text: `${text.slice(0, start)}${opening}${selected}${pad}${fence}${text.slice(end)}`,
-    selectionStart: start + opening.length,
-    selectionEnd: end + opening.length,
+    text: `${text.slice(0, range.start)}${opening}${content}${pad}${fence}${text.slice(range.end)}`,
+    selectionStart: range.start + opening.length,
+    selectionEnd: range.end + opening.length,
   };
 }
 
