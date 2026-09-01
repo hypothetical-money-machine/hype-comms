@@ -4037,6 +4037,57 @@ html[data-sidebar-position="right"] .sidebar {
   opacity: 1;
 }
 
+.composer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+
+.composer-toolbar-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 4px;
+  background: var(--theme-border-subtle);
+}
+
+.composer-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.composer-toolbar button:hover:not(:disabled),
+.composer-toolbar button:focus-visible {
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-strong);
+}
+
+.composer-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-toolbar button code {
+  background: none;
+  font-size: 11px;
+}
+
+.composer-toolbar button span {
+  font-size: 11px;
+}
+
 .mention-picker {
   position: absolute;
   right: 0;
