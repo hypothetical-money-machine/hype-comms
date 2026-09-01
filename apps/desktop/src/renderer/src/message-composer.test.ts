@@ -29,6 +29,7 @@ function renderComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]
     draft: "A useful update",
     disabled: false,
     error: "",
+    platform: "linux",
     onDraftChange: vi.fn(),
     onSubmit: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -215,6 +216,7 @@ function renderLiveComposer(overrides: Partial<Parameters<typeof MessageComposer
       error: "",
       members: [morgan, alex],
       currentUserId: morgan.id,
+      platform: "linux",
       ...overrides,
       draft,
       onDraftChange: (value) => {
@@ -324,6 +326,7 @@ describe("MessageComposer mentions", () => {
           error: "",
           members: [morgan, alex],
           currentUserId: morgan.id,
+          platform: "linux",
           draft,
           onDraftChange: (value: string) => setDraft(value),
           onSubmit: vi.fn().mockResolvedValue(undefined),
@@ -347,7 +350,7 @@ describe("MessageComposer mentions", () => {
 describe("MessageComposer formatting", () => {
   it("renders a formatting toolbar advertising every control and its shortcut", () => {
     renderComposer();
-    expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Text formatting" })).toBeTruthy();
     for (const name of [
       "Bold",
       "Italic",
@@ -400,6 +403,19 @@ describe("MessageComposer formatting", () => {
 
     expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("applies a held shortcut once, ignoring keydown auto-repeat", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "ship it");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
   });
 
   it("starts a bulleted list from a bare caret with Mod+Shift+8", () => {

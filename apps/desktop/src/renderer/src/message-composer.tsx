@@ -1,4 +1,4 @@
-import type { User } from "@hype-comms/contracts";
+import { MESSAGE_BODY_MAX_LENGTH, type User } from "@hype-comms/contracts";
 import {
   Fragment,
   useCallback,
@@ -9,10 +9,12 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   type Ref,
 } from "react";
 
 import type { Attachment } from "@hype-comms/contracts";
+import type { DesktopPlatform } from "../../shared/desktop-api";
 import {
   applyComposerFormat,
   composerFormatShortcut,
@@ -23,86 +25,69 @@ import { filterMentionMembers, insertMention, mentionQueryAt, segmentMentions } 
 
 const MIN_COMPOSER_HEIGHT = 44;
 const MAX_COMPOSER_HEIGHT = 132;
-const MAX_MESSAGE_LENGTH = 4_000;
-
-const FORMATTING_CONTROLS: readonly (
-  | { readonly kind: "control"; readonly action: ComposerFormatAction; readonly label: string }
-  | { readonly kind: "divider" }
-)[] = [
-  { kind: "control", action: "bold", label: "Bold" },
-  { kind: "control", action: "italic", label: "Italic" },
-  { kind: "control", action: "strikethrough", label: "Strikethrough" },
-  { kind: "control", action: "code", label: "Inline code" },
-  { kind: "divider" },
-  { kind: "control", action: "link", label: "Link" },
-  { kind: "divider" },
-  { kind: "control", action: "bulleted-list", label: "Bulleted list" },
-  { kind: "control", action: "numbered-list", label: "Numbered list" },
-  { kind: "control", action: "quote", label: "Quote" },
-];
-
-function formatIcon(action: ComposerFormatAction) {
-  switch (action) {
-    case "bold":
-      return <strong>B</strong>;
-    case "italic":
-      return <em>I</em>;
-    case "strikethrough":
-      return <s>S</s>;
-    case "code":
-      return <code>{"</>"}</code>;
-    case "link":
-      return (
-        <svg
-          viewBox="0 0 16 16"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          aria-hidden="true"
-        >
-          <path d="M6.5 9.5 9.5 6.5" />
-          <path d="m7.3 4.7 1.5-1.5a2.4 2.4 0 0 1 3.4 0 2.4 2.4 0 0 1 0 3.4L10.7 8.1" />
-          <path d="M8.7 11.3l-1.5 1.5a2.4 2.4 0 0 1-3.4 0 2.4 2.4 0 0 1 0-3.4l1.5-1.5" />
-        </svg>
-      );
-    case "bulleted-list":
-      return (
-        <svg
-          viewBox="0 0 16 16"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          aria-hidden="true"
-        >
-          <path d="M6.5 4h7 M6.5 8h7 M6.5 12h7" />
-          <path d="M3 4h.01 M3 8h.01 M3 12h.01" strokeWidth="2.4" />
-        </svg>
-      );
-    case "numbered-list":
-      return <span aria-hidden="true">1.</span>;
-    case "quote":
-      return (
-        <svg
-          viewBox="0 0 16 16"
-          width="14"
-          height="14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          aria-hidden="true"
-        >
-          <path d="M3 3v10 M6.5 6h7 M6.5 10h5" />
-        </svg>
-      );
-  }
+function ToolbarIcon({ children }: { readonly children: ReactNode }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
 }
+
+const FORMAT_ICONS: Record<ComposerFormatAction, ReactNode> = {
+  bold: <strong>B</strong>,
+  italic: <em>I</em>,
+  strikethrough: <s>S</s>,
+  code: <code>{"</>"}</code>,
+  link: (
+    <ToolbarIcon>
+      <path d="M6.5 9.5 9.5 6.5" />
+      <path d="m7.3 4.7 1.5-1.5a2.4 2.4 0 0 1 3.4 0 2.4 2.4 0 0 1 0 3.4L10.7 8.1" />
+      <path d="M8.7 11.3l-1.5 1.5a2.4 2.4 0 0 1-3.4 0 2.4 2.4 0 0 1 0-3.4l1.5-1.5" />
+    </ToolbarIcon>
+  ),
+  "bulleted-list": (
+    <ToolbarIcon>
+      <path d="M6.5 4h7 M6.5 8h7 M6.5 12h7" />
+      <path d="M3 4h.01 M3 8h.01 M3 12h.01" strokeWidth="2.4" />
+    </ToolbarIcon>
+  ),
+  "numbered-list": <span aria-hidden="true">1.</span>,
+  quote: (
+    <ToolbarIcon>
+      <path d="M3 3v10 M6.5 6h7 M6.5 10h5" />
+    </ToolbarIcon>
+  ),
+};
+
+interface FormatControl {
+  readonly action: ComposerFormatAction;
+  readonly label: string;
+}
+
+/** Rendered in order with a divider between groups. */
+const FORMATTING_GROUPS: readonly (readonly FormatControl[])[] = [
+  [
+    { action: "bold", label: "Bold" },
+    { action: "italic", label: "Italic" },
+    { action: "strikethrough", label: "Strikethrough" },
+    { action: "code", label: "Inline code" },
+  ],
+  [{ action: "link", label: "Link" }],
+  [
+    { action: "bulleted-list", label: "Bulleted list" },
+    { action: "numbered-list", label: "Numbered list" },
+    { action: "quote", label: "Quote" },
+  ],
+];
 
 function ComposerMentionHighlight({
   draft,
@@ -143,7 +128,7 @@ export function MessageComposer({
   members = [],
   currentUserId,
   placeholder,
-  platform = "",
+  platform,
   submitLabel = "Send",
   variantClassName,
   typingText = "",
@@ -165,7 +150,7 @@ export function MessageComposer({
   readonly members?: readonly User[];
   readonly currentUserId?: string;
   readonly placeholder?: string;
-  readonly platform?: string;
+  readonly platform: DesktopPlatform;
   readonly submitLabel?: string;
   readonly variantClassName?: string;
   readonly typingText?: string;
@@ -260,17 +245,20 @@ export function MessageComposer({
     [draft, mentionQuery, onDraftChange],
   );
 
-  const applyFormat = (action: ComposerFormatAction): void => {
-    const element = input.current;
-    if (element === null || disabled) return;
-    const start = element.selectionStart ?? draft.length;
-    const end = element.selectionEnd ?? start;
-    const result = applyComposerFormat(draft, start, end, action);
-    if (result.text.length > MAX_MESSAGE_LENGTH) return;
-    pendingSelection.current = { start: result.selectionStart, end: result.selectionEnd };
-    onDraftChange(result.text);
-    if (document.activeElement !== element) element.focus();
-  };
+  const applyFormat = useCallback(
+    (action: ComposerFormatAction): void => {
+      const element = input.current;
+      if (element === null || disabled) return;
+      const start = element.selectionStart ?? draft.length;
+      const end = element.selectionEnd ?? start;
+      const result = applyComposerFormat(draft, start, end, action);
+      if (result.text.length > MESSAGE_BODY_MAX_LENGTH) return;
+      pendingSelection.current = { start: result.selectionStart, end: result.selectionEnd };
+      onDraftChange(result.text);
+      if (document.activeElement !== element) element.focus();
+    },
+    [disabled, draft, onDraftChange],
+  );
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -290,10 +278,12 @@ export function MessageComposer({
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.nativeEvent.isComposing) return;
 
-    const formatAction = composerFormatShortcut(event);
+    const formatAction = composerFormatShortcut(event, platform);
     if (formatAction !== null) {
       event.preventDefault();
-      applyFormat(formatAction);
+      // A held shortcut auto-repeats; re-toggling on each repeat would leave the final state
+      // dependent on timing.
+      if (!event.repeat) applyFormat(formatAction);
       return;
     }
 
@@ -388,24 +378,25 @@ export function MessageComposer({
         <label className="sr-only" htmlFor={inputId}>
           {inputLabel}
         </label>
-        <div className="composer-toolbar" role="toolbar" aria-label="Text formatting">
-          {FORMATTING_CONTROLS.map((control, index) =>
-            control.kind === "divider" ? (
-              <span key={index} className="composer-toolbar-divider" aria-hidden="true" />
-            ) : (
-              <button
-                key={control.action}
-                type="button"
-                aria-label={control.label}
-                title={`${control.label} (${composerFormatShortcutLabel(control.action, platform)})`}
-                disabled={disabled}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => applyFormat(control.action)}
-              >
-                {formatIcon(control.action)}
-              </button>
-            ),
-          )}
+        <div className="composer-toolbar" role="group" aria-label="Text formatting">
+          {FORMATTING_GROUPS.map((group, index) => (
+            <Fragment key={group[0]?.action ?? index}>
+              {index > 0 && <span className="composer-toolbar-divider" aria-hidden="true" />}
+              {group.map((control) => (
+                <button
+                  key={control.action}
+                  type="button"
+                  aria-label={control.label}
+                  title={`${control.label} (${composerFormatShortcutLabel(control.action, platform)})`}
+                  disabled={disabled}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => applyFormat(control.action)}
+                >
+                  {FORMAT_ICONS[control.action]}
+                </button>
+              ))}
+            </Fragment>
+          ))}
         </div>
         <div className={draft === "" ? "composer-field" : "composer-field has-draft"} ref={field}>
           <ComposerMentionHighlight draft={draft} members={members} highlightRef={highlight} />
@@ -428,7 +419,7 @@ export function MessageComposer({
             onKeyDown={handleKeyDown}
             placeholder={effectivePlaceholder}
             disabled={disabled}
-            maxLength={MAX_MESSAGE_LENGTH}
+            maxLength={MESSAGE_BODY_MAX_LENGTH}
             rows={1}
             enterKeyHint="send"
             aria-describedby={hintId}

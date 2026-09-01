@@ -77,6 +77,12 @@ describe("applyComposerFormat links", () => {
     expect(result.text).toBe("[link text](url)");
     expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("link text");
   });
+
+  it("escapes Markdown delimiters in a selected label", () => {
+    const result = applyComposerFormat("see docs] here", 4, 9, "link");
+    expect(result.text).toBe("see [docs\\]](url) here");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("url");
+  });
 });
 
 describe("applyComposerFormat line styles", () => {
@@ -147,9 +153,12 @@ describe("composerFormatShortcut", () => {
     ["b", "bold"],
     ["i", "italic"],
     ["e", "code"],
-  ] as const)("maps Mod+%s", (key, action) => {
-    expect(composerFormatShortcut({ ...base, key, ctrlKey: true })).toBe(action);
-    expect(composerFormatShortcut({ ...base, key: key.toUpperCase(), metaKey: true })).toBe(action);
+  ] as const)("maps the platform modifier + %s", (key, action) => {
+    expect(composerFormatShortcut({ ...base, key, ctrlKey: true }, "linux")).toBe(action);
+    expect(composerFormatShortcut({ ...base, key, ctrlKey: true }, "win32")).toBe(action);
+    expect(
+      composerFormatShortcut({ ...base, key: key.toUpperCase(), metaKey: true }, "darwin"),
+    ).toBe(action);
   });
 
   it.each([
@@ -159,18 +168,41 @@ describe("composerFormatShortcut", () => {
     ["*", "Digit8", "bulleted-list"],
     ["(", "Digit9", "quote"],
   ] as const)("maps Mod+Shift+%s", (key, code, action) => {
-    expect(composerFormatShortcut({ ...base, key, code, ctrlKey: true, shiftKey: true })).toBe(
-      action,
-    );
+    expect(
+      composerFormatShortcut({ ...base, key, code, ctrlKey: true, shiftKey: true }, "linux"),
+    ).toBe(action);
+    expect(
+      composerFormatShortcut({ ...base, key, code, metaKey: true, shiftKey: true }, "darwin"),
+    ).toBe(action);
+  });
+
+  it("keeps macOS native Ctrl text-navigation bindings out of formatting", () => {
+    expect(composerFormatShortcut({ ...base, key: "b", ctrlKey: true }, "darwin")).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "e", ctrlKey: true }, "darwin")).toBeNull();
+    expect(
+      composerFormatShortcut({ ...base, key: "b", ctrlKey: true, metaKey: true }, "darwin"),
+    ).toBeNull();
+  });
+
+  it("ignores Meta combinations on platforms that advertise Ctrl", () => {
+    expect(composerFormatShortcut({ ...base, key: "b", metaKey: true }, "linux")).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "b", metaKey: true }, "win32")).toBeNull();
+    expect(
+      composerFormatShortcut({ ...base, key: "b", ctrlKey: true, metaKey: true }, "linux"),
+    ).toBeNull();
   });
 
   it("leaves send, quick-switcher, and compact-mode shortcuts alone", () => {
-    expect(composerFormatShortcut({ ...base, key: "Enter" })).toBeNull();
-    expect(composerFormatShortcut({ ...base, key: "Enter", ctrlKey: true })).toBeNull();
-    expect(composerFormatShortcut({ ...base, key: "k", ctrlKey: true })).toBeNull();
-    expect(composerFormatShortcut({ ...base, key: "s", ctrlKey: true, shiftKey: true })).toBeNull();
-    expect(composerFormatShortcut({ ...base, key: "b" })).toBeNull();
-    expect(composerFormatShortcut({ ...base, key: "b", ctrlKey: true, altKey: true })).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "Enter" }, "linux")).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "Enter", ctrlKey: true }, "linux")).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "k", ctrlKey: true }, "linux")).toBeNull();
+    expect(
+      composerFormatShortcut({ ...base, key: "s", ctrlKey: true, shiftKey: true }, "linux"),
+    ).toBeNull();
+    expect(composerFormatShortcut({ ...base, key: "b" }, "linux")).toBeNull();
+    expect(
+      composerFormatShortcut({ ...base, key: "b", ctrlKey: true, altKey: true }, "linux"),
+    ).toBeNull();
   });
 
   it("labels every action for both platforms", () => {

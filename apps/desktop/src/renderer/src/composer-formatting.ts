@@ -1,3 +1,5 @@
+import type { DesktopPlatform } from "../../shared/desktop-api";
+
 export type ComposerFormatAction =
   | "bold"
   | "italic"
@@ -114,20 +116,25 @@ function toggleLines(
   return { text: nextText, selectionStart: blockStart, selectionEnd: blockStart + block.length };
 }
 
+/** A label like `docs]` would otherwise close the link early and emit invalid Markdown. */
+function escapeLinkLabel(label: string): string {
+  return label.replace(/[\\[\]]/gu, "\\$&");
+}
+
 function insertLink(text: string, start: number, end: number): ComposerFormatResult {
   const selected = text.slice(start, end);
   const selectedIsUrl = URL_PATTERN.test(selected);
-  const label = selected === "" || selectedIsUrl ? LINK_TEXT_PLACEHOLDER : selected;
+  // Select whichever half still holds placeholder text so the user can type straight over it.
+  const labelIsPlaceholder = selected === "" || selectedIsUrl;
+  const label = labelIsPlaceholder ? LINK_TEXT_PLACEHOLDER : escapeLinkLabel(selected);
   const url = selectedIsUrl ? selected : LINK_URL_PLACEHOLDER;
   const nextText = `${text.slice(0, start)}[${label}](${url})${text.slice(end)}`;
-  // Select whichever half still holds placeholder text so the user can type straight over it.
-  const selectLabel = selected === "" || selectedIsUrl;
   const labelStart = start + 1;
   const urlStart = labelStart + label.length + 2;
   return {
     text: nextText,
-    selectionStart: selectLabel ? labelStart : urlStart,
-    selectionEnd: selectLabel ? labelStart + label.length : urlStart + url.length,
+    selectionStart: labelIsPlaceholder ? labelStart : urlStart,
+    selectionEnd: labelIsPlaceholder ? labelStart + label.length : urlStart + url.length,
   };
 }
 
@@ -167,26 +174,15 @@ export interface ComposerShortcutKey {
 
 /**
  * Plain Mod+K stays with the conversation quick switcher and Mod+Shift+S with compact mode, so
- * link takes Mod+Shift+K and nothing here claims Mod+Shift+S. The digit rows use `code` because
- * Shift rewrites `key` per keyboard layout.
+ * link takes Mod+Shift+K and nothing here claims Mod+Shift+S. The digit rows match on `code`
+ * because Shift rewrites `key` per keyboard layout.
+ *
+ * Only the platform's advertised modifier matches — on macOS, Ctrl+B/E must keep their native
+ * cursor-movement behavior in text fields, and elsewhere Meta combinations stay untouched.
+ *
+ * One table drives both the matcher and the advertised label, so what is handled and what is
+ * advertised cannot drift apart.
  */
-export function composerFormatShortcut(event: ComposerShortcutKey): ComposerFormatAction | null {
-  if ((!event.metaKey && !event.ctrlKey) || event.altKey) return null;
-  const key = event.key.toLocaleLowerCase();
-  if (event.shiftKey) {
-    if (key === "x") return "strikethrough";
-    if (key === "k") return "link";
-    if (event.code === "Digit7") return "numbered-list";
-    if (event.code === "Digit8") return "bulleted-list";
-    if (event.code === "Digit9") return "quote";
-    return null;
-  }
-  if (key === "b") return "bold";
-  if (key === "i") return "italic";
-  if (key === "e") return "code";
-  return null;
-}
-
 const SHORTCUT_KEYS: Record<
   ComposerFormatAction,
   { readonly shift: boolean; readonly key: string }
@@ -201,10 +197,29 @@ const SHORTCUT_KEYS: Record<
   quote: { shift: true, key: "9" },
 };
 
-/** Kept beside the matcher so the advertised shortcut cannot drift from the handled one. */
+const SHORTCUT_ACTIONS = Object.keys(SHORTCUT_KEYS) as readonly ComposerFormatAction[];
+
+export function composerFormatShortcut(
+  event: ComposerShortcutKey,
+  platform: DesktopPlatform,
+): ComposerFormatAction | null {
+  const modifier =
+    platform === "darwin" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  if (!modifier || event.altKey) return null;
+  const digit = /^Digit(\d)$/u.exec(event.code)?.[1];
+  const pressed = digit ?? event.key.toLocaleLowerCase();
+  return (
+    SHORTCUT_ACTIONS.find(
+      (action) =>
+        SHORTCUT_KEYS[action].shift === event.shiftKey &&
+        SHORTCUT_KEYS[action].key.toLocaleLowerCase() === pressed,
+    ) ?? null
+  );
+}
+
 export function composerFormatShortcutLabel(
   action: ComposerFormatAction,
-  platform: string,
+  platform: DesktopPlatform,
 ): string {
   const { shift, key } = SHORTCUT_KEYS[action];
   const modifier = platform === "darwin" ? "Cmd" : "Ctrl";

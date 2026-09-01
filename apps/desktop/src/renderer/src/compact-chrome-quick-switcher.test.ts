@@ -60,6 +60,7 @@ function CompactWorkspace() {
       disabled: false,
       error: "",
       inputRef: composerInput,
+      platform: "darwin",
       onDraftChange: () => undefined,
       onSubmit: () => Promise.resolve(),
     }),
