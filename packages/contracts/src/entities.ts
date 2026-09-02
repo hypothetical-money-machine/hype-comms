@@ -85,7 +85,7 @@ export const invitationSchema = z
   .strict();
 
 export const conversationKindSchema = z.enum(["channel", "direct_message", "group_direct_message"]);
-export const channelAccessSchema = z.enum(["workspace", "members"]);
+export const channelAccessSchema = z.enum(["workspace", "humans", "members"]);
 export const channelModeSchema = z.enum(["chat", "announcement"]);
 
 export const conversationSchema = z
@@ -127,8 +127,15 @@ export const conversationSchema = z
         message: "Channel mode is only valid for channels",
       });
     }
+    if (conversation.kind !== "channel" && conversation.access !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["access"],
+        message: "Channel access is only valid for channels",
+      });
+    }
     if (conversation.kind === "group_direct_message") {
-      for (const field of ["name", "slug", "topic", "access"] as const) {
+      for (const field of ["name", "slug", "topic"] as const) {
         if (conversation[field] !== null) {
           context.addIssue({
             code: "custom",
@@ -172,9 +179,13 @@ export const conversationMembershipSchema = z
   .strict();
 
 export const messageBodyFormatSchema = z.literal("hype_comms_markdown_v1");
+
+/** Longest message body the server accepts; composers cap their input at the same length. */
+export const MESSAGE_BODY_MAX_LENGTH = 4_000;
+
 export const messageBodySchema = z
   .string()
-  .max(4_000)
+  .max(MESSAGE_BODY_MAX_LENGTH)
   .refine((body) => body.trim().length > 0, "Message body cannot be blank")
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 

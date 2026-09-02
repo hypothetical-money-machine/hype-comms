@@ -115,15 +115,14 @@ button {
 
 .brand-mark,
 .workspace-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
+  display: block;
   margin-bottom: 24px;
-  place-items: center;
-  border-radius: 12px;
-  background: var(--theme-gradient-brand);
-  color: var(--theme-text-inverse);
-  font-weight: 900;
+  object-fit: contain;
+}
+
+.brand-mark {
+  width: 72px;
+  height: 72px;
 }
 
 .signin-card h1 {
@@ -744,7 +743,20 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .channel-icon {
+  position: relative;
   color: var(--theme-text-muted);
+}
+
+.channel-human-access-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--theme-surface-elevated);
+  color: var(--theme-text-accent);
 }
 
 .ai-channel-nav-icon {
@@ -4071,6 +4083,57 @@ html[data-sidebar-position="right"] .sidebar {
 .composer textarea::placeholder {
   color: var(--theme-text-subtle);
   opacity: 1;
+}
+
+.composer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+
+.composer-toolbar-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 4px;
+  background: var(--theme-border-subtle);
+}
+
+.composer-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.composer-toolbar button:hover:not(:disabled),
+.composer-toolbar button:focus-visible {
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-strong);
+}
+
+.composer-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-toolbar button code {
+  background: none;
+  font-size: 11px;
+}
+
+.composer-toolbar button span {
+  font-size: 11px;
 }
 
 .mention-picker {

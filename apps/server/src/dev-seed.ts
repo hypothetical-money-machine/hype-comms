@@ -237,14 +237,21 @@ async function ensureDemoMember(
     );
   }
 
-  await repository.upsertMembership({
-    workspaceId,
-    userId: user.id,
-    role,
-    status: "active",
+  const current = user;
+  await repository.transaction(async (txRepository) => {
+    await txRepository.lockHumansOnlyConversations(workspaceId);
+    await txRepository.lockWorkspaceMembership(workspaceId, current.id);
+    if (!(await txRepository.lockWorkspace(workspaceId))) {
+      throw new Error("Cannot seed a member into a missing demo workspace");
+    }
+    await txRepository.upsertMembership({
+      workspaceId,
+      userId: current.id,
+      role,
+      status: "active",
+    });
   });
 
-  const current = user;
   if (current.title !== fixture.title) {
     const updated = await repository.transaction(async (txRepo) => {
       return txRepo.updateMemberTitle(workspaceId, current.id, fixture.title);
@@ -400,6 +407,7 @@ export async function seedDevelopmentDemo(
 
   const workspaceRepository = new WorkspaceRepository(pool, {
     announcementChannelsEnabled: config.announcementChannelsEnabled,
+    humansOnlyChannelsEnabled: config.humansOnlyChannelsEnabled,
   });
   const conversationIds = new Map<DemoMessageFixture["conversation"], EntityId>();
   const generalId = await findConversationId(pool, workspace.id, "general");

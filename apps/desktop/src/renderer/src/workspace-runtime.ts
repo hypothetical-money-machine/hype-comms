@@ -33,6 +33,7 @@ import {
 } from "@hype-comms/contracts";
 
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
+import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import {
   clearPersistentWorkspaceCache,
   compareConversations,
@@ -1558,8 +1559,8 @@ export class WorkspaceRuntime {
     }
   }
 
-  async attachFile(conversationId: string): Promise<Attachment | null> {
-    return this.#client.chooseAndUploadConversationFile(conversationId);
+  async attachFiles(conversationId: string, maxFiles: number): Promise<AttachmentUploadResult> {
+    return this.#client.chooseAndUploadConversationFiles(conversationId, maxFiles);
   }
 
   async openFile(attachmentId: string): Promise<void> {

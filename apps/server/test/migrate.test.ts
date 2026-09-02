@@ -137,6 +137,8 @@ describeWithPostgres("runMigrations", () => {
           "0026_group_direct_messages.sql",
           "0027_read_only_agent_attachments.sql",
           "0028_channel_webhooks.sql",
+          "0029_humans_only_channels.sql",
+          "0030_attachment_retention.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -174,6 +176,8 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0026_group_direct_messages.sql" },
         { filename: "0027_read_only_agent_attachments.sql" },
         { filename: "0028_channel_webhooks.sql" },
+        { filename: "0029_humans_only_channels.sql" },
+        { filename: "0030_attachment_retention.sql" },
       ]);
 
       const userId = randomUUID();
@@ -1508,6 +1512,302 @@ describeWithPostgres("runMigrations", () => {
       await expect(
         pool.query("DELETE FROM conversations WHERE id = $1", [validGroupId]),
       ).resolves.toMatchObject({ rowCount: 1 });
+    });
+  });
+
+  it("keeps humans-only seats automatic and rejects non-human access at the database boundary", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const ownerId = randomUUID();
+      const memberId = randomUUID();
+      const lateMemberId = randomUUID();
+      const inactiveMemberId = randomUUID();
+      const agentId = randomUUID();
+      const botId = randomUUID();
+      const workspaceId = randomUUID();
+      const channelId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, kind, username, display_name)
+         VALUES ($1, 'human-owner@example.test', 'human', 'human-owner', 'Human Owner'),
+                ($2, 'human-member@example.test', 'human', 'human-member', 'Human Member'),
+                ($3, 'late-human@example.test', 'human', 'late-human', 'Late Human'),
+                ($4, 'inactive-human@example.test', 'human', 'inactive-human', 'Inactive Human'),
+                ($5, NULL, 'agent', 'channel-agent', 'Channel Agent'),
+                ($6, NULL, 'bot', 'channel-bot', 'Channel Bot')`,
+        [ownerId, memberId, lateMemberId, inactiveMemberId, agentId, botId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Human Space', 'human-space', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active'),
+                ($1, $3, 'member', 'active'),
+                ($1, $4, 'member', 'invited'),
+                ($1, $5, 'member', 'revoked'),
+                ($1, $6, 'member', 'active'),
+                ($1, $7, 'member', 'active')`,
+        [workspaceId, ownerId, memberId, lateMemberId, inactiveMemberId, agentId, botId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+         VALUES ($1, $2, 'channel', 'People', 'people', 'members', $3, true)`,
+        [channelId, workspaceId, ownerId],
+      );
+
+      await expect(
+        pool.query<{ user_id: string; role: string }>(
+          `SELECT user_id, role
+             FROM conversation_memberships
+            WHERE conversation_id = $1
+            ORDER BY user_id`,
+          [channelId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [
+          { user_id: ownerId, role: "member" },
+          { user_id: memberId, role: "member" },
+        ].sort((left, right) => left.user_id.localeCompare(right.user_id)),
+      });
+
+      await expect(
+        pool.query(
+          `SELECT 1
+             FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2`,
+          [channelId, lateMemberId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 0 });
+      await pool.query(
+        `UPDATE workspace_memberships
+            SET status = 'active'
+          WHERE workspace_id = $1 AND user_id = $2`,
+        [workspaceId, lateMemberId],
+      );
+      await expect(
+        pool.query(
+          `SELECT 1
+             FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [channelId, lateMemberId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+
+      await expect(
+        pool.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'member')`,
+          [channelId, workspaceId, agentId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'member')`,
+          [channelId, workspaceId, inactiveMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversation_memberships
+             (conversation_id, workspace_id, user_id, role)
+           VALUES ($1, $2, $3, 'owner')`,
+          [channelId, workspaceId, lateMemberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO bot_channel_grants
+             (workspace_id, bot_user_id, conversation_id, granted_by)
+           VALUES ($1, $2, $3, $4)`,
+          [workspaceId, botId, channelId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `UPDATE conversation_memberships
+              SET role = 'owner'
+            WHERE conversation_id = $1 AND user_id = $2`,
+          [channelId, ownerId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `DELETE FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2`,
+          [channelId, memberId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query("UPDATE conversations SET created_by = $1 WHERE id = $2", [agentId, channelId]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query(
+          `INSERT INTO conversations
+             (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+           VALUES ($1, $2, 'channel', 'Agent people', 'agent-people', 'members', $3, true)`,
+          [randomUUID(), workspaceId, agentId],
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query("UPDATE conversations SET human_only = false WHERE id = $1", [channelId]),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(
+        pool.query("UPDATE users SET kind = 'agent', email = NULL WHERE id = $1", [memberId]),
+      ).rejects.toMatchObject({ code: "23514" });
+
+      await expect(
+        pool.query("DELETE FROM users WHERE id = $1", [lateMemberId]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query("DELETE FROM conversations WHERE id = $1", [channelId]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+    });
+  });
+
+  it("avoids a conversation/workspace deadlock while activating a human", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const ownerId = randomUUID();
+      const memberId = randomUUID();
+      const workspaceId = randomUUID();
+      const channelId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, kind, username, display_name)
+         VALUES ($1, 'lock-owner@example.test', 'human', 'lock-owner', 'Lock Owner'),
+                ($2, 'lock-member@example.test', 'human', 'lock-member', 'Lock Member')`,
+        [ownerId, memberId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Lock Space', 'lock-space', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active'),
+                ($1, $3, 'member', 'invited')`,
+        [workspaceId, ownerId, memberId],
+      );
+      await pool.query(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+         VALUES ($1, $2, 'channel', 'Locked people', 'locked-people', 'members', $3, true)`,
+        [channelId, workspaceId, ownerId],
+      );
+
+      const mutation = await pool.connect();
+      const activation = await pool.connect();
+      try {
+        await mutation.query("BEGIN");
+        await activation.query("BEGIN");
+        await mutation.query("SET LOCAL statement_timeout = '2s'");
+        await activation.query("SET LOCAL statement_timeout = '2s'");
+        await mutation.query("SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE", [channelId]);
+
+        const activated = activation.query(
+          `UPDATE workspace_memberships
+              SET status = 'active'
+            WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, memberId],
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await expect(
+          mutation.query("SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE", [workspaceId]),
+        ).resolves.toMatchObject({ rowCount: 1 });
+        await mutation.query("COMMIT");
+        await expect(activated).resolves.toMatchObject({ rowCount: 1 });
+        await activation.query("COMMIT");
+      } finally {
+        await mutation.query("ROLLBACK");
+        await activation.query("ROLLBACK");
+        mutation.release();
+        activation.release();
+      }
+
+      await expect(
+        pool.query(
+          `SELECT role
+             FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [channelId, memberId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ role: "member" }] });
+    });
+  });
+
+  it("seats a human activated while a humans-only channel transaction is open", async () => {
+    await withFreshSchema(async (pool) => {
+      await runMigrations(pool);
+      const ownerId = randomUUID();
+      const memberId = randomUUID();
+      const workspaceId = randomUUID();
+      const channelId = randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, email, kind, username, display_name)
+         VALUES ($1, 'race-owner@example.test', 'human', 'race-owner', 'Race Owner'),
+                ($2, 'race-member@example.test', 'human', 'race-member', 'Race Member')`,
+        [ownerId, memberId],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'Race Space', 'race-space', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active'),
+                ($1, $3, 'member', 'invited')`,
+        [workspaceId, ownerId, memberId],
+      );
+
+      const creation = await pool.connect();
+      const activation = await pool.connect();
+      try {
+        await creation.query("BEGIN");
+        await activation.query("BEGIN");
+        await creation.query("SET LOCAL statement_timeout = '2s'");
+        await activation.query("SET LOCAL statement_timeout = '2s'");
+        await creation.query(
+          `INSERT INTO conversations
+             (id, workspace_id, kind, name, slug, channel_access, created_by, human_only)
+           VALUES ($1, $2, 'channel', 'Racing people', 'racing-people', 'members', $3, true)`,
+          [channelId, workspaceId, ownerId],
+        );
+
+        const activated = activation.query(
+          `UPDATE workspace_memberships
+              SET status = 'active'
+            WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, memberId],
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await creation.query("COMMIT");
+        await expect(activated).resolves.toMatchObject({ rowCount: 1 });
+        await activation.query("COMMIT");
+      } finally {
+        await creation.query("ROLLBACK");
+        await activation.query("ROLLBACK");
+        creation.release();
+        activation.release();
+      }
+
+      await expect(
+        pool.query(
+          `SELECT role
+             FROM conversation_memberships
+            WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [channelId, memberId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ role: "member" }] });
     });
   });
 

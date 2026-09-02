@@ -8,6 +8,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
@@ -107,6 +108,7 @@ const CLIENT_CAPABILITIES = [
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
+  HUMANS_ONLY_CHANNELS_CAPABILITY,
   AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
@@ -183,6 +185,10 @@ const SYNC_PERMANENT_REASONS = new Map<number, SyncPermanentReason>([
 /** 4xx statuses that describe a transient condition rather than a rejected request. */
 const RETRYABLE_CLIENT_STATUSES = new Set([408, 425]);
 
+type RequestScopeGuard = () => void;
+
+const alwaysCurrentRequestScope: RequestScopeGuard = () => undefined;
+
 export class WorkspaceTransport {
   constructor(
     private readonly apiOrigin: string,
@@ -206,16 +212,37 @@ export class WorkspaceTransport {
     return new URL(pathname, this.apiOrigin);
   }
 
-  async #fetchIdempotentMutation(url: string, init: RequestInit): Promise<Response> {
+  /** Fetch, abandoning the request if the calling scope is replaced on either side of the await. */
+  async #fetchInScope(
+    url: string,
+    init: RequestInit,
+    assertCurrentScope: RequestScopeGuard,
+  ): Promise<Response> {
+    assertCurrentScope();
+    const response = await this.session.fetch(url, init);
+    try {
+      assertCurrentScope();
+    } catch (error) {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+    return response;
+  }
+
+  async #fetchIdempotentMutation(
+    url: string,
+    init: RequestInit,
+    assertCurrentScope: RequestScopeGuard = alwaysCurrentRequestScope,
+  ): Promise<Response> {
     let response: Response;
     try {
-      response = await this.session.fetch(url, init);
+      response = await this.#fetchInScope(url, init, assertCurrentScope);
     } catch (error) {
       if (!isNetworkFailure(error)) throw error;
-      return this.session.fetch(url, init);
+      return this.#fetchInScope(url, init, assertCurrentScope);
     }
     if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
-      return this.session.fetch(url, init);
+      return this.#fetchInScope(url, init, assertCurrentScope);
     }
     return response;
   }
@@ -675,36 +702,47 @@ export class WorkspaceTransport {
     return listMessageAttachmentsResponseSchema.parse(await this.#payload(response));
   }
 
-  async uploadLocalFile(conversationId: string, filePath: string): Promise<Attachment> {
+  async uploadLocalFile(
+    conversationId: string,
+    filePath: string,
+    assertCurrentScope: RequestScopeGuard = alwaysCurrentRequestScope,
+  ): Promise<Attachment> {
+    assertCurrentScope();
     const bytes = await readFile(filePath);
+    assertCurrentScope();
     const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
     const contentType = contentTypeForFileName(fileName);
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
     const created = createFileUploadResponseSchema.parse(
       await this.#payload(
-        await this.#fetchIdempotentMutation(this.#url("/v1/files/uploads").href, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": crypto.randomUUID(),
+        await this.#fetchIdempotentMutation(
+          this.#url("/v1/files/uploads").href,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": crypto.randomUUID(),
+            },
+            body: JSON.stringify({
+              conversationId,
+              fileName,
+              contentType,
+              sizeBytes: bytes.byteLength,
+              contentSha256,
+            }),
           },
-          body: JSON.stringify({
-            conversationId,
-            fileName,
-            contentType,
-            sizeBytes: bytes.byteLength,
-            contentSha256,
-          }),
-        }),
+          assertCurrentScope,
+        ),
       ),
     );
-    const uploaded = await this.session.fetch(
+    const uploaded = await this.#fetchInScope(
       this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/content`).href,
       {
         method: "PUT",
         headers: { "content-type": contentType },
         body: bytes,
       },
+      assertCurrentScope,
     );
     if (!uploaded.ok) {
       throw new WorkspaceRequestError(
@@ -728,9 +766,11 @@ export class WorkspaceTransport {
               contentSha256,
             }),
           },
+          assertCurrentScope,
         ),
       ),
     );
+    assertCurrentScope();
     return attachmentSchema.parse(completed.attachment);
   }
 

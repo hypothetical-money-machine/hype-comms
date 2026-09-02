@@ -13,6 +13,7 @@ export function createElectronBuilderConfiguration(
     productName: flavor.productName,
     executableName: flavor.executableName,
     artifactName: flavor.artifactName,
+    icon: "build/icon.png",
     asar: true,
     electronFuses: {
       runAsNode: false,
@@ -28,6 +29,12 @@ export function createElectronBuilderConfiguration(
     directories: {
       output: flavor.releaseDirectory,
     },
+    extraResources: [
+      {
+        from: "build/icon.png",
+        to: "hype-comms-icon.png",
+      },
+    ],
     publish:
       flavor.updateUrl === null
         ? null

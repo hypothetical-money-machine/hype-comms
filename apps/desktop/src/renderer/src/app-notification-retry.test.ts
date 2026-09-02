@@ -77,6 +77,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
     directMessages: true,
     mentions: true,
     announcementChannels: false,
+    humansOnlyChannels: false,
   },
 };
 
@@ -297,7 +298,7 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     },
     listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
     listMessageAttachments: async () => ({ attachments: [] }),
-    chooseAndUploadConversationFile: async () => null,
+    chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
     openConversationFile: async () => ({ opened: true }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     syncWorkspace: async (after: string) =>

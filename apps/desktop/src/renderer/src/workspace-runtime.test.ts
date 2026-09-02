@@ -67,6 +67,7 @@ import type {
   NotificationAction,
   ServerStatus,
 } from "../../shared/desktop-api";
+import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import type {
   CachedWorkspaceState,
   MembershipRepairMarker,
@@ -342,6 +343,7 @@ function bootstrapAt(
       directMessages: true,
       mentions: true,
       announcementChannels: false,
+      humansOnlyChannels: false,
     },
     ...overrides,
   };
@@ -1041,8 +1043,14 @@ class FakeDesktopApi implements DesktopApi {
   )[] = [];
   readonly conversationFileRequests: string[] = [];
   readonly uploadedFiles: string[] = [];
+  readonly attachmentUploadRequests: {
+    readonly conversationId: string;
+    readonly maxFiles: number;
+  }[] = [];
   readonly openedFiles: string[] = [];
-  chooseAndUploadResult: Attachment | null | Promise<Attachment | null> = null;
+  chooseAndUploadResult: AttachmentUploadResult | Promise<AttachmentUploadResult> = {
+    status: "cancelled",
+  };
   readonly threadResults: Array<
     Omit<MessageThreadResponse, "attachments"> & { readonly attachments?: Attachment[] }
   > = [];
@@ -1445,8 +1453,12 @@ class FakeDesktopApi implements DesktopApi {
     };
   }
 
-  async chooseAndUploadConversationFile(conversationId: string): Promise<Attachment | null> {
+  async chooseAndUploadConversationFiles(
+    conversationId: string,
+    maxFiles: number,
+  ): Promise<AttachmentUploadResult> {
     this.uploadedFiles.push(conversationId);
+    this.attachmentUploadRequests.push({ conversationId, maxFiles });
     return this.chooseAndUploadResult;
   }
 
@@ -1856,6 +1868,36 @@ describe("WorkspaceRuntime", () => {
     await runtime.stop();
   });
 
+  it("forwards one bounded multi-file selection to the desktop bridge", async () => {
+    const first: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: null,
+      uploadedBy: USER_ID,
+      fileName: "one.png",
+      contentType: "image/png",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const second: Attachment = {
+      ...first,
+      id: "20000000-0000-4000-8000-0000000000ab",
+      fileName: "two.png",
+    };
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.chooseAndUploadResult = { status: "completed", attachments: [first, second] };
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await expect(runtime.attachFiles(CONVERSATION_ID, 2)).resolves.toEqual({
+      status: "completed",
+      attachments: [first, second],
+    });
+    expect(api.attachmentUploadRequests).toEqual([
+      { conversationId: CONVERSATION_ID, maxFiles: 2 },
+    ]);
+  });
+
   it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
@@ -2017,6 +2059,7 @@ describe("WorkspaceRuntime", () => {
         directMessages: true,
         mentions: true,
         announcementChannels: true,
+        humansOnlyChannels: false,
       },
     });
     const cache = new FakeWorkspaceCache();

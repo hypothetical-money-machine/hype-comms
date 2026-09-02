@@ -13,6 +13,7 @@ describe("loadConfig", () => {
       trustedProxies: [],
       agentProvisioningEnabled: true,
       defaultAgentAgencyEnabled: true,
+      humansOnlyChannelsEnabled: false,
       authKitAdmissionEnabled: false,
     });
   });
@@ -56,6 +57,15 @@ describe("loadConfig", () => {
       }),
     ).toMatchObject({ defaultAgentAgencyEnabled: true });
     expect(() => loadConfig({ HYPE_COMMS_DEFAULT_AGENT_AGENCY_ENABLED: "yes" })).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("accepts only an explicit humans-only channel cutover", () => {
+    expect(loadConfig({ HYPE_COMMS_HUMANS_ONLY_CHANNELS_ENABLED: "true" })).toMatchObject({
+      humansOnlyChannelsEnabled: true,
+    });
+    expect(() => loadConfig({ HYPE_COMMS_HUMANS_ONLY_CHANNELS_ENABLED: "yes" })).toThrow(
       ConfigError,
     );
   });

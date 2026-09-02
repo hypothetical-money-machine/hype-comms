@@ -83,6 +83,7 @@ export function bootstrap(): WorkspaceBootstrapResponse {
       directMessages: true,
       mentions: true,
       announcementChannels: false,
+      humansOnlyChannels: false,
     },
   };
 }

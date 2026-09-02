@@ -1,4 +1,5 @@
 import type {
+  ChannelMode,
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   PresenceState,
@@ -32,6 +33,7 @@ interface PeopleDirectorySharedProps {
 interface ChannelPeopleDialogProps extends PeopleDirectorySharedProps {
   readonly source: "channel";
   readonly channelName: string;
+  readonly channelMode?: ChannelMode | null;
   readonly conversationId: string;
   readonly load: (conversationId: string) => Promise<ChannelMembersResponse>;
   readonly upsert: (
@@ -143,6 +145,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const pendingAddIdsRef = useRef<ReadonlySet<string>>(new Set());
   const isChannel = source === "channel";
   const conversationId = source === "channel" ? props.conversationId : null;
+  const isAnnouncementChannel = source === "channel" && props.channelMode === "announcement";
   const load = source === "channel" ? props.load : null;
   const upsert = source === "channel" ? props.upsert : null;
   const remove = source === "channel" ? props.remove : null;
@@ -390,7 +393,21 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
         {details?.access === "workspace" && (
           <div className="channel-access-note">
             <strong>Open to everyone</strong>
-            <p>Every active workspace member can read and send messages in this channel.</p>
+            <p>
+              {isAnnouncementChannel
+                ? "Every active workspace member can read, reply in threads, and react. Workspace owners can post bulletins."
+                : "Every active workspace member can read and send messages in this channel."}
+            </p>
+          </div>
+        )}
+        {details?.access === "humans" && (
+          <div className="channel-access-note">
+            <strong>Humans only</strong>
+            <p>
+              {isAnnouncementChannel
+                ? "All people in the workspace can read, reply in threads, and react. Workspace owners can post bulletins. Agents and bots cannot access this channel."
+                : "All people in the workspace can read and send messages. Agents and bots cannot access this channel."}
+            </p>
           </div>
         )}
         {canManageChannel && conversationId !== null && upsert !== null && (
