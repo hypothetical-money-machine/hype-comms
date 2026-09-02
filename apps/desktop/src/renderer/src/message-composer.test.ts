@@ -36,6 +36,7 @@ function renderComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]
     draft: "A useful update",
     disabled: false,
     error: "",
+    platform: "linux",
     onDraftChange: vi.fn(),
     onSubmit: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -243,6 +244,7 @@ function renderLiveComposer(overrides: Partial<Parameters<typeof MessageComposer
       error: "",
       members: [morgan, alex],
       currentUserId: morgan.id,
+      platform: "linux",
       ...overrides,
       draft,
       onDraftChange: (value) => {
@@ -352,6 +354,7 @@ describe("MessageComposer mentions", () => {
           error: "",
           members: [morgan, alex],
           currentUserId: morgan.id,
+          platform: "linux",
           draft,
           onDraftChange: (value: string) => setDraft(value),
           onSubmit: vi.fn().mockResolvedValue(undefined),
@@ -369,5 +372,100 @@ describe("MessageComposer mentions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "switch" }));
     expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
+  });
+});
+
+describe("MessageComposer formatting", () => {
+  it("renders a formatting toolbar advertising every control and its shortcut", () => {
+    renderComposer();
+    expect(screen.getByRole("group", { name: "Text formatting" })).toBeTruthy();
+    for (const name of [
+      "Bold",
+      "Italic",
+      "Strikethrough",
+      "Inline code",
+      "Link",
+      "Bulleted list",
+      "Numbered list",
+      "Quote",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: "Bold" }).title).toBe("Bold (Ctrl+B)");
+  });
+
+  it("advertises Cmd shortcuts on macOS", () => {
+    renderComposer({ platform: "darwin" });
+    expect(screen.getByRole("button", { name: "Link" }).title).toBe("Link (Cmd+Shift+K)");
+  });
+
+  it("disables the toolbar with the composer", () => {
+    renderComposer({ disabled: true });
+    expect(screen.getByRole("button", { name: "Bold" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("wraps the selection from a toolbar click and keeps it selected for re-toggling", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "make it pop");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**make** it pop");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(textbox.selectionStart).toBe(2);
+    expect(textbox.selectionEnd).toBe(6);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+    expect(onDraftChange).toHaveBeenLastCalledWith("make it pop");
+  });
+
+  it("applies bold from the keyboard without sending", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "ship it");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("applies a held shortcut once, ignoring keydown auto-repeat", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "ship it");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
+  });
+
+  it("starts a bulleted list from a bare caret with Mod+Shift+8", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "groceries");
+    fireEvent.keyDown(textbox, { key: "*", code: "Digit8", ctrlKey: true, shiftKey: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("- groceries");
+  });
+
+  it("leaves plain Mod+K for the quick switcher and takes Mod+Shift+K for links", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "docs");
+    fireEvent.keyDown(textbox, { key: "k", ctrlKey: true });
+    expect(onDraftChange).toHaveBeenLastCalledWith("docs");
+
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "K", ctrlKey: true, shiftKey: true });
+    expect(onDraftChange).toHaveBeenLastCalledWith("[docs](url)");
   });
 });

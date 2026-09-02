@@ -2555,6 +2555,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
+                platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
@@ -2752,6 +2753,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 inputRef={attachComposerInput}
                 members={selectedConversationMembers}
                 currentUserId={currentUserId}
+                platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
@@ -2960,6 +2962,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               inputRef={attachThreadComposerInput}
               members={selectedConversationMembers}
               currentUserId={currentUserId}
+              platform={client.platform}
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
