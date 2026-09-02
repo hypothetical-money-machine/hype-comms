@@ -31,6 +31,7 @@ import type {
 } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
+  ATTACHMENT_UPLOAD_TTL_MS,
   LocalAttachmentStore,
   sha256Hex,
   type AttachmentStore,
@@ -3698,6 +3699,132 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       pool.query("SELECT 1 FROM attachments WHERE id = $1", [removable.attachment.id]),
     ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  async function stagePendingUpload(
+    fileName: string,
+    body: string,
+  ): Promise<{
+    bytes: Buffer;
+    contentSha256: string;
+    staged: Awaited<ReturnType<WorkspaceRepository["createFileUpload"]>>;
+  }> {
+    const bytes = Buffer.from(body);
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName,
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    return { bytes, contentSha256, staged };
+  }
+
+  async function storedUploadDeadline(attachmentId: string): Promise<Date> {
+    const result = await pool.query<{ upload_expires_at: Date | string }>(
+      `SELECT upload_expires_at FROM attachments WHERE id = $1`,
+      [attachmentId],
+    );
+    const deadline = result.rows[0]?.upload_expires_at;
+    if (deadline === undefined || deadline === null) {
+      throw new Error("Expected a stored upload deadline");
+    }
+    return deadline instanceof Date ? deadline : new Date(deadline);
+  }
+
+  it("sets pending upload expiry from the database clock", async () => {
+    const { staged } = await stagePendingUpload("clock.txt", "deadline from postgres");
+    const ttl = await pool.query<{ ttl_seconds: string }>(
+      `SELECT extract(epoch from (upload_expires_at - created_at))::text AS ttl_seconds
+         FROM attachments
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const ttlSeconds = Number(ttl.rows[0]?.ttl_seconds);
+    expect(ttlSeconds).toBeGreaterThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 - 1);
+    expect(ttlSeconds).toBeLessThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 + 1);
+    await expect(storedUploadDeadline(staged.attachment.id)).resolves.toEqual(
+      new Date(staged.expiresAt),
+    );
+  });
+
+  it("does not clean up a pending upload that is still valid on the database clock", async () => {
+    const { staged } = await stagePendingUpload("fresh.txt", "just created");
+    await repository.deleteExpiredState();
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 1 });
+  });
+
+  it("keeps an in-progress upload when the host clock is ahead of the database deadline", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-leads.txt",
+      "still valid on postgres",
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() + 60_000);
+    try {
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+      const completed = await repository.completeFileUpload(
+        owner,
+        staged.attachment.id,
+        { sizeBytes: bytes.byteLength, contentSha256 },
+        randomUUID(),
+      );
+      expect(completed.attachment.status).toBe("ready");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("rejects and cleans up an upload expired on the database clock when the host clock lags", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-lags.txt",
+      "already expired on postgres",
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() - 60_000);
+    try {
+      await expect(
+        repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "This upload has expired",
+      } satisfies Partial<ApiError>);
+      await expect(
+        repository.completeFileUpload(
+          owner,
+          staged.attachment.id,
+          { sizeBytes: bytes.byteLength, contentSha256 },
+          randomUUID(),
+        ),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "This upload has expired",
+      } satisfies Partial<ApiError>);
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 0 });
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("decides group attachment read capability before loading stored bytes", async () => {
