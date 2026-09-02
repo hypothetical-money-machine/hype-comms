@@ -32,6 +32,7 @@ import { AiChannel } from "./ai-channel";
 import { AgentEnrollmentsView } from "./agent-enrollments-view";
 import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
+import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
@@ -333,9 +334,7 @@ export function SignIn({
   return (
     <main className="signin-shell">
       <section className="signin-card">
-        <div className="brand-mark" aria-hidden="true">
-          H
-        </div>
+        <BrandMark className="brand-mark" label="Hype Comms" />
         <p className="eyebrow">Hypothetical Money Machine</p>
         <h1>Private workspace chat</h1>
         <p className="signin-lede">Sign in with the email address invited to this workspace.</p>
@@ -2136,7 +2135,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         aria-label="Workspace"
         {...chrome.chromeProps}
       >
-        <div className="workspace-mark">H</div>
+        <BrandMark className="workspace-mark" label="Hype Comms" />
       </aside>
 
       <aside

@@ -13,6 +13,7 @@ export function createElectronBuilderConfiguration(
     productName: flavor.productName,
     executableName: flavor.executableName,
     artifactName: flavor.artifactName,
+    icon: "build/icon.png",
     asar: true,
     electronFuses: {
       runAsNode: false,
