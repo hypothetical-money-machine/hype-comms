@@ -10,9 +10,8 @@ The adapter:
 - loads bootstrap, member, and complete conversation metadata;
 - starts `hype-comms-cli watch --json --after <cursor>` and treats stdout as
   NDJSON only;
-- wakes Hermes for every message in the agent's DMs and for explicitly
-  mentioned channel messages, plus unmentioned follow-ups inside threads the
-  agent has already written in when that is switched on;
+- wakes Hermes for every authorized message in joined conversations, then lets
+  the model either reply or intentionally remain silent;
 - after those wake gates pass, retrieves exactly one server-authoritative
   context pack ending at the triggering message and supplies that pack as
   clearly delimited, untrusted user content;
@@ -188,13 +187,8 @@ Optional:
   under the message that woke the agent. Default `true`. Set it to `false` to
   send every reply flat. Replies in direct messages are always flat and this
   switch does not change that.
-- `HYPE_COMMS_THREAD_FOLLOWUPS`: whether an unmentioned reply inside a thread
-  the agent has already replied in wakes it. Default `false`. Read the trigger
-  policy below before turning it on: it widens what reaches Hermes past
-  explicit mentions, and it costs one inference turn per message even when the
-  model decides to say nothing.
 
-The context limit and both switches are read once, when the adapter is
+The context limit and thread-reply switch are read once, when the adapter is
 constructed, so a change takes effect on `hermes gateway restart`.
 
 The environment credential overrides any saved CLI profile and is never
@@ -238,10 +232,9 @@ hermes gateway status
 ## Context pack
 
 An eligible wake is anchored to the exact server-minted triggering message ID.
-Only after self-message suppression, DM/channel resolution, verified-mention
-gating, the optional participated-thread gate, and profile-aware Hermes
-authorization (or the legacy UUID fallback) pass does the adapter make one
-context-history request. The returned pack contains:
+Only after self-message suppression, DM/channel resolution, and profile-aware
+Hermes authorization (or the legacy UUID fallback) pass does the adapter make
+one context-history request. The returned pack contains:
 
 - the canonical `#channel-slug` or derived `@dm-peer` selector;
 - up to `HYPE_COMMS_CONTEXT_LIMIT` messages, oldest first, through the trigger;
@@ -256,15 +249,11 @@ an invalid thread target, or any conversation/anchor mismatch. The shared CLI
 contract performs the first validation; this second check is the boundary just
 before model exposure.
 
-Nearby messages are ambient context, not additional wake triggers. An
-unmentioned channel message still causes no history request and no inference by
-itself. Once a later authorized mention or participated-thread follow-up wakes
-the agent, however, earlier conversation messages in the bounded tail—including
-messages that did not mention the agent or whose authors lack wake
-permission—become model-visible and are identified by the routing line described
-below. That privacy and token-cost expansion is intentional: it is what lets the
-agent answer from what was actually said instead of seeing only the final
-trigger.
+Every authorized message is a wake trigger. Nearby earlier messages in the
+bounded tail—including messages whose authors lack wake permission—become
+model-visible and are identified by the routing line described below. This
+privacy and token-cost expansion is intentional: it lets the agent decide from
+what was actually said rather than from the final message in isolation.
 
 The model receives the complete pack as compact JSON inside `BEGIN/END HYPE
 COMMS CONTEXT PACK V1` lines. Newlines and apparent boundary text inside message
@@ -275,23 +264,14 @@ validated realtime event; the server pack supplies the canonical reply root.
 
 ## Trigger and delivery policy
 
-- Direct message: always dispatched to Hermes after normal Hermes
-  authorization.
-- Channel: dispatched when `mentionedUserIds` explicitly contains the agent
-  user ID.
-- Unmentioned channel traffic: never wakes Hermes by itself, unless it is a
-  participated-thread follow-up and `HYPE_COMMS_THREAD_FOLLOWUPS` is on. It can
-  appear later as bounded ambient context when an eligible message does wake
-  Hermes; see the context-pack section above.
+- Direct message and channel traffic: dispatched to Hermes after normal Hermes
+  authorization, whether or not the agent is mentioned.
+- Reply decision: the model either produces a substantive reply or emits exactly
+  `NO_REPLY`; Hermes and the adapter both suppress that marker from delivery.
 - Self-authored message: ignored.
 - Reply in a channel: threaded under the message that woke the agent, in the
   same Hype Comms conversation. A reply whose anchor the adapter no longer
-  holds is sent flat into the conversation rather than guessed at. Note that
-  with follow-ups off, which is the default, the agent does not hear anything
-  said inside the thread it just opened unless that message mentions it again.
-  Threading puts the answer where a reply chip invites the human to continue,
-  and the trigger policy has not moved, so this is the one place where the two
-  pull against each other.
+  holds is sent flat into the conversation rather than guessed at.
 - Reply in a direct message: always flat, never threaded. A one-to-one
   conversation has no use for a thread, and a client that supports threads
   files threaded replies out of the main timeline, which in a direct message
@@ -306,41 +286,18 @@ validated realtime event; the server pack supplies the canonical reply root.
 - Owner administration: intentionally unavailable through the adapter. Use an
   owner's human CLI profile to manage agents and tokens.
 
-### Thread follow-ups
+### Intentional silence
 
-Off by default. With `HYPE_COMMS_THREAD_FOLLOWUPS=true`, a reply inside a
-thread the agent has already replied in wakes it even though nobody mentioned
-it, and the agent decides for itself whether to answer.
+Silence is decided by the model, not by a content blocklist. The adapter's
+stable `channel_prompt` tells the agent to use `NO_REPLY` when a message needs
+nothing from it. Hermes suppresses intentional-silence responses, and the
+adapter independently drops a whole-message silence marker before the network
+sender as a final delivery safeguard. The silent turn remains in Hermes's
+session history, so the agent can follow the conversation without posting.
 
-The adapter does not have to subscribe to anything to see those messages. It
-already receives every `message.created` event for the conversations it belongs
-to, and it discards the unmentioned ones itself. What the
-`participated-thread-notifications-v1` capability adds is precision: the server
-marks the thread replies that land in threads this agent has written in, so the
-agent can wake on those alone instead of waking on all thread traffic or
-keeping its own ledger of where it has spoken. The marking is per recipient and
-never travels in the shared event payload.
-
-Silence is decided by the model, not by a filter. Hermes suppresses delivery
-when a whole response is one of its intentional-silence markers, and the
-adapter's `channel_prompt` tells the agent to use `NO_REPLY` when a follow-up
-needs nothing from it. The silent turn still enters Hermes's session history, so
-the agent keeps following the conversation without posting into it.
-
-Three consequences are worth stating before turning it on. Deciding to stay
-quiet is a full inference turn, so a busy thread costs tokens and rate limit for
-no visible output. Unmentioned messages in participated threads now do reach
-Hermes and stay in its transcript, which narrows the promise made above: the
-allowlist still governs who may wake the agent, but "not added silently to
-Hermes context" stops holding for threads it has already joined.
-
-The third is the one to check before turning this on in a workspace that runs
-more than one agent. The adapter suppresses only its own messages, so where two
-agents have both replied in the same thread, each one's reply wakes the other
-and the exchange continues until one model chooses to stay quiet. Nothing in the
-adapter breaks that cycle. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS`,
-or leave follow-ups off, unless you have a reason to want agents answering each
-other.
+Every authorized message costs one inference turn even when the model stays
+quiet. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS` unless agent-to-agent
+wakes are intentional; self-authored messages remain suppressed.
 
 Hermes's configured authorization remains the final inbound gate. Before
 fetching context, the adapter invokes Hermes's profile-aware sender callback
