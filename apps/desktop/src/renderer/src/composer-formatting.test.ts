@@ -45,6 +45,11 @@ describe("applyComposerFormat inline styles", () => {
     expect(result).toEqual({ text: "***word***", selectionStart: 3, selectionEnd: 7 });
   });
 
+  it("unwraps a true italic pair around the selection", () => {
+    const result = applyComposerFormat("see *word* now", 5, 9, "italic");
+    expect(result).toEqual({ text: "see word now", selectionStart: 4, selectionEnd: 8 });
+  });
+
   it("removes only the italic layer from bold italic text", () => {
     const result = applyComposerFormat("***word***", 3, 7, "italic");
     expect(result).toEqual({ text: "**word**", selectionStart: 2, selectionEnd: 6 });
@@ -84,6 +89,11 @@ describe("applyComposerFormat inline styles", () => {
       selectionStart: 0,
       selectionEnd: 3,
     });
+  });
+
+  it("wraps a selection between two code spans instead of consuming their fences", () => {
+    const result = applyComposerFormat("`a` b `c`", 4, 5, "code");
+    expect(result).toEqual({ text: "`a` `b` `c`", selectionStart: 5, selectionEnd: 6 });
   });
 
   it("round-trips the padded fence from the selection it returns", () => {
@@ -232,6 +242,12 @@ describe("applyComposerFormat mention preservation", () => {
   it("does not expand across word-glued addresses", () => {
     const result = applyComposerFormat("mail hello@example now", 11, 18, "italic");
     expect(result.text).toBe("mail hello@*example* now");
+  });
+
+  it("does not steal a neighboring emphasis marker when toggling italic beside one", () => {
+    const result = applyComposerFormat("*foo*@alex*", 5, 10, "italic");
+    expect(result.text).toBe("*foo**@alex**");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
   });
 });
 

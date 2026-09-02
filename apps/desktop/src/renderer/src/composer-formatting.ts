@@ -62,6 +62,26 @@ function isItalicRun(run: number): boolean {
   return run % 2 === 1;
 }
 
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * True when the odd asterisk runs on both sides of the selection can actually pair as emphasis
+ * around it. A run glued to a word character on its far side is a neighbor's marker — the `*`
+ * before `@alex` in `*foo*@alex*` closes `*foo*` — and stripping it would corrupt that neighbor
+ * instead of unformatting the selection.
+ */
+function italicPairSurrounds(text: string, start: number, end: number): boolean {
+  const before = runLength(text, start, -1, "*");
+  const after = runLength(text, end, 1, "*");
+  if (!isItalicRun(before) || !isItalicRun(after)) return false;
+  const beyondBefore = text[start - before - 1];
+  const beyondAfter = text[end + after];
+  return (
+    (beyondBefore === undefined || !WORD_CHAR.test(beyondBefore)) &&
+    (beyondAfter === undefined || !WORD_CHAR.test(beyondAfter))
+  );
+}
+
 const MENTION_WORD = /[\p{L}\p{N}_-]/u;
 const MENTION_BOUNDARY = /[\p{L}\p{N}_]/u;
 
@@ -127,7 +147,7 @@ function toggleInline(
 
   const surroundedByMarkers =
     format === "italic"
-      ? isItalicRun(runLength(text, start, -1, "*")) && isItalicRun(runLength(text, end, 1, "*"))
+      ? italicPairSurrounds(text, start, end)
       : start >= width &&
         text.slice(start - width, start) === marker &&
         text.slice(end, end + width) === marker;
@@ -181,10 +201,14 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
   const beforePad = beforeMatch?.[2] ?? "";
   const afterPad = afterMatch?.[1] ?? "";
   const afterFence = afterMatch?.[2] ?? "";
+  // The wrap branch only emits pads for backtick-edged content, so a padded match around a
+  // backtick-free selection is two neighboring spans (`a` b `c`), not this selection's wrapper.
+  const padConsistent = beforePad === "" || selected.startsWith("`") || selected.endsWith("`");
   if (
     beforeFence.length > 0 &&
     beforeFence.length === afterFence.length &&
     beforePad === afterPad &&
+    padConsistent &&
     longestBacktickRun(selected) < beforeFence.length
   ) {
     const removed = beforeFence.length + beforePad.length;
