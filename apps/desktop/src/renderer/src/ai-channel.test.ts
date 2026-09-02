@@ -440,6 +440,25 @@ describe("AiChannel", () => {
     await waitFor(() => expect(input.value).toBe(""));
   });
 
+  it("keeps typing at the end visible when the prompt reaches its height cap", async () => {
+    const harness = createTransport(aiState());
+    await renderChannel(harness);
+    const input = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(input, "scrollTop", { configurable: true, value: 0, writable: true });
+    const prompt = Array.from({ length: 20 }, (_, index) => `Line ${String(index + 1)}`).join("\n");
+
+    fireEvent.change(input, { target: { value: prompt } });
+    input.setSelectionRange(prompt.length, prompt.length);
+    fireEvent.change(input, { target: { value: `${prompt}!` } });
+
+    expect(input.style.height).toBe("180px");
+    expect(input.style.overflowY).toBe("auto");
+    expect(input.scrollTop).toBe(240);
+  });
+
   it("keeps a failed prompt draft and exposes the sanitized error", async () => {
     const harness = createTransport(aiState({ generation: 8 }));
     harness.sendAiChannelPrompt.mockRejectedValue(new Error("Claude is not authenticated."));
