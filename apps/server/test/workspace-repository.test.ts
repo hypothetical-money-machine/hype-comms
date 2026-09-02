@@ -3560,6 +3560,146 @@ describeWithPostgres("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it("uses the database clock for attachment upload expiry", async () => {
+    const bytes = Buffer.from("database time");
+    const contentSha256 = sha256Hex(bytes);
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const staged = await repository.createFileUpload(
+        owner,
+        {
+          conversationId: generalId,
+          fileName: "database-time.txt",
+          contentType: "text/plain",
+          sizeBytes: bytes.byteLength,
+          contentSha256,
+        },
+        randomUUID(),
+      );
+
+      now.mockReturnValue(Date.parse("2200-01-01T00:00:00.000Z"));
+      await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+      await expect(
+        repository.completeFileUpload(
+          owner,
+          staged.attachment.id,
+          { sizeBytes: bytes.byteLength, contentSha256 },
+          randomUUID(),
+        ),
+      ).resolves.toMatchObject({ attachment: { status: "ready" } });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("removes an expired pending upload and its stored bytes", async () => {
+    const bytes = Buffer.from("scope change left this upload pending");
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName: "pending.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+
+    await repository.deleteExpiredState();
+
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(attachmentStore.read(workspaceId, staged.attachment.id)).rejects.toThrow(
+      "File is not available",
+    );
+  });
+
+  it("removes an unclaimed ready upload and its stored bytes after 30 days", async () => {
+    const attachmentId = await stageReadyFile(generalId, "abandoned.txt", "abandoned draft");
+    await pool.query(
+      `UPDATE attachments
+          SET content_received_at = clock_timestamp() - interval '30 days 1 second'
+        WHERE id = $1`,
+      [attachmentId],
+    );
+
+    await repository.deleteExpiredState();
+
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [attachmentId]),
+    ).resolves.toMatchObject({
+      rowCount: 0,
+    });
+    await expect(attachmentStore.read(workspaceId, attachmentId)).rejects.toThrow(
+      "File is not available",
+    );
+  });
+
+  it("continues cleanup after one attachment cannot be removed", async () => {
+    const bytes = Buffer.from("expired upload");
+    const contentSha256 = sha256Hex(bytes);
+    const blocked = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName: "blocked.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    const removable = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName: "removable.txt",
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    await repository.putFileContent(owner, blocked.attachment.id, "text/plain", bytes);
+    await repository.putFileContent(owner, removable.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = ANY($1::uuid[])`,
+      [[blocked.attachment.id, removable.attachment.id]],
+    );
+    repository = new WorkspaceRepository(pool, {
+      attachmentStore: {
+        write: attachmentStore.write.bind(attachmentStore),
+        read: attachmentStore.read.bind(attachmentStore),
+        remove: async (candidateWorkspaceId, attachmentId) => {
+          if (attachmentId === blocked.attachment.id) throw new Error("Storage is unavailable");
+          await attachmentStore.remove(candidateWorkspaceId, attachmentId);
+        },
+      },
+    });
+
+    await expect(repository.deleteExpiredState()).resolves.toEqual([
+      expect.objectContaining({ attachmentId: blocked.attachment.id, workspaceId }),
+    ]);
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [blocked.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [removable.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
   it("decides group attachment read capability before loading stored bytes", async () => {
     const group = await repository.createGroupDirectConversation(
       owner,

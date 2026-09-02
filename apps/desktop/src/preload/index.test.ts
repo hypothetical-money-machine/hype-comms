@@ -82,6 +82,18 @@ const PENDING_AGENT_ENROLLMENT = {
   updatedAt: NOW,
 } as const;
 
+const ATTACHMENT = {
+  id: "10000000-0000-4000-8000-000000000006",
+  messageId: null,
+  uploadedBy: USER_ID,
+  fileName: "one.png",
+  contentType: "image/png",
+  sizeBytes: 2048,
+  status: "ready",
+  downloadUrl: null,
+  createdAt: NOW,
+} as const;
+
 const NOTIFICATION_CONTEXT = {
   version: 1,
   status: "active",
@@ -368,6 +380,50 @@ describe("preload updateProfile", () => {
 
     await expect(desktopApi.updateProfile("Engineering Lead")).rejects.toThrow(
       "IPC transport failed",
+    );
+  });
+});
+
+describe("preload file upload boundary", () => {
+  it("passes a bounded multi-file selection to main and validates every uploaded attachment", async () => {
+    const second = {
+      ...ATTACHMENT,
+      id: "10000000-0000-4000-8000-000000000007",
+      fileName: "two.png",
+    };
+    const result = { status: "completed" as const, attachments: [ATTACHMENT, second] };
+    invoke.mockResolvedValueOnce(result);
+
+    await expect(desktopApi.chooseAndUploadConversationFiles(CONVERSATION_ID, 2)).resolves.toEqual(
+      result,
+    );
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.workspaceFileUpload, {
+      conversationId: CONVERSATION_ID,
+      maxFiles: 2,
+    });
+  });
+
+  it("rejects unbounded requests before they reach main", async () => {
+    await expect(desktopApi.chooseAndUploadConversationFiles(CONVERSATION_ID, 0)).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed batch results from main", async () => {
+    invoke.mockResolvedValueOnce({ status: "completed", attachments: [] });
+
+    await expect(desktopApi.chooseAndUploadConversationFiles(CONVERSATION_ID, 2)).rejects.toThrow();
+  });
+
+  it("rejects a batch result above the requested capacity", async () => {
+    const second = {
+      ...ATTACHMENT,
+      id: "10000000-0000-4000-8000-000000000007",
+      fileName: "two.png",
+    };
+    invoke.mockResolvedValueOnce({ status: "completed", attachments: [ATTACHMENT, second] });
+
+    await expect(desktopApi.chooseAndUploadConversationFiles(CONVERSATION_ID, 1)).rejects.toThrow(
+      "File upload result exceeded the requested limit",
     );
   });
 });

@@ -92,6 +92,10 @@ import type { Event, IpcMainInvokeEvent, OpenDialogOptions, Session, WebContents
 import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
+import {
+  assertCurrentUploadScope,
+  attachmentUploadRequestSchema,
+} from "../shared/attachment-upload";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
 import {
@@ -127,6 +131,10 @@ import {
   writeAgentWakeOperatorResponse,
 } from "./agent-wake-operator";
 import { startAgentWakeRuntime, type AgentWakeRuntimeSession } from "./agent-wake-runtime";
+import {
+  attachmentUploadDialogOptions,
+  uploadSelectedConversationFiles,
+} from "./attachment-upload";
 import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
 import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
 import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
@@ -779,6 +787,15 @@ function sessionStateMatchesNotificationScope(
     state.userId === scope.userId &&
     state.workspaceId === scope.workspaceId
   );
+}
+
+function attachmentUploadScopeKey(state: ChatSessionState): string | null {
+  if (state.status === "signed-in") return `${state.userId}:${state.workspaceId}`;
+  if (state.status === "session-unavailable" && state.lastAuthenticatedSession !== undefined) {
+    const { userId, workspaceId } = state.lastAuthenticatedSession;
+    return `${userId}:${workspaceId}`;
+  }
+  return null;
 }
 
 function beginSessionReplacement(): void {
@@ -1888,24 +1905,37 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileUpload);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileUpload, async (event, conversationId: unknown) => {
+  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileUpload, async (event, input: unknown) => {
     if (!isTrustedIpcSender(event)) throw new Error("Untrusted file upload sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+    const transport = workspaceTransport;
+    if (transport === null) throw new Error("Workspace transport is unavailable");
+    const session = chatSession;
+    if (session === null || session.state.status !== "signed-in") {
+      throw new Error("A signed-in workspace session is required to attach files");
+    }
+    const sessionState = session.state;
+    const uploadScope = attachmentUploadScopeKey(sessionState);
+    const uploadAuthIntentGeneration = authIntentGeneration;
+    const isCurrentUploadScope = (): boolean =>
+      chatSession === session &&
+      workspaceTransport === transport &&
+      authIntentGeneration === uploadAuthIntentGeneration &&
+      attachmentUploadScopeKey(session.state) === uploadScope;
+    const request = attachmentUploadRequestSchema.parse(input);
     const window = mainWindow;
-    const options: OpenDialogOptions = {
-      title: "Attach a file",
-      buttonLabel: "Attach",
-      properties: ["openFile"],
-    };
     const selection =
       window === null || window.isDestroyed()
-        ? await dialog.showOpenDialog(options)
-        : await dialog.showOpenDialog(window, options);
-    const selectedPath = selection.filePaths[0];
-    if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
-      return null;
-    }
-    return workspaceTransport.uploadLocalFile(entityIdSchema.parse(conversationId), selectedPath);
+        ? await dialog.showOpenDialog(attachmentUploadDialogOptions)
+        : await dialog.showOpenDialog(window, attachmentUploadDialogOptions);
+    return uploadSelectedConversationFiles(
+      selection,
+      request,
+      (conversationId, filePath) =>
+        transport.uploadLocalFile(conversationId, filePath, () =>
+          assertCurrentUploadScope(isCurrentUploadScope),
+        ),
+      isCurrentUploadScope,
+    );
   });
 
   ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileOpen);
