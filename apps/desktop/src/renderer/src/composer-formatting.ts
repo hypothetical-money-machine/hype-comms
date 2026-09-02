@@ -187,6 +187,57 @@ function longestBacktickRun(value: string): number {
   return max;
 }
 
+interface CodeSpanBounds {
+  readonly openStart: number;
+  readonly openEnd: number;
+  readonly closeStart: number;
+  readonly closeEnd: number;
+}
+
+/**
+ * CommonMark code spans resolve left to right: a backtick run opens a span that the next run of
+ * exactly the same length closes. Scanning the whole text is the only reliable way to tell a
+ * span's own fences from a neighbor's — the local context around a selection cannot distinguish
+ * `x` in `` `x` `` from x between `` `a` `` and `` `b` ``.
+ */
+function codeSpanContaining(text: string, start: number, end: number): CodeSpanBounds | null {
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "`") {
+      i += 1;
+      continue;
+    }
+    const openStart = i;
+    let openEnd = i;
+    while (openEnd < text.length && text[openEnd] === "`") openEnd += 1;
+    const width = openEnd - openStart;
+    let closeStart = -1;
+    let j = openEnd;
+    while (j < text.length) {
+      if (text[j] !== "`") {
+        j += 1;
+        continue;
+      }
+      const runStart = j;
+      while (j < text.length && text[j] === "`") j += 1;
+      if (j - runStart === width) {
+        closeStart = runStart;
+        break;
+      }
+    }
+    if (closeStart === -1) {
+      i = openEnd;
+      continue;
+    }
+    if (openEnd <= start && end <= closeStart) {
+      return { openStart, openEnd, closeStart, closeEnd: closeStart + width };
+    }
+    if (openStart > end) return null;
+    i = closeStart + width;
+  }
+  return null;
+}
+
 /**
  * Code spans cannot backslash-escape backticks, so a selection containing one needs a fence one
  * backtick longer than its longest run, space-padded when the content itself edges on a backtick.
@@ -206,35 +257,30 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
     }
   }
 
-  // Fences just outside the selection, tolerating the symmetric space padding the wrap branch
-  // emits — the selection it returns excludes the pads, and re-toggling must still find the fence.
-  const beforeMatch = /(`+)( ?)$/u.exec(text.slice(0, start));
-  const afterMatch = /^( ?)(`+)/u.exec(text.slice(end));
-  const beforeFence = beforeMatch?.[1] ?? "";
-  const beforePad = beforeMatch?.[2] ?? "";
-  const afterPad = afterMatch?.[1] ?? "";
-  const afterFence = afterMatch?.[2] ?? "";
-  // The wrap branch only emits pads for backtick-edged content, so a padded match around a
-  // backtick-free selection is two neighboring spans (`a` b `c`), not this selection's wrapper.
-  const padConsistent = beforePad === "" || selected.startsWith("`") || selected.endsWith("`");
-  // And a fence glued to a word character on its far side (`a`b`c`) is a neighbor's delimiter,
-  // same as the italic rule.
-  const fencesStandAlone =
-    notWordChar(text[start - beforeFence.length - beforePad.length - 1]) &&
-    notWordChar(text[end + afterPad.length + afterFence.length]);
-  if (
-    beforeFence.length > 0 &&
-    beforeFence.length === afterFence.length &&
-    beforePad === afterPad &&
-    padConsistent &&
-    fencesStandAlone &&
-    longestBacktickRun(selected) < beforeFence.length
-  ) {
-    const removed = beforeFence.length + beforePad.length;
+  // A caret splitting a backtick run evenly is an empty fence pair left by the wrap branch.
+  if (start === end) {
+    const beforeRun = runLength(text, start, -1, "`");
+    const afterRun = runLength(text, end, 1, "`");
+    if (beforeRun > 0 && beforeRun === afterRun) {
+      return {
+        text: `${text.slice(0, start - beforeRun)}${text.slice(end + afterRun)}`,
+        selectionStart: start - beforeRun,
+        selectionEnd: start - beforeRun,
+      };
+    }
+  }
+
+  // A selection inside a real span's content unwraps that span, pads and all — determined by
+  // parsing, so neighboring spans' fences are never mistaken for this selection's wrapper.
+  const span = codeSpanContaining(text, start, end);
+  if (span !== null) {
+    const inner = text.slice(span.openEnd, span.closeStart);
+    const padded = inner.startsWith(" ") && inner.endsWith(" ") && inner.trim() !== "";
+    const content = padded ? inner.slice(1, -1) : inner;
     return {
-      text: `${text.slice(0, start - removed)}${selected}${text.slice(end + removed)}`,
-      selectionStart: start - removed,
-      selectionEnd: end - removed,
+      text: `${text.slice(0, span.openStart)}${content}${text.slice(span.closeEnd)}`,
+      selectionStart: span.openStart,
+      selectionEnd: span.openStart + content.length,
     };
   }
 

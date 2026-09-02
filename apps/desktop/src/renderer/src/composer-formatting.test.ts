@@ -101,6 +101,21 @@ describe("applyComposerFormat inline styles", () => {
     expect(result.text).toBe("`a``b``c`");
   });
 
+  it("wraps between spans of non-word content instead of consuming their fences", () => {
+    const result = applyComposerFormat("` `b` `", 3, 4, "code");
+    expect(result.text).toBe("` ``b`` `");
+  });
+
+  it("unwraps the whole span when the selection covers part of its content", () => {
+    const result = applyComposerFormat("see `npm ci` now", 5, 8, "code");
+    expect(result).toEqual({ text: "see npm ci now", selectionStart: 4, selectionEnd: 10 });
+  });
+
+  it("removes an empty fence pair at the caret", () => {
+    const result = applyComposerFormat("note ``", 6, 6, "code");
+    expect(result).toEqual({ text: "note ", selectionStart: 5, selectionEnd: 5 });
+  });
+
   it("round-trips the padded fence from the selection it returns", () => {
     const wrapped = applyComposerFormat("cmd`", 0, 4, "code");
     const unwrapped = applyComposerFormat(
