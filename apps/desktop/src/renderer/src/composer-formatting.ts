@@ -353,9 +353,9 @@ function insertLink(text: string, start: number, end: number): ComposerFormatRes
   // Select whichever half still holds placeholder text so the user can type straight over it.
   const labelIsPlaceholder = selected === "" || selectedIsUrl;
   const label = labelIsPlaceholder ? LINK_TEXT_PLACEHOLDER : escapeLinkLabel(selected);
-  // Unescaped parentheses would close or truncate the Markdown destination early, and angle
-  // brackets are destination-reserved in CommonMark.
-  const url = selectedIsUrl ? selected.replace(/[()<>]/gu, "\\$&") : LINK_URL_PLACEHOLDER;
+  // Unescaped parentheses would close or truncate the Markdown destination early, angle brackets
+  // are destination-reserved, and a literal backslash would swallow the character after it.
+  const url = selectedIsUrl ? selected.replace(/[\\()<>]/gu, "\\$&") : LINK_URL_PLACEHOLDER;
   const nextText = `${text.slice(0, start)}[${label}](${url})${text.slice(end)}`;
   const labelStart = start + 1;
   const urlStart = labelStart + label.length + 2;
