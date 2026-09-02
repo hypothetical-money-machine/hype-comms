@@ -138,7 +138,8 @@ describeWithPostgres("runMigrations", () => {
           "0027_read_only_agent_attachments.sql",
           "0028_channel_webhooks.sql",
           "0029_humans_only_channels.sql",
-          "0030_system_channels.sql",
+          "0030_attachment_retention.sql",
+          "0031_system_channels.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -177,7 +178,8 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0027_read_only_agent_attachments.sql" },
         { filename: "0028_channel_webhooks.sql" },
         { filename: "0029_humans_only_channels.sql" },
-        { filename: "0030_system_channels.sql" },
+        { filename: "0030_attachment_retention.sql" },
+        { filename: "0031_system_channels.sql" },
       ]);
 
       const userId = randomUUID();

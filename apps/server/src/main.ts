@@ -189,14 +189,27 @@ async function main(): Promise<void> {
       const systemChannelSeeding = setInterval(seedSystemChannels, 60 * 60 * 1_000);
       systemChannelSeeding.unref();
       app.addHook("onClose", async () => clearInterval(systemChannelSeeding));
-      const maintenance = setInterval(
-        () => {
-          void repository.deleteExpiredState().catch((error: unknown) => {
+      const cleanWorkspaceState = () => {
+        void repository
+          .deleteExpiredState()
+          .then((failures) => {
+            for (const failure of failures) {
+              app.log.warn(
+                {
+                  err: failure.error,
+                  attachmentId: failure.attachmentId,
+                  workspaceId: failure.workspaceId,
+                },
+                "Attachment retention cleanup failed",
+              );
+            }
+          })
+          .catch((error: unknown) => {
             app.log.error({ err: error }, "Workspace retention cleanup failed");
           });
-        },
-        60 * 60 * 1_000,
-      );
+      };
+      cleanWorkspaceState();
+      const maintenance = setInterval(cleanWorkspaceState, 60 * 60 * 1_000);
       maintenance.unref();
       app.addHook("onClose", async () => clearInterval(maintenance));
     }

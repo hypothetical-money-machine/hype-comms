@@ -173,7 +173,7 @@ describeWithPostgres("seedSystemChannels", () => {
                workspace_memberships, workspaces, users
       CASCADE
     `);
-    // Truncating users also removes the publisher migration 0030 installs, so restore it.
+    // Truncating users also removes the publisher migration 0031 installs, so restore it.
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
        VALUES ($1, NULL, 'bot', 'hype-comms-system', 'Hype Comms')`,

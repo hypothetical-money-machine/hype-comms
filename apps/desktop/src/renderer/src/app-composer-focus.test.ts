@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   AiChannelState,
+  Attachment,
   ChatSessionState,
   HumanWorkspaceBootstrapResponse,
   Message,
@@ -12,6 +13,7 @@ import type {
   NotificationState,
   ProductRealtimeEvent,
   RealtimeSessionScope,
+  SendMessageOperation,
   ScopedProductRealtimeEvent,
   ThemeState,
   UpdateState,
@@ -20,6 +22,7 @@ import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
+import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
@@ -214,6 +217,14 @@ const aiChannelState: AiChannelState = {
 interface Harness {
   readonly client: DesktopApi;
   readonly acknowledgedNotificationActions: readonly NotificationAction[];
+  readonly sentMessages: readonly SendMessageOperation[];
+  readonly attachmentUploadRequests: readonly {
+    readonly conversationId: string;
+    readonly maxFiles: number;
+  }[];
+  readonly setAttachmentUploadResult: (
+    result: AttachmentUploadResult | Promise<AttachmentUploadResult>,
+  ) => void;
   readonly pushNotificationAction: (action: NotificationAction) => void;
   readonly pushWorkspaceEvent: (event: ProductRealtimeEvent) => void;
 }
@@ -226,6 +237,14 @@ function createHarness(): Harness {
   const actionListeners = new Set<(action: NotificationAction) => void>();
   const workspaceEventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
   const acknowledgedNotificationActions: NotificationAction[] = [];
+  const sentMessages: SendMessageOperation[] = [];
+  const attachmentUploadRequests: {
+    readonly conversationId: string;
+    readonly maxFiles: number;
+  }[] = [];
+  let attachmentUploadResult: AttachmentUploadResult | Promise<AttachmentUploadResult> = {
+    status: "cancelled",
+  };
 
   const currentBootstrap = (): HumanWorkspaceBootstrapResponse => ({
     ...bootstrap,
@@ -285,7 +304,14 @@ function createHarness(): Harness {
     listMessageReactions: async () => ({ reactions: [] }),
     listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
     listMessageAttachments: async () => ({ attachments: [] }),
-    chooseAndUploadConversationFile: async () => null,
+    chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
+      attachmentUploadRequests.push({ conversationId, maxFiles });
+      return attachmentUploadResult;
+    },
+    sendConversationMessage: async (operation: SendMessageOperation) => {
+      sentMessages.push(operation);
+      return { status: "retryable", reason: "network", retryAfterMs: 86_400_000 } as const;
+    },
     openConversationFile: async () => ({ opened: true }),
     searchMessages: async () => ({
       results: [{ message: launchMessage }, { message: threadReply }],
@@ -349,6 +375,11 @@ function createHarness(): Harness {
   return {
     client: client as unknown as DesktopApi,
     acknowledgedNotificationActions,
+    sentMessages,
+    attachmentUploadRequests,
+    setAttachmentUploadResult(result) {
+      attachmentUploadResult = result;
+    },
     pushNotificationAction(action) {
       for (const listener of actionListeners) listener(action);
     },
@@ -429,6 +460,94 @@ function parkFocus(): { readonly sentinel: HTMLButtonElement; readonly dispose: 
 }
 
 afterEach(() => cleanup());
+
+describe("composer attachment uploads", () => {
+  it("uses the attachment count when a multi-file message has no text", async () => {
+    const first: Attachment = {
+      id: "30000000-0000-4000-8000-000000000020",
+      messageId: null,
+      uploadedBy: USER_ID,
+      fileName: "planning-notes.txt",
+      contentType: "text/plain",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const second: Attachment = {
+      ...first,
+      id: "30000000-0000-4000-8000-000000000021",
+      fileName: "wireframes.txt",
+    };
+    const harness = await renderWorkspace();
+    harness.setAttachmentUploadResult({ status: "completed", attachments: [first, second] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await screen.findByText("planning-notes.txt");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(harness.sentMessages).toHaveLength(1));
+    expect(harness.sentMessages[0]?.message).toMatchObject({
+      body: "2 attachments",
+      attachmentIds: [first.id, second.id],
+    });
+  });
+
+  it("keeps a batch reserved while the composer remounts on another pane", async () => {
+    let resolveBatch: (result: AttachmentUploadResult) => void = () => undefined;
+    const batch = new Promise<AttachmentUploadResult>((resolve) => {
+      resolveBatch = resolve;
+    });
+    const first: Attachment = {
+      id: "30000000-0000-4000-8000-000000000020",
+      messageId: null,
+      uploadedBy: USER_ID,
+      fileName: "planning-notes.txt",
+      contentType: "text/plain",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    const second: Attachment = {
+      ...first,
+      id: "30000000-0000-4000-8000-000000000021",
+      fileName: "wireframes.txt",
+    };
+    const harness = await renderWorkspace();
+    harness.setAttachmentUploadResult(batch);
+
+    fireEvent.change(channelComposer(), { target: { value: "Files are on the way" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+
+    await waitFor(() =>
+      expect(harness.attachmentUploadRequests).toEqual([
+        { conversationId: GENERAL_ID, maxFiles: 10 },
+      ]),
+    );
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    await screen.findByRole("textbox", { name: "Message" });
+
+    expect(screen.getByRole("button", { name: "Attach files" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    expect(harness.attachmentUploadRequests).toHaveLength(1);
+
+    await act(async () => {
+      resolveBatch({ status: "completed", attachments: [first, second] });
+    });
+
+    await screen.findByText("planning-notes.txt");
+    expect(screen.getByText("wireframes.txt")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Attach files" }).hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+  });
+});
 
 describe("main composer focus on conversation changes", () => {
   it("focuses the composer when the user switches conversations", async () => {

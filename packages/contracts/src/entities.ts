@@ -204,9 +204,13 @@ export const conversationMembershipSchema = z
   .strict();
 
 export const messageBodyFormatSchema = z.literal("hype_comms_markdown_v1");
+
+/** Longest message body the server accepts; composers cap their input at the same length. */
+export const MESSAGE_BODY_MAX_LENGTH = 4_000;
+
 export const messageBodySchema = z
   .string()
-  .max(4_000)
+  .max(MESSAGE_BODY_MAX_LENGTH)
   .refine((body) => body.trim().length > 0, "Message body cannot be blank")
   .refine((body) => !body.includes("\0"), "Message body cannot contain NUL bytes");
 

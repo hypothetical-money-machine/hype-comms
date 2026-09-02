@@ -92,6 +92,21 @@ describe("ElectronNotificationPresenter", () => {
     });
   });
 
+  it("passes the trusted application icon path to Electron", () => {
+    const presenter = new ElectronNotificationPresenter(
+      electronConstructor(),
+      "/opt/hype-comms/resources/hype-comms-icon.png",
+    );
+
+    presenter.present(PRESENTATION, callbacks());
+
+    expect(FakeElectronNotification.instances[0]?.options).toEqual({
+      title: "Morgan",
+      body: "engineering",
+      icon: "/opt/hype-comms/resources/hype-comms-icon.png",
+    });
+  });
+
   it("reports asynchronous native failure without carrying its error string", () => {
     const presenter = new ElectronNotificationPresenter(electronConstructor());
     const listeners = callbacks();

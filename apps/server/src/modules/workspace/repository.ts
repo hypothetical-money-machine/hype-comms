@@ -148,6 +148,8 @@ import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channel
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
+const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
+const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 const TASK_RANK_STEP = 1_024n;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -270,6 +272,15 @@ interface AttachmentRow extends QueryResultRow {
   content_received_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface UploadAttachmentRow extends AttachmentRow {
+  upload_expired: boolean;
+}
+
+interface ExpiredAttachmentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
 }
 
 interface ReadableAttachmentRow extends AttachmentRow {
@@ -423,6 +434,12 @@ export interface WorkspaceRepositoryHooks {
   readonly afterRemoveChannelMemberConversationLocked?: () => Promise<void>;
   /** Local or remote object bytes for staged attachments. */
   readonly attachmentStore?: AttachmentStore;
+}
+
+export interface AttachmentCleanupFailure {
+  readonly attachmentId: string;
+  readonly workspaceId: string;
+  readonly error: unknown;
 }
 
 export interface AnnouncementAuditRecord {
@@ -2690,13 +2707,15 @@ export class WorkspaceRepository {
           responseSchema: createFileUploadResponseSchema,
         },
         async () => {
-          const expiresAt = new Date(Date.now() + ATTACHMENT_UPLOAD_TTL_MS).toISOString();
           const inserted = await client.query<AttachmentRow>(
             `INSERT INTO attachments (
                id, workspace_id, conversation_id, uploaded_by, file_name, content_type,
                size_bytes, content_sha256, status, upload_expires_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+             VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, 'pending',
+               clock_timestamp() + ($9::bigint * interval '1 millisecond')
+             )
              RETURNING *`,
             [
               randomUUID(),
@@ -2707,14 +2726,17 @@ export class WorkspaceRepository {
               contentType,
               input.sizeBytes,
               sha256Buffer(input.contentSha256),
-              expiresAt,
+              ATTACHMENT_UPLOAD_TTL_MS,
             ],
           );
           const row = inserted.rows[0];
           if (row === undefined) throw new Error("Attachment insert returned no row");
+          if (row.upload_expires_at === null) {
+            throw new Error("Attachment upload was created without an expiry");
+          }
           return createFileUploadResponseSchema.parse({
             attachment: mapAttachment(row),
-            expiresAt,
+            expiresAt: iso(row.upload_expires_at),
           });
         },
       );
@@ -2731,8 +2753,9 @@ export class WorkspaceRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const locked = await client.query<AttachmentRow>(
-        `SELECT *
+      const locked = await client.query<UploadAttachmentRow>(
+        `SELECT *,
+                coalesce(upload_expires_at <= clock_timestamp(), true) AS upload_expired
            FROM attachments
           WHERE id = $1
             AND workspace_id = $2
@@ -2746,10 +2769,7 @@ export class WorkspaceRepository {
       if (row.status !== "pending") {
         throw new ApiError(409, "CONFLICT", "This upload can no longer receive content");
       }
-      if (
-        row.upload_expires_at !== null &&
-        new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
-      ) {
+      if (row.upload_expired) {
         throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
       }
       if (row.content_type !== contentType.trim()) {
@@ -2797,8 +2817,9 @@ export class WorkspaceRepository {
           responseSchema: completeFileUploadResponseSchema,
         },
         async () => {
-          const locked = await client.query<AttachmentRow>(
-            `SELECT *
+          const locked = await client.query<UploadAttachmentRow>(
+            `SELECT *,
+                    coalesce(upload_expires_at <= clock_timestamp(), true) AS upload_expired
                FROM attachments
               WHERE id = $1
                 AND workspace_id = $2
@@ -2815,10 +2836,7 @@ export class WorkspaceRepository {
           if (row.status !== "pending") {
             throw new ApiError(409, "CONFLICT", "This upload can no longer be completed");
           }
-          if (
-            row.upload_expires_at !== null &&
-            new Date(iso(row.upload_expires_at)).getTime() <= Date.now()
-          ) {
+          if (row.upload_expired) {
             throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
           }
           if (row.content_received_at === null) {
@@ -4751,7 +4769,7 @@ export class WorkspaceRepository {
     return { status: "valid" };
   }
 
-  async deleteExpiredState(): Promise<void> {
+  async deleteExpiredState(): Promise<readonly AttachmentCleanupFailure[]> {
     await this.pool.query(
       `DELETE FROM sync_events
         WHERE created_at < clock_timestamp() - make_interval(days => $1)`,
@@ -4761,6 +4779,74 @@ export class WorkspaceRepository {
       `DELETE FROM realtime_tickets
         WHERE expires_at < clock_timestamp() - interval '1 hour'`,
     );
+    return [
+      ...(await this.#deleteExpiredAttachments("pending")),
+      ...(await this.#deleteExpiredAttachments("unclaimed-ready")),
+    ];
+  }
+
+  async #deleteExpiredAttachments(
+    kind: "pending" | "unclaimed-ready",
+  ): Promise<AttachmentCleanupFailure[]> {
+    const store = this.hooks.attachmentStore;
+    if (store === undefined) return [];
+
+    const failures: AttachmentCleanupFailure[] = [];
+
+    while (true) {
+      const batch = await this.#transaction(async (client) => {
+        const expired =
+          kind === "pending"
+            ? await client.query<ExpiredAttachmentRow>(
+                `SELECT id, workspace_id
+                   FROM attachments
+                  WHERE status = 'pending'
+                    AND upload_expires_at <= clock_timestamp()
+                  ORDER BY upload_expires_at, id
+                  LIMIT $1
+                  FOR UPDATE SKIP LOCKED`,
+                [ATTACHMENT_CLEANUP_BATCH_SIZE],
+              )
+            : await client.query<ExpiredAttachmentRow>(
+                `SELECT id, workspace_id
+                   FROM attachments
+                  WHERE status = 'ready'
+                    AND message_id IS NULL
+                    AND content_received_at <= clock_timestamp() - make_interval(secs => $1)
+                  ORDER BY content_received_at, id
+                  LIMIT $2
+                  FOR UPDATE SKIP LOCKED`,
+                [UNCLAIMED_READY_ATTACHMENT_RETENTION_MS / 1_000, ATTACHMENT_CLEANUP_BATCH_SIZE],
+              );
+        if (expired.rows.length === 0) {
+          return { deleted: 0, selected: 0, failures: [] satisfies AttachmentCleanupFailure[] };
+        }
+
+        const deleted: string[] = [];
+        const batchFailures: AttachmentCleanupFailure[] = [];
+        for (const attachment of expired.rows) {
+          try {
+            // Keep the row until byte removal succeeds, so a later pass can retry safely.
+            await store.remove(attachment.workspace_id, attachment.id);
+            deleted.push(attachment.id);
+          } catch (error) {
+            batchFailures.push({
+              attachmentId: attachment.id,
+              workspaceId: attachment.workspace_id,
+              error,
+            });
+          }
+        }
+        if (deleted.length > 0) {
+          await client.query("DELETE FROM attachments WHERE id = ANY($1::uuid[])", [deleted]);
+        }
+        return { deleted: deleted.length, selected: expired.rows.length, failures: batchFailures };
+      });
+      failures.push(...batch.failures);
+      if (batch.selected < ATTACHMENT_CLEANUP_BATCH_SIZE || batch.deleted === 0) {
+        return failures;
+      }
+    }
   }
 
   async #members(client: PoolClient, workspaceId: string) {

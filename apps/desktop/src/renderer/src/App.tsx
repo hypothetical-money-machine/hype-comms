@@ -32,6 +32,7 @@ import { AiChannel } from "./ai-channel";
 import { AgentEnrollmentsView } from "./agent-enrollments-view";
 import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
+import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { BUILT_IN_AUTHOR_NAME, isBuiltInConversation } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
@@ -98,6 +99,10 @@ type WorkspaceDestination =
   "workspace" | "ai" | "unreads" | "admin" | "preferences" | "agent-enrollments";
 type NavigationGuard = (validateDiscard?: () => boolean) => boolean | Promise<boolean>;
 
+interface AttachmentUploadReservation {
+  readonly generation: number;
+}
+
 interface AppProps {
   readonly client: DesktopApi;
   readonly theme: ThemeRuntime;
@@ -121,6 +126,11 @@ export function recoverableAuthenticatedSession(
   return session.status === "session-unavailable"
     ? (session.lastAuthenticatedSession ?? null)
     : null;
+}
+
+function attachmentUploadScopeKey(session: ChatSessionState): string | null {
+  const context = recoverableAuthenticatedSession(session);
+  return context === null ? null : `${context.userId}:${context.workspaceId}`;
 }
 
 function messageTime(value: string): string {
@@ -325,9 +335,7 @@ export function SignIn({
   return (
     <main className="signin-shell">
       <section className="signin-card">
-        <div className="brand-mark" aria-hidden="true">
-          H
-        </div>
+        <BrandMark className="brand-mark" label="Hype Comms" />
         <p className="eyebrow">Hypothetical Money Machine</p>
         <h1>Private workspace chat</h1>
         <p className="signin-lede">Sign in with the email address invited to this workspace.</p>
@@ -711,6 +719,33 @@ function isTextEntryControl(element: Element): boolean {
 // blocker cleared by a background event (snapshot reload trimming the thread, a reconnect
 // re-enabling the composer) minutes after the navigation must not move focus.
 const FOCUS_INTENT_TTL_MS = 15_000;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1_000;
+
+function attachmentOnlyMessageBody(attachments: readonly Attachment[]): string {
+  if (attachments.length === 0) return "";
+  if (attachments.length === 1) return attachments[0]?.fileName ?? "";
+  return `${String(attachments.length)} attachments`;
+}
+
+function withAttachmentUploadTimeout<T>(operation: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(
+      () => finish(() => reject(new Error("Attaching files timed out. You can try again."))),
+      ATTACHMENT_UPLOAD_TIMEOUT_MS,
+    );
+    void operation.then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
 
 export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosition }: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
@@ -736,6 +771,12 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
   const [pendingAttachments, setPendingAttachments] = useState<
     Readonly<Record<string, readonly Attachment[]>>
   >({});
+  const [attachingComposerKeys, setAttachingComposerKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const attachmentUploadReservations = useRef(new Map<string, AttachmentUploadReservation>());
+  const attachmentUploadGeneration = useRef(0);
+  const attachmentUploadScope = useRef<string | null>(null);
   const [destination, setDestination] = useState<WorkspaceDestination>("workspace");
   const preferencesPage = useRef<PreferencesPageHandle>(null);
   const requestPreferencesNavigationRef = useRef<NavigationGuard>(() => true);
@@ -942,6 +983,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
 
   const applySession = useCallback(
     (next: ChatSessionState) => {
+      const nextAttachmentUploadScope = attachmentUploadScopeKey(next);
+      if (attachmentUploadScope.current !== nextAttachmentUploadScope) {
+        attachmentUploadScope.current = nextAttachmentUploadScope;
+        attachmentUploadGeneration.current += 1;
+        attachmentUploadReservations.current.clear();
+        setAttachingComposerKeys(new Set());
+        setPendingAttachments({});
+      }
       setSession(next);
       if (next.status === "signed-in" && next.method === "email") {
         void startWorkspaceSession(next);
@@ -1693,12 +1742,17 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     runtimeState.selectedConversationId === null
       ? []
       : (pendingAttachments[runtimeState.selectedConversationId] ?? []);
+  const composerAttachmentUploadInProgress =
+    runtimeState.selectedConversationId !== null &&
+    attachingComposerKeys.has(runtimeState.selectedConversationId);
   const threadComposerKey =
     runtimeState.selectedConversationId === null || selectedThreadRootId === null
       ? null
       : `${runtimeState.selectedConversationId}:${selectedThreadRootId}`;
   const threadComposerAttachments =
     threadComposerKey === null ? [] : (pendingAttachments[threadComposerKey] ?? []);
+  const threadAttachmentUploadInProgress =
+    threadComposerKey !== null && attachingComposerKeys.has(threadComposerKey);
 
   const replacePendingAttachments = (
     key: string,
@@ -1710,28 +1764,73 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     }));
   };
 
+  const beginAttachmentUpload = (key: string): AttachmentUploadReservation | null => {
+    const reservations = attachmentUploadReservations.current;
+    if (reservations.has(key)) return null;
+    const reservation = { generation: attachmentUploadGeneration.current };
+    reservations.set(key, reservation);
+    setAttachingComposerKeys(new Set(reservations.keys()));
+    return reservation;
+  };
+
+  const finishAttachmentUpload = (key: string, reservation: AttachmentUploadReservation): void => {
+    const reservations = attachmentUploadReservations.current;
+    if (reservations.get(key) !== reservation) return;
+    reservations.delete(key);
+    setAttachingComposerKeys(new Set(reservations.keys()));
+  };
+
   const attachToComposer = async (key: string): Promise<void> => {
     const conversationId = runtimeState.selectedConversationId;
     if (conversationId === null) return;
     const current = pendingAttachments[key] ?? [];
-    if (current.length >= ATTACHMENTS_PER_MESSAGE_MAX) {
-      setComposerError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
-      return;
-    }
-    try {
-      const attachment = await runtime.attachFile(conversationId);
-      if (attachment === null) return;
-      replacePendingAttachments(key, (pending) =>
-        pending.some((existing) => existing.id === attachment.id)
-          ? pending
-          : [...pending, attachment].slice(0, ATTACHMENTS_PER_MESSAGE_MAX),
-      );
-      setComposerError("");
-      setThreadComposerError("");
-    } catch (error) {
-      const message = ipcErrorMessage(error, "Could not attach the file");
+    const remainingFiles = ATTACHMENTS_PER_MESSAGE_MAX - current.length;
+    const setAttachmentError = (message: string): void => {
       if (key === conversationId) setComposerError(message);
       else setThreadComposerError(message);
+    };
+    if (remainingFiles <= 0) {
+      setAttachmentError(`You can attach up to ${String(ATTACHMENTS_PER_MESSAGE_MAX)} files`);
+      return;
+    }
+    const reservation = beginAttachmentUpload(key);
+    if (reservation === null) return;
+    try {
+      const result = await withAttachmentUploadTimeout(
+        runtime.attachFiles(conversationId, remainingFiles),
+      );
+      if (reservation.generation !== attachmentUploadGeneration.current) return;
+      if (result.status === "cancelled") return;
+      if (result.status === "completed" || result.status === "partial") {
+        replacePendingAttachments(key, (pending) => {
+          const existingIds = new Set(pending.map((attachment) => attachment.id));
+          const available = Math.max(ATTACHMENTS_PER_MESSAGE_MAX - pending.length, 0);
+          return [
+            ...pending,
+            ...result.attachments
+              .filter((attachment) => !existingIds.has(attachment.id))
+              .slice(0, available),
+          ];
+        });
+      }
+      if (result.status === "completed") {
+        setComposerError("");
+        setThreadComposerError("");
+      } else if (result.status === "partial") {
+        setAttachmentError(result.message);
+      } else if (result.reason === "selection_limit") {
+        setAttachmentError(
+          `You can select up to ${String(remainingFiles)} ${remainingFiles === 1 ? "file" : "files"}`,
+        );
+      } else {
+        setAttachmentError(result.message);
+      }
+    } catch (error) {
+      if (reservation.generation !== attachmentUploadGeneration.current) return;
+      const message = ipcErrorMessage(error, "Could not attach the file");
+      setAttachmentError(message);
+    } finally {
+      finishAttachmentUpload(key, reservation);
     }
   };
 
@@ -1739,8 +1838,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     const submittedDraft = draft;
     const conversationId = runtimeState.selectedConversationId;
     const attachments = conversationId === null ? [] : (pendingAttachments[conversationId] ?? []);
-    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
-    if (body === "" || conversationId === null || bootstrap === null) return;
+    const body = submittedDraft.trim() || attachmentOnlyMessageBody(attachments);
+    if (
+      body === "" ||
+      conversationId === null ||
+      attachmentUploadReservations.current.has(conversationId) ||
+      bootstrap === null
+    ) {
+      return;
+    }
     const mentionedUserIds = mentionedMemberIds(
       body,
       bootstrap.members,
@@ -1800,8 +1906,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     const key =
       conversationId === null || threadRootId === null ? null : `${conversationId}:${threadRootId}`;
     const attachments = key === null ? [] : (pendingAttachments[key] ?? []);
-    const body = submittedDraft.trim() || attachments[0]?.fileName || "";
-    if (body === "" || conversationId === null || threadRootId === null || bootstrap === null) {
+    const body = submittedDraft.trim() || attachmentOnlyMessageBody(attachments);
+    if (
+      body === "" ||
+      conversationId === null ||
+      threadRootId === null ||
+      (key !== null && attachmentUploadReservations.current.has(key)) ||
+      bootstrap === null
+    ) {
       return;
     }
     const mentionedUserIds = mentionedMemberIds(
@@ -2037,7 +2149,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         aria-label="Workspace"
         {...chrome.chromeProps}
       >
-        <div className="workspace-mark">H</div>
+        <BrandMark className="workspace-mark" label="Hype Comms" />
       </aside>
 
       <aside
@@ -2492,9 +2604,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 pendingAttachments={composerAttachments}
                 disabled={false}
                 attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
+                attachmentUploadInProgress={composerAttachmentUploadInProgress}
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
+                platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
@@ -2687,11 +2801,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 pendingAttachments={composerAttachments}
                 disabled={selectedSummary === undefined}
                 attachDisabled={composerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
+                attachmentUploadInProgress={composerAttachmentUploadInProgress}
                 error={composerError}
                 inputLabel={selectedIsAnnouncement ? "Bulletin" : "Message"}
                 inputRef={attachComposerInput}
                 members={selectedConversationMembers}
                 currentUserId={currentUserId}
+                platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
@@ -2895,12 +3011,14 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               pendingAttachments={threadComposerAttachments}
               disabled={threadRoot === undefined}
               attachDisabled={threadComposerAttachments.length >= ATTACHMENTS_PER_MESSAGE_MAX}
+              attachmentUploadInProgress={threadAttachmentUploadInProgress}
               error={threadComposerError}
               inputId="thread-message-composer"
               inputLabel="Reply"
               inputRef={attachThreadComposerInput}
               members={selectedConversationMembers}
               currentUserId={currentUserId}
+              platform={client.platform}
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"

@@ -16,6 +16,7 @@ import {
   resolveExpectedAgentWakePackageEvidence,
   verifyAgentWakeBuild,
   verifyAgentWakeUpdateIsolation,
+  verifyApplicationIcon,
   verifyPackageEntries,
   verifyPackageMetadata,
   verifyPackagedApiOrigin,
@@ -113,6 +114,33 @@ test("requires the Codex worker without allowing bundled Codex packages or execu
       /contains a bundled Codex executable/u,
     );
   }
+});
+
+test("requires the packaged runtime icon to match the application icon source", async () => {
+  const asarPath = path.join("tmp", "Hype Comms", "resources", "app.asar");
+  const sourceIconPath = path.join("workspace", "apps", "desktop", "build", "icon.png");
+  const expectedIcon = Buffer.from("hype-comms-icon");
+  const requestedPaths = [];
+  const readMatchingIcon = async (filePath) => {
+    requestedPaths.push(filePath);
+    return expectedIcon;
+  };
+
+  await assert.doesNotReject(() =>
+    verifyApplicationIcon(asarPath, sourceIconPath, readMatchingIcon),
+  );
+  assert.deepEqual(requestedPaths, [
+    sourceIconPath,
+    path.join("tmp", "Hype Comms", "resources", "hype-comms-icon.png"),
+  ]);
+
+  await assert.rejects(
+    () =>
+      verifyApplicationIcon(asarPath, sourceIconPath, async (filePath) =>
+        filePath === sourceIconPath ? expectedIcon : Buffer.from("wrong-icon"),
+      ),
+    /does not match/u,
+  );
 });
 
 test("binds production packages to the configured deployed API origin", () => {
