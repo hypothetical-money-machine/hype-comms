@@ -10,6 +10,7 @@ import type {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   memo,
   useRef,
   useState,
@@ -313,9 +314,12 @@ export function AiChannel({
     };
   }, [applyState, transport]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = textarea.current;
     if (element === null) return;
+    const cursorIsAtEnd =
+      element.selectionStart === element.value.length &&
+      element.selectionEnd === element.value.length;
     element.style.height = "auto";
     const height = Math.min(
       Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
@@ -323,6 +327,10 @@ export function AiChannel({
     );
     element.style.height = `${String(height)}px`;
     element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
+    if (draft === "") element.scrollTop = 0;
+    else if (cursorIsAtEnd && element.scrollHeight > MAX_COMPOSER_HEIGHT) {
+      element.scrollTop = element.scrollHeight;
+    }
   }, [draft]);
 
   useEffect(() => {
