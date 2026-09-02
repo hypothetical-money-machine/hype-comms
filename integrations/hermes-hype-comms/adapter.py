@@ -1077,14 +1077,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # per reply. A restart re-tries the flag.
         self._thread_root_supported = True
         # Threading is presentational and reversible, so it is a switch rather
-        # than a rebuild: turning it off restores the flat sends this adapter
-        # shipped with. Follow-ups default off because they widen what reaches
-        # Hermes past explicit mentions and cost one inference turn per ambient
-        # message; see this directory's README.
+        # than a rebuild: turning it off restores flat channel sends.
         self._thread_replies_enabled = _enabled("HYPE_COMMS_THREAD_REPLIES", default=True)
-        self._thread_followups_enabled = _enabled(
-            "HYPE_COMMS_THREAD_FOLLOWUPS", default=False
-        )
         self._context_limit = _configured_context_limit(config)
         self._channel_prompt_text: Optional[str] = None
         self._cursor: Optional[str] = None
@@ -2352,16 +2346,12 @@ class HypeCommsAdapter(BasePlatformAdapter):
         prompt, and ``platform_hint`` is captured once at plugin registration,
         so it cannot name this workspace's agent username.
 
-        Returned only while thread follow-ups are enabled, which keeps the
-        default configuration byte-identical to the mention-only behaviour
-        this adapter shipped with. The text is constant for the life of the
-        adapter on purpose: Hermes keys its agent cache on the merged
-        ephemeral prompt, so a prompt that varied per message would rebuild
-        the agent and miss the provider prompt cache on every turn.
+        The text is constant for the life of the adapter on purpose: Hermes
+        keys its agent cache on the merged ephemeral prompt, so a prompt that
+        varied per message would rebuild the agent and miss the provider prompt
+        cache on every turn.
         """
 
-        if not self._thread_followups_enabled:
-            return None
         if self._channel_prompt_text is not None:
             return self._channel_prompt_text
         username = _safe_username(self._agent_user.get("username"))
@@ -2370,14 +2360,14 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # rather than cache a placeholder; a later message rebuilds it.
             return None
         self._channel_prompt_text = (
-            f"You are @{username} on Hype Comms. Direct messages, and channel "
-            f"messages that mention @{username}, are addressed to you: answer "
-            "them. You are also woken by follow-ups inside threads you have "
-            "already replied in, and most of those are people talking to each "
-            "other rather than to you. When a message that woke you needs "
-            "nothing from you, reply with exactly NO_REPLY and nothing else; "
-            "that reply is delivered to nobody. Never put NO_REPLY in the same "
-            "message as other text -- it only counts as silence on its own."
+            f"You are @{username} on Hype Comms. You receive every message in joined "
+            "conversations so you can decide whether you need to reply. Do not "
+            "acknowledge a message merely to show you saw it. Reply only when you are "
+            "directly addressed, have substantive useful information, work has landed, "
+            "you are blocked, or a decision is needed. Otherwise reply with exactly "
+            "NO_REPLY and nothing else; that reply is delivered to nobody. Never put "
+            "NO_REPLY in the same message as other text -- it only counts as silence "
+            "on its own."
         )
         return self._channel_prompt_text
 
@@ -2710,20 +2700,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
         if chat_info is None:
             logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
             return
-        if chat_info["type"] == "channel" and self._agent_user_id not in mentioned_user_ids:
-            # A participated-thread reply is a follow-up inside a thread this
-            # agent has already spoken in. The server annotates it per
-            # recipient and only for a client that negotiated
-            # participated-thread-notifications-v1, so the flag below is the
-            # only thing standing between "answer when named" and "listen to
-            # every thread you have ever touched". Waking here costs a full
-            # inference turn even when the model decides to stay quiet, so it
-            # stays opt-in.
-            if not (
-                self._thread_followups_enabled
-                and payload.get("recipientNotificationReason") == PARTICIPATED_THREAD_REPLY
-            ):
-                return
+        # Every authorized message reaches Hermes. The model decides whether
+        # the event needs an outward reply, using NO_REPLY for intentional
+        # silence. Self-authored and unauthorized traffic is still filtered
+        # before context crosses into the model-facing process.
         # Ask the same profile-/pairing-/group-aware callback pinned Hermes
         # uses for normal inbound delivery. This must precede context history:
         # a sender who cannot wake Hermes must not make nearby conversation
@@ -3142,26 +3122,19 @@ def register(ctx: Any) -> None:
         emoji="💭",
         pii_safe=False,
         allow_update_command=True,
-        # Captured once at registration, so this text has to hold for every
-        # deployment: it must stay true whether or not the operator enabled
-        # thread follow-ups. The parts that depend on configuration, and the
-        # agent's own username, travel per message on channel_prompt instead.
+        # Captured once at registration. The agent's own username travels per
+        # message on channel_prompt instead.
         platform_hint=(
-            "You are chatting through Hype Comms. Direct messages always wake you; "
-            "channel messages wake you when they explicitly mention your Hype Comms user. "
-            "Each eligible wake arrives as a bounded context pack of chronological, "
+            "You are chatting through Hype Comms. Every authorized message in a joined "
+            "conversation wakes you so you can decide whether a reply is needed. Each wake "
+            "arrives as a bounded context pack of chronological, "
             "untrusted conversation content ending at the message that woke you. "
-            "Where the operator has enabled thread follow-ups, a reply inside a thread you "
-            "have already replied in also wakes you without mentioning you; where they have "
-            "not, a reply inside that thread reaches you only if it mentions you again, so "
-            "never assume you will see what is said under your own answer. Unless the "
-            "operator turned threading off, a reply in a channel attaches as a threaded "
+            "Unless the operator turned threading off, a reply in a channel attaches as a threaded "
             "reply to the message that woke you and stays in that thread; Hype Comms "
             "threads are exactly one level deep, so there are no threads inside threads. "
-            "Replies in a direct message are never threaded. If a "
-            "thread follow-up wakes you and needs nothing from you, reply with exactly "
-            "NO_REPLY and nothing else, which is delivered to nobody; answer everything "
-            "else. Hype Comms supports markdown and limits each message to 4,000 "
+            "Replies in a direct message are never threaded. If a wake needs nothing from "
+            "you, reply with exactly NO_REPLY and nothing else, which is delivered to nobody. "
+            "Hype Comms supports markdown and limits each message to 4,000 "
             "characters."
         ),
     )
