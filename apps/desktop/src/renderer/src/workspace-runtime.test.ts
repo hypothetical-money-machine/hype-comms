@@ -20,6 +20,7 @@ import type {
   CreateChannelOperation,
   CreateTaskOperation,
   DirectConversationRequest,
+  DevicePreferences,
   ListConversationsQuery,
   ListConversationsResponse,
   ListAgentEnrollmentsResponse,
@@ -61,6 +62,7 @@ import type {
   ScopedProductRealtimeEvent,
 } from "@hype-comms/contracts";
 
+import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import type {
   DesktopApi,
   DesktopPlatform,
@@ -1001,6 +1003,7 @@ class FakeDesktopApi implements DesktopApi {
     resolvedColorScheme: "dark",
   };
   readonly initialCompactMode = false;
+  readonly initialDevicePreferences = DEFAULT_DEVICE_PREFERENCES;
   bootstrap: HumanWorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -1234,6 +1237,18 @@ class FakeDesktopApi implements DesktopApi {
 
   onCompactModeChanged(): () => void {
     throw new Error("The runtime test does not observe compact mode");
+  }
+
+  async getDevicePreferences(): Promise<DevicePreferences> {
+    throw new Error("The runtime test does not report device preferences");
+  }
+
+  async updateDevicePreferences(): Promise<DevicePreferences> {
+    throw new Error("The runtime test does not update device preferences");
+  }
+
+  onDevicePreferencesChanged(): () => void {
+    throw new Error("The runtime test does not observe device preferences");
   }
 
   async getAiChannelState(): Promise<AiChannelState> {

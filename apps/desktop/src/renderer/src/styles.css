@@ -3,6 +3,7 @@
      positions, and the slide-out offset all derive from these two values. */
   --rail-width: 68px;
   --sidebar-width: 284px;
+  --conversation-text-size: 1rem;
   /* Comfortable density. Compact mode overrides only these tokens so the same rules
      tighten message, sidebar, and chrome spacing without a second visual language. */
   --density-rail-padding: 14px 13px;
@@ -41,6 +42,22 @@
     sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+html[data-sidebar-width="narrow"] {
+  --sidebar-width: 240px;
+}
+
+html[data-sidebar-width="wide"] {
+  --sidebar-width: 340px;
+}
+
+html[data-message-text-size="small"] {
+  --conversation-text-size: 0.875rem;
+}
+
+html[data-message-text-size="large"] {
+  --conversation-text-size: 1.125rem;
 }
 
 * {
@@ -2177,6 +2194,77 @@ html[data-sidebar-position="right"] .sidebar {
   margin-top: 10px;
 }
 
+.preferences-page .device-preferences-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.preferences-page .device-preference-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 11px;
+  border: 1px solid var(--theme-border-subtle);
+  border-radius: 8px;
+  background: var(--theme-surface-input);
+}
+
+.preferences-page .device-preference-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.preferences-page .device-preference-copy label,
+.preferences-page .device-preference-toggle input {
+  cursor: pointer;
+}
+
+.preferences-page .device-preference-copy strong {
+  color: var(--theme-text-primary);
+  font-size: 12px;
+}
+
+.preferences-page .device-preference-copy small {
+  color: var(--theme-text-subtle);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.preferences-page .device-preference-row select {
+  min-width: 170px;
+  padding: 6px 8px;
+  border: 1px solid var(--theme-border-default);
+  border-radius: 7px;
+  background: var(--theme-surface-elevated);
+  color: var(--theme-text-primary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.preferences-page .device-preference-toggle input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--theme-border-accent);
+}
+
+.preferences-page .device-preference-row select:disabled,
+.preferences-page .device-preference-toggle input:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.preferences-page .device-preference-row[aria-busy="true"] {
+  border-color: var(--theme-border-accent);
+}
+
+.preferences-page .device-preference-error {
+  grid-column: 1 / -1;
+}
+
 .preferences-page .notification-settings {
   display: grid;
   gap: 10px;
@@ -2797,6 +2885,10 @@ html[data-sidebar-position="right"] .sidebar {
   opacity: 1;
 }
 
+html[data-always-show-grouped-message-times="true"] .message-continuation-time {
+  opacity: 1;
+}
+
 .message.search-target {
   margin: 0 -12px;
   padding-right: 12px;
@@ -2892,9 +2984,14 @@ html[data-sidebar-position="right"] .sidebar {
   text-transform: uppercase;
 }
 
+html[data-show-profile-titles="false"] .message-author-title {
+  display: none;
+}
+
 .message .message-body {
   margin: 4px 0 0;
   color: var(--theme-text-primary);
+  font-size: var(--conversation-text-size);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -3994,6 +4091,7 @@ html[data-sidebar-position="right"] .sidebar {
   border: 1px solid var(--theme-border-default);
   border-radius: 9px;
   font: inherit;
+  font-size: var(--conversation-text-size);
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -4494,7 +4592,8 @@ html[data-sidebar-position="right"] .sidebar {
 }
 
 .theme-control-error,
-.compact-mode-control-error {
+.compact-mode-control-error,
+.preferences-page .device-preference-error {
   margin: 0;
   color: var(--theme-text-danger);
   font-size: 10px;
@@ -5774,6 +5873,16 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
     grid-column: 1 / -1;
     justify-content: flex-end;
   }
+}
+
+/* The runtime resolves "system" against prefers-reduced-motion and stamps a concrete value, so
+   this attribute alone covers both an explicit choice and the OS setting. */
+html[data-motion-preference="reduced"] *,
+html[data-motion-preference="reduced"] *::before,
+html[data-motion-preference="reduced"] *::after {
+  scroll-behavior: auto !important;
+  animation: none !important;
+  transition: none !important;
 }
 
 @media (prefers-reduced-motion: no-preference) {
