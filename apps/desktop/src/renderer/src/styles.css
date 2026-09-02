@@ -115,15 +115,14 @@ button {
 
 .brand-mark,
 .workspace-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
+  display: block;
   margin-bottom: 24px;
-  place-items: center;
-  border-radius: 12px;
-  background: var(--theme-gradient-brand);
-  color: var(--theme-text-inverse);
-  font-weight: 900;
+  object-fit: contain;
+}
+
+.brand-mark {
+  width: 72px;
+  height: 72px;
 }
 
 .signin-card h1 {

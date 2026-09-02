@@ -112,6 +112,7 @@ import {
   SafeStorageAuthKitPendingStore,
 } from "./authkit-pending-store";
 import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
+import { resolveApplicationIconPath } from "./application-icon";
 import {
   DeepLinkSignInQueue,
   routeOpenUrlMagicLink,
@@ -249,6 +250,11 @@ configureApplicationIdentity(app, process.platform, {
   desktopName: __HYPE_COMMS_DESKTOP_NAME__,
   isProductionBuild: IS_PRODUCTION_BUILD,
   productName: __HYPE_COMMS_PRODUCT_NAME__,
+});
+const applicationIconPath = resolveApplicationIconPath({
+  appPath: app.getAppPath(),
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
 });
 protectMainProcessLogStreams([process.stdout, process.stderr]);
 
@@ -462,7 +468,7 @@ function createNotificationCapabilitySource(): NotificationCapabilitySource {
 
 function createNotificationPresenter(): NotificationPresenter {
   if (headlessDesktopConfiguration === null) {
-    return new ElectronNotificationPresenter(Notification);
+    return new ElectronNotificationPresenter(Notification, applicationIconPath);
   }
 
   const artifactDirectory = process.env[HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]?.trim() ?? "";
@@ -2245,6 +2251,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     show: false,
     backgroundColor: getThemeDefinition(themeController.state.resolvedThemeId).windowBackground,
     title: __HYPE_COMMS_PRODUCT_NAME__,
+    icon: applicationIconPath,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       additionalArguments: [
@@ -2639,6 +2646,7 @@ if (!hasSingleInstanceLock) {
   void app
     .whenReady()
     .then(async () => {
+      if (process.platform === "darwin") app.dock?.setIcon(applicationIconPath);
       const rendererRoot = path.join(__dirname, "../renderer");
       lockDownSession(session.defaultSession);
       await installBundledRendererProtocol(rendererRoot);
@@ -2905,7 +2913,7 @@ if (!hasSingleInstanceLock) {
         app.hide();
         macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
           configuration: macosNativeNotificationEvidenceConfiguration,
-          presenter: new ElectronNotificationPresenter(Notification),
+          presenter: new ElectronNotificationPresenter(Notification, applicationIconPath),
           requestAuthorization: async () => {
             if (macosNotificationAuthorization === null) return "unknown";
             return macosNotificationAuthorization.request();
