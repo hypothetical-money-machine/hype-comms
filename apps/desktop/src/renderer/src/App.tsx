@@ -33,6 +33,7 @@ import { AgentEnrollmentsView } from "./agent-enrollments-view";
 import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { ChannelCreatePopover } from "./channel-create-popover";
+import { BUILT_IN_AUTHOR_NAME, isBuiltInConversation } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
@@ -461,6 +462,7 @@ export function MessageRow({
   domIdPrefix = "message",
   channelReferences,
   onOpenChannel,
+  builtIn = false,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -480,8 +482,11 @@ export function MessageRow({
   readonly domIdPrefix?: string;
   readonly channelReferences?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
+  /** Bulletins in a built-in channel are authored by the server, which is not a workspace member. */
+  readonly builtIn?: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
+  const authorName = author?.displayName ?? (builtIn ? BUILT_IN_AUTHOR_NAME : "Former member");
   const participantId = message.authorId ?? "former-member";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [retracting, setRetracting] = useState(false);
@@ -500,7 +505,7 @@ export function MessageRow({
       ? "Reply in thread"
       : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
   const threadSummaryLabel = `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
-  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${author?.displayName ?? "Former member"}`;
+  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${authorName}`;
   return (
     <article
       className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
@@ -519,7 +524,7 @@ export function MessageRow({
       )}
       <div>
         <header className={continuation ? "sr-only" : undefined}>
-          <strong>{author?.displayName ?? "Former member"}</strong>
+          <strong>{authorName}</strong>
           {author?.title != null && <span className="message-author-title">{author.title}</span>}
           <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
         </header>
@@ -1024,10 +1029,13 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     selectedSummary.participantIds.length === 1 &&
     selectedSummary.participantIds[0] === bootstrap?.currentUser.user.id;
   const selectedIsAnnouncement = selectedSummary?.conversation.channelMode === "announcement";
+  const selectedIsBuiltIn =
+    selectedSummary !== undefined && isBuiltInConversation(selectedSummary.conversation);
   const tasksAvailable =
     (selectedSummary?.conversation.kind === "channel" && !selectedIsAnnouncement) ||
     selectedIsPersonal === true;
-  const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
+  const canPublishBulletins =
+    selectedIsAnnouncement && !selectedIsBuiltIn && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
     (message) =>
       message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
@@ -1983,9 +1991,15 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
     );
   }
 
-  const channels = bootstrap.conversations.filter(
+  const allChannels = bootstrap.conversations.filter(
     (summary) => summary.conversation.kind === "channel",
   );
+  // Built-in channels are server-owned and get their own sidebar section, so they are kept out of
+  // the member channel list rather than sorted among it.
+  const builtInChannels = allChannels.filter((summary) =>
+    isBuiltInConversation(summary.conversation),
+  );
+  const channels = allChannels.filter((summary) => !isBuiltInConversation(summary.conversation));
   const directMessages = bootstrap.conversations.filter(
     (summary) =>
       summary.conversation.kind === "direct_message" ||
@@ -2179,6 +2193,43 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             </>
           )}
 
+          {builtInChannels.length > 0 && (
+            <>
+              <div className="nav-heading">
+                <span>Built-in</span>
+              </div>
+              {builtInChannels.map((summary) => (
+                <button
+                  className={
+                    destination === "workspace" &&
+                    summary.conversation.id === runtimeState.selectedConversationId
+                      ? "conversation active"
+                      : "conversation"
+                  }
+                  type="button"
+                  key={summary.conversation.id}
+                  onClick={() => selectConversation(summary.conversation.id)}
+                >
+                  <span
+                    className="conversation-label conversation-label-channel"
+                    title={summary.conversation.name ?? undefined}
+                  >
+                    <ChannelIcon
+                      access={summary.conversation.access}
+                      channelMode={summary.conversation.channelMode}
+                    />
+                    <span className="conversation-label-text">{summary.conversation.name}</span>
+                  </span>
+                  <span className="built-in-channel-badge">Built-in</span>
+                  <ConversationBadge
+                    unreadCount={summary.unreadCount}
+                    mentionCount={summary.mentionCount}
+                  />
+                </button>
+              ))}
+            </>
+          )}
+
           <div className="nav-heading">
             <span>Channels</span>
             <ChannelCreatePopover
@@ -2338,7 +2389,9 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               )}
             {selectedIsAnnouncement && (
               <p className="announcement-participation">
-                Workspace owners post bulletins. Members can reply in threads and react.
+                {selectedIsBuiltIn
+                  ? "Hype Comms posts release notes here. Everyone can reply in threads and react."
+                  : "Workspace owners post bulletins. Members can reply in threads and react."}
               </p>
             )}
             <ConversationHealth
@@ -2399,6 +2452,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                         : "Everyone"}
                   </button>
                   {selectedSummary.conversation.slug !== "general" &&
+                    !selectedIsBuiltIn &&
                     !selectedSummary.conversation.isArchived &&
                     bootstrap.currentUser.role === "owner" && (
                       <button
@@ -2429,7 +2483,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             {selectedSummary.conversation.isArchived === true ? (
               <ArchivedConversationNotice />
             ) : selectedIsAnnouncement && !canPublishBulletins ? (
-              <AnnouncementPostingNotice />
+              <AnnouncementPostingNotice builtIn={selectedIsBuiltIn} />
             ) : (
               <MessageComposer
                 contextKey={selectedSummary.conversation.id}
@@ -2538,6 +2592,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <MessageRow
                       message={message}
                       members={bootstrap.members}
+                      builtIn={selectedIsBuiltIn}
                       reactions={reactionsByMessage.get(message.id) ?? []}
                       attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
@@ -2621,7 +2676,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
             {selectedSummary?.conversation.isArchived === true ? (
               <ArchivedConversationNotice />
             ) : selectedIsAnnouncement && !canPublishBulletins ? (
-              <AnnouncementPostingNotice />
+              <AnnouncementPostingNotice builtIn={selectedIsBuiltIn} />
             ) : (
               <MessageComposer
                 contextKey={runtimeState.selectedConversationId ?? undefined}
@@ -2708,6 +2763,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 <MessageRow
                   message={threadRoot}
                   members={bootstrap.members}
+                  builtIn={selectedIsBuiltIn}
                   reactions={reactionsByMessage.get(threadRoot.id) ?? []}
                   attachments={attachmentsByMessage.get(threadRoot.id) ?? []}
                   currentUserId={currentUserId}
@@ -2748,6 +2804,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <MessageRow
                       message={message}
                       members={bootstrap.members}
+                      builtIn={selectedIsBuiltIn}
                       reactions={reactionsByMessage.get(message.id) ?? []}
                       attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}

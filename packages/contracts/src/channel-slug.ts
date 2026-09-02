@@ -55,3 +55,27 @@ export function channelSlugFromName(name: string): string {
 
   return output.slice(0, CHANNEL_SLUG_MAX_CODE_POINTS).join("").replace(/-$/u, "");
 }
+
+/** Reserved prefix for server-owned built-in channels. */
+export const SYSTEM_CHANNEL_SLUG_PREFIX = "hype/";
+
+/**
+ * The slug of a server-owned built-in channel: the reserved prefix plus a valid channel slug.
+ *
+ * `/` cannot appear in `channelSlugSchema`, so the built-in namespace can never collide with a
+ * slug a member is able to create.
+ */
+export const systemChannelSlugSchema = z
+  .string()
+  .refine((value) => value.startsWith(SYSTEM_CHANNEL_SLUG_PREFIX), {
+    message: "System channel slug must begin with the reserved prefix",
+  })
+  .refine(
+    (value) => channelSlugSchema.safeParse(value.slice(SYSTEM_CHANNEL_SLUG_PREFIX.length)).success,
+    { message: "System channel slug must end with a valid channel slug" },
+  );
+
+/** Whether a stored slug names a server-owned built-in channel. */
+export function isSystemChannelSlug(slug: string | null | undefined): boolean {
+  return typeof slug === "string" && slug.startsWith(SYSTEM_CHANNEL_SLUG_PREFIX);
+}

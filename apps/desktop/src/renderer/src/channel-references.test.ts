@@ -147,4 +147,12 @@ describe("segmentMessageBody", () => {
   it("returns the body untouched when no channels are visible", () => {
     expect(segmentMessageBody("#general", [])).toEqual([{ kind: "text", text: "#general" }]);
   });
+
+  it("never links a built-in channel, whose slug is outside the reference grammar", () => {
+    const builtIn = [{ conversationId: GENERAL_ID, slug: "hype/release-notes" }];
+    expect(segmentMessageBody("#hype/release-notes", builtIn)).toEqual([
+      { kind: "text", text: "#hype/release-notes" },
+    ]);
+    expect(segmentMessageBody("#hype", builtIn)).toEqual([{ kind: "text", text: "#hype" }]);
+  });
 });

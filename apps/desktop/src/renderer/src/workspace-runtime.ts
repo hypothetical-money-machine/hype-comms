@@ -200,8 +200,11 @@ function firstConversation(snapshot: WorkspaceSnapshot): string | null {
 
 /** Matches the server's task target rule for the signed-in human renderer. */
 function isTaskConversation(summary: ConversationSummary, currentUserId: string): boolean {
+  // Announcement channels have no task list: the server rejects the request, so hydrating one
+  // would fail the whole snapshot rather than skip a conversation.
   return (
-    summary.conversation.kind === "channel" ||
+    (summary.conversation.kind === "channel" &&
+      summary.conversation.channelMode !== "announcement") ||
     (summary.conversation.kind === "direct_message" &&
       summary.participantIds.length === 1 &&
       summary.participantIds[0] === currentUserId)

@@ -143,6 +143,8 @@ import {
   insertSyncEventWithSequence,
   nextWorkspaceSequence,
 } from "./sync-events.js";
+import type { SystemBulletin } from "../system-channels/release-notes.js";
+import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
@@ -185,6 +187,7 @@ interface ConversationRow extends QueryResultRow {
   channel_access: "workspace" | "members" | null;
   human_only: boolean;
   channel_mode: "chat" | "announcement" | null;
+  is_system: boolean;
   is_archived: boolean;
   created_by: string | null;
   dm_user_low_id: string | null;
@@ -367,6 +370,7 @@ interface TicketRow extends QueryResultRow {
   ephemeral_activity: boolean;
   group_direct_messages: boolean;
   humans_only_channels: boolean;
+  system_channels: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -405,6 +409,8 @@ export interface WorkspaceRepositoryHooks {
   readonly announcementChannelsEnabled?: boolean;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly humansOnlyChannelsEnabled?: boolean;
+  /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
+  readonly systemChannelsEnabled?: boolean;
   /** Structured operational record; message bodies are deliberately never included. */
   readonly onAnnouncementAudit?: (record: AnnouncementAuditRecord) => void;
   /** Test seam for holding the message-delivery conversation lock. */
@@ -444,6 +450,7 @@ export interface WorkspacePrincipal {
   readonly ephemeralActivity?: boolean;
   readonly groupDirectMessages?: boolean;
   readonly humansOnlyChannels?: boolean;
+  readonly systemChannels?: boolean;
 }
 
 export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
@@ -494,6 +501,9 @@ function mapConversation(row: ConversationRow): Conversation {
     topic: row.topic,
     access: row.human_only ? "humans" : row.channel_access,
     channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
+    // Emitted only for built-in channels: the key is absent, never false, so payloads for ordinary
+    // channels stay byte-identical for clients whose schema predates built-in channels.
+    ...(row.is_system ? { isBuiltIn: true as const } : {}),
     isArchived: row.is_archived,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
@@ -512,6 +522,9 @@ function mapStoredConversation(row: ConversationRow): Conversation {
     topic: row.topic,
     access: row.channel_access,
     channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
+    // Emitted only for built-in channels: the key is absent, never false, so payloads for ordinary
+    // channels stay byte-identical for clients whose schema predates built-in channels.
+    ...(row.is_system ? { isBuiltIn: true as const } : {}),
     isArchived: row.is_archived,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
@@ -1025,6 +1038,10 @@ export class WorkspaceRepository {
     return this.hooks.humansOnlyChannelsEnabled ?? false;
   }
 
+  get systemChannelsEnabled(): boolean {
+    return this.hooks.systemChannelsEnabled ?? false;
+  }
+
   /** Persist the one-way cutover before this process begins serving default-agency traffic. */
   async enableDefaultAgentAgency(): Promise<void> {
     await this.pool.query(
@@ -1037,6 +1054,7 @@ export class WorkspaceRepository {
   async bootstrap(
     identity: AuthenticatedIdentity,
     includeGroupDirectMessages = true,
+    includeSystemChannels = false,
   ): Promise<WorkspaceBootstrapResponse> {
     if (this.announcementChannelsEnabled) {
       await this.pool.query(
@@ -1077,6 +1095,7 @@ export class WorkspaceRepository {
           null,
           CONVERSATION_PAGE_DEFAULT_LIMIT,
           includeGroupDirectMessages,
+          includeSystemChannels,
         );
         return workspaceBootstrapResponseSchema.parse({
           currentUser: identity.currentUser,
@@ -1463,6 +1482,7 @@ export class WorkspaceRepository {
     after: string | undefined,
     limit: number,
     includeGroupDirectMessages = true,
+    includeSystemChannels = false,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
     const client = await this.pool.connect();
@@ -1473,6 +1493,7 @@ export class WorkspaceRepository {
         anchorId,
         limit,
         includeGroupDirectMessages,
+        includeSystemChannels,
       );
       return listConversationsResponseSchema.parse({
         conversations: page.conversations,
@@ -1515,6 +1536,7 @@ export class WorkspaceRepository {
           AND conversation.kind = 'channel'
           AND conversation.channel_access = 'workspace'
           AND conversation.is_archived = false
+          AND NOT conversation.is_system
           AND (
             $3::uuid IS NULL
             OR (
@@ -1528,6 +1550,7 @@ export class WorkspaceRepository {
                  AND anchor.workspace_id = $1
                  AND anchor.kind = 'channel'
                  AND anchor.channel_access = 'workspace'
+                 AND NOT anchor.is_system
             )
           )
         ORDER BY lower(conversation.name), conversation.created_at, conversation.id
@@ -1908,6 +1931,228 @@ export class WorkspaceRepository {
     });
   }
 
+  /**
+   * Create each built-in channel a workspace is missing and post any release notes it has not
+   * received yet.
+   *
+   * This is the "auditable service publisher" path: it is deliberately unreachable from any route,
+   * so the human-owner bulletin gate in {@link sendMessage} stays the only way an API request can
+   * publish. Every channel and bulletin it writes is reported through the announcement audit hook
+   * under the system publisher's own user id.
+   *
+   * Seeding is idempotent across restarts and concurrent nodes: `system_bulletins` claims each
+   * (workspace, channel, bulletin) exactly once, and channel creation relies on the slug's unique
+   * index. Failures are reported per workspace and never abort the remaining work.
+   */
+  async seedSystemChannels(
+    definitions: readonly BuiltInChannelDefinition[],
+    onError?: (error: unknown, context: { workspaceId: string; slug: string }) => void,
+  ): Promise<void> {
+    if (definitions.length === 0) return;
+    const workspaces = await this.pool.query<{ id: string } & QueryResultRow>(
+      `SELECT id FROM workspaces ORDER BY id`,
+    );
+    if (workspaces.rows.length === 0) return;
+
+    const bulletinsBySlug = new Map<string, readonly SystemBulletin[]>();
+    for (const definition of definitions) {
+      bulletinsBySlug.set(definition.slug, await definition.loadBulletins());
+    }
+
+    for (const workspace of workspaces.rows) {
+      if (!(await this.#systemChannelsAvailable(workspace.id))) continue;
+      for (const definition of definitions) {
+        try {
+          const conversation = await this.#ensureSystemChannel(workspace.id, definition);
+          for (const bulletin of bulletinsBySlug.get(definition.slug) ?? []) {
+            await this.#publishSystemBulletin(conversation, definition.slug, bulletin);
+          }
+        } catch (error) {
+          onError?.(error, { workspaceId: workspace.id, slug: definition.slug });
+        }
+      }
+    }
+  }
+
+  /**
+   * Request and read the one-way built-in channel cutover for a workspace.
+   *
+   * Unlike the announcement and humans-only helpers this takes no row lock: the seeder must lock a
+   * conversation before the workspace row to match message delivery's order, so locking the
+   * workspace first here could deadlock against a member replying in the same channel. The flip is
+   * an idempotent one-way UPDATE, so an unlocked read is sufficient.
+   *
+   * Announcement availability is flipped alongside it. A built-in channel is an announcement
+   * channel, so a workspace that can hold one must already be able to represent announcement mode
+   * in its stored events.
+   */
+  async #systemChannelsAvailable(workspaceId: string): Promise<boolean> {
+    if (this.systemChannelsEnabled) {
+      await this.pool.query(
+        `UPDATE workspaces
+            SET system_channels_available = true,
+                announcement_channels_available = true
+          WHERE id = $1
+            AND (system_channels_available = false OR announcement_channels_available = false)`,
+        [workspaceId],
+      );
+    }
+    const result = await this.pool.query<{ system_channels_available: boolean } & QueryResultRow>(
+      `SELECT system_channels_available FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    );
+    return result.rows[0]?.system_channels_available ?? false;
+  }
+
+  async #ensureSystemChannel(
+    workspaceId: string,
+    definition: BuiltInChannelDefinition,
+  ): Promise<ConversationRow> {
+    return this.#transaction(async (client) => {
+      // The publisher needs a membership row because messages.author_id references one. It stays
+      // `invited` so it never occupies an active seat, never appears in the member directory, and
+      // never joins an event audience.
+      await client.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'invited')
+         ON CONFLICT (workspace_id, user_id) DO NOTHING`,
+        [workspaceId, SYSTEM_USER_ID],
+      );
+      const created = await client.query<ConversationRow>(
+        `INSERT INTO conversations
+           (id, workspace_id, kind, name, slug, topic, channel_access, channel_mode, is_system,
+            created_by)
+         VALUES ($1, $2, 'channel', $3, $4, $5, 'workspace', 'announcement', true, $6)
+         ON CONFLICT (workspace_id, slug) DO NOTHING
+         RETURNING *`,
+        [
+          randomUUID(),
+          workspaceId,
+          definition.name,
+          definition.slug,
+          definition.topic,
+          SYSTEM_USER_ID,
+        ],
+      );
+      const row = created.rows[0];
+      if (row === undefined) {
+        const existing = await client.query<ConversationRow>(
+          `SELECT * FROM conversations WHERE workspace_id = $1 AND slug = $2`,
+          [workspaceId, definition.slug],
+        );
+        const found = existing.rows[0];
+        if (found === undefined) throw new Error("Built-in channel could not be resolved");
+        return found;
+      }
+      const audienceUserIds = await this.#conversationAudience(client, row);
+      await insertSyncEvent(client, {
+        workspaceId,
+        actorUserId: SYSTEM_USER_ID,
+        type: "channel.created",
+        conversationId: row.id,
+        payload: {
+          conversation: mapStoredConversation(row),
+          participantIds: audienceUserIds,
+        },
+        audienceUserIds,
+      });
+      this.#auditAnnouncement({
+        operation: "channel.create",
+        outcome: "accepted",
+        actorUserId: SYSTEM_USER_ID,
+        workspaceId,
+        conversationId: row.id,
+      });
+      return row;
+    });
+  }
+
+  /** Returns true when this call delivered the bulletin, false when it was already present. */
+  async #publishSystemBulletin(
+    conversation: ConversationRow,
+    channelSlug: string,
+    bulletin: SystemBulletin,
+  ): Promise<boolean> {
+    return this.#transaction(async (client) => {
+      // Same lock order as message delivery: the conversation row first, the workspace sequence
+      // last. Taking the conversation lock also serializes two nodes seeding the same channel.
+      const locked = await client.query<ConversationRow>(
+        `SELECT * FROM conversations WHERE id = $1 FOR UPDATE`,
+        [conversation.id],
+      );
+      const current = locked.rows[0];
+      if (current === undefined) return false;
+
+      const messageId = randomUUID();
+      const claimed = await client.query(
+        `INSERT INTO system_bulletins (workspace_id, channel_slug, bulletin_key, message_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (workspace_id, channel_slug, bulletin_key) DO NOTHING`,
+        [current.workspace_id, channelSlug, bulletin.key, messageId],
+      );
+      if (claimed.rowCount === 0) return false;
+
+      const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
+        `UPDATE conversations
+            SET last_message_sequence = last_message_sequence + 1,
+                updated_at = clock_timestamp()
+          WHERE id = $1
+          RETURNING last_message_sequence::text AS next`,
+        [current.id],
+      );
+      const conversationSequence = conversationSequenceResult.rows[0]?.next;
+      if (conversationSequence === undefined)
+        throw new Error("Could not allocate bulletin sequence");
+
+      const workspaceSequence = await nextWorkspaceSequence(client, current.workspace_id);
+      const inserted = await client.query<MessageRow>(
+        `INSERT INTO messages (
+           id, workspace_id, conversation_id, conversation_sequence,
+           committed_workspace_sequence, client_message_id, request_fingerprint,
+           author_id, thread_root_id, body, body_format
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, 'hype_comms_markdown_v1')
+         RETURNING *`,
+        [
+          messageId,
+          current.workspace_id,
+          current.id,
+          conversationSequence,
+          workspaceSequence,
+          randomUUID(),
+          createHash("sha256")
+            .update(`${current.workspace_id}:${channelSlug}:${bulletin.key}`)
+            .digest(),
+          SYSTEM_USER_ID,
+          bulletin.body,
+        ],
+      );
+      const row = inserted.rows[0];
+      if (row === undefined) throw new Error("Bulletin insert returned no row");
+
+      const audienceUserIds = await this.#conversationAudience(client, current);
+      // Availability was confirmed before seeding, so stored events keep their channel mode.
+      await insertSyncEventWithSequence(client, workspaceSequence, {
+        workspaceId: current.workspace_id,
+        actorUserId: SYSTEM_USER_ID,
+        type: "message.created",
+        conversationId: current.id,
+        conversationSequence,
+        payload: { message: mapMessage(row), mentionedUserIds: [] },
+        audienceUserIds,
+        stripChannelMode: false,
+      });
+      this.#auditAnnouncement({
+        operation: "bulletin.publish",
+        outcome: "accepted",
+        actorUserId: SYSTEM_USER_ID,
+        workspaceId: current.workspace_id,
+        conversationId: current.id,
+      });
+      return true;
+    });
+  }
+
   async archiveChannel(
     identity: AuthenticatedIdentity,
     conversationId: string,
@@ -1920,6 +2165,7 @@ export class WorkspaceRepository {
             AND conversation.workspace_id = $2
             AND conversation.kind = 'channel'
             AND conversation.slug <> 'general'
+            AND NOT conversation.is_system
             AND ${conversationVisibilitySql("conversation", "$3")}
           FOR UPDATE`,
         [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
@@ -2927,6 +3173,7 @@ export class WorkspaceRepository {
     after: string | undefined,
     limit: number,
     includeGroupDirectMessages = true,
+    includeSystemChannels = false,
   ): Promise<MessageSearchResponse> {
     const normalizedQuery = query.trim();
     const queryHash = searchQueryHash(normalizedQuery);
@@ -2946,6 +3193,7 @@ export class WorkspaceRepository {
           WHERE message.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
             AND ($8::boolean OR conversation.kind <> 'group_direct_message')
+            AND ($9::boolean OR NOT conversation.is_system)
             AND message.deleted_at IS NULL
             AND message.search_vector @@ search_query.value
             AND (
@@ -2969,6 +3217,7 @@ export class WorkspaceRepository {
           cursor?.id ?? null,
           pageLimit + 1,
           includeGroupDirectMessages,
+          includeSystemChannels,
         ],
       );
       const hasMore = result.rows.length > pageLimit;
@@ -3684,6 +3933,21 @@ export class WorkspaceRepository {
         throw new ApiError(404, "NOT_FOUND", "Conversation not found");
       }
       if (conversation.channel_mode === "announcement" && input.threadRootId === null) {
+        // A built-in channel is published by the server alone. No API principal may write a root
+        // message there, including a workspace owner on a fully capable client; members still
+        // reply in threads and react through the paths below.
+        if (conversation.is_system) {
+          this.#auditAnnouncement({
+            operation: "bulletin.publish",
+            outcome: "rejected",
+            actorUserId: identity.currentUser.user.id,
+            workspaceId: identity.currentUser.workspaceId,
+            conversationId,
+            correlationId,
+            reason: "built_in_channel",
+          });
+          throw new ApiError(403, "FORBIDDEN", "Only Hype Comms posts in this channel");
+        }
         if (principal.kind !== "human" || principal.role !== "owner") {
           this.#auditAnnouncement({
             operation: "bulletin.publish",
@@ -4192,6 +4456,17 @@ export class WorkspaceRepository {
                           AND group_conversation.kind = 'group_direct_message'
                     )
                   )
+                  AND (
+                    $10::boolean
+                    OR event.conversation_id IS NULL
+                    OR NOT EXISTS (
+                      SELECT 1
+                        FROM conversations AS system_conversation
+                       WHERE system_conversation.id = event.conversation_id
+                          AND system_conversation.workspace_id = event.workspace_id
+                          AND system_conversation.is_system
+                    )
+                  )
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
@@ -4208,6 +4483,7 @@ export class WorkspaceRepository {
           principal.participatedThreadNotifications ?? false,
           principal.messageRetractEvents ?? false,
           principal.groupDirectMessages ?? false,
+          principal.systemChannels ?? false,
         ],
       );
       const scanned = rows.rows.slice(0, limit);
@@ -4253,6 +4529,7 @@ export class WorkspaceRepository {
       ephemeralActivity = false,
       groupDirectMessages = false,
       humansOnlyChannels = false,
+      systemChannels = false,
     } = capabilities;
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
@@ -4267,8 +4544,8 @@ export class WorkspaceRepository {
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
           reaction_events, read_state_events, task_events, announcement_channels,
           participated_thread_notifications, message_retract_events, member_profiles,
-          ephemeral_activity, group_direct_messages, humans_only_channels)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+          ephemeral_activity, group_direct_messages, humans_only_channels, system_channels)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
@@ -4287,6 +4564,7 @@ export class WorkspaceRepository {
         ephemeralActivity,
         groupDirectMessages,
         humansOnlyChannels,
+        systemChannels,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -4317,7 +4595,8 @@ export class WorkspaceRepository {
                    ticket.member_profiles,
                    ticket.ephemeral_activity,
                    ticket.group_direct_messages,
-                   ticket.humans_only_channels
+                   ticket.humans_only_channels,
+                   ticket.system_channels
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -4332,7 +4611,8 @@ export class WorkspaceRepository {
               ticket.member_profiles,
               ticket.ephemeral_activity,
               ticket.group_direct_messages,
-              ticket.humans_only_channels
+              ticket.humans_only_channels,
+              ticket.system_channels
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -4389,6 +4669,7 @@ export class WorkspaceRepository {
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
         humansOnlyChannels: row.humans_only_channels,
+        systemChannels: row.system_channels,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -4407,6 +4688,7 @@ export class WorkspaceRepository {
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
         humansOnlyChannels: row.humans_only_channels,
+        systemChannels: row.system_channels,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");
@@ -4569,6 +4851,7 @@ export class WorkspaceRepository {
     after: string | null,
     limit: number,
     includeGroupDirectMessages: boolean,
+    includeSystemChannels: boolean,
   ): Promise<ConversationPage> {
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
     const result = await client.query<ConversationRow>(
@@ -4577,6 +4860,7 @@ export class WorkspaceRepository {
         WHERE conversation.workspace_id = $1
           AND ${conversationVisibilitySql("conversation", "$2")}
           AND ($4::boolean OR conversation.kind <> 'group_direct_message')
+          AND ($6::boolean OR NOT conversation.is_system)
           AND (
             $3::uuid IS NULL
             OR (
@@ -4594,6 +4878,7 @@ export class WorkspaceRepository {
                   WHERE anchor.id = $3::uuid
                     AND anchor.workspace_id = $1
                     AND ($4::boolean OR anchor.kind <> 'group_direct_message')
+                    AND ($6::boolean OR NOT anchor.is_system)
                     AND (
                       ${conversationVisibilitySql("anchor", "$2")}
                       OR (
@@ -4619,6 +4904,7 @@ export class WorkspaceRepository {
         after,
         includeGroupDirectMessages,
         pageLimit + 1,
+        includeSystemChannels,
       ],
     );
     const rows = result.rows.slice(0, pageLimit);

@@ -42,11 +42,13 @@ afterEach(cleanup);
 function renderMessage(overrides: {
   readonly members?: readonly User[];
   readonly message?: Message;
+  readonly builtIn?: boolean;
 }) {
   return render(
     createElement(MessageRow, {
       message: overrides.message ?? baseMessage,
       members: overrides.members ?? [baseUser],
+      ...(overrides.builtIn === undefined ? {} : { builtIn: overrides.builtIn }),
       reactions: [],
       currentUserId: USER_ID,
       reactionsDisabled: false,
@@ -96,5 +98,13 @@ describe("MessageRow author title", () => {
 
     expect(screen.getByText("Former member")).not.toBeNull();
     expect(document.querySelector(".message-author-title")).toBeNull();
+  });
+
+  it("names the app as the author of a bulletin in a built-in channel", () => {
+    // The publisher is not a workspace member, so the ordinary fallback would misname it.
+    renderMessage({ members: [], builtIn: true });
+
+    expect(screen.getByText("Hype Comms")).not.toBeNull();
+    expect(screen.queryByText("Former member")).toBeNull();
   });
 });
