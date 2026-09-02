@@ -1,13 +1,13 @@
-import type { SYSTEM_CHANNEL_SLUG_PREFIX } from "@hype-comms/contracts";
+import { SYSTEM_USER_ID, type SYSTEM_CHANNEL_SLUG_PREFIX } from "@hype-comms/contracts";
 
 import { loadReleaseNoteBulletins, type SystemBulletin } from "./release-notes.js";
 
 /**
- * The publisher of every server-authored bulletin, created in migration 0030. A bot principal
+ * The publisher of every server-authored bulletin, created in migration 0031. A bot principal
  * keeps it out of the human-owner authorization paths while giving each bulletin a real, auditable
- * author.
+ * author. The id lives in contracts because clients match it to attribute bulletins.
  */
-export const SYSTEM_USER_ID = "a0000000-0000-4000-8000-00000000c001";
+export { SYSTEM_USER_ID };
 export const SYSTEM_USER_DISPLAY_NAME = "Hype Comms";
 
 export interface BuiltInChannelDefinition {

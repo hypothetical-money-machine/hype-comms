@@ -14,6 +14,7 @@ import type {
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
+import { SYSTEM_USER_ID } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -405,11 +406,15 @@ async function renderWorkspace(
 
 afterEach(() => cleanup());
 
-const bulletin = message(
-  RELEASE_NOTES_ID,
-  "30000000-0000-4000-8000-00000000000c",
-  "**Hype Comms v0.1.36**\n\n## Highlights\n\n- Humans-only channels",
-);
+// Authored by the system user, which never appears in the member directory.
+const bulletin = {
+  ...message(
+    RELEASE_NOTES_ID,
+    "30000000-0000-4000-8000-00000000000c",
+    "**Hype Comms v0.1.36**\n\n## Highlights\n\n- Humans-only channels",
+  ),
+  authorId: SYSTEM_USER_ID,
+};
 
 const releaseNotesSummary = {
   conversation: {

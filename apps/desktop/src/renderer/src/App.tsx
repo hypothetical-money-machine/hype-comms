@@ -34,7 +34,11 @@ import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
-import { BUILT_IN_AUTHOR_NAME, isBuiltInConversation } from "./built-in-channels";
+import {
+  BUILT_IN_AUTHOR_ID,
+  BUILT_IN_AUTHOR_NAME,
+  isBuiltInConversation,
+} from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
@@ -470,7 +474,6 @@ export function MessageRow({
   domIdPrefix = "message",
   channelReferences,
   onOpenChannel,
-  builtIn = false,
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -490,11 +493,13 @@ export function MessageRow({
   readonly domIdPrefix?: string;
   readonly channelReferences?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
-  /** Bulletins in a built-in channel are authored by the server, which is not a workspace member. */
-  readonly builtIn?: boolean;
 }) {
   const author = members.find((member) => member.id === message.authorId);
-  const authorName = author?.displayName ?? (builtIn ? BUILT_IN_AUTHOR_NAME : "Former member");
+  // The publisher is never in the member directory, so it is matched by id. Any other missing
+  // author is a departed member, even inside a built-in channel.
+  const authorName =
+    author?.displayName ??
+    (message.authorId === BUILT_IN_AUTHOR_ID ? BUILT_IN_AUTHOR_NAME : "Former member");
   const participantId = message.authorId ?? "former-member";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [retracting, setRetracting] = useState(false);
@@ -2706,7 +2711,6 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <MessageRow
                       message={message}
                       members={bootstrap.members}
-                      builtIn={selectedIsBuiltIn}
                       reactions={reactionsByMessage.get(message.id) ?? []}
                       attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}
@@ -2879,7 +2883,6 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 <MessageRow
                   message={threadRoot}
                   members={bootstrap.members}
-                  builtIn={selectedIsBuiltIn}
                   reactions={reactionsByMessage.get(threadRoot.id) ?? []}
                   attachments={attachmentsByMessage.get(threadRoot.id) ?? []}
                   currentUserId={currentUserId}
@@ -2920,7 +2923,6 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     <MessageRow
                       message={message}
                       members={bootstrap.members}
-                      builtIn={selectedIsBuiltIn}
                       reactions={reactionsByMessage.get(message.id) ?? []}
                       attachments={attachmentsByMessage.get(message.id) ?? []}
                       currentUserId={currentUserId}

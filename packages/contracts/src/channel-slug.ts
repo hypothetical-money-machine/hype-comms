@@ -79,3 +79,11 @@ export const systemChannelSlugSchema = z
 export function isSystemChannelSlug(slug: string | null | undefined): boolean {
   return typeof slug === "string" && slug.startsWith(SYSTEM_CHANNEL_SLUG_PREFIX);
 }
+
+/**
+ * The fixed id of the user that authors every server-published bulletin, installed by the
+ * system-channels migration. The publisher never appears in a workspace's member directory, so
+ * clients match this id to attribute its messages; any other unresolvable author is an ordinary
+ * departed member.
+ */
+export const SYSTEM_USER_ID = "a0000000-0000-4000-8000-00000000c001";
