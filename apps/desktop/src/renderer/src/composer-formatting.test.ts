@@ -116,6 +116,11 @@ describe("applyComposerFormat inline styles", () => {
     expect(result).toEqual({ text: "note ", selectionStart: 5, selectionEnd: 5 });
   });
 
+  it("unwraps the span when the caret splits a backtick run inside its content", () => {
+    const result = applyComposerFormat("`a``b`", 3, 3, "code");
+    expect(result).toEqual({ text: "a``b", selectionStart: 0, selectionEnd: 4 });
+  });
+
   it("round-trips the padded fence from the selection it returns", () => {
     const wrapped = applyComposerFormat("cmd`", 0, 4, "code");
     const unwrapped = applyComposerFormat(
@@ -279,6 +284,12 @@ describe("applyComposerFormat mention preservation", () => {
   it("does not steal a neighboring emphasis marker when toggling italic beside one", () => {
     const result = applyComposerFormat("*foo*@alex*", 5, 10, "italic");
     expect(result.text).toBe("*foo**@alex**");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("does not drag a mention into the wrap when the selection starts at its end", () => {
+    const result = applyComposerFormat("@alex*foo*", 5, 10, "italic");
+    expect(result.text).toBe("@alex**foo**");
     expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
   });
 

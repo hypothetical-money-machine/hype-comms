@@ -121,11 +121,17 @@ function snapWrapRange(
   start: number,
   end: number,
 ): { readonly start: number; readonly end: number } {
+  // Snap only when the boundary falls strictly inside the token: a selection starting exactly at
+  // a mention's end (or ending at its start) does not split it, and expanding there would drag
+  // neighboring text — like the `*foo*` after `@alex*foo*` — into the wrap.
   const startToken = mentionTokenAt(text, start);
   const endToken = mentionTokenAt(text, end);
   return {
-    start: startToken !== null && start > startToken.start ? startToken.start : start,
-    end: endToken !== null && end < endToken.end ? endToken.end : end,
+    start:
+      startToken !== null && start > startToken.start && start < startToken.end
+        ? startToken.start
+        : start,
+    end: endToken !== null && end > endToken.start && end < endToken.end ? endToken.end : end,
   };
 }
 
@@ -257,21 +263,10 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
     }
   }
 
-  // A caret splitting a backtick run evenly is an empty fence pair left by the wrap branch.
-  if (start === end) {
-    const beforeRun = runLength(text, start, -1, "`");
-    const afterRun = runLength(text, end, 1, "`");
-    if (beforeRun > 0 && beforeRun === afterRun) {
-      return {
-        text: `${text.slice(0, start - beforeRun)}${text.slice(end + afterRun)}`,
-        selectionStart: start - beforeRun,
-        selectionEnd: start - beforeRun,
-      };
-    }
-  }
-
   // A selection inside a real span's content unwraps that span, pads and all — determined by
-  // parsing, so neighboring spans' fences are never mistaken for this selection's wrapper.
+  // parsing, so neighboring spans' fences are never mistaken for this selection's wrapper. This
+  // runs before the empty-pair check: a caret splitting a backtick run inside span content must
+  // unwrap the span, not delete content backticks.
   const span = codeSpanContaining(text, start, end);
   if (span !== null) {
     const inner = text.slice(span.openEnd, span.closeStart);
@@ -282,6 +277,20 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
       selectionStart: span.openStart,
       selectionEnd: span.openStart + content.length,
     };
+  }
+
+  // A caret splitting an unmatched backtick run evenly is an empty fence pair left by the wrap
+  // branch.
+  if (start === end) {
+    const beforeRun = runLength(text, start, -1, "`");
+    const afterRun = runLength(text, end, 1, "`");
+    if (beforeRun > 0 && beforeRun === afterRun) {
+      return {
+        text: `${text.slice(0, start - beforeRun)}${text.slice(end + afterRun)}`,
+        selectionStart: start - beforeRun,
+        selectionEnd: start - beforeRun,
+      };
+    }
   }
 
   const range = snapWrapRange(text, start, end);
