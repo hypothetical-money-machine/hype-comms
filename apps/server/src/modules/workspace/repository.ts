@@ -1839,16 +1839,27 @@ export class WorkspaceRepository {
                updated_at = clock_timestamp()`,
         [conversationId, identity.currentUser.workspaceId, memberId, input.role],
       );
-      const audienceAfter = await this.#conversationAudience(client, conversation);
+      // For a members-access channel (the only kind #requireManagedChannel admits), the upsert
+      // only flips the target's own membership row live, and the target was validated as an
+      // active human/agent workspace member earlier in this transaction — so the post-upsert
+      // audience is the pre-upsert audience plus the target, and deriving it avoids a second
+      // audience query. Accepted race: this transaction runs at READ COMMITTED and holds no lock
+      // on the target's workspace_memberships row, so a concurrent workspace-level deactivation
+      // can commit in between; a re-query would then drop the target where this derivation keeps
+      // them. That is harmless — deactivated users cannot sync — and every conversation-scoped
+      // writer is serialized by the #requireManagedChannel conversation row lock.
       const action = current === undefined || current.left_at !== null ? "added" : "updated";
+      // The member list is stable once the membership upsert has run; read it before
+      // #insertEvent so the workspace-row event lock is held for as little time as possible.
+      const channelMembers = await this.#channelMembers(client, identity, conversation);
       const event = await this.#insertEvent(client, identity, {
         type: "channel.membership_changed",
         conversation,
         payload: { memberId, action },
-        audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
+        audienceUserIds: [...new Set([...audienceBefore, memberId])],
       });
       return channelMembershipMutationResponseSchema.parse({
-        channelMembers: await this.#channelMembers(client, identity, conversation),
+        channelMembers,
         syncCursor: event.workspaceSequence,
       });
     });
@@ -1902,6 +1913,10 @@ export class WorkspaceRepository {
           RETURNING *`,
         [conversationId, memberId, identity.currentUser.user.id],
       );
+      // Read the post-removal member list before any #insertEvent call so the workspace-row
+      // event lock is held for as little time as possible. #channelMembers reads only
+      // users/memberships/grants and does not depend on inserted events.
+      const channelMembers = await this.#channelMembers(client, identity, conversation);
       for (const row of unassigned.rows) {
         const task = mapTask(row);
         await this.#insertEvent(client, identity, {
@@ -1919,7 +1934,7 @@ export class WorkspaceRepository {
         audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
       });
       return channelMembershipMutationResponseSchema.parse({
-        channelMembers: await this.#channelMembers(client, identity, conversation),
+        channelMembers,
         syncCursor: event.workspaceSequence,
       });
     });
