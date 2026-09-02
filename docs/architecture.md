@@ -449,6 +449,34 @@ active theme, it resolves the OS foundation again; if the result changed, the de
 the preview and requires another explicit save instead of applying an appearance the user did not
 review.
 
+## Desktop device preferences contract
+
+`DevicePreferences` is the strict, versioned contract for non-secret settings that belong to one
+desktop installation. Version 1 contains these fields and defaults:
+
+| Preference                          | Allowed values and default                 | Effect                                                   |
+| ----------------------------------- | ------------------------------------------ | -------------------------------------------------------- |
+| Sidebar width                       | `narrow`, `default`, `wide`; `default`     | Changes the conversation sidebar width.                  |
+| Message text size                   | `small`, `default`, `large`; `default`     | Changes message and composer text.                       |
+| Time format                         | `system`, `12-hour`, `24-hour`; `system`   | Formats committed and pending message times.             |
+| Group consecutive messages          | Boolean; `true`                            | Groups adjacent messages from the same author.           |
+| Always show grouped-message times   | Boolean; `false`                           | Keeps continuation timestamps visible.                   |
+| Show profile titles                 | Boolean; `true`                            | Shows member titles in full message headers.             |
+| Send-message shortcut               | `enter`, `mod-enter`; `enter`              | Selects Enter or Command/Ctrl+Enter for chat messages.    |
+| Spellcheck                          | Boolean; `true`                            | Enables the native spellchecker in message composers.    |
+| Motion                              | `system`, `reduced`; `system`              | Follows the OS preference or disables interface motion.  |
+
+Electron main owns the record and stores it atomically at
+`userData/hype-comms-settings/device-preferences.json`. Main serializes strict, non-empty partial
+updates, merges each update with the latest saved record, writes it before publishing it, and keeps
+the previous state if the write fails. Missing, malformed, oversized, or unknown-version files use
+the defaults. Signing out does not clear these device-local settings.
+
+Main and preload validate and byte-limit every preference request, response, and push. A trusted,
+bounded startup argument gives preload the initialized record when Electron creates the window.
+The renderer applies its presentation attributes before React mounts, then subscribes before
+requesting current state so a startup response cannot replace a newer update.
+
 ## Feature behavior
 
 - Channel names use a unique lowercase hyphenated slug; all active members can create either a

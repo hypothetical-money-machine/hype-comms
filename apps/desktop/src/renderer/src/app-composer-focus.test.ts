@@ -25,6 +25,7 @@ import type { DesktopApi } from "../../shared/desktop-api";
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -434,6 +435,7 @@ async function renderWorkspace(): Promise<Harness> {
       client: harness.client,
       theme: createTheme(),
       compactMode: createCompactMode(),
+      devicePreferences: createTestDevicePreferencesRuntime(),
       fencedBlockquotes: new FencedBlockquoteRuntime(null),
       sidebarPosition: createSidebarPosition(),
     }),
