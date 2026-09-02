@@ -75,6 +75,66 @@ function isItalicRun(run: number): boolean {
 
 const WORD_CHAR = /[\p{L}\p{N}]/u;
 
+/** True when the character at `index` is backslash-escaped (odd run of backslashes before it). */
+function escapedAt(text: string, index: number): boolean {
+  let count = 0;
+  for (let i = index - 1; i >= 0 && text[i] === "\\"; i -= 1) count += 1;
+  return count % 2 === 1;
+}
+
+/**
+ * True when an odd asterisk run earlier in the text is still unclosed at `index` — the next odd
+ * run there acts as that emphasis's closer, not as this selection's opener. Even runs belong to
+ * bold and do not toggle the state; code spans are skipped because their content is literal;
+ * backslash-escaped characters are literal too.
+ */
+function insideOpenEmphasis(text: string, index: number): boolean {
+  let inside = false;
+  let i = 0;
+  while (i < index) {
+    const char = text[i];
+    if (char === "\\") {
+      i += 2;
+      continue;
+    }
+    if (char === "`") {
+      let runEnd = i;
+      while (runEnd < text.length && text[runEnd] === "`") runEnd += 1;
+      const width = runEnd - i;
+      let closeEnd = -1;
+      let j = runEnd;
+      while (j < text.length) {
+        if (text[j] !== "`") {
+          j += 1;
+          continue;
+        }
+        const runStart = j;
+        while (j < text.length && text[j] === "`") j += 1;
+        if (j - runStart === width) {
+          closeEnd = j;
+          break;
+        }
+      }
+      if (closeEnd === -1) {
+        i = runEnd;
+        continue;
+      }
+      if (closeEnd > index) return false;
+      i = closeEnd;
+      continue;
+    }
+    if (char === "*") {
+      let runEnd = i;
+      while (runEnd < text.length && text[runEnd] === "*") runEnd += 1;
+      if ((runEnd - i) % 2 === 1) inside = !inside;
+      i = runEnd;
+      continue;
+    }
+    i += 1;
+  }
+  return inside;
+}
+
 /**
  * Marker runs glued to a word character on their far side belong to a neighboring span — the `*`
  * before `@alex` in `*foo*@alex*` closes `*foo*` — and must never be treated as the selection's
@@ -87,10 +147,27 @@ function notWordChar(char: string | undefined): boolean {
 
 /** True when the odd asterisk runs on both sides of the selection can pair as emphasis around it. */
 function italicPairSurrounds(text: string, start: number, end: number): boolean {
-  const before = runLength(text, start, -1, "*");
-  const after = runLength(text, end, 1, "*");
+  const beforeRaw = runLength(text, start, -1, "*");
+  const beforeStart = start - beforeRaw;
+  const before = beforeRaw > 0 && escapedAt(text, beforeStart) ? beforeRaw - 1 : beforeRaw;
+  const afterRaw = runLength(text, end, 1, "*");
+  const after = afterRaw > 0 && escapedAt(text, end) ? afterRaw - 1 : afterRaw;
   if (!isItalicRun(before) || !isItalicRun(after)) return false;
-  return notWordChar(text[start - before - 1]) && notWordChar(text[end + after]);
+  // A closer for an earlier open emphasis — as after `*foo!*` — is never ours to strip.
+  if (insideOpenEmphasis(text, beforeStart)) return false;
+  return notWordChar(text[beforeStart - 1]) && notWordChar(text[end + afterRaw]);
+}
+
+/** Branch analog of italicPairSurrounds for a selection that includes its own markers. */
+function italicSelectionCarriesMarkers(text: string, start: number, end: number): boolean {
+  const selected = text.slice(start, end);
+  if (selected.length < 2) return false;
+  if (escapedAt(text, start) || escapedAt(text, end - 1)) return false;
+  const lead = runLength(selected, 0, 1, "*");
+  const trail = runLength(selected, selected.length, -1, "*");
+  if (!isItalicRun(lead) || !isItalicRun(trail) || lead + trail > selected.length) return false;
+  if (insideOpenEmphasis(text, start)) return false;
+  return notWordChar(text[start - 1]) && notWordChar(text[end]);
 }
 
 const MENTION_WORD = /[\p{L}\p{N}_-]/u;
@@ -147,13 +224,7 @@ function toggleInline(
 
   const selectionCarriesMarkers =
     format === "italic"
-      ? selected.length >= 2 &&
-        isItalicRun(runLength(selected, 0, 1, "*")) &&
-        isItalicRun(runLength(selected, selected.length, -1, "*")) &&
-        runLength(selected, 0, 1, "*") + runLength(selected, selected.length, -1, "*") <=
-          selected.length &&
-        notWordChar(text[start - 1]) &&
-        notWordChar(text[end])
+      ? italicSelectionCarriesMarkers(text, start, end)
       : selected.length >= width * 2 && selected.startsWith(marker) && selected.endsWith(marker);
   if (selectionCarriesMarkers) {
     const inner = selected.slice(width, selected.length - width);
@@ -209,6 +280,12 @@ interface CodeSpanBounds {
 function codeSpanContaining(text: string, start: number, end: number): CodeSpanBounds | null {
   let i = 0;
   while (i < text.length) {
+    // An escaped backtick is a literal character and cannot open a span; escapes do not apply
+    // inside an open span, so only the opener scan skips them.
+    if (text[i] === "\\") {
+      i += 2;
+      continue;
+    }
     if (text[i] !== "`") {
       i += 1;
       continue;
@@ -282,7 +359,8 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
   // A caret splitting an unmatched backtick run evenly is an empty fence pair left by the wrap
   // branch.
   if (start === end) {
-    const beforeRun = runLength(text, start, -1, "`");
+    let beforeRun = runLength(text, start, -1, "`");
+    if (beforeRun > 0 && escapedAt(text, start - beforeRun)) beforeRun -= 1;
     const afterRun = runLength(text, end, 1, "`");
     if (beforeRun > 0 && beforeRun === afterRun) {
       return {

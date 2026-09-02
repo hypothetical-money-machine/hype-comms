@@ -121,6 +121,17 @@ describe("applyComposerFormat inline styles", () => {
     expect(result).toEqual({ text: "a``b", selectionStart: 0, selectionEnd: 4 });
   });
 
+  it("treats backslash-escaped backticks as literals, not fences", () => {
+    const result = applyComposerFormat("\\`a\\`", 2, 3, "code");
+    expect(result.text).toBe("\\``a`\\`");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("a");
+  });
+
+  it("does not treat an escaped literal backtick as half of an empty pair", () => {
+    const result = applyComposerFormat("\\``", 2, 2, "code");
+    expect(result.text).toBe("\\````");
+  });
+
   it("round-trips the padded fence from the selection it returns", () => {
     const wrapped = applyComposerFormat("cmd`", 0, 4, "code");
     const unwrapped = applyComposerFormat(
@@ -285,6 +296,23 @@ describe("applyComposerFormat mention preservation", () => {
   it("does not expand across word-glued addresses", () => {
     const result = applyComposerFormat("mail hello@example now", 11, 18, "italic");
     expect(result.text).toBe("mail hello@*example* now");
+  });
+
+  it("does not consume the closer of a punctuation-terminated neighboring span", () => {
+    const result = applyComposerFormat("*foo!*@alex*", 6, 11, "italic");
+    expect(result.text).toBe("*foo!**@alex**");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("rejects a selection whose leading asterisk closes an earlier span", () => {
+    const result = applyComposerFormat("*foo!*@alex*", 5, 12, "italic");
+    expect(result.text).toBe("*foo!**@alex**");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("ignores asterisks inside code spans when pairing italics", () => {
+    const result = applyComposerFormat("`*` see *word* now", 9, 13, "italic");
+    expect(result.text).toBe("`*` see word now");
   });
 
   it("does not steal a neighboring emphasis marker when toggling italic beside one", () => {
