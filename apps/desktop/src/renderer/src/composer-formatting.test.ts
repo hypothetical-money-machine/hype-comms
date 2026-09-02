@@ -96,6 +96,11 @@ describe("applyComposerFormat inline styles", () => {
     expect(result).toEqual({ text: "`a` `b` `c`", selectionStart: 5, selectionEnd: 6 });
   });
 
+  it("leaves tightly packed neighboring spans alone when formatting between them", () => {
+    const result = applyComposerFormat("`a`b`c`", 3, 4, "code");
+    expect(result.text).toBe("`a``b``c`");
+  });
+
   it("round-trips the padded fence from the selection it returns", () => {
     const wrapped = applyComposerFormat("cmd`", 0, 4, "code");
     const unwrapped = applyComposerFormat(
@@ -146,6 +151,12 @@ describe("applyComposerFormat links", () => {
   it("treats an http url as a label because the renderer links https only", () => {
     const result = applyComposerFormat("http://example.com", 0, 18, "link");
     expect(result.text).toBe("[http://example.com](url)");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("url");
+  });
+
+  it("treats a credential-bearing url as a label because the renderer rejects it", () => {
+    const result = applyComposerFormat("https://user:secret@example.com", 0, 31, "link");
+    expect(result.text).toBe("[https://user:secret@example.com](url)");
     expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("url");
   });
 
@@ -246,6 +257,12 @@ describe("applyComposerFormat mention preservation", () => {
 
   it("does not steal a neighboring emphasis marker when toggling italic beside one", () => {
     const result = applyComposerFormat("*foo*@alex*", 5, 10, "italic");
+    expect(result.text).toBe("*foo**@alex**");
+    expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
+  });
+
+  it("does not strip a neighboring marker when the selection includes glued asterisks", () => {
+    const result = applyComposerFormat("*foo*@alex*", 4, 11, "italic");
     expect(result.text).toBe("*foo**@alex**");
     expect(mentionedMemberIds(result.text, [alex], [alex.id])).toEqual([alex.id]);
   });

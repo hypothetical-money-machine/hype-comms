@@ -40,9 +40,20 @@ type LineFormat = keyof typeof LINE_RULES;
 
 const LINK_TEXT_PLACEHOLDER = "link text";
 const LINK_URL_PLACEHOLDER = "url";
-// HTTPS only: the message renderer refuses to link anything else, so treating an http:// selection
-// as a destination would emit a permanently dead link.
-const URL_PATTERN = /^https:\/\/\S+$/iu;
+
+/**
+ * Mirrors the renderer's link policy (HTTPS only, no embedded credentials): anything it would
+ * refuse to link must become the label, not a permanently dead destination.
+ */
+function isLinkableUrl(value: string): boolean {
+  if (!/^https:\/\/\S+$/iu.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
 
 /** Length of the run of `char` at `index` — forward from it, or backward ending just before it. */
 function runLength(value: string, index: number, step: -1 | 1, char: string): number {
@@ -65,21 +76,21 @@ function isItalicRun(run: number): boolean {
 const WORD_CHAR = /[\p{L}\p{N}]/u;
 
 /**
- * True when the odd asterisk runs on both sides of the selection can actually pair as emphasis
- * around it. A run glued to a word character on its far side is a neighbor's marker — the `*`
- * before `@alex` in `*foo*@alex*` closes `*foo*` — and stripping it would corrupt that neighbor
- * instead of unformatting the selection.
+ * Marker runs glued to a word character on their far side belong to a neighboring span — the `*`
+ * before `@alex` in `*foo*@alex*` closes `*foo*` — and must never be treated as the selection's
+ * own delimiters, or unwrapping corrupts the neighbor. The cost is that intraword italics and code
+ * unwrap by re-wrapping instead; mention integrity wins that trade.
  */
+function notWordChar(char: string | undefined): boolean {
+  return char === undefined || !WORD_CHAR.test(char);
+}
+
+/** True when the odd asterisk runs on both sides of the selection can pair as emphasis around it. */
 function italicPairSurrounds(text: string, start: number, end: number): boolean {
   const before = runLength(text, start, -1, "*");
   const after = runLength(text, end, 1, "*");
   if (!isItalicRun(before) || !isItalicRun(after)) return false;
-  const beyondBefore = text[start - before - 1];
-  const beyondAfter = text[end + after];
-  return (
-    (beyondBefore === undefined || !WORD_CHAR.test(beyondBefore)) &&
-    (beyondAfter === undefined || !WORD_CHAR.test(beyondAfter))
-  );
+  return notWordChar(text[start - before - 1]) && notWordChar(text[end + after]);
 }
 
 const MENTION_WORD = /[\p{L}\p{N}_-]/u;
@@ -134,7 +145,9 @@ function toggleInline(
         isItalicRun(runLength(selected, 0, 1, "*")) &&
         isItalicRun(runLength(selected, selected.length, -1, "*")) &&
         runLength(selected, 0, 1, "*") + runLength(selected, selected.length, -1, "*") <=
-          selected.length
+          selected.length &&
+        notWordChar(text[start - 1]) &&
+        notWordChar(text[end])
       : selected.length >= width * 2 && selected.startsWith(marker) && selected.endsWith(marker);
   if (selectionCarriesMarkers) {
     const inner = selected.slice(width, selected.length - width);
@@ -204,11 +217,17 @@ function toggleCode(text: string, start: number, end: number): ComposerFormatRes
   // The wrap branch only emits pads for backtick-edged content, so a padded match around a
   // backtick-free selection is two neighboring spans (`a` b `c`), not this selection's wrapper.
   const padConsistent = beforePad === "" || selected.startsWith("`") || selected.endsWith("`");
+  // And a fence glued to a word character on its far side (`a`b`c`) is a neighbor's delimiter,
+  // same as the italic rule.
+  const fencesStandAlone =
+    notWordChar(text[start - beforeFence.length - beforePad.length - 1]) &&
+    notWordChar(text[end + afterPad.length + afterFence.length]);
   if (
     beforeFence.length > 0 &&
     beforeFence.length === afterFence.length &&
     beforePad === afterPad &&
     padConsistent &&
+    fencesStandAlone &&
     longestBacktickRun(selected) < beforeFence.length
   ) {
     const removed = beforeFence.length + beforePad.length;
@@ -275,7 +294,7 @@ function escapeLinkLabel(label: string): string {
 
 function insertLink(text: string, start: number, end: number): ComposerFormatResult {
   const selected = text.slice(start, end);
-  const selectedIsUrl = URL_PATTERN.test(selected);
+  const selectedIsUrl = isLinkableUrl(selected);
   // Select whichever half still holds placeholder text so the user can type straight over it.
   const labelIsPlaceholder = selected === "" || selectedIsUrl;
   const label = labelIsPlaceholder ? LINK_TEXT_PLACEHOLDER : escapeLinkLabel(selected);
