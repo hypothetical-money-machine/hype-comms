@@ -165,6 +165,12 @@ describe("applyComposerFormat links", () => {
     expect(result.text).toBe("[link text](https://x.dev/a\\(b\\))");
     expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("link text");
   });
+
+  it("escapes angle brackets in a selected https destination", () => {
+    const result = applyComposerFormat("https://x.dev/a<b>", 0, 18, "link");
+    expect(result.text).toBe("[link text](https://x.dev/a\\<b\\>)");
+    expect(result.text.slice(result.selectionStart, result.selectionEnd)).toBe("link text");
+  });
 });
 
 describe("applyComposerFormat line styles", () => {
