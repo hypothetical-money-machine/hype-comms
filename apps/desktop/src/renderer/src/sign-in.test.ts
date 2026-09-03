@@ -55,6 +55,12 @@ function createClient(overrides: Record<string, unknown> = {}): DesktopApi {
 const PROTOCOL_WARNING_TEXT = /link handler\s+is not registered on this system/;
 
 describe("SignIn", () => {
+  it("shows the Hype Comms brand mark", async () => {
+    render(createElement(SignIn, { client: createClient(), theme: createTheme() }));
+
+    expect(screen.getByRole("img", { name: "Hype Comms" })).toBeTruthy();
+  });
+
   it("refreshes capabilities and removes AuthKit after an unavailable start failure", async () => {
     const getAuthCapabilities = vi
       .fn<() => Promise<AuthCapabilities>>()

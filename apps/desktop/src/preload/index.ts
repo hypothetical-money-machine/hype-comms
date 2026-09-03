@@ -41,7 +41,6 @@ import {
   listConversationsResponseSchema,
   listAgentEnrollmentsResponseSchema,
   listMembersResponseSchema,
-  attachmentSchema,
   conversationFilesQuerySchema,
   conversationFilesResponseSchema,
   listMessageAttachmentsRequestSchema,
@@ -132,6 +131,10 @@ import {
 } from "@hype-comms/contracts";
 
 import { DESKTOP_CHANNELS } from "../shared/channels";
+import {
+  attachmentUploadRequestSchema,
+  attachmentUploadResultSchema,
+} from "../shared/attachment-upload";
 import { resolveInitialCompactModeArgument } from "../shared/compact-mode";
 import type {
   DesktopApi,
@@ -638,12 +641,18 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAttachmentsList, request),
       );
     },
-    chooseAndUploadConversationFile: async (conversationId: string) => {
-      const result: unknown = await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceFileUpload,
-        entityIdSchema.parse(conversationId),
+    chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
+      const request = attachmentUploadRequestSchema.parse({ conversationId, maxFiles });
+      const result = attachmentUploadResultSchema.parse(
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceFileUpload, request),
       );
-      return result === null ? null : attachmentSchema.parse(result);
+      if (
+        (result.status === "completed" || result.status === "partial") &&
+        result.attachments.length > request.maxFiles
+      ) {
+        throw new Error("File upload result exceeded the requested limit");
+      }
+      return result;
     },
     openConversationFile: async (attachmentId: string) =>
       openAttachmentResponseSchema.parse(

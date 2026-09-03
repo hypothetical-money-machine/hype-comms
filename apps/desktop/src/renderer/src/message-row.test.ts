@@ -150,8 +150,10 @@ describe("MessageRow thread action", () => {
     expect(summary.getAttribute("type")).toBe("button");
   });
 
-  it("shows in-thread attachment chips that open the file", () => {
+  it("shows every in-thread attachment chip and opens its file", () => {
     const onOpenAttachment = vi.fn().mockResolvedValue(undefined);
+    const firstAttachmentId = "10000000-0000-4000-8000-000000000010";
+    const secondAttachmentId = "10000000-0000-4000-8000-000000000011";
     render(
       createElement(MessageRow, {
         message,
@@ -159,12 +161,23 @@ describe("MessageRow thread action", () => {
         reactions: [],
         attachments: [
           {
-            id: "10000000-0000-4000-8000-000000000010",
+            id: firstAttachmentId,
             messageId: MESSAGE_ID,
             uploadedBy: USER_ID,
             fileName: "launch-notes.pdf",
             contentType: "application/pdf",
             sizeBytes: 2048,
+            status: "ready",
+            downloadUrl: null,
+            createdAt: NOW,
+          },
+          {
+            id: secondAttachmentId,
+            messageId: MESSAGE_ID,
+            uploadedBy: USER_ID,
+            fileName: "launch-diagram.png",
+            contentType: "image/png",
+            sizeBytes: 4096,
             status: "ready",
             downloadUrl: null,
             createdAt: NOW,
@@ -181,7 +194,9 @@ describe("MessageRow thread action", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "launch-notes.pdf" }));
-    expect(onOpenAttachment).toHaveBeenCalledWith("10000000-0000-4000-8000-000000000010");
+    fireEvent.click(screen.getByRole("button", { name: "launch-diagram.png" }));
+    expect(onOpenAttachment).toHaveBeenNthCalledWith(1, firstAttachmentId);
+    expect(onOpenAttachment).toHaveBeenNthCalledWith(2, secondAttachmentId);
   });
 
   it("does not expose a nested reply action when the caller omits it", () => {

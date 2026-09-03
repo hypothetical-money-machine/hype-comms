@@ -13,6 +13,7 @@ import {
 import { resolveDesktopBuildFlavor } from "../apps/desktop/build-flavor.mjs";
 
 const expectedUpdateProvider = "generic";
+const packagedApplicationIconFilename = "hype-comms-icon.png";
 const agentWakeConfigurationCall =
   /resolveAgentWakeConfigurationPath\(\{\s*compiledIn:\s*(true|false),/gu;
 const agentWakeOperatorCall =
@@ -225,6 +226,21 @@ export function verifyPackageMetadata(asarPath, flavor, extractFileImplementatio
   }
 }
 
+export async function verifyApplicationIcon(
+  asarPath,
+  sourceIconPath = path.resolve("apps/desktop/build/icon.png"),
+  readFileImplementation = readFile,
+) {
+  const packagedIconPath = path.join(path.dirname(asarPath), packagedApplicationIconFilename);
+  const [sourceIcon, packagedIcon] = await Promise.all([
+    readFileImplementation(sourceIconPath),
+    readFileImplementation(packagedIconPath),
+  ]);
+  if (!Buffer.from(packagedIcon).equals(Buffer.from(sourceIcon))) {
+    throw new Error(`${packagedIconPath} does not match ${sourceIconPath}`);
+  }
+}
+
 export function resolveExpectedProductionApiOrigin(value) {
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(
@@ -369,6 +385,7 @@ export async function verifyDesktopPackages(
     const entries = new Set(listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/")));
     verifyPackageEntries(asarPath, entries);
     verifyPackageMetadata(asarPath, flavor);
+    await verifyApplicationIcon(asarPath);
     if (expectedApiOrigin !== null) {
       verifyPackagedApiOrigin(asarPath, expectedApiOrigin);
     }
@@ -389,7 +406,7 @@ export async function verifyDesktopPackages(
 
   const apiOriginCheck = expectedApiOrigin === null ? "" : "the API origin, ";
   console.log(
-    `Verified ${apiOriginCheck}Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
+    `Verified ${apiOriginCheck}application icon, Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
   );
 }
 

@@ -42,9 +42,11 @@ export interface ElectronNotificationConstructor {
 export class ElectronNotificationPresenter implements NotificationPresenter {
   readonly kind = "native" as const;
   readonly #Notification: ElectronNotificationConstructor;
+  readonly #icon: string | undefined;
 
-  constructor(Notification: ElectronNotificationConstructor) {
+  constructor(Notification: ElectronNotificationConstructor, icon?: string) {
     this.#Notification = Notification;
+    this.#icon = icon;
   }
 
   present(
@@ -55,6 +57,7 @@ export class ElectronNotificationPresenter implements NotificationPresenter {
       ...(presentation.id === undefined ? {} : { id: presentation.id }),
       title: presentation.title,
       body: presentation.body,
+      ...(this.#icon === undefined ? {} : { icon: this.#icon }),
     });
     let finished = false;
     const finish = (callback: () => void): void => {

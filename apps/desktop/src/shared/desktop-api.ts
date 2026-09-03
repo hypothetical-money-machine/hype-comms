@@ -16,7 +16,6 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   CommunicationPathsResponse,
-  Attachment,
   ConversationFilesResponse,
   ConversationMutationResponse,
   CreateTaskOperation,
@@ -72,6 +71,8 @@ import type {
   UpdateTaskOperation,
   User,
 } from "@hype-comms/contracts";
+
+import type { AttachmentUploadResult } from "./attachment-upload";
 
 export type DesktopPlatform = "darwin" | "linux" | "win32";
 
@@ -251,7 +252,10 @@ export interface DesktopApi
   readonly listMessageAttachments: (
     messageIds: readonly string[],
   ) => Promise<ListMessageAttachmentsResponse>;
-  readonly chooseAndUploadConversationFile: (conversationId: string) => Promise<Attachment | null>;
+  readonly chooseAndUploadConversationFiles: (
+    conversationId: string,
+    maxFiles: number,
+  ) => Promise<AttachmentUploadResult>;
   readonly openConversationFile: (attachmentId: string) => Promise<OpenAttachmentResponse>;
   readonly listConversationTasks: (
     conversationId: string,

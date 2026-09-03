@@ -21,6 +21,13 @@ const pendingAttachment: Attachment = {
   createdAt: "2026-08-04T12:00:00.000Z",
 };
 
+const secondPendingAttachment: Attachment = {
+  ...pendingAttachment,
+  id: "10000000-0000-4000-8000-000000000011",
+  fileName: "launch-diagram.png",
+  contentType: "image/png",
+};
+
 afterEach(cleanup);
 
 function renderComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]> = {}) {
@@ -29,6 +36,7 @@ function renderComposer(overrides: Partial<Parameters<typeof MessageComposer>[0]
     draft: "A useful update",
     disabled: false,
     error: "",
+    platform: "linux",
     onDraftChange: vi.fn(),
     onSubmit: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -160,13 +168,14 @@ describe("MessageComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("lets a pending attachment send without a draft", () => {
+  it("lets multiple pending attachments send without a draft", () => {
     const { props } = renderComposer({
       draft: "",
-      pendingAttachments: [pendingAttachment],
+      pendingAttachments: [pendingAttachment, secondPendingAttachment],
       onAttach: vi.fn().mockResolvedValue(undefined),
     });
     expect(screen.getByText("launch-notes.pdf")).toBeTruthy();
+    expect(screen.getByText("launch-diagram.png")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(props.onSubmit).toHaveBeenCalledOnce();
@@ -175,9 +184,29 @@ describe("MessageComposer", () => {
   it("exposes an attach action that does not submit the draft", () => {
     const onAttach = vi.fn().mockResolvedValue(undefined);
     const { props } = renderComposer({ draft: "A useful update", onAttach });
-    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
     expect(onAttach).toHaveBeenCalledOnce();
     expect(props.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does not send a draft while files are attaching", async () => {
+    let finishAttachment: (() => void) | undefined;
+    const attachmentInProgress = new Promise<void>((resolve) => {
+      finishAttachment = resolve;
+    });
+    const onAttach = vi.fn(() => attachmentInProgress);
+    const { props } = renderComposer({ onAttach });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+
+    finishAttachment?.();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
+    );
   });
 });
 
@@ -215,6 +244,7 @@ function renderLiveComposer(overrides: Partial<Parameters<typeof MessageComposer
       error: "",
       members: [morgan, alex],
       currentUserId: morgan.id,
+      platform: "linux",
       ...overrides,
       draft,
       onDraftChange: (value) => {
@@ -324,6 +354,7 @@ describe("MessageComposer mentions", () => {
           error: "",
           members: [morgan, alex],
           currentUserId: morgan.id,
+          platform: "linux",
           draft,
           onDraftChange: (value: string) => setDraft(value),
           onSubmit: vi.fn().mockResolvedValue(undefined),
@@ -341,5 +372,100 @@ describe("MessageComposer mentions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "switch" }));
     expect(screen.getByRole("listbox", { name: "Mention a member" })).toBeTruthy();
+  });
+});
+
+describe("MessageComposer formatting", () => {
+  it("renders a formatting toolbar advertising every control and its shortcut", () => {
+    renderComposer();
+    expect(screen.getByRole("group", { name: "Text formatting" })).toBeTruthy();
+    for (const name of [
+      "Bold",
+      "Italic",
+      "Strikethrough",
+      "Inline code",
+      "Link",
+      "Bulleted list",
+      "Numbered list",
+      "Quote",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: "Bold" }).title).toBe("Bold (Ctrl+B)");
+  });
+
+  it("advertises Cmd shortcuts on macOS", () => {
+    renderComposer({ platform: "darwin" });
+    expect(screen.getByRole("button", { name: "Link" }).title).toBe("Link (Cmd+Shift+K)");
+  });
+
+  it("disables the toolbar with the composer", () => {
+    renderComposer({ disabled: true });
+    expect(screen.getByRole("button", { name: "Bold" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("wraps the selection from a toolbar click and keeps it selected for re-toggling", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "make it pop");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**make** it pop");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(textbox.selectionStart).toBe(2);
+    expect(textbox.selectionEnd).toBe(6);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+    expect(onDraftChange).toHaveBeenLastCalledWith("make it pop");
+  });
+
+  it("applies bold from the keyboard without sending", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "ship it");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("applies a held shortcut once, ignoring keydown auto-repeat", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "ship it");
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+    fireEvent.keyDown(textbox, { key: "b", ctrlKey: true, repeat: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("**ship** it");
+  });
+
+  it("starts a bulleted list from a bare caret with Mod+Shift+8", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "groceries");
+    fireEvent.keyDown(textbox, { key: "*", code: "Digit8", ctrlKey: true, shiftKey: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("- groceries");
+  });
+
+  it("leaves plain Mod+K for the quick switcher and takes Mod+Shift+K for links", () => {
+    const { onDraftChange } = renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "docs");
+    fireEvent.keyDown(textbox, { key: "k", ctrlKey: true });
+    expect(onDraftChange).toHaveBeenLastCalledWith("docs");
+
+    textbox.setSelectionRange(0, 4);
+    fireEvent.keyDown(textbox, { key: "K", ctrlKey: true, shiftKey: true });
+    expect(onDraftChange).toHaveBeenLastCalledWith("[docs](url)");
   });
 });
