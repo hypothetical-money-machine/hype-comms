@@ -1,4 +1,8 @@
-import { MESSAGE_BODY_MAX_LENGTH, type User } from "@hype-comms/contracts";
+import {
+  MESSAGE_BODY_MAX_LENGTH,
+  type SendMessageShortcutPreference,
+  type User,
+} from "@hype-comms/contracts";
 import {
   Fragment,
   useCallback,
@@ -129,10 +133,12 @@ export function MessageComposer({
   members = [],
   currentUserId,
   placeholder,
-  platform,
   submitLabel = "Send",
   variantClassName,
   typingText = "",
+  platform,
+  sendMessageShortcut = "enter",
+  spellCheck = true,
   onDraftChange,
   onAttach,
   onRemoveAttachment,
@@ -152,10 +158,12 @@ export function MessageComposer({
   readonly members?: readonly User[];
   readonly currentUserId?: string;
   readonly placeholder?: string;
-  readonly platform: DesktopPlatform;
   readonly submitLabel?: string;
   readonly variantClassName?: string;
   readonly typingText?: string;
+  readonly platform: DesktopPlatform;
+  readonly sendMessageShortcut?: SendMessageShortcutPreference;
+  readonly spellCheck?: boolean;
   readonly onDraftChange: (value: string) => void;
   readonly onAttach?: () => Promise<void>;
   readonly onRemoveAttachment?: (attachmentId: string) => void;
@@ -330,6 +338,11 @@ export function MessageComposer({
     }
 
     if (event.key !== "Enter" || event.shiftKey) return;
+    const exactSendModifierPressed =
+      platform === "darwin"
+        ? event.metaKey && !event.ctrlKey && !event.altKey
+        : event.ctrlKey && !event.metaKey && !event.altKey;
+    if (sendMessageShortcut === "mod-enter" && !exactSendModifierPressed) return;
     event.preventDefault();
     if (!sendDisabled) event.currentTarget.form?.requestSubmit();
   };
@@ -427,7 +440,8 @@ export function MessageComposer({
             disabled={disabled}
             maxLength={MESSAGE_BODY_MAX_LENGTH}
             rows={1}
-            enterKeyHint="send"
+            enterKeyHint={sendMessageShortcut === "enter" ? "send" : "enter"}
+            spellCheck={spellCheck}
             aria-describedby={hintId}
             aria-expanded={pickerOpen}
             aria-controls={pickerOpen ? listboxId : undefined}
@@ -483,7 +497,16 @@ export function MessageComposer({
           )}
         </div>
         <p className="composer-hint" id={hintId}>
-          <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
+          {sendMessageShortcut === "enter" ? (
+            <>
+              <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
+            </>
+          ) : (
+            <>
+              <kbd>{platform === "darwin" ? "Command" : "Ctrl"}</kbd> + <kbd>Enter</kbd> to send ·{" "}
+              <kbd>Enter</kbd> for a new line
+            </>
+          )}
         </p>
       </div>
       {onAttach !== undefined && (

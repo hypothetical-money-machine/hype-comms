@@ -64,6 +64,48 @@ describe("MessageComposer", () => {
     expect(screen.getByText(/for a new line/)).toBeTruthy();
   });
 
+  it.each(["linux", "win32"] as const)(
+    "can reserve plain Enter for a new line and send with Ctrl+Enter on %s",
+    (platform) => {
+      const { props } = renderComposer({
+        platform,
+        sendMessageShortcut: "mod-enter",
+      });
+      const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+      fireEvent.keyDown(textbox, { key: "Enter" });
+      fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, altKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, metaKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, shiftKey: true });
+      expect(props.onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+      expect(props.onSubmit).toHaveBeenCalledOnce();
+      expect(textbox.getAttribute("enterkeyhint")).toBe("enter");
+      expect(screen.getByText(/Ctrl/)).toBeTruthy();
+    },
+  );
+
+  it("uses Command+Enter on macOS and applies the spell-check preference", () => {
+    const { props } = renderComposer({
+      platform: "darwin",
+      sendMessageShortcut: "mod-enter",
+      spellCheck: false,
+    });
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, altKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, shiftKey: true });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
+    expect(props.onSubmit).toHaveBeenCalledOnce();
+    expect(textbox.getAttribute("spellcheck")).toBe("false");
+    expect(screen.getByText(/Command/)).toBeTruthy();
+  });
+
   it("does not submit while an input method editor is composing", () => {
     const { props } = renderComposer();
     const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
@@ -307,6 +349,20 @@ describe("MessageComposer mentions", () => {
     typeDraft(textbox, "thanks @mo");
     fireEvent.keyDown(textbox, { key: "Tab" });
     expect(onDraftChange).toHaveBeenLastCalledWith("thanks @morgan ");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps mention selection ahead of the configured send shortcut", () => {
+    const { onDraftChange, onSubmit } = renderLiveComposer({
+      platform: "linux",
+      sendMessageShortcut: "mod-enter",
+    });
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    typeDraft(textbox, "@");
+    fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("@morgan ");
     expect(onSubmit).not.toHaveBeenCalled();
   });
 

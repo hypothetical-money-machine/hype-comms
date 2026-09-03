@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { devicePreferencesSchema } from "@hype-comms/contracts";
 import type {
+  DevicePreferences,
+  DevicePreferencesPatch,
   NotificationActionDrainResponse,
   NotificationContext,
   NotificationPreference,
@@ -22,6 +25,8 @@ import type {
 } from "../../shared/desktop-api";
 import { getThemeDefinition } from "../../shared/theme";
 import { CompactModeRuntime } from "./compact-mode-runtime";
+import type { DevicePreferencesControlRuntime } from "./device-preferences-controls";
+import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { PreferencesPage, type PreferencesPageHandle } from "./preferences-page";
 import { SidebarPositionRuntime } from "./sidebar-position-runtime";
@@ -113,6 +118,26 @@ class PreferencesCompactModeTransport implements CompactModeTransport {
   }
 }
 
+class PreferencesDevicePreferencesRuntime implements DevicePreferencesControlRuntime {
+  state: DevicePreferences = DEFAULT_DEVICE_PREFERENCES;
+  readonly listeners = new Set<() => void>();
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async update(patch: DevicePreferencesPatch): Promise<DevicePreferences> {
+    this.emit(patch);
+    return this.state;
+  }
+
+  emit(patch: DevicePreferencesPatch): void {
+    this.state = devicePreferencesSchema.parse({ ...this.state, ...patch });
+    for (const listener of this.listeners) listener();
+  }
+}
+
 class PreferencesNotificationTransport implements NotificationTransport {
   state: NotificationState = {
     version: 1,
@@ -174,6 +199,7 @@ class PreferencesNotificationTransport implements NotificationTransport {
 interface PreferencesHarnessProps {
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly devicePreferences: PreferencesDevicePreferencesRuntime;
   readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
@@ -186,6 +212,7 @@ interface PreferencesHarnessProps {
 function PreferencesHarness({
   theme,
   compactMode,
+  devicePreferences,
   fencedBlockquotes,
   sidebarPosition,
   notifications,
@@ -236,6 +263,7 @@ function PreferencesHarness({
       active,
       theme,
       compactMode,
+      devicePreferences,
       fencedBlockquotes,
       sidebarPosition,
       notifications,
@@ -276,6 +304,7 @@ async function renderPreferences({
   const compactModeClient = new PreferencesCompactModeTransport();
   const theme = new ThemeRuntime(themeClient, document.documentElement);
   const compactMode = new CompactModeRuntime(compactModeClient, document.documentElement);
+  const devicePreferences = new PreferencesDevicePreferencesRuntime();
   const fencedBlockquotes = new FencedBlockquoteRuntime(null);
   const sidebarPosition = new SidebarPositionRuntime(document.documentElement, null);
   await theme.start();
@@ -284,6 +313,7 @@ async function renderPreferences({
     createElement(PreferencesHarness, {
       theme,
       compactMode,
+      devicePreferences,
       fencedBlockquotes,
       sidebarPosition,
       notifications,
@@ -297,6 +327,7 @@ async function renderPreferences({
     ...rendered,
     compactMode,
     compactModeClient,
+    devicePreferences,
     fencedBlockquotes,
     sidebarPosition,
     theme,
@@ -312,6 +343,11 @@ function openPreferences(): HTMLElement {
 afterEach(() => {
   cleanup();
   delete document.documentElement.dataset.compact;
+  delete document.documentElement.dataset.alwaysShowGroupedMessageTimes;
+  delete document.documentElement.dataset.messageTextSize;
+  delete document.documentElement.dataset.motionPreference;
+  delete document.documentElement.dataset.showProfileTitles;
+  delete document.documentElement.dataset.sidebarWidth;
   delete document.documentElement.dataset.sidebarPosition;
   delete document.documentElement.dataset.theme;
   vi.restoreAllMocks();
@@ -347,8 +383,13 @@ describe("PreferencesPage", () => {
   });
 
   it("renders every preference section and reflects live runtime changes", async () => {
-    const { compactModeClient, fencedBlockquotes, sidebarPosition, themeClient } =
-      await renderPreferences();
+    const {
+      compactModeClient,
+      devicePreferences,
+      fencedBlockquotes,
+      sidebarPosition,
+      themeClient,
+    } = await renderPreferences();
     openPreferences();
 
     expect(screen.getByRole("heading", { name: "Profile", level: 3 })).toBeTruthy();
@@ -356,11 +397,20 @@ describe("PreferencesPage", () => {
     expect(screen.getByRole("combobox", { name: "Appearance" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Layout", level: 3 })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Sidebar position" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Sidebar width" })).toBeTruthy();
     expect((screen.getByRole("radio", { name: "Left" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("checkbox", { name: "Compact mode" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Messages", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Message text size" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Time format" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Group consecutive messages" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Fenced blockquotes" })).toBeTruthy();
     expect((screen.getByRole("radio", { name: "Off" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("heading", { name: "Composer", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Send messages with" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Check spelling" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Accessibility", level: 3 })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Motion" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Notifications", level: 3 })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe(
       "Notifications are unavailable in this build.",
@@ -372,6 +422,11 @@ describe("PreferencesPage", () => {
       resolvedColorScheme: "light",
     });
     compactModeClient.emit(true);
+    devicePreferences.emit({
+      messageTextSize: "large",
+      sendMessageShortcut: "mod-enter",
+      spellCheck: false,
+    });
     sidebarPosition.setPosition("right");
     fireEvent.click(screen.getByRole("radio", { name: '"""' }));
     expect(fencedBlockquotes.mode).toBe("double-quote");
@@ -385,6 +440,15 @@ describe("PreferencesPage", () => {
       ).toBe(true);
       expect((screen.getByRole("radio", { name: "Right" }) as HTMLInputElement).checked).toBe(true);
       expect((screen.getByRole("radio", { name: '"""' }) as HTMLInputElement).checked).toBe(true);
+      expect(
+        (screen.getByRole("combobox", { name: "Message text size" }) as HTMLSelectElement).value,
+      ).toBe("large");
+      expect(
+        (screen.getByRole("combobox", { name: "Send messages with" }) as HTMLSelectElement).value,
+      ).toBe("mod-enter");
+      expect(
+        (screen.getByRole("checkbox", { name: "Check spelling" }) as HTMLInputElement).checked,
+      ).toBe(false);
     });
   });
 

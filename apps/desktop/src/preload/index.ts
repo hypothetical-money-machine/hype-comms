@@ -4,6 +4,8 @@ import {
   AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
   AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -34,6 +36,8 @@ import {
   conversationMutationResponseSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
+  devicePreferencesPatchSchema,
+  devicePreferencesSchema,
   directConversationRequestSchema,
   entityIdSchema,
   chatSessionStateSchema,
@@ -104,6 +108,8 @@ import {
   type CreateChannelOperation,
   type CreateTaskOperation,
   type DirectConversationRequest,
+  type DevicePreferences,
+  type DevicePreferencesPatch,
   type ListConversationsQuery,
   type MessageSearchQuery,
   type MoveTaskOperation,
@@ -136,6 +142,7 @@ import {
   attachmentUploadResultSchema,
 } from "../shared/attachment-upload";
 import { resolveInitialCompactModeArgument } from "../shared/compact-mode";
+import { resolveInitialDevicePreferencesArgument } from "../shared/device-preferences";
 import type {
   DesktopApi,
   DesktopPlatform,
@@ -171,7 +178,7 @@ interface IpcPayloadSchema<T> {
   readonly parse: (value: unknown) => T;
 }
 
-function parseBoundedNotificationPayload<T>(
+function parseBoundedIpcPayload<T>(
   schema: IpcPayloadSchema<T>,
   value: unknown,
   maxBytes: number,
@@ -180,18 +187,18 @@ function parseBoundedNotificationPayload<T>(
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new TypeError("Notification IPC payload must be JSON-serializable");
+    throw new TypeError("IPC payload must be JSON-serializable");
   }
   if (serialized === undefined) {
-    throw new TypeError("Notification IPC payload must be JSON-serializable");
+    throw new TypeError("IPC payload must be JSON-serializable");
   }
   if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
-    throw new RangeError("Notification IPC payload exceeds its byte limit");
+    throw new RangeError("IPC payload exceeds its byte limit");
   }
   return schema.parse(value);
 }
 
-function subscribeToBoundedNotificationPayload<T>(
+function subscribeToBoundedIpcPayload<T>(
   channel: string,
   schema: IpcPayloadSchema<T>,
   maxBytes: number,
@@ -199,7 +206,7 @@ function subscribeToBoundedNotificationPayload<T>(
 ): () => void {
   const wrappedListener = (_event: IpcRendererEvent, value: unknown): void => {
     try {
-      listener(parseBoundedNotificationPayload(schema, value, maxBytes));
+      listener(parseBoundedIpcPayload(schema, value, maxBytes));
     } catch {
       // Invalid or oversized main-to-renderer pushes fail closed at the preload boundary.
     }
@@ -218,6 +225,7 @@ if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
 const initialThemeState = resolveInitialThemeStateArgument(process.argv);
 const isHeadless = ipcRenderer.sendSync(DESKTOP_CHANNELS.automationHeadless) === true;
 const initialCompactMode = resolveInitialCompactModeArgument(process.argv);
+const initialDevicePreferences = resolveInitialDevicePreferencesArgument(process.argv);
 
 const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransport = Object.freeze(
   {
@@ -225,6 +233,7 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
     isHeadless,
     initialThemeState,
     initialCompactMode,
+    initialDevicePreferences,
     getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
     getUpdateState: async () =>
       updateStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.updateState)),
@@ -281,18 +290,43 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         listener,
         (value): value is boolean => compactModePreferenceSchema.safeParse(value).success,
       ),
+    getDevicePreferences: async () =>
+      parseBoundedIpcPayload(
+        devicePreferencesSchema,
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.devicePreferencesState),
+        DEVICE_PREFERENCES_IPC_MAX_BYTES,
+      ),
+    updateDevicePreferences: async (patch: DevicePreferencesPatch) => {
+      const request = parseBoundedIpcPayload(
+        devicePreferencesPatchSchema,
+        patch,
+        DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
+      );
+      return parseBoundedIpcPayload(
+        devicePreferencesSchema,
+        await ipcRenderer.invoke(DESKTOP_CHANNELS.devicePreferencesUpdate, request),
+        DEVICE_PREFERENCES_IPC_MAX_BYTES,
+      );
+    },
+    onDevicePreferencesChanged: (listener: (preferences: DevicePreferences) => void) =>
+      subscribeToBoundedIpcPayload(
+        DESKTOP_CHANNELS.devicePreferencesChanged,
+        devicePreferencesSchema,
+        DEVICE_PREFERENCES_IPC_MAX_BYTES,
+        listener,
+      ),
     getAiChannelState: async () =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelState),
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     startAiChannel: async (input: AiChannelGenerationRequest) =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.aiChannelStart,
-          parseBoundedNotificationPayload(
+          parseBoundedIpcPayload(
             aiChannelGenerationRequestSchema,
             input,
             AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -301,17 +335,17 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     chooseAiChannelWorkspace: async () =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelWorkspaceChoose),
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     newAiChannelSession: async (input: AiChannelGenerationRequest) =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.aiChannelSessionNew,
-          parseBoundedNotificationPayload(
+          parseBoundedIpcPayload(
             aiChannelGenerationRequestSchema,
             input,
             AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -320,11 +354,11 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     sendAiChannelPrompt: async (input: AiChannelPromptRequest) =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.aiChannelPromptSend,
-          parseBoundedNotificationPayload(
+          parseBoundedIpcPayload(
             aiChannelPromptRequestSchema,
             input,
             AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
@@ -333,11 +367,11 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     cancelAiChannelPrompt: async (input: AiChannelGenerationRequest) =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.aiChannelPromptCancel,
-          parseBoundedNotificationPayload(
+          parseBoundedIpcPayload(
             aiChannelGenerationRequestSchema,
             input,
             AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -346,11 +380,11 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     respondAiChannelPermission: async (input: AiChannelPermissionResponse) =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         aiChannelStateSchema,
         await ipcRenderer.invoke(
           DESKTOP_CHANNELS.aiChannelPermissionRespond,
-          parseBoundedNotificationPayload(
+          parseBoundedIpcPayload(
             aiChannelPermissionResponseSchema,
             input,
             AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -359,7 +393,7 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
       ),
     onAiChannelStateChanged: (listener: (state: AiChannelState) => void) =>
-      subscribeToBoundedNotificationPayload(
+      subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.aiChannelChanged,
         aiChannelStateSchema,
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
@@ -400,13 +434,13 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         (value): value is ChatSessionState => chatSessionStateSchema.safeParse(value).success,
       ),
     getNotificationContext: async () =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         notificationContextSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationContext),
         NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
       ),
     reportNotificationActivity: async (activity: NotificationActivityUpdate) => {
-      const request = parseBoundedNotificationPayload(
+      const request = parseBoundedIpcPayload(
         notificationActivityUpdateSchema,
         activity,
         NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
@@ -420,19 +454,19 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       }
     },
     drainNotificationActions: async (ready: NotificationActionDrainRequest) => {
-      const request = parseBoundedNotificationPayload(
+      const request = parseBoundedIpcPayload(
         notificationActionDrainRequestSchema,
         ready,
         NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
       );
-      return parseBoundedNotificationPayload(
+      return parseBoundedIpcPayload(
         notificationActionDrainResponseSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationActionsDrain, request),
         NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
       );
     },
     acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
-      const request = parseBoundedNotificationPayload(
+      const request = parseBoundedIpcPayload(
         notificationActionAcknowledgementSchema,
         acknowledgement,
         NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
@@ -446,38 +480,38 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       }
     },
     onNotificationAction: (listener: (action: NotificationAction) => void) =>
-      subscribeToBoundedNotificationPayload(
+      subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.notificationAction,
         notificationActionSchema,
         NOTIFICATION_ACTION_IPC_MAX_BYTES,
         listener,
       ),
     getNotificationState: async () =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         notificationStateSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationState),
         NOTIFICATION_STATE_IPC_MAX_BYTES,
       ),
     setNotificationPreference: async (preference: NotificationPreference) => {
-      const request = parseBoundedNotificationPayload(
+      const request = parseBoundedIpcPayload(
         notificationPreferenceSchema,
         preference,
         NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
       );
-      return parseBoundedNotificationPayload(
+      return parseBoundedIpcPayload(
         notificationStateSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationPreferenceSet, request),
         NOTIFICATION_STATE_IPC_MAX_BYTES,
       );
     },
     refreshNotificationCapability: async () =>
-      parseBoundedNotificationPayload(
+      parseBoundedIpcPayload(
         notificationStateSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationCapabilityRefresh),
         NOTIFICATION_STATE_IPC_MAX_BYTES,
       ),
     onNotificationStateChanged: (listener: (state: NotificationState) => void) =>
-      subscribeToBoundedNotificationPayload(
+      subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.notificationStateChanged,
         notificationStateSchema,
         NOTIFICATION_STATE_IPC_MAX_BYTES,
@@ -487,12 +521,12 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       if (!isHeadless) {
         throw new Error("Captured notification activation is available only in headless mode");
       }
-      const request = parseBoundedNotificationPayload(
+      const request = parseBoundedIpcPayload(
         notificationCaptureActivationRequestSchema,
         { version: 1, captureId },
         NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
       );
-      const response = parseBoundedNotificationPayload(
+      const response = parseBoundedIpcPayload(
         notificationCaptureActivationResponseSchema,
         await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationCaptureActivate, request),
         NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
