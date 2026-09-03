@@ -1,9 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 
-import { messageBodySchema } from "@hype-comms/contracts";
+import { MESSAGE_BODY_MAX_LENGTH, messageBodySchema } from "@hype-comms/contracts";
 
 /** Bodies are capped by `messageBodySchema` and by the messages table CHECK. */
-const MAX_BULLETIN_BODY = 4_000;
+const MAX_BULLETIN_BODY = MESSAGE_BODY_MAX_LENGTH;
 const RELEASE_NOTES_FILE = /^v(\d+)\.(\d+)\.(\d+)\.md$/;
 /**
  * The scaffold marker the release runbook removes once notes are written and reviewed. An
@@ -29,11 +29,14 @@ function developmentReleaseNotesDirectory(): URL {
 }
 
 function truncateBody(body: string, version: string): string {
-  if ([...body].length <= MAX_BULLETIN_BODY) return body;
+  // messageBodySchema measures UTF-16 code units (`String.length`), not code points, so the cap is
+  // applied in the same metric. Backing off one unit keeps a surrogate pair intact.
+  if (body.length <= MAX_BULLETIN_BODY) return body;
   const footer = `…\n\n_Full notes: docs/releases/v${version}.md_`;
-  const room = MAX_BULLETIN_BODY - [...footer].length;
-  // Slice by code point so a truncated surrogate pair cannot corrupt the body.
-  return `${[...body].slice(0, room).join("").trimEnd()}${footer}`;
+  let room = MAX_BULLETIN_BODY - footer.length;
+  const last = body.charCodeAt(room - 1);
+  if (last >= 0xd800 && last <= 0xdbff) room -= 1;
+  return `${body.slice(0, room).trimEnd()}${footer}`;
 }
 
 /**

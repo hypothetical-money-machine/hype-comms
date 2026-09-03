@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
-import type { CurrentUser, WorkspaceEvent } from "@hype-comms/contracts";
+import { messageBodySchema, type CurrentUser, type WorkspaceEvent } from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
@@ -117,8 +117,28 @@ describe("loadReleaseNoteBulletins", () => {
     const bulletins = await loadReleaseNoteBulletins(directoryUrl());
     const body = bulletins[0]?.body ?? "";
 
-    expect([...body].length).toBeLessThanOrEqual(4_000);
+    expect(body.length).toBeLessThanOrEqual(4_000);
     expect(body).toContain("_Full notes: docs/releases/v0.1.1.md_");
+  });
+
+  it("truncates by UTF-16 code units so an emoji-heavy note still satisfies the contract", async () => {
+    // 2,500 code points but 5,000 UTF-16 units: a code-point cap would let this through and
+    // messageBodySchema would then reject it, aborting the whole seeding pass.
+    await writeFile(
+      path.join(directory, "v0.1.2.md"),
+      `## Highlights\n\n- ${"🎉".repeat(2_500)}\n`,
+    );
+
+    const bulletins = await loadReleaseNoteBulletins(directoryUrl());
+    const body = bulletins[0]?.body ?? "";
+
+    expect(body.length).toBeLessThanOrEqual(4_000);
+    expect(messageBodySchema.safeParse(body).success).toBe(true);
+    // No surrogate pair was split at the cut.
+    expect(body).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+    );
+    expect(body).toContain("_Full notes: docs/releases/v0.1.2.md_");
   });
 
   it("reads the notes bundled with the server when no directory is given", async () => {
@@ -128,7 +148,7 @@ describe("loadReleaseNoteBulletins", () => {
     expect(bulletins.length).toBeGreaterThan(0);
     for (const bulletin of bulletins) {
       expect(bulletin.key).toMatch(/^v\d+\.\d+\.\d+$/);
-      expect([...bulletin.body].length).toBeLessThanOrEqual(4_000);
+      expect(bulletin.body.length).toBeLessThanOrEqual(4_000);
     }
   });
 });

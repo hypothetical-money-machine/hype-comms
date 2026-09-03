@@ -809,6 +809,15 @@ describe("transport contracts", () => {
     expect(isSystemChannelSlug(null)).toBe(false);
   });
 
+  it("caps the whole built-in slug, prefix included, at the database limit", () => {
+    // conversations.slug is limited to 100 code points in total, so a 96-code-point suffix that
+    // channelSlugSchema alone would accept must be rejected once the prefix is added.
+    expect(systemChannelSlugSchema.parse(`hype/${"a".repeat(95)}`)).toHaveLength(100);
+    expect(() => systemChannelSlugSchema.parse(`hype/${"a".repeat(96)}`)).toThrow(
+      /at most 100 Unicode code points/,
+    );
+  });
+
   it("keeps the built-in marker and the reserved namespace in lockstep", () => {
     const builtIn = {
       ...CONVERSATION_SUMMARY.conversation,
