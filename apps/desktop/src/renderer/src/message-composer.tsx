@@ -338,8 +338,11 @@ export function MessageComposer({
     }
 
     if (event.key !== "Enter" || event.shiftKey) return;
-    const modifierPressed = platform === "darwin" ? event.metaKey : event.ctrlKey;
-    if (sendMessageShortcut === "mod-enter" && !modifierPressed) return;
+    const exactSendModifierPressed =
+      platform === "darwin"
+        ? event.metaKey && !event.ctrlKey && !event.altKey
+        : event.ctrlKey && !event.metaKey && !event.altKey;
+    if (sendMessageShortcut === "mod-enter" && !exactSendModifierPressed) return;
     event.preventDefault();
     if (!sendDisabled) event.currentTarget.form?.requestSubmit();
   };
