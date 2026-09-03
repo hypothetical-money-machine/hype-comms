@@ -19,3 +19,12 @@ export const BUILT_IN_AUTHOR_ID = SYSTEM_USER_ID;
 export function isBuiltInConversation(conversation: Conversation): boolean {
   return conversation.isBuiltIn === true || isSystemChannelSlug(conversation.slug);
 }
+
+/**
+ * The name to show for a message author who is absent from the member directory. Every place
+ * that renders an author name must use this rather than a bare "Former member" fallback, or a
+ * server-published bulletin is misattributed.
+ */
+export function missingAuthorName(authorId: string | null): string {
+  return authorId === BUILT_IN_AUTHOR_ID ? BUILT_IN_AUTHOR_NAME : "Former member";
+}

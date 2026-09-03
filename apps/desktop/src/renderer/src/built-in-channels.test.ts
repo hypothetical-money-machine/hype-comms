@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { Conversation } from "@hype-comms/contracts";
+import { SYSTEM_USER_ID, type Conversation } from "@hype-comms/contracts";
 
-import { isBuiltInConversation } from "./built-in-channels";
+import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const base: Conversation = {
@@ -53,5 +53,13 @@ describe("isBuiltInConversation", () => {
         isBuiltIn: undefined,
       }),
     ).toBe(false);
+  });
+});
+
+describe("missingAuthorName", () => {
+  it("names the app only for the system user and keeps former members otherwise", () => {
+    expect(missingAuthorName(SYSTEM_USER_ID)).toBe("Hype Comms");
+    expect(missingAuthorName("10000000-0000-4000-8000-000000000099")).toBe("Former member");
+    expect(missingAuthorName(null)).toBe("Former member");
   });
 });

@@ -34,11 +34,7 @@ import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
-import {
-  BUILT_IN_AUTHOR_ID,
-  BUILT_IN_AUTHOR_NAME,
-  isBuiltInConversation,
-} from "./built-in-channels";
+import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
@@ -495,11 +491,7 @@ export function MessageRow({
   readonly onOpenChannel?: (conversationId: string) => void;
 }) {
   const author = members.find((member) => member.id === message.authorId);
-  // The publisher is never in the member directory, so it is matched by id. Any other missing
-  // author is a departed member, even inside a built-in channel.
-  const authorName =
-    author?.displayName ??
-    (message.authorId === BUILT_IN_AUTHOR_ID ? BUILT_IN_AUTHOR_NAME : "Former member");
+  const authorName = author?.displayName ?? missingAuthorName(message.authorId);
   const participantId = message.authorId ?? "former-member";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [retracting, setRetracting] = useState(false);
