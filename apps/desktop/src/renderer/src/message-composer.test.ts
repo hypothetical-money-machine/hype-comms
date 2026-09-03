@@ -64,22 +64,28 @@ describe("MessageComposer", () => {
     expect(screen.getByText(/for a new line/)).toBeTruthy();
   });
 
-  it("can reserve plain Enter for a new line and send with Ctrl+Enter", () => {
-    const { props } = renderComposer({
-      platform: "linux",
-      sendMessageShortcut: "mod-enter",
-    });
-    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+  it.each(["linux", "win32"] as const)(
+    "can reserve plain Enter for a new line and send with Ctrl+Enter on %s",
+    (platform) => {
+      const { props } = renderComposer({
+        platform,
+        sendMessageShortcut: "mod-enter",
+      });
+      const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
 
-    fireEvent.keyDown(textbox, { key: "Enter" });
-    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
-    expect(props.onSubmit).not.toHaveBeenCalled();
+      fireEvent.keyDown(textbox, { key: "Enter" });
+      fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, altKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, metaKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true, shiftKey: true });
+      expect(props.onSubmit).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
-    expect(props.onSubmit).toHaveBeenCalledOnce();
-    expect(textbox.getAttribute("enterkeyhint")).toBe("enter");
-    expect(screen.getByText(/Ctrl/)).toBeTruthy();
-  });
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+      expect(props.onSubmit).toHaveBeenCalledOnce();
+      expect(textbox.getAttribute("enterkeyhint")).toBe("enter");
+      expect(screen.getByText(/Ctrl/)).toBeTruthy();
+    },
+  );
 
   it("uses Command+Enter on macOS and applies the spell-check preference", () => {
     const { props } = renderComposer({
@@ -90,6 +96,9 @@ describe("MessageComposer", () => {
     const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
 
     fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, altKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, ctrlKey: true });
+    fireEvent.keyDown(textbox, { key: "Enter", metaKey: true, shiftKey: true });
     expect(props.onSubmit).not.toHaveBeenCalled();
     fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
     expect(props.onSubmit).toHaveBeenCalledOnce();
