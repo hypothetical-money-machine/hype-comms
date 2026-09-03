@@ -7,6 +7,7 @@ import {
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   HUMANS_ONLY_CHANNELS_CAPABILITY,
+  SYSTEM_CHANNELS_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -873,7 +874,7 @@ describe("event capability routes", () => {
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
         `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ` +
         `${EPHEMERAL_ACTIVITY_CAPABILITY}, ${GROUP_DIRECT_MESSAGES_CAPABILITY}, ` +
-        HUMANS_ONLY_CHANNELS_CAPABILITY,
+        `${HUMANS_ONLY_CHANNELS_CAPABILITY}, ${SYSTEM_CHANNELS_CAPABILITY}`,
     };
 
     const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
@@ -900,6 +901,7 @@ describe("event capability routes", () => {
         ephemeralActivity: true,
         groupDirectMessages: true,
         humansOnlyChannels: true,
+        systemChannels: true,
       },
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
@@ -915,6 +917,7 @@ describe("event capability routes", () => {
         ephemeralActivity: true,
         groupDirectMessages: true,
         humansOnlyChannels: true,
+        systemChannels: true,
       },
     );
   });
@@ -951,6 +954,7 @@ describe("event capability routes", () => {
         ephemeralActivity: false,
         groupDirectMessages: false,
         humansOnlyChannels: false,
+        systemChannels: false,
       },
     );
     expect(malformed.statusCode).toBe(400);

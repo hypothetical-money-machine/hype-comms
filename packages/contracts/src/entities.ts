@@ -8,7 +8,7 @@ import {
   isoDateTimeSchema,
   sequenceSchema,
 } from "./common.js";
-import { channelSlugSchema } from "./channel-slug.js";
+import { channelSlugSchema, isSystemChannelSlug, systemChannelSlugSchema } from "./channel-slug.js";
 
 const timestampsShape = {
   createdAt: isoDateTimeSchema,
@@ -94,7 +94,7 @@ export const conversationSchema = z
     workspaceId: entityIdSchema,
     kind: conversationKindSchema,
     name: z.string().trim().min(1).max(100).nullable(),
-    slug: channelSlugSchema.nullable(),
+    slug: z.union([channelSlugSchema, systemChannelSlugSchema]).nullable(),
     topic: z.string().trim().max(250).nullable(),
     // Missing on pre-membership server responses and encrypted cache records. Null has the same
     // renderer meaning as a legacy workspace-visible channel; current servers always send the
@@ -103,12 +103,37 @@ export const conversationSchema = z
     // Missing on pre-announcement server responses and encrypted cache records. New clients
     // normalize a legacy channel to chat while keeping the field null for direct conversations.
     channelMode: channelModeSchema.nullable().optional(),
+    // Present, and always true, only on server-owned built-in channels. Deliberately absent
+    // rather than false elsewhere: `conversationSchema` is strict, so emitting the key on an
+    // ordinary channel would break clients released before built-in channels existed.
+    isBuiltIn: z.literal(true).optional(),
     isArchived: z.boolean(),
     createdBy: entityIdSchema.nullable(),
     ...timestampsShape,
   })
   .strict()
   .superRefine((conversation, context) => {
+    if (conversation.isBuiltIn === true && conversation.kind !== "channel") {
+      context.addIssue({
+        code: "custom",
+        path: ["isBuiltIn"],
+        message: "Only a channel can be built in",
+      });
+    }
+    if (conversation.isBuiltIn === true && !isSystemChannelSlug(conversation.slug)) {
+      context.addIssue({
+        code: "custom",
+        path: ["slug"],
+        message: "A built-in channel must use the reserved slug namespace",
+      });
+    }
+    if (isSystemChannelSlug(conversation.slug) && conversation.isBuiltIn !== true) {
+      context.addIssue({
+        code: "custom",
+        path: ["isBuiltIn"],
+        message: "The reserved slug namespace is limited to built-in channels",
+      });
+    }
     if (conversation.kind === "channel" && conversation.channelMode === null) {
       context.addIssue({
         code: "custom",

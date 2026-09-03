@@ -29,6 +29,7 @@ import { SignInThrottle } from "./throttle.js";
 import { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { LocalAttachmentStore } from "./modules/workspace/file-store.js";
 import { WorkspaceRepository } from "./modules/workspace/repository.js";
+import { BUILT_IN_CHANNELS } from "./modules/system-channels/registry.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -120,6 +121,7 @@ async function main(): Promise<void> {
       const repository = new WorkspaceRepository(databasePool, {
         announcementChannelsEnabled: config.announcementChannelsEnabled,
         humansOnlyChannelsEnabled: config.humansOnlyChannelsEnabled,
+        systemChannelsEnabled: config.systemChannelsEnabled,
         attachmentStore,
         onAnnouncementAudit: (record) => {
           process.stdout.write(`${JSON.stringify({ level: "info", ...record })}\n`);
@@ -173,6 +175,20 @@ async function main(): Promise<void> {
     }
     if (workspace !== undefined) {
       const repository = workspace.repository;
+      const seedSystemChannels = (): void => {
+        void repository
+          .seedSystemChannels(BUILT_IN_CHANNELS, (error, context) => {
+            app.log.error({ err: error, ...context }, "Built-in channel seeding failed");
+          })
+          .catch((error: unknown) => {
+            app.log.error({ err: error }, "Built-in channel seeding failed");
+          });
+      };
+      // Seed on boot, then hourly so a workspace created after boot is served without a restart.
+      seedSystemChannels();
+      const systemChannelSeeding = setInterval(seedSystemChannels, 60 * 60 * 1_000);
+      systemChannelSeeding.unref();
+      app.addHook("onClose", async () => clearInterval(systemChannelSeeding));
       const cleanWorkspaceState = () => {
         void repository
           .deleteExpiredState()

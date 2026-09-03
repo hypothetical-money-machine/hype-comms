@@ -70,6 +70,14 @@ describe("loadConfig", () => {
     );
   });
 
+  it("accepts only an explicit built-in channel cutover", () => {
+    expect(loadConfig({ HYPE_COMMS_SYSTEM_CHANNELS_ENABLED: "true" })).toMatchObject({
+      systemChannelsEnabled: true,
+    });
+    expect(loadConfig({})).toMatchObject({ systemChannelsEnabled: false });
+    expect(() => loadConfig({ HYPE_COMMS_SYSTEM_CHANNELS_ENABLED: "yes" })).toThrow(ConfigError);
+  });
+
   it("maps HYPE_COMMS_WEB_ROOT to webRoot and omits it when unset", () => {
     expect(loadConfig({ HYPE_COMMS_WEB_ROOT: "/srv/hype-comms/web" })).toMatchObject({
       webRoot: "/srv/hype-comms/web",

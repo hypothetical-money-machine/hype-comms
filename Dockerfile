@@ -24,6 +24,9 @@ RUN npm ci --include-workspace-root \
 
 COPY packages/contracts ./packages/contracts
 COPY apps/server ./apps/server
+# The built-in release-notes channel is seeded from the reviewed notes; the build copies them into
+# apps/server/dist, which the runtime stage already ships.
+COPY docs/releases ./docs/releases
 RUN npm run build --workspace @hype-comms/server
 
 # ---------------------------------------------------------------------------
