@@ -2070,3 +2070,76 @@ describe("workspace cache implementation parity", () => {
     expect(memoryState).toEqual(persistentState);
   });
 });
+
+describe("persistent message retention preflight", () => {
+  it("refreshes recent history without reading unrelated encrypted message values", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(NOW) + 60_000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence1, messageSequence2]);
+    const reads = vi.spyOn(IDBObjectStore.prototype, "getAll");
+    await cache.upsertHistory(ALPHA_ID, [{ ...messageSequence2 }]);
+    expect(
+      reads.mock.contexts.filter(
+        (store) => store instanceof IDBObjectStore && store.name === "messages",
+      ),
+    ).toEqual([]);
+    const state = await cache.load();
+    expect(state.messages).toEqual([messageSequence1, messageSequence2]);
+  });
+
+  it("expires UTC timestamps with different precision while preserving the boundary, reactions and outbox", async () => {
+    // The expired minute-only timestamp sorts AFTER a newer timestamp with seconds.
+    // The indexed first key alone cannot establish which instant is oldest.
+    const cutoff = Date.parse(NOW) + 500;
+    vi.spyOn(Date, "now").mockReturnValue(cutoff + 90 * 24 * 60 * 60 * 1000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const expired = { ...messageSequence1, createdAt: "2026-07-24T12:00Z" };
+    const boundary = { ...messageSequence2, createdAt: "2026-07-24T12:00:00.500Z" };
+    const newer = { ...messageSequence10, createdAt: "2026-07-24T12:00:00.600Z" };
+    const reaction = reactionAddedEvent.payload.reaction;
+    const expiredReaction = {
+      ...reaction,
+      id: "10000000-0000-4000-8000-000000009099",
+      messageId: expired.id,
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.enqueue(queuedAlphaMessage, NOW)).resolves.toBe(true);
+    await cache.replaceSnapshot(snapshot, [expired, boundary, newer], [reaction, expiredReaction]);
+    const state = await cache.load();
+    expect(state.messages).toEqual([boundary, newer]);
+    expect(state.reactions).toEqual([reaction]);
+    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox[0]?.operation).toEqual(queuedAlphaMessage);
+  });
+
+  it("keeps the size cap and existing ID tie-break, then avoids a scan at exactly the cap", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(NOW) + 60_000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const messages = Array.from({ length: 20_002 }, (_, index): Message => ({
+      ...messageSequence2,
+      id: `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      clientMessageId: `70000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      conversationSequence: String(index + 1),
+    }));
+    await cache.replaceSnapshot(snapshot, messages);
+    const database = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
+    await database.open();
+    try {
+      expect(await database.table("messages").count()).toBe(20_000);
+      expect(await database.table("messages").get(messages[0]!.id)).toBeDefined();
+      expect(await database.table("messages").get(messages[19_999]!.id)).toBeDefined();
+      expect(await database.table("messages").get(messages[20_000]!.id)).toBeUndefined();
+      expect(await database.table("messages").get(messages[20_001]!.id)).toBeUndefined();
+      const reads = vi.spyOn(IDBObjectStore.prototype, "getAll");
+      await cache.upsertHistory(ALPHA_ID, [messages[0]!]);
+      expect(
+        reads.mock.contexts.filter(
+          (store) => store instanceof IDBObjectStore && store.name === "messages",
+        ),
+      ).toEqual([]);
+      expect(await database.table("messages").count()).toBe(20_000);
+    } finally {
+      database.close();
+    }
+  }, 30_000);
+});

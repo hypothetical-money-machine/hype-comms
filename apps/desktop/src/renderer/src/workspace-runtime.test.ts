@@ -7034,7 +7034,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.error).toBeNull();
   });
 
-  it.each([false])(
+  it.each([false, true])(
     "drops history after acknowledged membership repair (overlap=%s)",
     async (overlap) => {
       const privateSummary: ConversationSummary = {
@@ -8395,6 +8395,189 @@ describe("WorkspaceRuntime", () => {
       await expect(runtime.updateProfileTitle("Captain")).rejects.toThrow("Profile update failed");
       expect(runtime.state.bootstrap?.currentUser.user.title).toBeUndefined();
     });
+  });
+});
+
+describe("overlapping cached history pages", () => {
+  const older: Message = {
+    ...peerMessage,
+    id: "20000000-0000-4000-8000-000000009001",
+    clientMessageId: "20000000-0000-4000-8000-000000009002",
+    conversationSequence: "0",
+    body: "Previously unloaded older message",
+  };
+  const page = (messages: Message[], nextCursor: string | null): MessageHistoryResponse => ({
+    messages,
+    nextCursor,
+    threadsSupported: true,
+    threadSummaries: [],
+    attachments: [],
+  });
+  async function restored(cached: Message[] = [ownMessage, peerMessage]) {
+    const cache = new MemoryWorkspaceCache();
+    const snapshot = bootstrapAt("10", {
+      conversations: [
+        channel(CONVERSATION_ID, "general"),
+        channel(SECOND_CONVERSATION_ID, "random"),
+      ],
+    });
+    await cache.replaceSnapshot(snapshot, cached);
+    const api = new FakeDesktopApi(snapshot);
+    api.histories.set(CONVERSATION_ID, page([ownMessage], "older-a"));
+    const getHistory = vi.spyOn(api, "getConversationMessages");
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await settle(
+      () => api.historyRequests.length === 1 && runtime.state.historyLoading.length === 0,
+      "first history page",
+    );
+    return { cache, api, runtime, getHistory };
+  }
+
+  it("refreshes only the first page on open, then gets beyond overlapping pages in one action", async () => {
+    const { runtime, api, cache, getHistory } = await restored();
+    expect(getHistory.mock.calls).toEqual([[{ conversationId: CONVERSATION_ID, limit: 50 }]]);
+    api.historyResults.set(CONVERSATION_ID, [
+      page([peerMessage], "older-b"),
+      page([], "older-c"),
+      page([older], "older-d"),
+    ]);
+    getHistory.mockClear();
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.calls).toEqual([
+      [{ conversationId: CONVERSATION_ID, before: "older-a", limit: 50 }],
+      [{ conversationId: CONVERSATION_ID, before: "older-b", limit: 50 }],
+      [{ conversationId: CONVERSATION_ID, before: "older-c", limit: 50 }],
+    ]);
+    expect(runtime.state.messages).toEqual([older, peerMessage, ownMessage]);
+    expect((await cache.load()).messages).toEqual([older, peerMessage, ownMessage]);
+    expect(runtime.state.historyLoading).toEqual([]);
+    expect(runtime.state.historyErrors).toEqual({});
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(true);
+    await runtime.stop();
+  });
+
+  it("fills an uncached gap instead of seeking before the oldest cached message", async () => {
+    const { runtime, api } = await restored([older, ownMessage]);
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "before-gap")]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.messages).toEqual([older, peerMessage, ownMessage]);
+    expect(api.historyRequests).toHaveLength(2);
+    await runtime.stop();
+  });
+
+  it("applies updated reactions on overlapping pages and stops at the end of history", async () => {
+    const { runtime, api, cache } = await restored();
+    api.reactions.push(ownReaction);
+    api.historyResults.set(CONVERSATION_ID, [page([ownMessage], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.reactions).toContainEqual(ownReaction);
+    expect((await cache.load()).reactions).toContainEqual(ownReaction);
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(false);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(2);
+    await runtime.stop();
+  });
+
+  it("shares the in-flight operation and resumes a failed page from its server cursor", async () => {
+    const { runtime, api, getHistory } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const first = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => getHistory.mock.calls.length === 3, "second overlapping page");
+    const second = runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.historyLoading).toEqual([CONVERSATION_ID]);
+    delayed.reject(new Error("Network unavailable"));
+    await Promise.all([first, second]);
+    expect(getHistory.mock.calls).toHaveLength(3);
+    expect(runtime.state.historyLoading).toEqual([]);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toBe("Network unavailable");
+    api.historyResults.set(CONVERSATION_ID, [page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.lastCall).toEqual([
+      { conversationId: CONVERSATION_ID, before: "older-b", limit: 50 },
+    ]);
+    expect(runtime.state.messages).toContainEqual(older);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("stops a cyclic cursor without making another request", async () => {
+    const { runtime, api } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [
+      page([peerMessage], "older-b"),
+      page([ownMessage], "older-a"),
+    ]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(3);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toContain(
+      "The server repeated a history page",
+    );
+    expect(runtime.state.historyLoading).toEqual([]);
+    await runtime.stop();
+  });
+
+  it("bounds overlapping pages and preserves the cursor for the next user action", async () => {
+    const { runtime, api, getHistory } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [
+      ...Array.from({ length: 20 }, (_, index) => page([peerMessage], `older-${index}`)),
+      page([older], null),
+    ]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(21);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toContain("Load older messages again");
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.lastCall).toEqual([
+      { conversationId: CONVERSATION_ID, before: "older-19", limit: 50 },
+    ]);
+    expect(runtime.state.messages).toContainEqual(older);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("stops fetching overlapping pages when the person changes conversations", async () => {
+    const { runtime, api } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 3, "second overlapping page");
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    delayed.resolve(page([peerMessage], "older-c"));
+    await loading;
+    expect(api.historyRequests.filter((id) => id === CONVERSATION_ID)).toHaveLength(3);
+    expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(runtime.state.historyErrors).toEqual({});
+    // Returning to the conversation continues from the last persisted server cursor.
+    runtime.selectConversation(CONVERSATION_ID);
+    api.historyResults.set(CONVERSATION_ID, [page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.messages).toContainEqual(older);
+    await runtime.stop();
+  });
+
+  it("continues past thread replies absent from the main timeline", async () => {
+    const { runtime, api } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [page([threadReply], "older-b"), page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(3);
+    expect(runtime.state.messages).toEqual(expect.arrayContaining([threadReply, older]));
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("does not project or continue a page chain after the session stops", async () => {
+    const { runtime, api, cache } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 3, "second overlapping page");
+    await runtime.stop();
+    delayed.resolve(page([older], "older-c"));
+    await loading;
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).messages).not.toContainEqual(older);
+    expect(api.historyRequests).toHaveLength(3);
   });
 });
 
