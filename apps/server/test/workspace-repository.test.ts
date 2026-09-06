@@ -745,6 +745,48 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(JSON.stringify(sync)).not.toContain(reaction.reaction.id);
   });
 
+  it("skips malformed and noncanonical message references without aborting sync pages", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Canonical sync reference"),
+      mentionedUserIds: [],
+    });
+    await repository.addReaction(member, sent.message.id, "🎉");
+    const canonical = await repository.sync(observer, "0", 100, { reactionEvents: true });
+    expect(canonical.events.map((event) => event.type)).toEqual([
+      "message.created",
+      "reaction.added",
+    ]);
+    const invalidReferences: readonly unknown[] = [
+      "not-a-uuid",
+      `${sent.message.id.slice(0, -1)}z`,
+      `{${sent.message.id}}`,
+      sent.message.id.replaceAll("-", ""),
+      sent.message.id.toUpperCase(),
+      `${sent.message.id} `,
+      `${sent.message.id}\n`,
+      null,
+      42,
+      { id: sent.message.id },
+    ];
+    for (const reference of invalidReferences) {
+      // A UUID containing only digits has no distinct uppercase spelling.
+      if (reference === sent.message.id) continue;
+      await pool.query(
+        `UPDATE sync_events
+            SET payload = jsonb_set(payload,
+              CASE WHEN event_type = 'message.created' THEN '{message,id}'::text[]
+                   ELSE '{reaction,messageId}'::text[] END,
+              $2::jsonb)
+          WHERE workspace_id = $1 AND event_type IN ('message.created', 'reaction.added')`,
+        [workspaceId, JSON.stringify(reference)],
+      );
+      const page = await repository.sync(observer, "0", 100, { reactionEvents: true });
+      expect(page.events).toEqual([]);
+      expect(page.nextCursor).toBe(canonical.nextCursor);
+      expect(page.hasMore).toBe(false);
+    }
+  });
+
   it("rejects retracting another member's message and an author retract after five minutes", async () => {
     const own = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "still secret after the window"),

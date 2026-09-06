@@ -536,6 +536,16 @@ function mapStoredConversation(row: ConversationRow): Conversation {
   });
 }
 
+// Preserve id::text equality: PostgreSQL prints UUIDs in canonical lowercase form. Guard the
+// payload cast so malformed or noncanonical stored references stay invisible instead of failing
+// the whole sync page, while allowing the message primary-key index to serve each lookup.
+function canonicalUuidSql(expression: string): string {
+  return `CASE
+    WHEN ${expression} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN (${expression})::uuid
+  END`;
+}
+
 function conversationVisibilitySql(
   alias: "conversation" | "anchor",
   userParameter: string,
@@ -4184,7 +4194,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS created_message
-                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                       WHERE created_message.id = ${canonicalUuidSql("event.payload #>> '{message,id}'")}
                          AND created_message.workspace_id = event.workspace_id
                          AND created_message.deleted_at IS NULL
                     )
@@ -4194,7 +4204,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS reaction_message
-                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                       WHERE reaction_message.id = ${canonicalUuidSql("event.payload #>> '{reaction,messageId}'")}
                          AND reaction_message.workspace_id = event.workspace_id
                          AND reaction_message.deleted_at IS NULL
                     )
