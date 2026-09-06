@@ -4050,8 +4050,8 @@ html[data-show-profile-titles="false"] .message-author-title {
 .composer-field > textarea {
   grid-area: 1 / 1;
   width: 100%;
-  min-height: 44px;
-  max-height: 132px;
+  min-height: var(--composer-min-height);
+  max-height: var(--composer-max-height);
   padding: 11px 14px;
   border: 1px solid var(--theme-border-default);
   border-radius: 9px;
@@ -5725,8 +5725,8 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
 
 .ai-channel-composer textarea {
   width: 100%;
-  min-height: 48px;
-  max-height: 180px;
+  min-height: var(--composer-min-height);
+  max-height: var(--composer-max-height);
   padding: 13px 38px 13px 14px;
   resize: none;
   border: 1px solid var(--theme-border-default);

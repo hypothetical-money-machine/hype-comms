@@ -1,0 +1,247 @@
+diff --git a/apps/desktop/src/renderer/src/ai-channel.test.ts b/apps/desktop/src/renderer/src/ai-channel.test.ts
+index 20af211b..6f99eaf3 100644
+--- a/apps/desktop/src/renderer/src/ai-channel.test.ts
++++ b/apps/desktop/src/renderer/src/ai-channel.test.ts
+@@ -440,23 +440,33 @@ describe("AiChannel", () => {
+     await waitFor(() => expect(input.value).toBe(""));
+   });
+ 
+-  it("keeps typing at the end visible when the prompt reaches its height cap", async () => {
++  it("autosizes a preserved draft when the composer remounts", async () => {
++    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(function (
++      this: HTMLTextAreaElement,
++    ) {
++      return this.value === "" ? 46 : 240;
++    });
++    vi.spyOn(HTMLTextAreaElement.prototype, "offsetHeight", "get").mockReturnValue(48);
++    vi.spyOn(HTMLTextAreaElement.prototype, "clientHeight", "get").mockReturnValue(46);
+     const harness = createTransport(aiState());
+     await renderChannel(harness);
+-    const input = await screen.findByRole<HTMLTextAreaElement>("textbox", {
++    const firstInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+       name: "Message Claude",
+     });
+-    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 240 });
+-    Object.defineProperty(input, "scrollTop", { configurable: true, value: 0, writable: true });
+     const prompt = Array.from({ length: 20 }, (_, index) => `Line ${String(index + 1)}`).join("\n");
++    fireEvent.change(firstInput, { target: { value: prompt } });
++    expect(firstInput.style.height).toBe("180px");
+ 
+-    fireEvent.change(input, { target: { value: prompt } });
+-    input.setSelectionRange(prompt.length, prompt.length);
+-    fireEvent.change(input, { target: { value: `${prompt}!` } });
++    act(() => harness.emit(aiState({ status: "configured" })));
++    expect(screen.queryByRole("textbox", { name: "Message Claude" })).toBeNull();
++    act(() => harness.emit(aiState({ status: "ready" })));
++    const remountedInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
++      name: "Message Claude",
++    });
+ 
+-    expect(input.style.height).toBe("180px");
+-    expect(input.style.overflowY).toBe("auto");
+-    expect(input.scrollTop).toBe(240);
++    expect(remountedInput.value).toBe(prompt);
++    expect(remountedInput.style.height).toBe("180px");
++    expect(remountedInput.style.overflowY).toBe("auto");
+   });
+ 
+   it("keeps a failed prompt draft and exposes the sanitized error", async () => {
+diff --git a/apps/desktop/src/renderer/src/ai-channel.tsx b/apps/desktop/src/renderer/src/ai-channel.tsx
+index 6f13811f..a9c83994 100644
+--- a/apps/desktop/src/renderer/src/ai-channel.tsx
++++ b/apps/desktop/src/renderer/src/ai-channel.tsx
+@@ -10,7 +10,6 @@ import type {
+ import {
+   useCallback,
+   useEffect,
+-  useLayoutEffect,
+   memo,
+   useRef,
+   useState,
+@@ -21,11 +20,11 @@ import {
+ } from "react";
+ 
+ import type { AiChannelTransport } from "../../shared/desktop-api";
++import { useComposerAutosize } from "./composer-autosize";
+ import { MarkdownBody } from "./message-body";
+ 
+ const PROMPT_MAX_LENGTH = 64_000;
+-const MIN_COMPOSER_HEIGHT = 48;
+-const MAX_COMPOSER_HEIGHT = 180;
++const AI_COMPOSER_SIZE = { minHeight: 48, maxHeight: 180 } as const;
+ const STREAM_BOTTOM_THRESHOLD = 48;
+ 
+ type PendingAction =
+@@ -258,7 +257,11 @@ export function AiChannel({
+   const lifecycle = useRef(0);
+   const actionInFlight = useRef(false);
+   const activeRef = useRef(active);
+-  const textarea = useRef<HTMLTextAreaElement>(null);
++  const {
++    ref: textarea,
++    assign: assignTextarea,
++    style: composerSizeStyle,
++  } = useComposerAutosize(draft, AI_COMPOSER_SIZE);
+   const stream = useRef<HTMLDivElement>(null);
+   const streamEnd = useRef<HTMLDivElement>(null);
+   const stickToStreamEnd = useRef(true);
+@@ -314,25 +317,6 @@ export function AiChannel({
+     };
+   }, [applyState, transport]);
+ 
+-  useLayoutEffect(() => {
+-    const element = textarea.current;
+-    if (element === null) return;
+-    const cursorIsAtEnd =
+-      element.selectionStart === element.value.length &&
+-      element.selectionEnd === element.value.length;
+-    element.style.height = "auto";
+-    const height = Math.min(
+-      Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
+-      MAX_COMPOSER_HEIGHT,
+-    );
+-    element.style.height = `${String(height)}px`;
+-    element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
+-    if (draft === "") element.scrollTop = 0;
+-    else if (cursorIsAtEnd && element.scrollHeight > MAX_COMPOSER_HEIGHT) {
+-      element.scrollTop = element.scrollHeight;
+-    }
+-  }, [draft]);
+-
+   useEffect(() => {
+     if (active && stickToStreamEnd.current) {
+       streamEnd.current?.scrollIntoView?.({ block: "nearest" });
+@@ -842,9 +826,9 @@ export function AiChannel({
+                 <label className="sr-only" htmlFor="ai-channel-prompt">
+                   Message Claude
+                 </label>
+-                <div className="ai-channel-composer-field">
++                <div className="ai-channel-composer-field" style={composerSizeStyle}>
+                   <textarea
+-                    ref={textarea}
++                    ref={assignTextarea}
+                     id="ai-channel-prompt"
+                     value={draft}
+                     maxLength={PROMPT_MAX_LENGTH}
+diff --git a/apps/desktop/src/renderer/src/message-composer.tsx b/apps/desktop/src/renderer/src/message-composer.tsx
+index 985a0665..8b4181e6 100644
+--- a/apps/desktop/src/renderer/src/message-composer.tsx
++++ b/apps/desktop/src/renderer/src/message-composer.tsx
+@@ -15,6 +15,7 @@ import {
+ 
+ import type { Attachment } from "@hype-comms/contracts";
+ import type { DesktopPlatform } from "../../shared/desktop-api";
++import { useComposerAutosize } from "./composer-autosize";
+ import {
+   applyComposerFormat,
+   composerFormatShortcut,
+@@ -23,8 +24,8 @@ import {
+ } from "./composer-formatting";
+ import { filterMentionMembers, insertMention, mentionQueryAt, segmentMentions } from "./mentions";
+ 
+-const MIN_COMPOSER_HEIGHT = 44;
+-const MAX_COMPOSER_HEIGHT = 132;
++const MESSAGE_COMPOSER_SIZE = { minHeight: 44, maxHeight: 132 } as const;
++
+ function ToolbarIcon({ children }: { readonly children: ReactNode }) {
+   return (
+     <svg
+@@ -161,7 +162,11 @@ export function MessageComposer({
+   readonly onRemoveAttachment?: (attachmentId: string) => void;
+   readonly onSubmit: () => Promise<void>;
+ }) {
+-  const input = useRef<HTMLTextAreaElement>(null);
++  const {
++    ref: input,
++    assign: assignComposer,
++    style: composerSizeStyle,
++  } = useComposerAutosize(draft, MESSAGE_COMPOSER_SIZE);
+   const highlight = useRef<HTMLDivElement>(null);
+   const field = useRef<HTMLDivElement>(null);
+   const selectedOption = useRef<HTMLButtonElement | null>(null);
+@@ -188,18 +193,6 @@ export function MessageComposer({
+   const pickerOpen = mentionQuery !== null && !dismissed && members.length > 0;
+   const listboxId = `${inputId}-mention-picker`;
+ 
+-  useEffect(() => {
+-    const element = input.current;
+-    if (element === null) return;
+-    element.style.height = "auto";
+-    const height = Math.min(
+-      Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
+-      MAX_COMPOSER_HEIGHT,
+-    );
+-    element.style.height = `${String(height)}px`;
+-    element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
+-  }, [draft]);
+-
+   useLayoutEffect(() => {
+     const element = input.current;
+     const nextSelection = pendingSelection.current;
+@@ -336,11 +329,11 @@ export function MessageComposer({
+ 
+   const assignInputRef = useCallback(
+     (element: HTMLTextAreaElement | null) => {
+-      input.current = element;
++      assignComposer(element);
+       if (typeof inputRef === "function") inputRef(element);
+       else if (inputRef !== undefined && inputRef !== null) inputRef.current = element;
+     },
+-    [inputRef],
++    [assignComposer, inputRef],
+   );
+ 
+   const hintId = `${inputId}-hint`;
+@@ -404,7 +397,11 @@ export function MessageComposer({
+             </Fragment>
+           ))}
+         </div>
+-        <div className={draft === "" ? "composer-field" : "composer-field has-draft"} ref={field}>
++        <div
++          className={draft === "" ? "composer-field" : "composer-field has-draft"}
++          ref={field}
++          style={composerSizeStyle}
++        >
+           <ComposerMentionHighlight draft={draft} members={members} highlightRef={highlight} />
+           <textarea
+             ref={assignInputRef}
+diff --git a/apps/desktop/src/renderer/src/styles.css b/apps/desktop/src/renderer/src/styles.css
+index 82992efe..7d66b5e3 100644
+--- a/apps/desktop/src/renderer/src/styles.css
++++ b/apps/desktop/src/renderer/src/styles.css
+@@ -3988,8 +3988,8 @@ html[data-sidebar-position="right"] .sidebar {
+ .composer-field > textarea {
+   grid-area: 1 / 1;
+   width: 100%;
+-  min-height: 44px;
+-  max-height: 132px;
++  min-height: var(--composer-min-height);
++  max-height: var(--composer-max-height);
+   padding: 11px 14px;
+   border: 1px solid var(--theme-border-default);
+   border-radius: 9px;
+@@ -5661,8 +5661,8 @@ html[data-sidebar-position="right"] .compact-hotzone.attention {
+ 
+ .ai-channel-composer textarea {
+   width: 100%;
+-  min-height: 48px;
+-  max-height: 180px;
++  min-height: var(--composer-min-height);
++  max-height: var(--composer-max-height);
+   padding: 13px 38px 13px 14px;
+   resize: none;
+   border: 1px solid var(--theme-border-default);
+diff --git a/code-review-ctrl-enter-input-overflow.md b/code-review-ctrl-enter-input-overflow.md
+index bc3067af..eec43ab6 100644
+--- a/code-review-ctrl-enter-input-overflow.md
++++ b/code-review-ctrl-enter-input-overflow.md
+@@ -55,8 +55,7 @@ const element = textarea.current;
+ if (element === null) return;
+ const previousScrollTop = element.scrollTop;
+ const cursorIsAtEnd =
+-  element.selectionStart === element.value.length &&
+-  element.selectionEnd === element.value.length;
++  element.selectionStart === element.value.length && element.selectionEnd === element.value.length;
+ element.style.height = "auto";
+ const contentHeight = element.scrollHeight;
+ const height = Math.min(Math.max(contentHeight, MIN_COMPOSER_HEIGHT), MAX_COMPOSER_HEIGHT);
