@@ -120,7 +120,7 @@ describe("NotificationSettings", () => {
       "Notifications are unavailable in this build.",
     );
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Refresh capability" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
   });
 
   it("subscribes before loading and does not overwrite a push with stale hydration", async () => {
@@ -190,10 +190,10 @@ describe("NotificationSettings", () => {
 
     expect(await screen.findByText("Supported")).toBeTruthy();
     expect(screen.getByText("Denied")).toBeTruthy();
-    expect(screen.getByText(/Permission and Do Not Disturb are managed/)).toBeTruthy();
+    expect(screen.getByText(/Enable Hype Comms notifications in system settings/)).toBeTruthy();
     expect(transport.refreshCalls).toBe(0);
 
-    const button = screen.getByRole("button", { name: "Refresh capability" });
+    const button = screen.getByRole("button", { name: "Check again" });
     button.focus();
     fireEvent.click(button);
     fireEvent.click(button);
@@ -220,7 +220,7 @@ describe("NotificationSettings", () => {
     expect(transport.getCalls).toBe(1);
     expect(transport.refreshCalls).toBe(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Refresh capability" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await screen.findByRole("checkbox", { name: /Enable notifications/ });
     expect(transport.getCalls).toBe(1);
     expect(transport.refreshCalls).toBe(1);

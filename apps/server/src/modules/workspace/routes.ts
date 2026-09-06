@@ -7,6 +7,7 @@ import {
   EPHEMERAL_ACTIVITY_CAPABILITY,
   GROUP_DIRECT_MESSAGES_CAPABILITY,
   HUMANS_ONLY_CHANNELS_CAPABILITY,
+  SYSTEM_CHANNELS_CAPABILITY,
   MEMBER_PROFILES_CAPABILITY,
   MESSAGE_RETRACT_EVENTS_CAPABILITY,
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
@@ -166,6 +167,7 @@ function workspaceClientCapabilities(
     ephemeralActivity: supported.includes(EPHEMERAL_ACTIVITY_CAPABILITY),
     groupDirectMessages: supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
     humansOnlyChannels: supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+    systemChannels: supported.includes(SYSTEM_CHANNELS_CAPABILITY),
   };
 }
 
@@ -356,7 +358,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
     requireAgentScope(identity, "workspace:read");
     const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
     return projectBootstrap(
-      await repository.bootstrap(identity, supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)),
+      await repository.bootstrap(
+        identity,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
+      ),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(MEMBER_PROFILES_CAPABILITY),
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
@@ -421,6 +427,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
         query.data.after,
         query.data.limit,
         supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
       ),
       supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
@@ -699,6 +706,7 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       query.data.after,
       query.data.limit,
       supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      supported.includes(SYSTEM_CHANNELS_CAPABILITY),
     );
   });
 

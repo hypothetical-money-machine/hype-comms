@@ -58,14 +58,18 @@ export function ArchivedConversationNotice({ thread = false }: { readonly thread
   );
 }
 
-export function AnnouncementPostingNotice() {
+export function AnnouncementPostingNotice({ builtIn = false }: { builtIn?: boolean }) {
   return (
     <div
       className="announcement-posting-notice"
       role="note"
       aria-label="Announcement posting restricted"
     >
-      <strong>Only workspace owners can post bulletins</strong>
+      <strong>
+        {builtIn
+          ? "Only Hype Comms posts in this channel"
+          : "Only workspace owners can post bulletins"}
+      </strong>
       <span>You can reply to a bulletin in its thread or add a reaction.</span>
     </div>
   );

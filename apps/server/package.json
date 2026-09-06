@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "prebuild": "npm run build --workspace @hype-comms/contracts",
-    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs",
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs && node ./scripts/copy-release-notes.mjs",
     "predev": "npm run build --workspace @hype-comms/contracts",
     "dev": "tsx watch src/main.ts",
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
@@ -35,7 +35,7 @@
     "@fastify/websocket": "11.3.0",
     "@hype-comms/contracts": "*",
     "@workos-inc/node": "10.10.0",
-    "fastify": "5.12.0",
+    "fastify": "5.12.3",
     "jose": "6.2.9",
     "nodemailer": "^9.0.5",
     "pg": "8.23.0",

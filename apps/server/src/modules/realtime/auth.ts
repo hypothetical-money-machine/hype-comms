@@ -29,6 +29,8 @@ export type RealtimePrincipal =
       readonly groupDirectMessages?: boolean;
       /** False/absent for tickets issued to clients predating humans-only channels. */
       readonly humansOnlyChannels?: boolean;
+      /** False/absent for tickets issued to clients predating built-in channels. */
+      readonly systemChannels?: boolean;
     }
   | {
       readonly userId: string;
@@ -56,6 +58,8 @@ export type RealtimePrincipal =
       readonly groupDirectMessages?: boolean;
       /** False/absent for tickets issued to clients predating humans-only channels. */
       readonly humansOnlyChannels?: boolean;
+      /** False/absent for tickets issued to clients predating built-in channels. */
+      readonly systemChannels?: boolean;
     };
 
 /**

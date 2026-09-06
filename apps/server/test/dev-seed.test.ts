@@ -88,7 +88,7 @@ describeWithPostgres("development demo seed", () => {
     }>(
       `
       SELECT
-        (SELECT count(*) FROM users)::text AS users,
+        (SELECT count(*) FROM users WHERE kind = 'human')::text AS users,
         (SELECT count(*) FROM workspace_memberships)::text AS memberships,
         (SELECT count(*) FROM conversations)::text AS conversations,
         (SELECT count(*) FROM messages)::text AS messages,
@@ -111,7 +111,7 @@ describeWithPostgres("development demo seed", () => {
     });
 
     const titlesAfterSecond = await pool.query<{ username: string; title: string | null }>(
-      "SELECT username, title FROM users ORDER BY username",
+      "SELECT username, title FROM users WHERE kind = 'human' ORDER BY username",
     );
     expect(titlesAfterSecond.rows).toEqual([
       { username: "claire", title: "Product Engineer" },
@@ -123,7 +123,7 @@ describeWithPostgres("development demo seed", () => {
     await seedDevelopmentDemo(pool, config);
 
     const titlesAfterReset = await pool.query<{ username: string; title: string | null }>(
-      "SELECT username, title FROM users ORDER BY username",
+      "SELECT username, title FROM users WHERE kind = 'human' ORDER BY username",
     );
     expect(titlesAfterReset.rows).toEqual([
       { username: "claire", title: "Product Engineer" },
