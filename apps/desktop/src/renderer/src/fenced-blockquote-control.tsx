@@ -45,7 +45,9 @@ export function FencedBlockquoteControl({
           </label>
         ))}
       </div>
-      <p id={descriptionId}>Interpret matching lines as a multiline quote fence.</p>
+      <p id={descriptionId}>
+        Put the selected marker on its own line before and after text to display it as a quote.
+      </p>
     </div>
   );
 }
