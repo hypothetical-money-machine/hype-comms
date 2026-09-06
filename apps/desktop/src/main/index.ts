@@ -8,6 +8,8 @@ import {
   AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
   AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -28,6 +30,8 @@ import {
   compactModePreferenceSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
+  devicePreferencesPatchSchema,
+  devicePreferencesSchema,
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
@@ -62,6 +66,8 @@ import {
   upsertChannelMemberOperationSchema,
   type AiChannelState,
   type ChatSessionState,
+  type DevicePreferences,
+  type DevicePreferencesPatch,
   type HumanWorkspaceBootstrapResponse,
   type NotificationContext,
   type NotificationState,
@@ -98,6 +104,7 @@ import {
 } from "../shared/attachment-upload";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
+import { createInitialDevicePreferencesArgument } from "../shared/device-preferences";
 import {
   AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE,
   type RealtimeConnectionState,
@@ -142,6 +149,8 @@ import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
 import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
+import { DevicePreferencesController } from "./device-preferences-controller";
+import { DevicePreferencesStore } from "./device-preferences-store";
 import {
   callbackForSignedOutSession,
   consumeDevelopmentAuthCallbackFile,
@@ -422,6 +431,8 @@ let stopThemeSubscription: (() => void) | null = null;
 let userUpdateCheckInFlight = false;
 let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
+let devicePreferencesController: DevicePreferencesController | null = null;
+let stopDevicePreferencesSubscription: (() => void) | null = null;
 let aiChannelController: AiChannelController | null = null;
 let stopAiChannelSubscription: (() => void) | null = null;
 let agentWakeRuntime: AgentWakeRuntimeSession | null = null;
@@ -669,7 +680,7 @@ interface IpcPayloadSchema<T> {
   readonly parse: (value: unknown) => T;
 }
 
-function parseBoundedNotificationIpc<T>(
+function parseBoundedIpcPayload<T>(
   schema: IpcPayloadSchema<T>,
   value: unknown,
   maximumBytes: number,
@@ -678,16 +689,16 @@ function parseBoundedNotificationIpc<T>(
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new Error("Notification IPC payload is not JSON-serializable");
+    throw new Error("IPC payload is not JSON-serializable");
   }
   if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > maximumBytes) {
-    throw new Error("Notification IPC payload exceeds its byte limit");
+    throw new Error("IPC payload exceeds its byte limit");
   }
   return schema.parse(value);
 }
 
 function boundedAiChannelState(value: unknown): AiChannelState {
-  return parseBoundedNotificationIpc(aiChannelStateSchema, value, AI_CHANNEL_STATE_IPC_MAX_BYTES);
+  return parseBoundedIpcPayload(aiChannelStateSchema, value, AI_CHANNEL_STATE_IPC_MAX_BYTES);
 }
 
 function deliverAiChannelState(state: AiChannelState): void {
@@ -1022,6 +1033,13 @@ function deliverCompactModeState(enabled: boolean): void {
   sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, enabled);
 }
 
+function deliverDevicePreferences(preferences: DevicePreferences): void {
+  sendToRenderer(
+    DESKTOP_CHANNELS.devicePreferencesChanged,
+    parseBoundedIpcPayload(devicePreferencesSchema, preferences, DEVICE_PREFERENCES_IPC_MAX_BYTES),
+  );
+}
+
 function flushPendingRendererEvents(): void {
   if (chatSession !== null) {
     sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
@@ -1034,6 +1052,9 @@ function flushPendingRendererEvents(): void {
   }
   if (compactModeController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, compactModeController.enabled);
+  }
+  if (devicePreferencesController !== null) {
+    deliverDevicePreferences(devicePreferencesController.state);
   }
   if (notificationSettingsController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.notificationStateChanged, notificationSettingsController.state);
@@ -1292,6 +1313,50 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesState);
+  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesState, (event): DevicePreferences => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted device-preferences-state IPC sender");
+    }
+    if (devicePreferencesController === null) {
+      throw new Error("Device preferences are unavailable");
+    }
+    return parseBoundedIpcPayload(
+      devicePreferencesSchema,
+      devicePreferencesController.state,
+      DEVICE_PREFERENCES_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesUpdate);
+  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesUpdate, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted device-preferences-update IPC sender");
+    }
+    if (devicePreferencesController === null) {
+      throw new Error("Device preferences are unavailable");
+    }
+    let patch: DevicePreferencesPatch;
+    try {
+      patch = parseBoundedIpcPayload(
+        devicePreferencesPatchSchema,
+        value,
+        DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
+      );
+    } catch (error) {
+      throw new Error("Invalid device preference update", { cause: error });
+    }
+    try {
+      return parseBoundedIpcPayload(
+        devicePreferencesSchema,
+        await devicePreferencesController.update(patch),
+        DEVICE_PREFERENCES_IPC_MAX_BYTES,
+      );
+    } catch (error) {
+      throw new Error("Could not save the device preferences", { cause: error });
+    }
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelState);
   ipcMain.handle(DESKTOP_CHANNELS.aiChannelState, (event): AiChannelState => {
     if (!isTrustedIpcSender(event)) {
@@ -1310,7 +1375,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1357,7 +1422,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1372,7 +1437,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelPromptRequestSchema,
       value,
       AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
@@ -1387,7 +1452,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1402,7 +1467,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelPermissionResponseSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1566,13 +1631,13 @@ function registerIpcHandlers(): void {
       scope === null ||
       notificationActiveGeneration !== scope.sessionGeneration
     ) {
-      return parseBoundedNotificationIpc(
+      return parseBoundedIpcPayload(
         notificationContextSchema,
         inactiveNotificationContext(),
         NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
       );
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationContextSchema,
       controller.bindRenderer(event.sender.id, rendererSessionGeneration),
       NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
@@ -1586,7 +1651,7 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const activity = parseBoundedNotificationIpc(
+    const activity = parseBoundedIpcPayload(
       notificationActivityUpdateSchema,
       input,
       NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
@@ -1603,12 +1668,12 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       notificationActionDrainRequestSchema,
       input,
       NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationActionDrainResponseSchema,
       controller.rendererReadyAndDrain(event.sender.id, request),
       NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -1622,7 +1687,7 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const acknowledgement = parseBoundedNotificationIpc(
+    const acknowledgement = parseBoundedIpcPayload(
       notificationActionAcknowledgementSchema,
       input,
       NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
@@ -1636,7 +1701,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       notificationSettingsController.state,
       NOTIFICATION_STATE_IPC_MAX_BYTES,
@@ -1652,12 +1717,12 @@ function registerIpcHandlers(): void {
       throw new Error("Notification settings are unavailable");
     }
     const controller = notificationSettingsController;
-    const preference = parseBoundedNotificationIpc(
+    const preference = parseBoundedIpcPayload(
       notificationPreferenceSchema,
       input,
       NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       await setNotificationPreferenceWithAuthorization({
         authorization: macosNotificationAuthorization,
@@ -1678,7 +1743,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       await notificationSettingsController.refreshCapability(),
       NOTIFICATION_STATE_IPC_MAX_BYTES,
@@ -1693,12 +1758,12 @@ function registerIpcHandlers(): void {
     if (headlessDesktopConfiguration === null || captureNotificationPresenter === null) {
       throw new Error("Notification capture activation is unavailable");
     }
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       notificationCaptureActivationRequestSchema,
       input,
       NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationCaptureActivationResponseSchema,
       {
         version: 1,
@@ -2237,7 +2302,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
   if (compactModeController === null) {
     throw new Error("Compact mode must be initialized before creating a window");
   }
+  if (devicePreferencesController === null) {
+    throw new Error("Device preferences must be initialized before creating a window");
+  }
   const compactModeEnabled = compactModeController.enabled;
+  const devicePreferences = devicePreferencesController.state;
   const window = new BrowserWindow({
     width: headlessDesktopConfiguration?.contentWidth ?? 1_280,
     height: headlessDesktopConfiguration?.contentHeight ?? 800,
@@ -2257,6 +2326,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
       additionalArguments: [
         createInitialThemeStateArgument(themeController.state),
         createInitialCompactModeArgument(compactModeEnabled),
+        createInitialDevicePreferencesArgument(devicePreferences),
       ],
       contextIsolation: true,
       sandbox: true,
@@ -2658,6 +2728,12 @@ if (!hasSingleInstanceLock) {
       compactModeController = new CompactModeController({
         persistence: new CompactModePreferenceStore({ userDataPath: app.getPath("userData") }),
       });
+      devicePreferencesController = new DevicePreferencesController({
+        persistence: new DevicePreferencesStore({ userDataPath: app.getPath("userData") }),
+        reportListenerError: () => {
+          reportMainProcessError("Device preferences listener failed");
+        },
+      });
       aiChannelController = new AiChannelController({
         preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
         hostFactory: createClaudeAiAgentHost,
@@ -2675,6 +2751,7 @@ if (!hasSingleInstanceLock) {
       await Promise.all([
         themeController.initialize(),
         compactModeController.initialize(),
+        devicePreferencesController.initialize(),
         aiChannelController.initialize().catch(() => {
           reportMainProcessError("Failed to restore the local AI Channel preference");
           return aiChannelController?.state;
@@ -2684,6 +2761,8 @@ if (!hasSingleInstanceLock) {
       const initializedNotificationSettings = notificationSettingsController;
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
+      stopDevicePreferencesSubscription =
+        devicePreferencesController.subscribe(deliverDevicePreferences);
       stopAiChannelSubscription = aiChannelController.subscribe(deliverAiChannelState);
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
@@ -3091,6 +3170,10 @@ if (!hasSingleInstanceLock) {
       stopCompactModeSubscription?.();
       stopCompactModeSubscription = null;
       compactModeController?.dispose();
+      stopDevicePreferencesSubscription?.();
+      stopDevicePreferencesSubscription = null;
+      devicePreferencesController?.dispose();
+      devicePreferencesController = null;
       stopAiChannelSubscription?.();
       stopAiChannelSubscription = null;
     },

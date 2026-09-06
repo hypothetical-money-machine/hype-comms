@@ -156,6 +156,19 @@ const AI_CHANNEL_STATE = {
   error: null,
 } as const;
 
+const DEVICE_PREFERENCES = {
+  version: 1,
+  sidebarWidth: "wide",
+  messageTextSize: "large",
+  timestampFormat: "24-hour",
+  groupConsecutiveMessages: false,
+  alwaysShowGroupedMessageTimes: true,
+  showProfileTitles: false,
+  sendMessageShortcut: "mod-enter",
+  spellCheck: false,
+  motionPreference: "reduced",
+} as const;
+
 beforeEach(() => {
   invoke.mockReset();
   on.mockReset();
@@ -241,6 +254,73 @@ describe("preload theme boundary", () => {
 
     invoke.mockResolvedValueOnce({ ...systemState, css: "body { display: none }" });
     await expect(desktopApi.getSystemThemeState()).rejects.toThrow();
+  });
+});
+
+describe("preload device-preferences boundary", () => {
+  it("starts from safe defaults and validates state returned by main", async () => {
+    expect(desktopApi.initialDevicePreferences).toEqual({
+      version: 1,
+      sidebarWidth: "default",
+      messageTextSize: "default",
+      timestampFormat: "system",
+      groupConsecutiveMessages: true,
+      alwaysShowGroupedMessageTimes: false,
+      showProfileTitles: true,
+      sendMessageShortcut: "enter",
+      spellCheck: true,
+      motionPreference: "system",
+    });
+
+    invoke.mockResolvedValueOnce(DEVICE_PREFERENCES);
+    await expect(desktopApi.getDevicePreferences()).resolves.toEqual(DEVICE_PREFERENCES);
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.devicePreferencesState);
+
+    invoke.mockResolvedValueOnce({ ...DEVICE_PREFERENCES, customCss: "body {}" });
+    await expect(desktopApi.getDevicePreferences()).rejects.toThrow();
+
+    invoke.mockResolvedValueOnce({ ...DEVICE_PREFERENCES, padding: "x".repeat(4_096) });
+    await expect(desktopApi.getDevicePreferences()).rejects.toThrow(/byte limit/u);
+  });
+
+  it("validates and bounds non-empty patches before invoking main", async () => {
+    invoke.mockResolvedValueOnce(DEVICE_PREFERENCES);
+
+    await expect(
+      desktopApi.updateDevicePreferences({
+        sidebarWidth: "wide",
+        sendMessageShortcut: "mod-enter",
+      }),
+    ).resolves.toEqual(DEVICE_PREFERENCES);
+    expect(invoke).toHaveBeenCalledWith(DESKTOP_CHANNELS.devicePreferencesUpdate, {
+      sidebarWidth: "wide",
+      sendMessageShortcut: "mod-enter",
+    });
+
+    invoke.mockClear();
+    await expect(desktopApi.updateDevicePreferences({})).rejects.toThrow();
+    await expect(
+      desktopApi.updateDevicePreferences({ padding: "x".repeat(4_096) } as never),
+    ).rejects.toThrow(/byte limit/u);
+    await expect(
+      desktopApi.updateDevicePreferences({ sidebarWidth: "enormous" } as never),
+    ).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("drops invalid or oversized pushes and removes the exact listener", () => {
+    const listener = vi.fn();
+    const unsubscribe = desktopApi.onDevicePreferencesChanged(listener);
+    const wrapped = on.mock.calls[0]?.[1] as ((event: unknown, value: unknown) => void) | undefined;
+
+    wrapped?.({}, DEVICE_PREFERENCES);
+    wrapped?.({}, { ...DEVICE_PREFERENCES, customCss: "body {}" });
+    wrapped?.({}, { ...DEVICE_PREFERENCES, padding: "x".repeat(4_096) });
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(DEVICE_PREFERENCES);
+    unsubscribe();
+    expect(removeListener).toHaveBeenCalledWith(DESKTOP_CHANNELS.devicePreferencesChanged, wrapped);
   });
 });
 

@@ -21,6 +21,8 @@ import type {
   CreateTaskOperation,
   CreateChannelOperation,
   DirectConversationRequest,
+  DevicePreferences,
+  DevicePreferencesPatch,
   ConversationFilesQuery,
   ListConversationsQuery,
   ListConversationsResponse,
@@ -91,6 +93,8 @@ export type {
   NotificationPreference,
   NotificationState,
   RealtimeConnectionState,
+  DevicePreferences,
+  DevicePreferencesPatch,
 };
 
 export interface SessionTransport {
@@ -121,6 +125,15 @@ export interface CompactModeTransport {
   readonly getCompactMode: () => Promise<boolean>;
   readonly setCompactMode: (enabled: boolean) => Promise<boolean>;
   readonly onCompactModeChanged: (listener: (enabled: boolean) => void) => () => void;
+}
+
+export interface DevicePreferencesTransport {
+  readonly initialDevicePreferences: DevicePreferences;
+  readonly getDevicePreferences: () => Promise<DevicePreferences>;
+  readonly updateDevicePreferences: (patch: DevicePreferencesPatch) => Promise<DevicePreferences>;
+  readonly onDevicePreferencesChanged: (
+    listener: (preferences: DevicePreferences) => void,
+  ) => () => void;
 }
 
 /**
@@ -173,6 +186,7 @@ export interface DesktopApi
     SessionTransport,
     ThemeTransport,
     CompactModeTransport,
+    DevicePreferencesTransport,
     AiChannelTransport,
     Partial<NotificationTransport>,
     Partial<NotificationCaptureTransport> {

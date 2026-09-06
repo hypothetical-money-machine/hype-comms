@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -153,6 +154,16 @@ const humansThreadRoot: Message = {
   updatedAt: NOW,
 };
 
+const humansFollowUp: Message = {
+  ...humansThreadRoot,
+  id: "40000000-0000-4000-8000-000000000025",
+  conversationSequence: "2",
+  clientMessageId: "40000000-0000-4000-8000-000000000026",
+  body: "A consecutive planning update",
+  createdAt: "2026-08-23T12:01:00.000Z",
+  updatedAt: "2026-08-23T12:01:00.000Z",
+};
+
 const notificationState: NotificationState = {
   version: 1,
   devicePreference: "enabled",
@@ -170,7 +181,10 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
   workspaceId: WORKSPACE_ID,
 };
 
-function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = bootstrap) {
+function createClient(
+  workspaceBootstrap: HumanWorkspaceBootstrapResponse = bootstrap,
+  humansMessages: readonly Message[] = [humansThreadRoot],
+) {
   let realtimeStarts = 0;
   const createDirectConversation = vi.fn(async (): Promise<ConversationMutationResponse> => ({
     conversation: {
@@ -248,7 +262,7 @@ function createClient(workspaceBootstrap: HumanWorkspaceBootstrapResponse = boot
     },
     createDirectConversation,
     getConversationMessages: async ({ conversationId }: { conversationId: string }) => ({
-      messages: conversationId === HUMANS_CHANNEL_ID ? [humansThreadRoot] : [],
+      messages: conversationId === HUMANS_CHANNEL_ID ? humansMessages : [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: null,
@@ -362,13 +376,18 @@ function createSidebarPosition(): SidebarPositionRuntime {
 
 async function renderWorkspace(
   workspaceBootstrap: HumanWorkspaceBootstrapResponse = bootstrap,
+  options: {
+    readonly devicePreferences?: Parameters<typeof createTestDevicePreferencesRuntime>[0];
+    readonly humansMessages?: readonly Message[];
+  } = {},
 ): Promise<DesktopApi> {
-  const client = createClient(workspaceBootstrap);
+  const client = createClient(workspaceBootstrap, options.humansMessages);
   render(
     createElement(App, {
       client,
       theme: createTheme(),
       compactMode: createCompactMode(),
+      devicePreferences: createTestDevicePreferencesRuntime(options.devicePreferences),
       fencedBlockquotes: new FencedBlockquoteRuntime(null),
       sidebarPosition: createSidebarPosition(),
     }),
@@ -456,6 +475,26 @@ describe("workspace member directory", () => {
     expect(screen.getByRole("option", { name: /Morgan/u })).toBeTruthy();
     expect(screen.getByRole("option", { name: /Sam/u })).toBeTruthy();
     expect(screen.queryByRole("option", { name: /Hermes/u })).toBeNull();
+  });
+
+  it("renders full headers for consecutive messages when grouping is disabled", async () => {
+    await renderWorkspace(humansOnlyBootstrap, {
+      devicePreferences: { groupConsecutiveMessages: false },
+      humansMessages: [humansThreadRoot, humansFollowUp],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Humans-only channel: People Planning/u }));
+    const firstArticle = (await screen.findByText(humansThreadRoot.body)).closest("article");
+    const followUpArticle = (await screen.findByText(humansFollowUp.body)).closest("article");
+    if (firstArticle === null || followUpArticle === null) {
+      throw new Error("Expected both consecutive messages to render in the timeline");
+    }
+
+    for (const article of [firstArticle, followUpArticle]) {
+      expect(article.classList).not.toContain("message-continuation");
+      expect(article.querySelector("header")?.classList).not.toContain("sr-only");
+      expect(within(article).getByText("Sam")).toBeTruthy();
+    }
   });
 });
 

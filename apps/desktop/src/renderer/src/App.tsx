@@ -17,6 +17,7 @@ import {
   type ChannelAccess,
   type ChannelMode,
   type ChatSessionState,
+  type TimestampFormatPreference,
   type Message,
   type NotificationContext,
   type ProtocolHandlerState,
@@ -54,6 +55,7 @@ import {
   ConversationEmptyState,
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
+import type { DevicePreferencesRuntime } from "./device-preferences-runtime";
 import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
@@ -85,6 +87,7 @@ import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
 import { useConversationDrafts } from "./use-conversation-drafts";
+import { useDevicePreferences } from "./use-device-preferences";
 import { ipcErrorMessage } from "./ipc-error-message";
 import { WorkspaceSearch } from "./workspace-search";
 import type { OutboxItem } from "./workspace-cache";
@@ -107,6 +110,7 @@ interface AppProps {
   readonly client: DesktopApi;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly devicePreferences: DevicePreferencesRuntime;
   readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
 }
@@ -133,11 +137,35 @@ function attachmentUploadScopeKey(session: ChatSessionState): string | null {
   return context === null ? null : `${context.userId}:${context.workspaceId}`;
 }
 
-function messageTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+// Constructing an Intl.DateTimeFormat is expensive and every visible message row formats a time on
+// each render, so the formatters are built once per format and reused.
+const messageTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function messageTimeFormatter(
+  format: TimestampFormatPreference,
+  locale?: Intl.LocalesArgument,
+): Intl.DateTimeFormat {
+  const key = `${format}\u0000${locale === undefined ? "" : JSON.stringify(locale)}`;
+  const cached = messageTimeFormatters.get(key);
+  if (cached !== undefined) return cached;
+
+  const formatter = new Intl.DateTimeFormat(locale, {
     hour: "numeric",
     minute: "2-digit",
-  }).format(new Date(value));
+    ...(format === "system"
+      ? {}
+      : { hourCycle: format === "12-hour" ? ("h12" as const) : ("h23" as const) }),
+  });
+  messageTimeFormatters.set(key, formatter);
+  return formatter;
+}
+
+export function formatMessageTime(
+  value: string,
+  format: TimestampFormatPreference,
+  locale?: Intl.LocalesArgument,
+): string {
+  return messageTimeFormatter(format, locale).format(new Date(value));
 }
 
 export function visibleTimelineMessages(
@@ -470,6 +498,7 @@ export function MessageRow({
   domIdPrefix = "message",
   channelReferences,
   onOpenChannel,
+  timestampFormat = "system",
 }: {
   readonly message: Message;
   readonly members: readonly User[];
@@ -489,6 +518,7 @@ export function MessageRow({
   readonly domIdPrefix?: string;
   readonly channelReferences?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
+  readonly timestampFormat?: TimestampFormatPreference;
 }) {
   const author = members.find((member) => member.id === message.authorId);
   const authorName = author?.displayName ?? missingAuthorName(message.authorId);
@@ -522,7 +552,7 @@ export function MessageRow({
     >
       {continuation ? (
         <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
-          {messageTime(message.createdAt)}
+          {formatMessageTime(message.createdAt, timestampFormat)}
         </time>
       ) : (
         <Avatar user={author} />
@@ -531,7 +561,9 @@ export function MessageRow({
         <header className={continuation ? "sr-only" : undefined}>
           <strong>{authorName}</strong>
           {author?.title != null && <span className="message-author-title">{author.title}</span>}
-          <time dateTime={message.createdAt}>{messageTime(message.createdAt)}</time>
+          <time dateTime={message.createdAt}>
+            {formatMessageTime(message.createdAt, timestampFormat)}
+          </time>
         </header>
         <MessageBody
           body={message.body}
@@ -651,6 +683,7 @@ export function PendingMessageRow({
   mutationsDisabled = false,
   channelReferences,
   onOpenChannel,
+  timestampFormat = "system",
 }: {
   readonly item: OutboxItem;
   readonly currentUser: User;
@@ -663,6 +696,7 @@ export function PendingMessageRow({
   readonly mutationsDisabled?: boolean;
   readonly channelReferences?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
+  readonly timestampFormat?: TimestampFormatPreference;
 }) {
   const pendingStatus = editing ? "editing" : item.status.replaceAll("_", " ");
   return (
@@ -671,7 +705,7 @@ export function PendingMessageRow({
     >
       {continuation ? (
         <time className="message-continuation-time" dateTime={item.createdAt} aria-hidden="true">
-          {messageTime(item.createdAt)}
+          {formatMessageTime(item.createdAt, timestampFormat)}
         </time>
       ) : (
         <Avatar user={currentUser} />
@@ -744,8 +778,16 @@ function withAttachmentUploadTimeout<T>(operation: Promise<T>): Promise<T> {
   });
 }
 
-export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosition }: AppProps) {
+export function App({
+  client,
+  theme,
+  compactMode,
+  devicePreferences,
+  fencedBlockquotes,
+  sidebarPosition,
+}: AppProps) {
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
+  const preferences = useDevicePreferences(devicePreferences);
   const isHeadless = client.isHeadless === true;
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
   const [session, setSession] = useState<ChatSessionState | null>(null);
@@ -2456,6 +2498,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
         active={destination === "preferences"}
         theme={theme}
         compactMode={compactMode}
+        devicePreferences={devicePreferences}
         fencedBlockquotes={fencedBlockquotes}
         sidebarPosition={sidebarPosition}
         notifications={notificationTransport ?? undefined}
@@ -2609,6 +2652,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
+                sendMessageShortcut={preferences.sendMessageShortcut}
+                spellCheck={preferences.spellCheck}
                 onDraftChange={updateMainDraft}
                 onAttach={() => attachToComposer(selectedSummary.conversation.id)}
                 onRemoveAttachment={(attachmentId) =>
@@ -2715,7 +2760,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       }
                       onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedMessageId}
-                      continuation={isMessageContinuation(message, messages[index - 1] ?? null)}
+                      continuation={
+                        preferences.groupConsecutiveMessages &&
+                        isMessageContinuation(message, messages[index - 1] ?? null)
+                      }
+                      timestampFormat={preferences.timestampFormat}
                       channelReferences={channelReferences}
                       onOpenChannel={selectConversation}
                       replyCount={Math.max(
@@ -2739,20 +2788,22 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               {pending.map((item, index) => {
                 const previousTimestamp =
                   pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
-                const continuation = isMessageContinuation(
-                  {
-                    authorId: currentUserId,
-                    createdAt: item.createdAt,
-                    conversationSequence: null,
-                  },
-                  index > 0
-                    ? {
-                        authorId: currentUserId,
-                        createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
-                        conversationSequence: null,
-                      }
-                    : (messages.at(-1) ?? null),
-                );
+                const continuation =
+                  preferences.groupConsecutiveMessages &&
+                  isMessageContinuation(
+                    {
+                      authorId: currentUserId,
+                      createdAt: item.createdAt,
+                      conversationSequence: null,
+                    },
+                    index > 0
+                      ? {
+                          authorId: currentUserId,
+                          createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
+                          conversationSequence: null,
+                        }
+                      : (messages.at(-1) ?? null),
+                  );
                 return (
                   <Fragment key={item.operation.message.clientMessageId}>
                     {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
@@ -2763,6 +2814,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       currentUser={bootstrap.currentUser.user}
                       members={bootstrap.members}
                       continuation={continuation}
+                      timestampFormat={preferences.timestampFormat}
                       editing={editingClientMessageId === item.operation.message.clientMessageId}
                       mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onEdit={() => {
@@ -2807,6 +2859,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
                 typingText={selectedTypingText}
+                sendMessageShortcut={preferences.sendMessageShortcut}
+                spellCheck={preferences.spellCheck}
                 onDraftChange={updateMainDraft}
                 onAttach={
                   selectedSummary === undefined
@@ -2885,6 +2939,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                   onRetract={() => runtime.retractMessage(threadRoot.id)}
                   highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
                   continuation={false}
+                  timestampFormat={preferences.timestampFormat}
                   domIdPrefix="thread-message"
                   channelReferences={channelReferences}
                   onOpenChannel={selectConversation}
@@ -2924,10 +2979,11 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                       onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
                       onRetract={() => runtime.retractMessage(message.id)}
                       highlighted={message.id === runtimeState.focusedThreadMessageId}
-                      continuation={isMessageContinuation(
-                        message,
-                        threadReplies[index - 1] ?? null,
-                      )}
+                      continuation={
+                        preferences.groupConsecutiveMessages &&
+                        isMessageContinuation(message, threadReplies[index - 1] ?? null)
+                      }
+                      timestampFormat={preferences.timestampFormat}
                       domIdPrefix="thread-message"
                       channelReferences={channelReferences}
                       onOpenChannel={selectConversation}
@@ -2942,20 +2998,22 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                     threadPending[index - 1]?.createdAt ??
                     threadReplies.at(-1)?.createdAt ??
                     threadRoot.createdAt;
-                  const continuation = isMessageContinuation(
-                    {
-                      authorId: currentUserId,
-                      createdAt: item.createdAt,
-                      conversationSequence: null,
-                    },
-                    index > 0
-                      ? {
-                          authorId: currentUserId,
-                          createdAt: threadPending[index - 1]?.createdAt ?? item.createdAt,
-                          conversationSequence: null,
-                        }
-                      : (threadReplies.at(-1) ?? null),
-                  );
+                  const continuation =
+                    preferences.groupConsecutiveMessages &&
+                    isMessageContinuation(
+                      {
+                        authorId: currentUserId,
+                        createdAt: item.createdAt,
+                        conversationSequence: null,
+                      },
+                      index > 0
+                        ? {
+                            authorId: currentUserId,
+                            createdAt: threadPending[index - 1]?.createdAt ?? item.createdAt,
+                            conversationSequence: null,
+                          }
+                        : (threadReplies.at(-1) ?? null),
+                    );
                   return (
                     <Fragment key={item.operation.message.clientMessageId}>
                       {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
@@ -2966,6 +3024,7 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
                         currentUser={bootstrap.currentUser.user}
                         members={bootstrap.members}
                         continuation={continuation}
+                        timestampFormat={preferences.timestampFormat}
                         editing={
                           threadEditingClientMessageId === item.operation.message.clientMessageId
                         }
@@ -3017,6 +3076,8 @@ export function App({ client, theme, compactMode, fencedBlockquotes, sidebarPosi
               submitLabel="Reply"
               variantClassName="thread-composer"
               typingText={selectedTypingText}
+              sendMessageShortcut={preferences.sendMessageShortcut}
+              spellCheck={preferences.spellCheck}
               onDraftChange={updateThreadDraft}
               onAttach={
                 threadComposerKey === null ? undefined : () => attachToComposer(threadComposerKey)
