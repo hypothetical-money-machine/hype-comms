@@ -2831,6 +2831,102 @@ describeWithPostgres("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
   });
 
+  it("pages ranked search results after filtering visibility, retractions, and legacy groups", async () => {
+    const send = async (conversationId: string, repeats: number) =>
+      (
+        await repository.sendMessage(owner, conversationId, {
+          ...message(randomUUID(), Array(repeats).fill("perfrank").join(" ")),
+          mentionedUserIds: [],
+        })
+      ).message;
+    const highestPublic = await send(generalId, 10);
+    const earlierTie = await send(generalId, 1);
+    const laterTie = await send(generalId, 1);
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Private ranking",
+      slug: "private-ranking",
+      topic: null,
+      access: "members",
+    });
+    await send(privateChannel.conversation.conversation.id, 20);
+    const retracted = await send(generalId, 30);
+    await repository.retractMessage(owner, retracted.id);
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const groupMessage = await send(group.conversation.conversation.id, 15);
+
+    for (const includeGroups of [false, true]) {
+      const expected = [
+        ...(includeGroups ? [groupMessage.id] : []),
+        highestPublic.id,
+        laterTie.id,
+        earlierTie.id,
+      ];
+      const unpaged = await repository.searchMessages(
+        member,
+        "perfrank",
+        undefined,
+        50,
+        includeGroups,
+      );
+      expect(unpaged.results.map(({ message: result }) => result.id)).toEqual(expected);
+      expect(unpaged.nextCursor).toBeNull();
+      const pagedIds: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await repository.searchMessages(member, "perfrank", cursor, 1, includeGroups);
+        expect(page.results).toHaveLength(1);
+        pagedIds.push(page.results[0]!.message.id);
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor !== undefined);
+      expect(pagedIds).toEqual(expected);
+    }
+  });
+
+  it("searches access and message contents from one snapshot during membership revocation", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Search snapshot",
+      slug: "search-snapshot",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    const before = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "snapshotrank before revocation"),
+      mentionedUserIds: [],
+    });
+    let afterId: string | undefined;
+    const racingRepository = new WorkspaceRepository(pool, {
+      afterSearchVisibilityRead: async () => {
+        await repository.removeChannelMember(owner, conversationId, memberId);
+        await repository.retractMessage(owner, before.message.id);
+        const after = await repository.sendMessage(owner, conversationId, {
+          ...message(randomUUID(), "snapshotrank after revocation"),
+          mentionedUserIds: [],
+        });
+        afterId = after.message.id;
+      },
+    });
+
+    const inFlight = await racingRepository.searchMessages(member, "snapshotrank", undefined, 50);
+    expect(afterId).toBeDefined();
+    expect(inFlight.results.map(({ message: result }) => result.id)).toEqual([before.message.id]);
+    expect(inFlight.results[0]?.message.body).toBe("snapshotrank before revocation");
+    expect(inFlight.nextCursor).toBeNull();
+    expect(
+      (await repository.searchMessages(member, "snapshotrank", undefined, 50)).results,
+    ).toEqual([]);
+    expect(
+      (await repository.searchMessages(owner, "snapshotrank", undefined, 50)).results.map(
+        ({ message: result }) => result.id,
+      ),
+    ).toEqual([afterId]);
+  });
+
   it("grants and revokes member-only channel access across every message boundary", async () => {
     const created = await repository.createChannel(owner, {
       name: "Leadership",
