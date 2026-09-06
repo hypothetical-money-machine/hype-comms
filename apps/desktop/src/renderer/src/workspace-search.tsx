@@ -2,6 +2,7 @@ import type { MessageSearchResponse, MessageSearchResult, User } from "@hype-com
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 
+import { missingAuthorName } from "./built-in-channels";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface WorkspaceSearchProps {
@@ -205,7 +206,7 @@ export function WorkspaceSearch({
                           <span className="search-result-context">
                             <strong>{conversationName(result.message.conversationId)}</strong>
                             <span>
-                              {author?.displayName ?? "Former member"} ·{" "}
+                              {author?.displayName ?? missingAuthorName(result.message.authorId)} ·{" "}
                               {resultTime(result.message.createdAt)}
                             </span>
                           </span>
