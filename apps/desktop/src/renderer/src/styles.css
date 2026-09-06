@@ -1709,41 +1709,6 @@ html[data-sidebar-position="right"] .sidebar {
   color: var(--theme-text-muted);
 }
 
-.theme-designer-safety {
-  display: flex;
-  gap: 9px;
-  margin-top: 18px;
-  padding: 10px;
-  border: 1px solid var(--theme-border-accent);
-  border-radius: 8px;
-  background: var(--theme-accent-surface);
-}
-
-.theme-designer-safety > span {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  flex: none;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--theme-action-primary);
-  color: var(--theme-action-primary-text);
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.theme-designer-safety strong {
-  color: var(--theme-text-primary);
-  font-size: 11px;
-}
-
-.theme-designer-safety p {
-  margin: 2px 0 0;
-  color: var(--theme-text-muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-
 .theme-preview-panel {
   padding: 20px;
   background: var(--theme-surface-subtle);
