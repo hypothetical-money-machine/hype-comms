@@ -35,12 +35,19 @@ function useCurrentDate(): Date {
 }
 
 function calendarDate(value: string | Date, timeZone?: string): CalendarDate {
+  const date = value instanceof Date ? value : new Date(value);
+  // Date's local fields already use the viewer's Gregorian calendar day, including DST.
+  // Creating an Intl formatter for every adjacent message dominates large timeline renders.
+  if (timeZone === undefined) {
+    if (!Number.isFinite(date.getTime())) throw new RangeError("Invalid message timestamp");
+    return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() };
+  }
   const parts = new Intl.DateTimeFormat("en-US-u-ca-gregory", {
     timeZone,
     year: "numeric",
     month: "numeric",
     day: "numeric",
-  }).formatToParts(value instanceof Date ? value : new Date(value));
+  }).formatToParts(date);
   const year = Number(parts.find((part) => part.type === "year")?.value);
   const month = Number(parts.find((part) => part.type === "month")?.value);
   const day = Number(parts.find((part) => part.type === "day")?.value);
