@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cacheDecryptBatchResponseSchema,
@@ -555,6 +555,7 @@ function withoutTimestamps(state: CachedWorkspaceState) {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await clearPersistentWorkspaceCaches();
 });
 
@@ -1531,6 +1532,61 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 });
 
 describe("PersistentWorkspaceCache durability", () => {
+  it("does not revive membership state when a removal arrives during metadata encryption", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const gate = crypto.pauseNextEncryption();
+    const refresh = cache.refreshMetadata(snapshot);
+    await gate.started;
+    await cache.stageMembershipRepair(selfRemovedEvent);
+    gate.release();
+    expect(await refresh).toBeNull();
+    const state = await cache.load();
+    expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
+    expect(state.messages).toEqual([]);
+    expect(state.outbox).toEqual([]);
+    expect(
+      state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
+    ).toBe(false);
+  });
+
+  it("leaves metadata unchanged when its owner retires during encryption", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    const controller = new AbortController();
+    const gate = crypto.pauseNextEncryption();
+    const refresh = cache.refreshMetadata(
+      {
+        ...snapshot,
+        workspace: { ...snapshot.workspace, name: "Retired request" },
+      },
+      controller.signal,
+    );
+    await gate.started;
+    controller.abort();
+    gate.release();
+    await expect(refresh).rejects.toMatchObject({ name: "AbortError" });
+    const state = await cache.load();
+    expect(state.bootstrap?.workspace.name).toBe(snapshot.workspace.name);
+    expect(state.messages).toEqual([messageSequence2]);
+  });
+
+  it("preserves a history page committed while metadata encryption waits", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    const gate = crypto.pauseNextEncryption();
+    const refresh = cache.refreshMetadata(snapshot);
+    await gate.started;
+    await cache.upsertHistory(ALPHA_ID, [messageSequence1]);
+    gate.release();
+    expect(await refresh).not.toBeNull();
+    expect((await cache.load()).messages).toEqual([messageSequence1, messageSequence2]);
+  });
+
   it("rolls back a projection when its membership signal aborts at transaction commit", async () => {
     const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
     await cache.replaceSnapshot(snapshot, []);
@@ -1676,6 +1732,14 @@ describe("PersistentWorkspaceCache durability", () => {
     database.close();
 
     const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    expect(await reopened.loadSyncCursor()).toBe(selfRemovedEvent.workspaceSequence);
+    // Cursor-only reads must finish the same crash-recovery purge as a complete cache load.
+    const purged = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
+    await purged.open();
+    expect(await purged.table("messages").count()).toBe(0);
+    expect(await purged.table("outbox").count()).toBe(0);
+    expect((await purged.table("metadata").get("state")).repairMarker).not.toBeNull();
+    purged.close();
     const state = await reopened.load();
     expect(
       state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
@@ -1919,6 +1983,109 @@ describe("PersistentWorkspaceCache retraction write races", () => {
 });
 
 describe("workspace cache implementation parity", () => {
+  it("reads one conversation without losing the rest of the offline cache", async () => {
+    for (const cache of [
+      new MemoryWorkspaceCache(),
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+    ]) {
+      const zebraMessage = { ...messageSequence1, conversationId: ZEBRA_ID };
+      const reaction = reactionAddedEvent.payload.reaction;
+      await cache.replaceSnapshot(snapshot, [messageSequence2, zebraMessage], [reaction], [task]);
+      await cache.enqueue(queuedAlphaMessage, NOW);
+      const metadata = await cache.load({ conversationId: null });
+      expect(metadata.bootstrap?.conversations).toHaveLength(3);
+      expect(metadata.messages).toEqual([]);
+      expect(metadata.tasks).toEqual([]);
+      expect(metadata.reactions).toEqual([]);
+      expect(metadata.outbox).toHaveLength(1);
+      const alpha = await cache.load({ conversationId: ALPHA_ID });
+      expect(alpha.messages).toEqual([messageSequence2]);
+      expect(alpha.tasks).toEqual([task]);
+      expect(alpha.reactions).toEqual([reaction]);
+      const zebra = await cache.load({ conversationId: ZEBRA_ID });
+      expect(zebra.messages).toEqual([zebraMessage]);
+      expect(zebra.tasks).toEqual([]);
+      expect(zebra.reactions).toEqual([]);
+      expect((await cache.load()).messages).toEqual([zebraMessage, messageSequence2]);
+      await cache.stageMembershipRepair(selfRemovedEvent);
+      const removed = await cache.load({ conversationId: ALPHA_ID });
+      expect(removed.messages).toEqual([]);
+      expect(removed.outbox).toEqual([]);
+      expect(removed.repairMarker?.eventId).toBe(selfRemovedEvent.id);
+    }
+  });
+
+  it("refreshes metadata while preserving histories, tasks, reactions, and outbox state", async () => {
+    for (const cache of [
+      new MemoryWorkspaceCache(),
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+    ]) {
+      await cache.replaceSnapshot(
+        snapshot,
+        [messageSequence2],
+        [reactionAddedEvent.payload.reaction],
+        [task],
+      );
+      await cache.enqueue(queuedAlphaMessage, NOW);
+      const before = await cache.load();
+      const refreshed = {
+        ...snapshot,
+        workspace: { ...snapshot.workspace, name: "Renamed workspace" },
+        members: [morgan],
+      };
+      expect(await cache.refreshMetadata(refreshed)).toMatchObject({
+        workspace: { name: "Renamed workspace" },
+        members: [morgan],
+      });
+      const after = await cache.load();
+      expect(after.messages).toEqual(before.messages);
+      expect(after.tasks).toEqual(before.tasks);
+      expect(after.reactions).toEqual(before.reactions);
+      expect(after.outbox).toEqual(before.outbox);
+      expect(after.syncCursor).toBe(before.syncCursor);
+      expect(after.bootstrap?.workspace.name).toBe("Renamed workspace");
+      expect(after.bootstrap?.members).toMatchObject([morgan]);
+    }
+  });
+
+  it("requires full repair for changed cursors, authorization, and staged membership events", async () => {
+    for (const cache of [
+      new MemoryWorkspaceCache(),
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+    ]) {
+      await cache.replaceSnapshot(snapshot, [messageSequence2]);
+      expect(await cache.refreshMetadata({ ...snapshot, syncCursor: "1" })).toBeNull();
+      expect(
+        await cache.refreshMetadata({ ...snapshot, conversations: [zebraSummary] }),
+      ).toBeNull();
+      expect((await cache.load()).messages).toEqual([messageSequence2]);
+      await cache.advanceCursor("1");
+      expect(await cache.refreshMetadata(snapshot)).toBeNull();
+      await cache.stageMembershipRepair(selfRemovedEvent);
+      expect(await cache.refreshMetadata({ ...snapshot, syncCursor: "12" })).toBeNull();
+      const state = await cache.load();
+      expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
+      expect(state.messages).toEqual([]);
+    }
+  });
+
+  it("reads the same durable cursor before and after a staged self-removal", async () => {
+    for (const cache of [
+      new MemoryWorkspaceCache(),
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+    ]) {
+      expect(await cache.loadSyncCursor()).toBeNull();
+      await cache.replaceSnapshot(snapshot, [messageSequence2]);
+      expect(await cache.loadSyncCursor()).toBe(snapshot.syncCursor);
+      await cache.stageMembershipRepair(selfRemovedEvent);
+      expect(await cache.loadSyncCursor()).toBe(selfRemovedEvent.workspaceSequence);
+      const state = await cache.load();
+      expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+      expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
+      expect(state.messages).toEqual([]);
+    }
+  });
+
   it("returns identical loaded state from both implementations", async () => {
     const memory: WorkspaceCache = new MemoryWorkspaceCache();
     const persistent: WorkspaceCache = new PersistentWorkspaceCache({
@@ -1939,4 +2106,77 @@ describe("workspace cache implementation parity", () => {
     const persistentState = withoutTimestamps(await persistent.load());
     expect(memoryState).toEqual(persistentState);
   });
+});
+
+describe("persistent message retention preflight", () => {
+  it("refreshes recent history without reading unrelated encrypted message values", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(NOW) + 60_000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence1, messageSequence2]);
+    const reads = vi.spyOn(IDBObjectStore.prototype, "getAll");
+    await cache.upsertHistory(ALPHA_ID, [{ ...messageSequence2 }]);
+    expect(
+      reads.mock.contexts.filter(
+        (store) => store instanceof IDBObjectStore && store.name === "messages",
+      ),
+    ).toEqual([]);
+    const state = await cache.load();
+    expect(state.messages).toEqual([messageSequence1, messageSequence2]);
+  });
+
+  it("expires UTC timestamps with different precision while preserving the boundary, reactions and outbox", async () => {
+    // The expired minute-only timestamp sorts AFTER a newer timestamp with seconds.
+    // The indexed first key alone cannot establish which instant is oldest.
+    const cutoff = Date.parse(NOW) + 500;
+    vi.spyOn(Date, "now").mockReturnValue(cutoff + 90 * 24 * 60 * 60 * 1000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const expired = { ...messageSequence1, createdAt: "2026-07-24T12:00Z" };
+    const boundary = { ...messageSequence2, createdAt: "2026-07-24T12:00:00.500Z" };
+    const newer = { ...messageSequence10, createdAt: "2026-07-24T12:00:00.600Z" };
+    const reaction = reactionAddedEvent.payload.reaction;
+    const expiredReaction = {
+      ...reaction,
+      id: "10000000-0000-4000-8000-000000009099",
+      messageId: expired.id,
+    };
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.enqueue(queuedAlphaMessage, NOW)).resolves.toBe(true);
+    await cache.replaceSnapshot(snapshot, [expired, boundary, newer], [reaction, expiredReaction]);
+    const state = await cache.load();
+    expect(state.messages).toEqual([boundary, newer]);
+    expect(state.reactions).toEqual([reaction]);
+    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox[0]?.operation).toEqual(queuedAlphaMessage);
+  });
+
+  it("keeps the size cap and existing ID tie-break, then avoids a scan at exactly the cap", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(NOW) + 60_000);
+    const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    const messages = Array.from({ length: 20_002 }, (_, index): Message => ({
+      ...messageSequence2,
+      id: `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      clientMessageId: `70000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      conversationSequence: String(index + 1),
+    }));
+    await cache.replaceSnapshot(snapshot, messages);
+    const database = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
+    await database.open();
+    try {
+      expect(await database.table("messages").count()).toBe(20_000);
+      expect(await database.table("messages").get(messages[0]!.id)).toBeDefined();
+      expect(await database.table("messages").get(messages[19_999]!.id)).toBeDefined();
+      expect(await database.table("messages").get(messages[20_000]!.id)).toBeUndefined();
+      expect(await database.table("messages").get(messages[20_001]!.id)).toBeUndefined();
+      const reads = vi.spyOn(IDBObjectStore.prototype, "getAll");
+      await cache.upsertHistory(ALPHA_ID, [messages[0]!]);
+      expect(
+        reads.mock.contexts.filter(
+          (store) => store instanceof IDBObjectStore && store.name === "messages",
+        ),
+      ).toEqual([]);
+      expect(await database.table("messages").count()).toBe(20_000);
+    } finally {
+      database.close();
+    }
+  }, 30_000);
 });

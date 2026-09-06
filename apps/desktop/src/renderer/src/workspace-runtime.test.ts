@@ -59,6 +59,7 @@ import type {
   HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
   WorkspaceEvent,
+  WorkspaceSnapshot,
   ScopedProductRealtimeEvent,
 } from "@hype-comms/contracts";
 
@@ -76,6 +77,7 @@ import type {
   OutboxItem,
   RetractReservation,
   WorkspaceCache,
+  WorkspaceCacheLoadOptions,
 } from "./workspace-cache";
 import {
   applyRetractReservation,
@@ -552,6 +554,7 @@ type ReplaceSnapshotArgs = Parameters<WorkspaceCache["replaceSnapshot"]>;
 class FakeWorkspaceCache implements WorkspaceCache {
   readonly mode = "memory_only" as const;
   loadCount = 0;
+  fullLoadCount = 0;
   reactionUpsertFailures = 0;
   /** Ordered record of the calls whose relative order a test needs to pin, oldest first. */
   readonly operations: string[] = [];
@@ -581,16 +584,35 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return this.#syncCursor;
   }
 
-  async load(): Promise<CachedWorkspaceState> {
+  async loadSyncCursor(): Promise<string | null> {
+    return this.#syncCursor;
+  }
+
+  async refreshMetadata(): Promise<WorkspaceSnapshot | null> {
+    // Tests using this fake exercise the full snapshot fallback; the real cache is exercised
+    // separately for the unchanged-catalog restart path.
+    return null;
+  }
+
+  async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
     this.loadCount += 1;
+    if (options === undefined) this.fullLoadCount += 1;
     this.operations.push("load");
     const barrier = this.loadBarriers.shift();
     if (barrier !== undefined) await barrier;
     return {
       bootstrap: this.#snapshot,
-      messages: [...this.#messages.values()],
-      reactions: [...this.#reactions.values()],
-      tasks: [...this.#tasks.values()],
+      messages: [...this.#messages.values()].filter(
+        (message) => options === undefined || message.conversationId === options.conversationId,
+      ),
+      reactions: [...this.#reactions.values()].filter(
+        (reaction) =>
+          options === undefined ||
+          this.#messages.get(reaction.messageId)?.conversationId === options.conversationId,
+      ),
+      tasks: [...this.#tasks.values()].filter(
+        (task) => options === undefined || task.conversationId === options.conversationId,
+      ),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       ),
@@ -1757,12 +1779,15 @@ async function drain(): Promise<void> {
 function deferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
+  readonly reject: (reason: Error) => void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function runtimeWith(api: FakeDesktopApi, cache: WorkspaceCache): WorkspaceRuntime {
@@ -1944,6 +1969,118 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).outbox).toHaveLength(1);
   });
 
+  it.each([true, false])(
+    "restores another conversation's cached history before network refresh (offline=%s)",
+    async (offline) => {
+      const cache = new MemoryWorkspaceCache();
+      const secondMessages = Array.from({ length: 75 }, (_, index): Message => ({
+        ...peerMessage,
+        id: `20000000-0000-4000-8000-${String(1000 + index).padStart(12, "0")}`,
+        clientMessageId: `20000000-0000-4000-8000-${String(2000 + index).padStart(12, "0")}`,
+        conversationId: SECOND_CONVERSATION_ID,
+        conversationSequence: String(index + 1),
+        body: `Cached second conversation message ${index}`,
+      }));
+      const secondTask = { ...task, conversationId: SECOND_CONVERSATION_ID };
+      const secondReaction = { ...ownReaction, messageId: secondMessages[0]!.id };
+      const snapshot = bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "random"),
+        ],
+      });
+      await cache.replaceSnapshot(
+        snapshot,
+        [ownMessage, ...secondMessages],
+        [secondReaction],
+        [secondTask],
+      );
+      const api = new FakeDesktopApi(snapshot);
+      const network = deferred<MessageHistoryResponse>();
+      api.historyResults.set(SECOND_CONVERSATION_ID, [network.promise]);
+      const runtime = runtimeWith(api, cache);
+      await runtime.start(session, { offline });
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      expect(runtime.state.tasks).toEqual([]);
+      const load = vi.spyOn(cache, "load");
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      await settle(
+        () => runtime.state.messages.some((message) => message.id === secondMessages[0]!.id),
+        "cached conversation before network",
+      );
+      expect(
+        runtime.state.messages.filter(
+          (message) => message.conversationId === SECOND_CONVERSATION_ID,
+        ),
+      ).toEqual(secondMessages);
+      expect(runtime.state.tasks).toEqual([secondTask]);
+      expect(runtime.state.reactions).toEqual([secondReaction]);
+      expect(load.mock.calls).toEqual([[{ conversationId: SECOND_CONVERSATION_ID }]]);
+      if (offline) {
+        expect(api.historyRequests).toEqual([]);
+        await runtime.sendMessage(SECOND_CONVERSATION_ID, "Queued from restored cache", []);
+        expect((await cache.load()).outbox).toHaveLength(1);
+        expect(api.sent).toEqual([]);
+      } else {
+        await settle(() => api.historyRequests.includes(SECOND_CONVERSATION_ID), "network refresh");
+        expect(runtime.state.historyLoading).toContain(SECOND_CONVERSATION_ID);
+        network.reject(new Error("Network is unavailable"));
+        await settle(
+          () => runtime.state.historyErrors[SECOND_CONVERSATION_ID] !== undefined,
+          "network error",
+        );
+        expect(runtime.state.messages).toHaveLength(76);
+      }
+      await runtime.stop();
+    },
+  );
+
+  it("discards a cached history read from a retired session", async () => {
+    const cache = new MemoryWorkspaceCache();
+    const secondMessage = { ...peerMessage, conversationId: SECOND_CONVERSATION_ID };
+    await cache.replaceSnapshot(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "random"),
+        ],
+      }),
+      [ownMessage, secondMessage],
+    );
+    const runtime = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    await runtime.start(session, { offline: true });
+    const gate = deferred<void>();
+    const originalLoad = cache.load.bind(cache);
+    const load = vi.spyOn(cache, "load").mockImplementationOnce(async (options) => {
+      const result = await originalLoad(options);
+      await gate.promise;
+      return result;
+    });
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(() => load.mock.calls.length === 1, "old cached read");
+    await runtime.stop();
+    await cache.upsertHistory(SECOND_CONVERSATION_ID, [
+      { ...secondMessage, version: 2, body: "New cached version" },
+    ]);
+    await runtime.start(session, { offline: true });
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.body === "New cached version"),
+      "replacement session cached history",
+    );
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({ body: "New cached version" }),
+    );
+    gate.resolve();
+    await drain();
+    expect(runtime.state.messages).toContainEqual(
+      expect.objectContaining({ body: "New cached version" }),
+    );
+    expect(runtime.state.messages).not.toContainEqual(secondMessage);
+    await runtime.stop();
+  });
+
   it("converges two clients after disconnects before and after the canonical commit", async () => {
     vi.useFakeTimers();
     try {
@@ -2029,6 +2166,128 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
+  it("starts with only the opening history and persists another conversation on selection", async () => {
+    const secondMessage = { ...peerMessage, conversationId: SECOND_CONVERSATION_ID };
+    const snapshot = bootstrapAt("10", {
+      conversations: [
+        channel(SECOND_CONVERSATION_ID, "design"),
+        channel(CONVERSATION_ID, "general"),
+      ],
+    });
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(snapshot);
+    const history = deferred<MessageHistoryResponse>();
+    api.historyResults.set(SECOND_CONVERSATION_ID, [history.promise]);
+    const runtime = runtimeWith(api, cache);
+
+    await runtime.start(session);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+    expect(runtime.state.bootstrap?.conversations).toEqual(snapshot.conversations);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.busy).toBe(false);
+    expect((await cache.load()).messages).toEqual([]);
+
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+    history.resolve({
+      messages: [secondMessage],
+      attachments: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await settle(() => runtime.state.messages.length === 1, "selected history persisted");
+    expect((await cache.load()).messages).toEqual([secondMessage]);
+    expect(runtime.hasOlder(SECOND_CONVERSATION_ID)).toBe(false);
+    runtime.selectConversation(CONVERSATION_ID);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+    await runtime.stop();
+  });
+
+  it("reports a failed first visit and retries history when selected again", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "design"),
+        ],
+      }),
+    );
+    const history = deferred<MessageHistoryResponse>();
+    api.historyResults.set(SECOND_CONVERSATION_ID, [history.promise]);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    history.reject(new Error("History is temporarily unavailable"));
+    await drain();
+    expect(runtime.state.historyErrors[SECOND_CONVERSATION_ID]).toBe(
+      "History is temporarily unavailable",
+    );
+    expect(runtime.hasOlder(SECOND_CONVERSATION_ID)).toBe(true);
+
+    runtime.selectConversation(CONVERSATION_ID);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(() => !runtime.hasOlder(SECOND_CONVERSATION_ID), "history retry");
+    expect(runtime.state.historyErrors[SECOND_CONVERSATION_ID]).toBeUndefined();
+    await drain();
+    expect(runtime.state.historyLoading).toEqual([]);
+    expect(api.historyRequests).toEqual([
+      CONVERSATION_ID,
+      SECOND_CONVERSATION_ID,
+      SECOND_CONVERSATION_ID,
+    ]);
+    await runtime.stop();
+  });
+
+  it("starts a new history request without waiting for a retired session's pending visit", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "design"),
+        ],
+      }),
+    );
+    const oldHistory = deferred<MessageHistoryResponse>();
+    const newHistory = deferred<MessageHistoryResponse>();
+    api.historyResults.set(SECOND_CONVERSATION_ID, [oldHistory.promise, newHistory.promise]);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await runtime.start(session);
+    expect(api.historyRequests).toEqual([
+      CONVERSATION_ID,
+      SECOND_CONVERSATION_ID,
+      SECOND_CONVERSATION_ID,
+    ]);
+
+    oldHistory.reject(new Error("Retired request failed"));
+    await drain();
+    expect(runtime.state.historyLoading).toEqual([SECOND_CONVERSATION_ID]);
+    expect(runtime.state.historyErrors).toEqual({});
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(3);
+    newHistory.resolve({
+      messages: [{ ...peerMessage, conversationId: SECOND_CONVERSATION_ID }],
+      threadSummaries: [],
+      attachments: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await settle(() => runtime.state.historyLoading.length === 0, "new session history");
+    expect(runtime.state.messages).toContainEqual({
+      ...peerMessage,
+      conversationId: SECOND_CONVERSATION_ID,
+    });
+    await runtime.stop();
+  });
+
   it("repairs a cached restart from its cursor and hydrates history only when selected", async () => {
     const secondSummary = channel(SECOND_CONVERSATION_ID, "random");
     const secondMessage: Message = {
@@ -2053,10 +2312,35 @@ describe("WorkspaceRuntime", () => {
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
     expect(api.conversationTaskRequests).toEqual([]);
     expect(runtime.state.messages).toEqual([peerMessage, secondMessage]);
+    // Empty catch-up pages should not cause another full history decryption.
+    expect(cache.fullLoadCount).toBeLessThanOrEqual(3);
 
     runtime.selectConversation(SECOND_CONVERSATION_ID);
     await settle(() => api.historyRequests.length === 2, "second history hydration");
     expect(api.historyRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+  });
+
+  it("refreshes a restored catalog without loading or replacing its histories again", async () => {
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("10"), [peerMessage], [ownReaction], [task]);
+    const load = vi.spyOn(cache, "load");
+    const replace = vi.spyOn(cache, "replaceSnapshot");
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { workspace: { ...bootstrapAt("10").workspace, name: "Updated name" } }),
+    );
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.error).toBeNull();
+    expect(runtime.state.bootstrap?.workspace.name).toBe("Updated name");
+    expect(runtime.state.messages).toContainEqual(peerMessage);
+    expect(runtime.state.tasks).toContainEqual(task);
+    expect(load.mock.calls).toEqual([
+      [{ conversationId: null }],
+      [{ conversationId: CONVERSATION_ID }],
+    ]);
+    expect(replace).not.toHaveBeenCalled();
+    expect((await cache.load()).bootstrap?.workspace.name).toBe("Updated name");
+    await runtime.stop();
   });
 
   it("replaces a legacy channel mode before syncing or restarting realtime", async () => {
@@ -4445,7 +4729,7 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
 
-  it("hydrates tasks only for channels and the signed-in user's self DM", async () => {
+  it("hydrates the opening channel, then repairs tasks only for channels and self DM", async () => {
     const selfDmId = "20000000-0000-4000-8000-000000000030";
     const peerDmId = "20000000-0000-4000-8000-000000000031";
     const groupDmId = "20000000-0000-4000-8000-000000000032";
@@ -4470,8 +4754,20 @@ describe("WorkspaceRuntime", () => {
 
     await runtime.start(session);
 
-    expect(api.historyRequests).toEqual([CONVERSATION_ID, selfDmId, peerDmId, groupDmId]);
-    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+
+    api.bootstrap = { ...api.bootstrap, syncCursor: "11" };
+    api.emitWorkspaceEvent(membershipChanged(MEMBER_EVENT_ID, "11"));
+    await settle(() => api.acknowledged.includes("11"), "full membership repair");
+    expect(api.historyRequests).toEqual([
+      CONVERSATION_ID,
+      CONVERSATION_ID,
+      selfDmId,
+      peerDmId,
+      groupDmId,
+    ]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, CONVERSATION_ID, selfDmId]);
   });
 
   it("hydrates an announcement channel without asking for a task list it cannot have", async () => {
@@ -4504,7 +4800,7 @@ describe("WorkspaceRuntime", () => {
 
     // The server rejects tasks for an announcement channel, so requesting one would fail the
     // whole snapshot and leave the workspace stuck loading.
-    expect(api.historyRequests).toEqual([CONVERSATION_ID, announcementId, builtInId]);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
     expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
   });
 
@@ -5070,6 +5366,37 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
   });
 
+  it("issues distinct main-timeline jump requests for repeated task and attachment sources", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+    await runtime.start(session);
+    const sourceTask = { ...task, sourceMessageId: OWN_MESSAGE_ID };
+    runtime.openTaskSource(sourceTask);
+    const first = runtime.state.focusedMessageRequest;
+    runtime.openTaskSource(sourceTask);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(first);
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "launch-notes.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    runtime.openAttachmentSource(attachment);
+    const second = runtime.state.focusedMessageRequest;
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second);
+    expect(runtime.state.focusedMessageId).toBe(OWN_MESSAGE_ID);
+    await runtime.stop();
+    await runtime.start(session);
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second + 1);
+  });
+
   it("sends attachment ids and hydrates files from history and live messages", async () => {
     const attachment: Attachment = {
       id: "20000000-0000-4000-8000-0000000000aa",
@@ -5551,6 +5878,12 @@ describe("WorkspaceRuntime", () => {
     });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
+    runtime.selectConversation(DIRECT_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === DIRECT_MESSAGE_ID),
+      "first direct history hydration",
+    );
+    runtime.selectConversation(CONVERSATION_ID);
     const bootstrapRequestsAfterStart = api.bootstrapRequests;
     const historyRequestsAfterStart = api.historyRequests.length;
     expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
@@ -6483,6 +6816,10 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
     runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === privateMessage.id),
+      "private history hydration",
+    );
     expect(runtime.state.messages).toContainEqual(privateMessage);
 
     api.bootstrap = bootstrapAt("11");
@@ -6699,6 +7036,8 @@ describe("WorkspaceRuntime", () => {
     });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
+    await runtime.loadOlder(SECOND_CONVERSATION_ID);
+    await runtime.loadOlder(thirdConversationId);
     expect(runtime.state.outbox.map((item) => item.operation.conversationId)).toContain(
       thirdConversationId,
     );
@@ -6760,86 +7099,116 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.error).toBeNull();
   });
 
-  it("drops an older-history response released after membership repair is acknowledged", async () => {
-    const privateSummary: ConversationSummary = {
-      ...channel(SECOND_CONVERSATION_ID, "leadership"),
-      conversation: {
-        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
-        access: "members",
-      },
-      participantIds: [USER_ID],
-      membershipRole: "owner",
-    };
-    const currentPrivateMessage: Message = {
-      ...peerMessage,
-      id: "20000000-0000-4000-8000-000000000076",
-      clientMessageId: "20000000-0000-4000-8000-000000000077",
-      conversationId: SECOND_CONVERSATION_ID,
-    };
-    const olderPrivateMessage: Message = {
-      ...currentPrivateMessage,
-      id: "20000000-0000-4000-8000-000000000078",
-      clientMessageId: "20000000-0000-4000-8000-000000000079",
-      conversationSequence: "0",
-      body: "Must stay purged after a delayed history response",
-    };
-    const api = new FakeDesktopApi(
-      bootstrapAt("10", {
-        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
-      }),
-    );
-    api.histories.set(SECOND_CONVERSATION_ID, {
-      messages: [currentPrivateMessage],
-      threadSummaries: [],
-      threadsSupported: true,
-      nextCursor: "older-private-history",
-    });
-    const cache = new FakeWorkspaceCache();
-    const runtime = runtimeWith(api, cache);
-    await runtime.start(session);
+  it.each([false, true])(
+    "drops history after acknowledged membership repair (overlap=%s)",
+    async (overlap) => {
+      const privateSummary: ConversationSummary = {
+        ...channel(SECOND_CONVERSATION_ID, "leadership"),
+        conversation: {
+          ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+          access: "members",
+        },
+        participantIds: [USER_ID],
+        membershipRole: "owner",
+      };
+      const currentPrivateMessage: Message = {
+        ...peerMessage,
+        id: "20000000-0000-4000-8000-000000000076",
+        clientMessageId: "20000000-0000-4000-8000-000000000077",
+        conversationId: SECOND_CONVERSATION_ID,
+      };
+      const olderPrivateMessage: Message = {
+        ...currentPrivateMessage,
+        id: "20000000-0000-4000-8000-000000000078",
+        clientMessageId: "20000000-0000-4000-8000-000000000079",
+        conversationSequence: "0",
+        body: "Must stay purged after a delayed history response",
+      };
+      const api = new FakeDesktopApi(
+        bootstrapAt("10", {
+          conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+        }),
+      );
+      api.histories.set(SECOND_CONVERSATION_ID, {
+        messages: [currentPrivateMessage],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: "older-private-history",
+      });
+      const cache = new FakeWorkspaceCache();
+      const runtime = runtimeWith(api, cache);
+      await runtime.start(session);
 
-    const delayedHistory = deferred<MessageHistoryResponse>();
-    api.historyResults.set(SECOND_CONVERSATION_ID, [delayedHistory.promise]);
-    const requestsBeforeLoad = api.historyRequests.length;
-    const loading = runtime.loadOlder(SECOND_CONVERSATION_ID);
-    await settle(
-      () => api.historyRequests.length === requestsBeforeLoad + 1,
-      "delayed private history request",
-    );
+      if (overlap) {
+        runtime.selectConversation(SECOND_CONVERSATION_ID);
+        await settle(
+          () =>
+            api.historyRequests.includes(SECOND_CONVERSATION_ID) &&
+            runtime.state.historyLoading.length === 0,
+          "initial private history",
+        );
+      }
+      const delayedHistory = deferred<MessageHistoryResponse>();
+      api.historyResults.set(SECOND_CONVERSATION_ID, [
+        ...(overlap
+          ? [
+              {
+                messages: [currentPrivateMessage],
+                threadSummaries: [],
+                threadsSupported: true,
+                attachments: [],
+                nextCursor: "older-private-second-page",
+              },
+            ]
+          : []),
+        delayedHistory.promise,
+      ]);
+      const requestsBeforeLoad = api.historyRequests.length;
+      const loading = runtime.loadOlder(SECOND_CONVERSATION_ID);
+      await settle(
+        () => api.historyRequests.length === requestsBeforeLoad + (overlap ? 2 : 1),
+        "delayed private history request",
+      );
 
-    api.bootstrapResults.push(bootstrapAt("11"));
-    api.emitWorkspaceEvent(
-      membershipChanged(
-        "20000000-0000-4000-8000-00000000007a",
-        "11",
-        "removed",
-        SECOND_CONVERSATION_ID,
-      ),
-    );
-    await settle(
-      () => api.acknowledged.includes("11"),
-      "history membership repair acknowledgement",
-    );
+      api.bootstrapResults.push(bootstrapAt("11"));
+      api.emitWorkspaceEvent(
+        membershipChanged(
+          "20000000-0000-4000-8000-00000000007a",
+          "11",
+          "removed",
+          SECOND_CONVERSATION_ID,
+        ),
+      );
+      await settle(
+        () => api.acknowledged.includes("11"),
+        "history membership repair acknowledgement",
+      );
 
-    delayedHistory.resolve({
-      messages: [olderPrivateMessage],
-      threadSummaries: [],
-      threadsSupported: true,
-      attachments: [],
-      nextCursor: null,
-    });
-    await loading;
-    await drain();
+      delayedHistory.resolve({
+        messages: [olderPrivateMessage],
+        threadSummaries: [],
+        threadsSupported: true,
+        attachments: [],
+        nextCursor: "more-private-history",
+      });
+      await loading;
+      await drain();
+      expect(api.historyRequests.filter((id) => id === SECOND_CONVERSATION_ID)).toHaveLength(
+        overlap ? 3 : 1,
+      );
 
-    expect(
-      runtime.state.messages.filter((message) => message.conversationId === SECOND_CONVERSATION_ID),
-    ).toEqual([]);
-    expect(
-      (await cache.load()).messages.filter(
-        (message) => message.conversationId === SECOND_CONVERSATION_ID,
-      ),
-    ).toEqual([]);
-  });
+      expect(
+        runtime.state.messages.filter(
+          (message) => message.conversationId === SECOND_CONVERSATION_ID,
+        ),
+      ).toEqual([]);
+      expect(
+        (await cache.load()).messages.filter(
+          (message) => message.conversationId === SECOND_CONVERSATION_ID,
+        ),
+      ).toEqual([]);
+    },
+  );
 
   it("drops a task-list response released after membership repair is acknowledged", async () => {
     const privateSummary: ConversationSummary = {
@@ -7463,7 +7832,6 @@ describe("WorkspaceRuntime", () => {
     expect(cache.operations.slice(cache.operations.indexOf("applyEvent:member.updated"))).toEqual([
       "applyEvent:member.updated",
       "replaceMembers",
-      "load",
       "load",
     ]);
   });
@@ -8092,5 +8460,372 @@ describe("WorkspaceRuntime", () => {
       await expect(runtime.updateProfileTitle("Captain")).rejects.toThrow("Profile update failed");
       expect(runtime.state.bootstrap?.currentUser.user.title).toBeUndefined();
     });
+  });
+});
+
+describe("overlapping cached history pages", () => {
+  const older: Message = {
+    ...peerMessage,
+    id: "20000000-0000-4000-8000-000000009001",
+    clientMessageId: "20000000-0000-4000-8000-000000009002",
+    conversationSequence: "0",
+    body: "Previously unloaded older message",
+  };
+  const page = (messages: Message[], nextCursor: string | null): MessageHistoryResponse => ({
+    messages,
+    nextCursor,
+    threadsSupported: true,
+    threadSummaries: [],
+    attachments: [],
+  });
+  async function restored(cached: Message[] = [ownMessage, peerMessage]) {
+    const cache = new MemoryWorkspaceCache();
+    const snapshot = bootstrapAt("10", {
+      conversations: [
+        channel(CONVERSATION_ID, "general"),
+        channel(SECOND_CONVERSATION_ID, "random"),
+      ],
+    });
+    await cache.replaceSnapshot(snapshot, cached);
+    const api = new FakeDesktopApi(snapshot);
+    api.histories.set(CONVERSATION_ID, page([ownMessage], "older-a"));
+    const getHistory = vi.spyOn(api, "getConversationMessages");
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    await settle(
+      () => api.historyRequests.length === 1 && runtime.state.historyLoading.length === 0,
+      "first history page",
+    );
+    return { cache, api, runtime, getHistory };
+  }
+
+  it("refreshes only the first page on open, then gets beyond overlapping pages in one action", async () => {
+    const { runtime, api, cache, getHistory } = await restored();
+    expect(getHistory.mock.calls).toEqual([[{ conversationId: CONVERSATION_ID, limit: 50 }]]);
+    api.historyResults.set(CONVERSATION_ID, [
+      page([peerMessage], "older-b"),
+      page([], "older-c"),
+      page([older], "older-d"),
+    ]);
+    getHistory.mockClear();
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.calls).toEqual([
+      [{ conversationId: CONVERSATION_ID, before: "older-a", limit: 50 }],
+      [{ conversationId: CONVERSATION_ID, before: "older-b", limit: 50 }],
+      [{ conversationId: CONVERSATION_ID, before: "older-c", limit: 50 }],
+    ]);
+    expect(runtime.state.messages).toEqual([older, peerMessage, ownMessage]);
+    expect((await cache.load()).messages).toEqual([older, peerMessage, ownMessage]);
+    expect(runtime.state.historyLoading).toEqual([]);
+    expect(runtime.state.historyErrors).toEqual({});
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(true);
+    await runtime.stop();
+  });
+
+  it("fills an uncached gap instead of seeking before the oldest cached message", async () => {
+    const { runtime, api } = await restored([older, ownMessage]);
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "before-gap")]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.messages).toEqual([older, peerMessage, ownMessage]);
+    expect(api.historyRequests).toHaveLength(2);
+    await runtime.stop();
+  });
+
+  it("applies updated reactions on overlapping pages and stops at the end of history", async () => {
+    const { runtime, api, cache } = await restored();
+    api.reactions.push(ownReaction);
+    api.historyResults.set(CONVERSATION_ID, [page([ownMessage], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.reactions).toContainEqual(ownReaction);
+    expect((await cache.load()).reactions).toContainEqual(ownReaction);
+    expect(runtime.hasOlder(CONVERSATION_ID)).toBe(false);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(2);
+    await runtime.stop();
+  });
+
+  it("shares the in-flight operation and resumes a failed page from its server cursor", async () => {
+    const { runtime, api, getHistory } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const first = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => getHistory.mock.calls.length === 3, "second overlapping page");
+    const second = runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.historyLoading).toEqual([CONVERSATION_ID]);
+    delayed.reject(new Error("Network unavailable"));
+    await Promise.all([first, second]);
+    expect(getHistory.mock.calls).toHaveLength(3);
+    expect(runtime.state.historyLoading).toEqual([]);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toBe("Network unavailable");
+    api.historyResults.set(CONVERSATION_ID, [page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.lastCall).toEqual([
+      { conversationId: CONVERSATION_ID, before: "older-b", limit: 50 },
+    ]);
+    expect(runtime.state.messages).toContainEqual(older);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("stops a cyclic cursor without making another request", async () => {
+    const { runtime, api } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [
+      page([peerMessage], "older-b"),
+      page([ownMessage], "older-a"),
+    ]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(3);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toContain(
+      "The server repeated a history page",
+    );
+    expect(runtime.state.historyLoading).toEqual([]);
+    await runtime.stop();
+  });
+
+  it("bounds overlapping pages and preserves the cursor for the next user action", async () => {
+    const { runtime, api, getHistory } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [
+      ...Array.from({ length: 20 }, (_, index) => page([peerMessage], `older-${index}`)),
+      page([older], null),
+    ]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(21);
+    expect(runtime.state.historyErrors[CONVERSATION_ID]).toContain("Load older messages again");
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(getHistory.mock.lastCall).toEqual([
+      { conversationId: CONVERSATION_ID, before: "older-19", limit: 50 },
+    ]);
+    expect(runtime.state.messages).toContainEqual(older);
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("stops fetching overlapping pages when the person changes conversations", async () => {
+    const { runtime, api } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 3, "second overlapping page");
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    delayed.resolve(page([peerMessage], "older-c"));
+    await loading;
+    expect(api.historyRequests.filter((id) => id === CONVERSATION_ID)).toHaveLength(3);
+    expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(runtime.state.historyErrors).toEqual({});
+    // Returning to the conversation continues from the last persisted server cursor.
+    runtime.selectConversation(CONVERSATION_ID);
+    api.historyResults.set(CONVERSATION_ID, [page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(runtime.state.messages).toContainEqual(older);
+    await runtime.stop();
+  });
+
+  it("continues past thread replies absent from the main timeline", async () => {
+    const { runtime, api } = await restored();
+    api.historyResults.set(CONVERSATION_ID, [page([threadReply], "older-b"), page([older], null)]);
+    await runtime.loadOlder(CONVERSATION_ID);
+    expect(api.historyRequests).toHaveLength(3);
+    expect(runtime.state.messages).toEqual(expect.arrayContaining([threadReply, older]));
+    expect(runtime.state.historyErrors).toEqual({});
+    await runtime.stop();
+  });
+
+  it("does not project or continue a page chain after the session stops", async () => {
+    const { runtime, api, cache } = await restored();
+    const delayed = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page([peerMessage], "older-b"), delayed.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(() => api.historyRequests.length === 3, "second overlapping page");
+    await runtime.stop();
+    delayed.resolve(page([older], "older-c"));
+    await loading;
+    expect(runtime.state.messages).toEqual([]);
+    expect((await cache.load()).messages).not.toContainEqual(older);
+    expect(api.historyRequests).toHaveLength(3);
+  });
+});
+
+describe("opening-history reload after startup catch-up", () => {
+  const secondOld: Message = {
+    ...ownMessage,
+    id: "20000000-0000-4000-8000-000000000071",
+    clientMessageId: "20000000-0000-4000-8000-000000000072",
+    conversationId: SECOND_CONVERSATION_ID,
+    conversationSequence: "1",
+    body: "Older cached second conversation",
+  };
+  const secondNew: Message = {
+    ...peerMessage,
+    id: "20000000-0000-4000-8000-000000000073",
+    clientMessageId: "20000000-0000-4000-8000-000000000074",
+    conversationId: SECOND_CONVERSATION_ID,
+    conversationSequence: "2",
+    body: "Second conversation backlog",
+  };
+  const secondReaction = {
+    ...ownReaction,
+    id: "20000000-0000-4000-8000-000000000075",
+    messageId: secondOld.id,
+  };
+  const secondTask = { ...task, conversationId: SECOND_CONVERSATION_ID };
+
+  async function fixture() {
+    const conversations = [
+      channel(CONVERSATION_ID, "general"),
+      channel(SECOND_CONVERSATION_ID, "design"),
+    ];
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(
+      bootstrapAt("9", { conversations }),
+      [ownMessage, secondOld],
+      [ownReaction, secondReaction],
+      [secondTask],
+    );
+    const api = new FakeDesktopApi(bootstrapAt("12", { conversations }));
+    api.syncResults.push({
+      status: "accepted",
+      response: {
+        events: [
+          peerEvent,
+          {
+            ...peerEvent,
+            id: "20000000-0000-4000-8000-000000000076",
+            type: "message.created",
+            conversationId: SECOND_CONVERSATION_ID,
+            workspaceSequence: "12",
+            conversationSequence: "2",
+            payload: { message: secondNew, mentionedUserIds: [] },
+          },
+        ],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    });
+    const runtime = runtimeWith(api, cache);
+    return { cache, api, runtime };
+  }
+
+  it("catches up all histories durably while restoring unopened history on its first visit", async () => {
+    const { cache, api, runtime } = await fixture();
+    const load = vi.spyOn(cache, "load");
+    await runtime.start(session);
+    expect(runtime.state.messages).toEqual([peerMessage, ownMessage]);
+    expect(runtime.state.reactions).toEqual([ownReaction]);
+    expect(runtime.state.tasks).toEqual([]);
+    expect(load.mock.calls).toEqual([
+      [{ conversationId: null }],
+      [{ conversationId: CONVERSATION_ID }],
+      [{ conversationId: CONVERSATION_ID }],
+    ]);
+    expect(api.syncedFrom).toEqual(["9", "12"]);
+    expect(api.acknowledged).toEqual(["12", "12"]);
+    expect(api.startedCursors).toEqual(["12"]);
+    expect((await cache.load()).messages).toEqual(
+      expect.arrayContaining([ownMessage, peerMessage, secondOld, secondNew]),
+    );
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === secondNew.id),
+      "lazy backlog history",
+    );
+    expect(runtime.state.messages).toEqual(expect.arrayContaining([secondOld, secondNew]));
+    expect(runtime.state.reactions).toContainEqual(secondReaction);
+    expect(runtime.state.tasks).toContainEqual(secondTask);
+    await runtime.stop();
+  });
+
+  it("falls back to a full reload when navigation adds another history during the read", async () => {
+    const { cache, runtime } = await fixture();
+    const original = cache.load.bind(cache);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let openingReads = 0;
+    const load = vi.spyOn(cache, "load").mockImplementation(async (options) => {
+      const state = await original(options);
+      if (options?.conversationId === CONVERSATION_ID && ++openingReads === 2) {
+        entered.resolve();
+        await release.promise;
+      }
+      return state;
+    });
+    const starting = runtime.start(session);
+    await entered.promise;
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === secondNew.id),
+      "concurrent cached visit",
+    );
+    release.resolve();
+    await starting;
+    expect(load.mock.calls.some((args) => args.length === 0)).toBe(true);
+    expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+    expect(runtime.state.messages).toEqual(
+      expect.arrayContaining([ownMessage, peerMessage, secondOld, secondNew]),
+    );
+    expect(runtime.state.reactions).toContainEqual(secondReaction);
+    expect(runtime.state.tasks).toContainEqual(secondTask);
+    await runtime.stop();
+  });
+
+  it("discards the scoped reload when its session is retired", async () => {
+    const { cache, runtime, api } = await fixture();
+    const original = cache.load.bind(cache);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let openingReads = 0;
+    vi.spyOn(cache, "load").mockImplementation(async (options) => {
+      const state = await original(options);
+      if (options?.conversationId === CONVERSATION_ID && ++openingReads === 2) {
+        entered.resolve();
+        await release.promise;
+      }
+      return state;
+    });
+    const starting = runtime.start(session);
+    await entered.promise;
+    await runtime.stop();
+    release.resolve();
+    await starting;
+    expect(runtime.state.messages).toEqual([]);
+    expect(api.startedCursors).toEqual([]);
+    expect((await original()).messages).toContainEqual(secondNew);
+  });
+
+  it("retains the full reload for a source-less retraction in an unopened history", async () => {
+    const { cache, runtime, api } = await fixture();
+    api.syncResults.splice(0, 1, {
+      status: "accepted",
+      response: {
+        events: [
+          {
+            version: 1,
+            id: "20000000-0000-4000-8000-000000000077",
+            type: "message.retracted",
+            occurredAt: NOW,
+            workspaceId: WORKSPACE_ID,
+            conversationId: SECOND_CONVERSATION_ID,
+            workspaceSequence: "12",
+            conversationSequence: "1",
+            entityVersion: 2,
+            delivery: "at_least_once",
+            payload: { messageId: secondOld.id, deletedAt: NOW },
+          },
+        ],
+        nextCursor: "12",
+        highWaterCursor: "12",
+        hasMore: false,
+      },
+    });
+    const load = vi.spyOn(cache, "load");
+    await runtime.start(session);
+    expect(load.mock.calls.some((args) => args.length === 0)).toBe(true);
+    expect(runtime.state.messages.find((message) => message.id === secondOld.id)?.deletedAt).toBe(
+      NOW,
+    );
+    expect(runtime.state.reactions).not.toContainEqual(secondReaction);
+    expect(runtime.state.tasks).toContainEqual(secondTask);
+    await runtime.stop();
   });
 });

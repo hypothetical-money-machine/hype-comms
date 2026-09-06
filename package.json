@@ -36,6 +36,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
     "package:desktop": "npm run package --workspace @hype-comms/desktop",
+    "perf:baseline": "node scripts/performance-baseline.mjs",
     "package:desktop:linux": "npm run package:linux --workspace @hype-comms/desktop",
     "package:desktop:linux:arm64": "npm run package:linux:arm64 --workspace @hype-comms/desktop",
     "package:desktop:appimage": "npm run package:linux:appimage --workspace @hype-comms/desktop",
