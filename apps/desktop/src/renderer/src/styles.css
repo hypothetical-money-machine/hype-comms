@@ -2794,6 +2794,11 @@ html[data-sidebar-position="right"] .sidebar {
   padding: var(--density-message-list-padding);
 }
 
+/* Short rows have overflowing action rails; keep active controls above adjacent rows. */
+.message-list > .message:is(:hover, :focus-within, :has(.reaction-add[aria-expanded="true"])) {
+  z-index: 1;
+}
+
 .load-older {
   display: block;
   margin: 0 auto 18px;
