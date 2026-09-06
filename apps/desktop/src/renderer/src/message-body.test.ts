@@ -29,6 +29,46 @@ const alex: User = {
 afterEach(cleanup);
 
 describe("MessageBody", () => {
+  it("updates references and their actions without replacing unchanged Markdown elements", () => {
+    const body = "**Meet in #general with @alex**";
+    const firstOpen = vi.fn();
+    const nextOpen = vi.fn();
+    const { container, rerender } = render(
+      createElement(MessageBody, { body, channels, members: [alex], onOpenChannel: firstOpen }),
+    );
+    const paragraph = container.querySelector("p");
+    const strong = container.querySelector("strong");
+    const reference = screen.getByRole("button", { name: "#general" });
+    reference.focus();
+
+    rerender(
+      createElement(MessageBody, {
+        body,
+        channels: [...channels],
+        members: [{ ...alex }],
+        onOpenChannel: nextOpen,
+      }),
+    );
+    expect(container.querySelector("p")).toBe(paragraph);
+    expect(container.querySelector("strong")).toBe(strong);
+    expect(document.activeElement).toBe(reference);
+    fireEvent.click(reference);
+    expect(firstOpen).not.toHaveBeenCalled();
+    expect(nextOpen).toHaveBeenCalledWith(GENERAL_ID);
+
+    rerender(
+      createElement(MessageBody, { body, channels: [], members: [], onOpenChannel: nextOpen }),
+    );
+    expect(container.querySelector("strong")).toBe(strong);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(container.querySelector(".mention-chip")).toBeNull();
+    expect(container.textContent).toBe("Meet in #general with @alex");
+
+    rerender(createElement(MessageBody, { body: "A changed *message*" }));
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.querySelector("em")?.textContent).toBe("message");
+  });
+
   it("renders channel references as buttons that open the channel", () => {
     const onOpenChannel = vi.fn();
     render(
