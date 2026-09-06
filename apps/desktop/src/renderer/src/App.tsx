@@ -1105,6 +1105,13 @@ export function App({
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
+  const selectedHistoryLoading =
+    runtimeState.selectedConversationId !== null &&
+    runtimeState.historyLoading.includes(runtimeState.selectedConversationId);
+  const selectedHistoryError =
+    runtimeState.selectedConversationId === null
+      ? undefined
+      : runtimeState.historyErrors[runtimeState.selectedConversationId];
   const selectedConversationMembers = useMemo(() => {
     if (bootstrap === null || selectedSummary === undefined) return [];
     const participantIds = new Set(selectedSummary.participantIds);
@@ -2665,15 +2672,27 @@ export function App({
                   <button
                     className="load-older"
                     type="button"
+                    disabled={selectedHistoryLoading}
                     onClick={() => {
                       const conversationId = runtimeState.selectedConversationId;
                       if (conversationId !== null) void runtime.loadOlder(conversationId);
                     }}
                   >
-                    Load older messages
+                    {selectedHistoryLoading
+                      ? "Loading messages…"
+                      : selectedHistoryError !== undefined
+                        ? "Retry loading messages"
+                        : messages.length === 0
+                          ? "Load messages"
+                          : "Load older messages"}
                   </button>
                 )}
-              {messages.length === 0 && pending.length === 0 ? (
+              {selectedHistoryError !== undefined && <p role="alert">{selectedHistoryError}</p>}
+              {messages.length === 0 && pending.length === 0 && selectedHistoryLoading ? (
+                <p role="status">Loading conversation history…</p>
+              ) : messages.length === 0 &&
+                pending.length === 0 &&
+                selectedHistoryError === undefined ? (
                 <ConversationEmptyState
                   conversationName={
                     selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
