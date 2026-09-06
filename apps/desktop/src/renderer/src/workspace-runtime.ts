@@ -124,6 +124,8 @@ interface OutboxUpdate {
  * download that fails while a resync runs is transient, and is retried with backoff instead.
  */
 const MAX_CONSECUTIVE_RESYNCS = 3;
+// Bound one user action even if a server returns empty/overlapping pages indefinitely.
+const MAX_OVERLAPPING_HISTORY_PAGES = 20;
 
 /**
  * How long the resync in place has to hold up before the next demand starts a chain of its own
@@ -2353,7 +2355,7 @@ export class WorkspaceRuntime {
     }
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
-    const hydration = this.#loadHistoryPage(conversationId)
+    const hydration = this.#loadAdditionalHistory(conversationId)
       .catch((error: unknown) => {
         if (this.#isProjectionCurrent(projection, conversationId)) {
           this.#setState({
@@ -2382,7 +2384,37 @@ export class WorkspaceRuntime {
     await hydration;
   }
 
-  async #loadHistoryPage(conversationId: string): Promise<void> {
+  async #loadAdditionalHistory(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    // Opening a conversation still refreshes only its first page. An explicit older-page
+    // request follows server cursors until it adds visible messages or reaches the end.
+    const continueOverlaps = this.#historyCursors.has(conversationId);
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < MAX_OVERLAPPING_HISTORY_PAGES; page++) {
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const before = this.#historyCursors.get(conversationId);
+      if (before !== undefined && before !== null) {
+        if (seenCursors.has(before))
+          throw new Error("The server repeated a history page. Try loading older messages again.");
+        seenCursors.add(before);
+      }
+      const addedMessages = await this.#loadHistoryPage(conversationId);
+      if (
+        !this.#isProjectionCurrent(projection, conversationId) ||
+        !continueOverlaps ||
+        this.#state.selectedConversationId !== conversationId ||
+        addedMessages !== false ||
+        this.#historyCursors.get(conversationId) === null
+      ) {
+        return;
+      }
+    }
+    throw new Error("More history remains. Load older messages again to continue.");
+  }
+
+  async #loadHistoryPage(conversationId: string): Promise<boolean | undefined> {
     const cache = this.#cache;
     if (cache === null) return;
     const projection = this.#captureProjection(cache);
@@ -2426,7 +2458,7 @@ export class WorkspaceRuntime {
       ...(before === undefined ? {} : { before }),
       limit: 50,
     });
-    await this.#serialize(async () => {
+    return this.#serialize(async () => {
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       const messageIds = history.messages.map((message) => message.id);
       const hydrated =
@@ -2442,6 +2474,13 @@ export class WorkspaceRuntime {
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const retainedMessages = this.#retainMessages(history.messages);
+      const knownIds = new Set(this.#state.messages.map((message) => message.id));
+      const addedMessages = retainedMessages.some(
+        (message) =>
+          !knownIds.has(message.id) &&
+          message.deletedAt === null &&
+          (!history.threadsSupported || message.threadRootId === null),
+      );
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#setState({
         messages: mergeMessages(this.#state.messages, retainedMessages),
@@ -2472,6 +2511,7 @@ export class WorkspaceRuntime {
           retainAttachmentsForLiveMessages(history.attachments ?? [], retainedMessages),
         ),
       });
+      return addedMessages;
     });
   }
 

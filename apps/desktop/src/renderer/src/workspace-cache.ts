@@ -2573,6 +2573,27 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async #evictMessages(): Promise<void> {
+    const belowRetentionLimits = await this.#database.transaction(
+      "r",
+      this.#database.messages,
+      async () => {
+        const [count, oldestKeys] = await Promise.all([
+          this.#database.messages.count(),
+          this.#database.messages.orderBy("createdAt").limit(1).keys(),
+        ]);
+        if (count === 0) return true;
+        const oldest = oldestKeys[0];
+        // Wire timestamps are UTC, but seconds and fractional precision can differ. Compare
+        // minute prefixes so index ordering within the cutoff minute cannot hide an expired row.
+        const cutoffMinute = new Date(Date.now() - MAX_MESSAGE_AGE_MS).toISOString().slice(0, 16);
+        return (
+          count <= MAX_ACKNOWLEDGED_MESSAGES &&
+          typeof oldest === "string" &&
+          oldest.slice(0, 16) > cutoffMinute
+        );
+      },
+    );
+    if (belowRetentionLimits) return;
     const rows = await this.#database.messages.toArray();
     rows.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const cutoff = Date.now() - MAX_MESSAGE_AGE_MS;
