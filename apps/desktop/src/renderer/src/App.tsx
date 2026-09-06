@@ -61,6 +61,11 @@ import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
 import { MessageBody } from "./message-body";
+import {
+  captureTimelineScrollAnchor,
+  restoreTimelineScrollAnchor,
+  type TimelineScrollAnchor,
+} from "./timeline-scroll-anchor";
 import { MessageComposer } from "./message-composer";
 import { mentionedMemberIds } from "./mentions";
 import { isMessageContinuation } from "./message-grouping";
@@ -889,6 +894,15 @@ export function App({
     });
   }, [notificationTransport, runtime]);
   const messageList = useRef<HTMLDivElement>(null);
+  const historyAnchor = useRef<{
+    conversationId: string;
+    focusRequest: number;
+    anchor: TimelineScrollAnchor;
+  } | null>(null);
+  const cancelHistoryAnchor = useCallback(() => {
+    historyAnchor.current = null;
+  }, []);
+  const handledMessageFocus = useRef<{ id: string; request: number } | null>(null);
   const timelineConversationId = useRef<string | null>(null);
   const stickToTimelineBottom = useRef(true);
   const [timelineAtLiveTail, setTimelineAtLiveTail] = useState(false);
@@ -1411,6 +1425,31 @@ export function App({
     scheduleReadTracking();
   }, [scheduleReadTracking]);
 
+  useLayoutEffect(() => {
+    const pending = historyAnchor.current;
+    const list = messageList.current;
+    if (pending === null) return;
+    if (
+      list === null ||
+      destination !== "workspace" ||
+      paneView !== "chat" ||
+      pending.conversationId !== runtimeState.selectedConversationId ||
+      pending.focusRequest !== runtimeState.focusedMessageRequest
+    ) {
+      historyAnchor.current = null;
+      return;
+    }
+    restoreTimelineScrollAnchor(list, pending.anchor);
+    if (!selectedHistoryLoading) historyAnchor.current = null;
+  }, [
+    destination,
+    paneView,
+    messages,
+    selectedHistoryLoading,
+    runtimeState.selectedConversationId,
+    runtimeState.focusedMessageRequest,
+  ]);
+
   const markVisibleThreadMessagesRead = useCallback((): void => {
     const conversationId = runtimeState.selectedConversationId;
     const threadRootId = runtimeState.selectedThreadRootId;
@@ -1596,9 +1635,28 @@ export function App({
 
   useEffect(() => {
     const focusedMessageId = runtimeState.focusedMessageId;
-    if (focusedMessageId === null) return;
-    document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({ block: "center" });
-  }, [messages.length, runtimeState.focusedMessageId, runtimeState.selectedConversationId]);
+    const request = runtimeState.focusedMessageRequest;
+    if (focusedMessageId === null) {
+      handledMessageFocus.current = null;
+      return;
+    }
+    if (destination !== "workspace" || paneView !== "chat") return;
+    const handled = handledMessageFocus.current;
+    if (handled?.id === focusedMessageId && handled.request === request) return;
+    const row = document.getElementById(`message-${focusedMessageId}`);
+    if (row === null) return;
+    row.scrollIntoView({ block: "center" });
+    // History can arrive after the request. Once the target exists, further message loads
+    // must preserve the reader's position instead of replaying the old search/task jump.
+    handledMessageFocus.current = { id: focusedMessageId, request };
+  }, [
+    destination,
+    paneView,
+    messages,
+    runtimeState.focusedMessageId,
+    runtimeState.focusedMessageRequest,
+    runtimeState.selectedConversationId,
+  ]);
 
   useEffect(() => {
     const focusedMessageId = runtimeState.focusedThreadMessageId;
@@ -2726,6 +2784,10 @@ export function App({
               ref={messageList}
               aria-live="polite"
               onScroll={handleTimelineScroll}
+              onWheelCapture={cancelHistoryAnchor}
+              onTouchMoveCapture={cancelHistoryAnchor}
+              onPointerDownCapture={cancelHistoryAnchor}
+              onKeyDownCapture={cancelHistoryAnchor}
             >
               {runtimeState.selectedConversationId !== null &&
                 runtime.hasOlder(runtimeState.selectedConversationId) && (
@@ -2735,7 +2797,19 @@ export function App({
                     disabled={selectedHistoryLoading}
                     onClick={() => {
                       const conversationId = runtimeState.selectedConversationId;
-                      if (conversationId !== null) void runtime.loadOlder(conversationId);
+                      if (conversationId === null) return;
+                      const list = messageList.current;
+                      const anchor = list === null ? null : captureTimelineScrollAnchor(list);
+                      historyAnchor.current =
+                        anchor === null
+                          ? null
+                          : {
+                              conversationId,
+                              focusRequest: runtimeState.focusedMessageRequest,
+                              anchor,
+                            };
+                      if (anchor !== null) stickToTimelineBottom.current = false;
+                      void runtime.loadOlder(conversationId);
                     }}
                   >
                     {selectedHistoryLoading

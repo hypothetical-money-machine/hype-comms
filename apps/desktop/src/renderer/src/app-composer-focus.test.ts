@@ -904,6 +904,82 @@ describe("main composer focus on conversation changes", () => {
     expect(channelComposer().placeholder).toBe("Message # Launch Planning");
   });
 
+  it("lets the reader scroll while older history is still loading", async () => {
+    const harness = await renderWorkspace();
+    act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
+    await screen.findByText(launchMessage.body);
+    const row = document.getElementById(`message-${launchMessage.id}`);
+    const list = row?.closest<HTMLElement>(".message-list");
+    if (row === null || list === null || list === undefined) throw new Error("Missing timeline");
+    const viewport = vi
+      .spyOn(list, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 500, 500));
+    const bounds = vi
+      .spyOn(row, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 100, 500, 30));
+    let resolveHistory: (history: MessageHistoryResponse) => void = () => undefined;
+    const history = new Promise<MessageHistoryResponse>((resolve) => {
+      resolveHistory = resolve;
+    });
+    const request = vi.spyOn(harness.client, "getConversationMessages").mockReturnValue(history);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+      await waitFor(() => expect(request).toHaveBeenCalled());
+      fireEvent.wheel(list, { deltaY: 200 });
+      list.scrollTop = 200;
+      bounds.mockReturnValue(new DOMRect(0, 600, 500, 30));
+      await act(async () =>
+        resolveHistory({
+          messages: [threadRoot, launchMessage],
+          attachments: [],
+          threadSummaries: [],
+          threadsSupported: true,
+          nextCursor: null,
+        }),
+      );
+      await screen.findByText(threadRoot.body);
+      expect(list.scrollTop).toBe(200);
+    } finally {
+      viewport.mockRestore();
+      bounds.mockRestore();
+      request.mockRestore();
+    }
+  });
+
+  it("keeps the reading position after a search jump when older history loads, but permits a new jump", async () => {
+    const harness = await renderWorkspace();
+    const openResult = async (): Promise<void> => {
+      fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+      const input = await screen.findByRole("searchbox", { name: "Search messages" });
+      fireEvent.change(input, { target: { value: "Release notes" } });
+      fireEvent.click(screen.getByRole("button", { name: "Search" }));
+      fireEvent.click(await screen.findByRole("button", { name: /Release notes are drafted/ }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    };
+    await openResult();
+    const row = document.getElementById(`message-${launchMessage.id}`);
+    if (row === null) throw new Error("Search target did not render");
+    const scroll = vi.spyOn(row, "scrollIntoView");
+    try {
+      vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+        messages: [threadRoot, launchMessage],
+        attachments: [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+      await screen.findByText(threadRoot.body);
+      expect(scroll).not.toHaveBeenCalled();
+
+      await openResult();
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+      expect(scroll).toHaveBeenLastCalledWith({ block: "center" });
+    } finally {
+      scroll.mockRestore();
+    }
+  });
+
   it("focuses the thread composer after a thread search result closes the dialog", async () => {
     // A thread result awaits the thread fetch between the selection commit and closeSearch(false),
     // so the selection flushes while the dialog still holds focus and the guard defers. The close

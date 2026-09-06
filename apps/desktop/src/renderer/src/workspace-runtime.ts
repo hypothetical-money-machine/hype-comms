@@ -79,6 +79,8 @@ export interface WorkspaceRuntimeState {
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
+  /** Changes for an explicit main-timeline jump, including a repeated jump to the same message. */
+  readonly focusedMessageRequest: number;
   readonly selectedThreadRootId: string | null;
   readonly focusedThreadMessageId: string | null;
   readonly historyLoading: readonly string[];
@@ -172,6 +174,7 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
+  focusedMessageRequest: 0,
   selectedThreadRootId: null,
   focusedThreadMessageId: null,
   historyLoading: [],
@@ -584,6 +587,8 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
+  // Do not reuse a jump request if this runtime stops and starts another session.
+  #focusedMessageRequest = 0;
   #offlineOnly = false;
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
   #outboxFlushOwner: ProjectionGuard | null = null;
@@ -1133,7 +1138,7 @@ export class WorkspaceRuntime {
     this.#setState({
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
-
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: null,
       focusedThreadMessageId: null,
       threadLoading: false,
@@ -1609,7 +1614,7 @@ export class WorkspaceRuntime {
       selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
       focusedMessageId:
         message === undefined || message.threadRootId === null ? attachment.messageId : null,
-
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: message?.threadRootId ?? null,
       focusedThreadMessageId:
         message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
@@ -1847,7 +1852,7 @@ export class WorkspaceRuntime {
             }),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
-
+        focusedMessageRequest: ++this.#focusedMessageRequest,
         selectedThreadRootId: threadRootId,
         focusedThreadMessageId: threadRootId === null ? null : result.message.id,
         threadLoading: threadRootId !== null,
@@ -2024,6 +2029,7 @@ export class WorkspaceRuntime {
         ...(this.#state.selectedConversationId === root.conversationId
           ? {
               focusedMessageId: selectedThreadRootId ?? threadRootId,
+              focusedMessageRequest: ++this.#focusedMessageRequest,
             }
           : {}),
       });
