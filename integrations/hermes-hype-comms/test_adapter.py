@@ -861,7 +861,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
             await adapter.disconnect()
 
-    async def test_dm_mentions_and_self_suppression_checkpoint_without_channel_leakage(self) -> None:
+    async def test_dm_and_channel_messages_reach_model_while_self_messages_do_not(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
@@ -883,14 +883,15 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             message_event("104", DM_ID, AGENT_ID, body="the adapter's own reply")
         )
 
-        self.assertEqual(len(adapter.handled_events), 2)
+        self.assertEqual(len(adapter.handled_events), 3)
         self.assertIn('"body":"dm"', adapter.handled_events[0].text)
-        self.assertIn('"body":"@hermes wake up"', adapter.handled_events[1].text)
+        self.assertIn('"body":"background channel traffic"', adapter.handled_events[1].text)
+        self.assertIn('"body":"@hermes wake up"', adapter.handled_events[2].text)
         self.assertEqual(adapter.handled_events[0].source.chat_type, "dm")
         self.assertEqual(adapter.handled_events[1].source.chat_type, "channel")
         self.assertEqual(adapter.handled_events[1].source.user_id, USER_ID)
         self.assertEqual(adapter.handled_events[1].source.user_name, "morgan")
-        self.assertEqual(len(context_calls(factory)), 2)
+        self.assertEqual(len(context_calls(factory)), 3)
         self.assertEqual(adapter._cursor, "104")
 
     async def test_context_is_fetched_once_only_after_every_wake_gate(self) -> None:
@@ -917,12 +918,16 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         trigger = message_event("105", DM_ID, USER_ID, body="eligible DM")
         await adapter._accept_event(trigger)
 
-        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertEqual(len(adapter.handled_events), 3)
         self.assertEqual(
             [call["args"] for call in context_calls(factory)],
-            [context_args(DM_ID, message_id_for("105"))],
+            [
+                context_args(CHANNEL_ID, message_id_for("103")),
+                context_args(CHANNEL_ID, message_id_for("104")),
+                context_args(DM_ID, message_id_for("105")),
+            ],
         )
-        self.assertEqual(len(adapter.pre_gateway_dispatch_events), 1)
+        self.assertEqual(len(adapter.pre_gateway_dispatch_events), 3)
         self.assertEqual(adapter.pairing_events, [])
 
     async def test_profile_denied_dm_cannot_flip_into_trigger_only_inference(
@@ -4275,14 +4280,16 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             send_calls(factory)[0]["args"], ("messages", "send", CHANNEL_ID, "--json")
         )
 
-    async def test_an_unmentioned_thread_follow_up_is_ignored_by_default(self) -> None:
-        # The shipped promise is that unmentioned channel traffic never reaches
-        # Hermes. Receiving the annotation is not the same as acting on it.
+    async def test_an_unmentioned_thread_follow_up_reaches_the_model_by_default(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
         seen: list[Any] = []
-        adapter.handle_message = lambda event: seen.append(event)
+
+        async def capture(event: Any) -> None:
+            seen.append(event)
+
+        adapter.handle_message = capture
 
         outcome = await adapter._accept_event(
             message_event(
@@ -4296,8 +4303,12 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(seen, [])
-        self.assertEqual(adapter._thread_roots, {})
+        self.assertEqual(len(seen), 1)
+        self.assertIn('"body":"still broken"', seen[0].text)
+        self.assertEqual(
+            adapter._thread_roots[message_id_for("101")],
+            (CHANNEL_ID, THREAD_ROOT_ID),
+        )
 
     async def test_an_unmentioned_thread_follow_up_wakes_the_agent_when_enabled(self) -> None:
         # With follow-ups on, a reply inside a thread this agent already spoke
@@ -4334,22 +4345,24 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", THREAD_ROOT_ID),
         )
 
-    async def test_unmentioned_top_level_channel_traffic_stays_ignored_when_enabled(self) -> None:
-        # The server only annotates thread replies, so an ordinary unmentioned
-        # channel message carries no reason and must stay out of Hermes even
-        # with follow-ups switched on.
+    async def test_unmentioned_top_level_channel_traffic_reaches_the_model(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
         self.prepare_adapter(adapter)
         seen: list[Any] = []
-        adapter.handle_message = lambda event: seen.append(event)
+
+        async def capture(event: Any) -> None:
+            seen.append(event)
+
+        adapter.handle_message = capture
 
         outcome = await adapter._accept_event(
             message_event("101", CHANNEL_ID, USER_ID, body="unrelated chatter")
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(seen, [])
+        self.assertEqual(len(seen), 1)
+        self.assertIn('"body":"unrelated chatter"', seen[0].text)
 
     async def test_an_unrecognized_notification_reason_is_fatal(self) -> None:
         # Absence is the whole legacy shape and is accepted. Any other value
@@ -4373,14 +4386,16 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "INVALID_MESSAGE_EVENT")
 
-    async def test_the_channel_prompt_names_the_agent_only_when_follow_ups_are_on(self) -> None:
+    async def test_the_channel_prompt_always_names_the_agent_and_silence_contract(self) -> None:
         # metadata and raw_message reach no prompt, and platform_hint is fixed
         # at plugin registration, so channel_prompt is the only place this
-        # adapter can tell the model its own handle and the silence rule. The
-        # default configuration sets none of it.
+        # adapter can tell the model its own handle and the silence rule.
         quiet = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(quiet)
-        self.assertIsNone(quiet._channel_prompt())
+        quiet_prompt = quiet._channel_prompt()
+        self.assertIsNotNone(quiet_prompt)
+        self.assertIn("@hermes", quiet_prompt)
+        self.assertIn("NO_REPLY", quiet_prompt)
 
         adapter = self.new_adapter(
             FakeProcessFactory([]), env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"}
@@ -4448,10 +4463,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@hermes", prompt)
         self.assertIn("NO_REPLY", prompt)
 
-    async def test_a_dispatched_event_carries_no_channel_prompt_by_default(self) -> None:
-        # The default configuration must leave the prompt exactly as it was
-        # before follow-ups existed, because a changed ephemeral prompt costs
-        # a fresh agent and a cold provider prompt cache.
+    async def test_a_dispatched_event_carries_the_channel_prompt_by_default(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
@@ -4461,7 +4473,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(adapter.handled_events), 1)
-        self.assertIsNone(adapter.handled_events[0].channel_prompt)
+        prompt = adapter.handled_events[0].channel_prompt
+        self.assertIsNotNone(prompt)
+        self.assertIn("decide whether you need to reply", prompt)
+        self.assertIn("NO_REPLY", prompt)
 
     async def test_short_prose_naming_a_marker_is_still_delivered(self) -> None:
         # The long-prose case passes on the 64-character cap alone. This one is
@@ -4622,13 +4637,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(callable(context.kwargs["standalone_sender_fn"]))
         # The hint is the agent's whole model of the platform. It has to say
-        # where a reply lands and, more importantly, that the agent goes deaf
-        # in the thread it just opened unless a follow-up mentions it again.
+        # where a reply lands and that every authorized message is a decision
+        # point where intentional silence is valid.
         hint = context.kwargs["platform_hint"]
         self.assertIn("context pack", hint)
         self.assertIn("threaded reply", hint)
         self.assertIn("one level deep", hint)
-        self.assertIn("mention", hint)
+        self.assertIn("Every authorized message", hint)
+        self.assertIn("NO_REPLY", hint)
         self.assertIn("4,000 characters", hint)
 
 
