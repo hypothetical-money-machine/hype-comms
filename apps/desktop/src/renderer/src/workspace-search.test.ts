@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { MessageSearchResponse, MessageSearchResult, User } from "@hype-comms/contracts";
+import {
+  SYSTEM_USER_ID,
+  type MessageSearchResponse,
+  type MessageSearchResult,
+  type User,
+} from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -82,6 +87,34 @@ describe("WorkspaceSearch", () => {
     fireEvent.click(screen.getByRole("button", { name: /Quarterly avalanche review/ }));
     await waitFor(() => expect(openResult).toHaveBeenCalledWith(result));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("names the app as the author of a server-published bulletin in results", async () => {
+    // The publisher is never in the member directory; a departed member still reads as former.
+    const bulletin: MessageSearchResult = {
+      message: { ...result.message, authorId: SYSTEM_USER_ID, body: "Hype Comms v0.1.37" },
+    };
+    const departed: MessageSearchResult = {
+      message: {
+        ...result.message,
+        id: "10000000-0000-4000-8000-000000000004",
+        authorId: "10000000-0000-4000-8000-000000000005",
+      },
+    };
+    render(
+      createElement(WorkspaceSearch, {
+        members: [],
+        conversationName: () => "📣 Release notes",
+        search: vi.fn().mockResolvedValue({ results: [bulletin, departed], nextCursor: null }),
+        openResult: vi.fn().mockResolvedValue(undefined),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+    submitQuery("v0.1.37");
+
+    expect(await screen.findByText("Hype Comms v0.1.37")).toBeTruthy();
+    expect(screen.getByText(/Hype Comms ·/)).toBeTruthy();
+    expect(screen.getByText(/Former member ·/)).toBeTruthy();
   });
 
   it("keeps the search open when opening a result is declined", async () => {

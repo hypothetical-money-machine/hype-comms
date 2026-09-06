@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "prebuild": "npm run build --workspace @hype-comms/contracts",
-    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs",
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs && node ./scripts/copy-release-notes.mjs",
     "predev": "npm run build --workspace @hype-comms/contracts",
     "dev": "tsx watch src/main.ts",
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",

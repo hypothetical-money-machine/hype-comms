@@ -34,6 +34,8 @@ import {
   incomingWebhookMessageRequestSchema,
   channelSlugFromName,
   channelSlugSchema,
+  isSystemChannelSlug,
+  systemChannelSlugSchema,
   clientCapabilitiesHeaderSchema,
   conversationSummarySchema,
   conversationSchema,
@@ -793,6 +795,55 @@ describe("transport contracts", () => {
         topic: null,
       }),
     ).toThrow(/Channel access is only valid for channels/);
+  });
+
+  it("separates the built-in channel slug namespace from member-created slugs", () => {
+    expect(systemChannelSlugSchema.parse("hype/release-notes")).toBe("hype/release-notes");
+    for (const invalid of ["hype/", "hype/-notes", "release-notes", "hype/Release", "hype//x"]) {
+      expect(() => systemChannelSlugSchema.parse(invalid)).toThrow();
+    }
+    // A member can never create a slug that lands in the reserved namespace.
+    expect(() => channelSlugSchema.parse("hype/release-notes")).toThrow();
+    expect(isSystemChannelSlug("hype/release-notes")).toBe(true);
+    expect(isSystemChannelSlug("release-notes")).toBe(false);
+    expect(isSystemChannelSlug(null)).toBe(false);
+  });
+
+  it("caps the whole built-in slug, prefix included, at the database limit", () => {
+    // conversations.slug is limited to 100 code points in total, so a 96-code-point suffix that
+    // channelSlugSchema alone would accept must be rejected once the prefix is added.
+    expect(systemChannelSlugSchema.parse(`hype/${"a".repeat(95)}`)).toHaveLength(100);
+    expect(() => systemChannelSlugSchema.parse(`hype/${"a".repeat(96)}`)).toThrow(
+      /at most 100 Unicode code points/,
+    );
+  });
+
+  it("keeps the built-in marker and the reserved namespace in lockstep", () => {
+    const builtIn = {
+      ...CONVERSATION_SUMMARY.conversation,
+      name: "Release notes",
+      slug: "hype/release-notes",
+      channelMode: "announcement" as const,
+      isBuiltIn: true as const,
+    };
+    expect(conversationSchema.parse(builtIn)).toMatchObject({
+      slug: "hype/release-notes",
+      channelMode: "announcement",
+      isBuiltIn: true,
+    });
+
+    expect(() => conversationSchema.parse({ ...builtIn, slug: "release-notes" })).toThrow(
+      /reserved slug namespace/,
+    );
+    const withoutMarker: Record<string, unknown> = { ...builtIn };
+    delete withoutMarker.isBuiltIn;
+    expect(() => conversationSchema.parse(withoutMarker)).toThrow(/reserved slug namespace/);
+    expect(() => conversationSchema.parse({ ...builtIn, isBuiltIn: false })).toThrow();
+
+    // Ordinary channels stay byte-identical for clients whose schema predates built-in channels.
+    expect(conversationSchema.parse(CONVERSATION_SUMMARY.conversation)).not.toHaveProperty(
+      "isBuiltIn",
+    );
   });
 
   it("requires unique participants and a complete direct-conversation audience", () => {

@@ -3417,6 +3417,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: false,
       groupDirectMessages: false,
       humansOnlyChannels: false,
+      systemChannels: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
@@ -3431,6 +3432,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: true,
       groupDirectMessages: true,
       humansOnlyChannels: true,
+      systemChannels: true,
     });
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
@@ -3447,6 +3449,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: true,
       groupDirectMessages: true,
       humansOnlyChannels: true,
+      systemChannels: true,
     });
   });
 

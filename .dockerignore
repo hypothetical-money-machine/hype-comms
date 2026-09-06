@@ -32,6 +32,9 @@ docs
 scripts
 *.md
 !README.md
+# The server build bundles the reviewed release notes into dist for the built-in channel.
+!docs/releases
+!docs/releases/*.md
 
 .DS_Store
 .idea

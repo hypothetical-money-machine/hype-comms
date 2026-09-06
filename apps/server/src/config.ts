@@ -49,6 +49,10 @@ const rawConfigSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
+    systemChannelsEnabled: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     authKitAdmissionEnabled: z
       .enum(["true", "false"])
       .default("false")
@@ -146,6 +150,8 @@ export interface ServerConfig {
   readonly announcementChannelsEnabled: boolean;
   /** Requests the one-way cluster cutover after every server and realtime worker is compatible. */
   readonly humansOnlyChannelsEnabled: boolean;
+  /** Requests the one-way cluster cutover after every server and realtime worker is compatible. */
+  readonly systemChannelsEnabled: boolean;
   /**
    * Exposes AuthKit admission only after its provider, revocation, and proxy trust boundaries are
    * ready. Provider maintenance and signed webhooks may remain active while this is false.
@@ -239,6 +245,7 @@ export function loadConfig(
     workspaceSlug: env.HYPE_COMMS_WORKSPACE_SLUG,
     announcementChannelsEnabled: env.HYPE_COMMS_ANNOUNCEMENT_CHANNELS_ENABLED,
     humansOnlyChannelsEnabled: env.HYPE_COMMS_HUMANS_ONLY_CHANNELS_ENABLED,
+    systemChannelsEnabled: env.HYPE_COMMS_SYSTEM_CHANNELS_ENABLED,
     authKitAdmissionEnabled: env.HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED,
     workosApiKey: env.WORKOS_API_KEY,
     workosClientId: env.WORKOS_CLIENT_ID,
@@ -493,6 +500,7 @@ export function loadConfig(
     shutdownTimeoutMs: result.data.shutdownTimeoutMs,
     announcementChannelsEnabled: result.data.announcementChannelsEnabled,
     humansOnlyChannelsEnabled: result.data.humansOnlyChannelsEnabled,
+    systemChannelsEnabled: result.data.systemChannelsEnabled,
     authKitAdmissionEnabled: result.data.authKitAdmissionEnabled,
     ...(result.data.metricsToken === undefined ? {} : { metricsToken: result.data.metricsToken }),
     allowedOrigins: [...new Set(originsResult.data)],
