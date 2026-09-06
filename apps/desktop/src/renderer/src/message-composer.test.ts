@@ -64,6 +64,26 @@ describe("MessageComposer", () => {
     expect(screen.getByText(/for a new line/)).toBeTruthy();
   });
 
+  it.each(["linux", "win32", "darwin"] as const)(
+    "submits with the Enter shortcut only when Enter has no modifiers on %s",
+    (platform) => {
+      const { props } = renderComposer({
+        platform,
+        sendMessageShortcut: "enter",
+      });
+      const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+      fireEvent.keyDown(textbox, { key: "Enter", ctrlKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", metaKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", altKey: true });
+      fireEvent.keyDown(textbox, { key: "Enter", shiftKey: true });
+      expect(props.onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(textbox, { key: "Enter" });
+      expect(props.onSubmit).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["linux", "win32"] as const)(
     "can reserve plain Enter for a new line and send with Ctrl+Enter on %s",
     (platform) => {

@@ -342,7 +342,11 @@ export function MessageComposer({
       platform === "darwin"
         ? event.metaKey && !event.ctrlKey && !event.altKey
         : event.ctrlKey && !event.metaKey && !event.altKey;
-    if (sendMessageShortcut === "mod-enter" && !exactSendModifierPressed) return;
+    const shortcutMatches =
+      sendMessageShortcut === "mod-enter"
+        ? exactSendModifierPressed
+        : !event.metaKey && !event.ctrlKey && !event.altKey;
+    if (!shortcutMatches) return;
     event.preventDefault();
     if (!sendDisabled) event.currentTarget.form?.requestSubmit();
   };
