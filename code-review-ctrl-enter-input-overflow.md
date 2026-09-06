@@ -55,8 +55,7 @@ const element = textarea.current;
 if (element === null) return;
 const previousScrollTop = element.scrollTop;
 const cursorIsAtEnd =
-  element.selectionStart === element.value.length &&
-  element.selectionEnd === element.value.length;
+  element.selectionStart === element.value.length && element.selectionEnd === element.value.length;
 element.style.height = "auto";
 const contentHeight = element.scrollHeight;
 const height = Math.min(Math.max(contentHeight, MIN_COMPOSER_HEIGHT), MAX_COMPOSER_HEIGHT);

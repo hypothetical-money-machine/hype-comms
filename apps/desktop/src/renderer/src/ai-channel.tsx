@@ -10,7 +10,6 @@ import type {
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   memo,
   useRef,
   useState,
@@ -21,11 +20,11 @@ import {
 } from "react";
 
 import type { AiChannelTransport } from "../../shared/desktop-api";
+import { useComposerAutosize } from "./composer-autosize";
 import { MarkdownBody } from "./message-body";
 
 const PROMPT_MAX_LENGTH = 64_000;
-const MIN_COMPOSER_HEIGHT = 48;
-const MAX_COMPOSER_HEIGHT = 180;
+const AI_COMPOSER_SIZE = { minHeight: 48, maxHeight: 180 } as const;
 const STREAM_BOTTOM_THRESHOLD = 48;
 
 type PendingAction =
@@ -258,7 +257,11 @@ export function AiChannel({
   const lifecycle = useRef(0);
   const actionInFlight = useRef(false);
   const activeRef = useRef(active);
-  const textarea = useRef<HTMLTextAreaElement>(null);
+  const {
+    ref: textarea,
+    assign: assignTextarea,
+    style: composerSizeStyle,
+  } = useComposerAutosize(draft, AI_COMPOSER_SIZE);
   const stream = useRef<HTMLDivElement>(null);
   const streamEnd = useRef<HTMLDivElement>(null);
   const stickToStreamEnd = useRef(true);
@@ -313,25 +316,6 @@ export function AiChannel({
       unsubscribe();
     };
   }, [applyState, transport]);
-
-  useLayoutEffect(() => {
-    const element = textarea.current;
-    if (element === null) return;
-    const cursorIsAtEnd =
-      element.selectionStart === element.value.length &&
-      element.selectionEnd === element.value.length;
-    element.style.height = "auto";
-    const height = Math.min(
-      Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
-      MAX_COMPOSER_HEIGHT,
-    );
-    element.style.height = `${String(height)}px`;
-    element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
-    if (draft === "") element.scrollTop = 0;
-    else if (cursorIsAtEnd && element.scrollHeight > MAX_COMPOSER_HEIGHT) {
-      element.scrollTop = element.scrollHeight;
-    }
-  }, [draft]);
 
   useEffect(() => {
     if (active && stickToStreamEnd.current) {
@@ -842,9 +826,9 @@ export function AiChannel({
                 <label className="sr-only" htmlFor="ai-channel-prompt">
                   Message Claude
                 </label>
-                <div className="ai-channel-composer-field">
+                <div className="ai-channel-composer-field" style={composerSizeStyle}>
                   <textarea
-                    ref={textarea}
+                    ref={assignTextarea}
                     id="ai-channel-prompt"
                     value={draft}
                     maxLength={PROMPT_MAX_LENGTH}

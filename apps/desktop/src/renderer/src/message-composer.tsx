@@ -15,6 +15,7 @@ import {
 
 import type { Attachment } from "@hype-comms/contracts";
 import type { DesktopPlatform } from "../../shared/desktop-api";
+import { useComposerAutosize } from "./composer-autosize";
 import {
   applyComposerFormat,
   composerFormatShortcut,
@@ -23,8 +24,8 @@ import {
 } from "./composer-formatting";
 import { filterMentionMembers, insertMention, mentionQueryAt, segmentMentions } from "./mentions";
 
-const MIN_COMPOSER_HEIGHT = 44;
-const MAX_COMPOSER_HEIGHT = 132;
+const MESSAGE_COMPOSER_SIZE = { minHeight: 44, maxHeight: 132 } as const;
+
 function ToolbarIcon({ children }: { readonly children: ReactNode }) {
   return (
     <svg
@@ -161,7 +162,11 @@ export function MessageComposer({
   readonly onRemoveAttachment?: (attachmentId: string) => void;
   readonly onSubmit: () => Promise<void>;
 }) {
-  const input = useRef<HTMLTextAreaElement>(null);
+  const {
+    ref: input,
+    assign: assignComposer,
+    style: composerSizeStyle,
+  } = useComposerAutosize(draft, MESSAGE_COMPOSER_SIZE);
   const highlight = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLDivElement>(null);
   const selectedOption = useRef<HTMLButtonElement | null>(null);
@@ -187,18 +192,6 @@ export function MessageComposer({
   );
   const pickerOpen = mentionQuery !== null && !dismissed && members.length > 0;
   const listboxId = `${inputId}-mention-picker`;
-
-  useEffect(() => {
-    const element = input.current;
-    if (element === null) return;
-    element.style.height = "auto";
-    const height = Math.min(
-      Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
-      MAX_COMPOSER_HEIGHT,
-    );
-    element.style.height = `${String(height)}px`;
-    element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
-  }, [draft]);
 
   useLayoutEffect(() => {
     const element = input.current;
@@ -336,11 +329,11 @@ export function MessageComposer({
 
   const assignInputRef = useCallback(
     (element: HTMLTextAreaElement | null) => {
-      input.current = element;
+      assignComposer(element);
       if (typeof inputRef === "function") inputRef(element);
       else if (inputRef !== undefined && inputRef !== null) inputRef.current = element;
     },
-    [inputRef],
+    [assignComposer, inputRef],
   );
 
   const hintId = `${inputId}-hint`;
@@ -404,7 +397,11 @@ export function MessageComposer({
             </Fragment>
           ))}
         </div>
-        <div className={draft === "" ? "composer-field" : "composer-field has-draft"} ref={field}>
+        <div
+          className={draft === "" ? "composer-field" : "composer-field has-draft"}
+          ref={field}
+          style={composerSizeStyle}
+        >
           <ComposerMentionHighlight draft={draft} members={members} highlightRef={highlight} />
           <textarea
             ref={assignInputRef}

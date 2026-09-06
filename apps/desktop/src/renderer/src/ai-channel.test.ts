@@ -440,23 +440,33 @@ describe("AiChannel", () => {
     await waitFor(() => expect(input.value).toBe(""));
   });
 
-  it("keeps typing at the end visible when the prompt reaches its height cap", async () => {
+  it("autosizes a preserved draft when the composer remounts", async () => {
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(function (
+      this: HTMLTextAreaElement,
+    ) {
+      return this.value === "" ? 46 : 240;
+    });
+    vi.spyOn(HTMLTextAreaElement.prototype, "offsetHeight", "get").mockReturnValue(48);
+    vi.spyOn(HTMLTextAreaElement.prototype, "clientHeight", "get").mockReturnValue(46);
     const harness = createTransport(aiState());
     await renderChannel(harness);
-    const input = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+    const firstInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "Message Claude",
     });
-    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 240 });
-    Object.defineProperty(input, "scrollTop", { configurable: true, value: 0, writable: true });
     const prompt = Array.from({ length: 20 }, (_, index) => `Line ${String(index + 1)}`).join("\n");
+    fireEvent.change(firstInput, { target: { value: prompt } });
+    expect(firstInput.style.height).toBe("180px");
 
-    fireEvent.change(input, { target: { value: prompt } });
-    input.setSelectionRange(prompt.length, prompt.length);
-    fireEvent.change(input, { target: { value: `${prompt}!` } });
+    act(() => harness.emit(aiState({ status: "configured" })));
+    expect(screen.queryByRole("textbox", { name: "Message Claude" })).toBeNull();
+    act(() => harness.emit(aiState({ status: "ready" })));
+    const remountedInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
 
-    expect(input.style.height).toBe("180px");
-    expect(input.style.overflowY).toBe("auto");
-    expect(input.scrollTop).toBe(240);
+    expect(remountedInput.value).toBe(prompt);
+    expect(remountedInput.style.height).toBe("180px");
+    expect(remountedInput.style.overflowY).toBe("auto");
   });
 
   it("keeps a failed prompt draft and exposes the sanitized error", async () => {
