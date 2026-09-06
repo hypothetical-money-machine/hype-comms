@@ -512,32 +512,32 @@ export function MessageComposer({
             </>
           )}
         </p>
-      </div>
-      {onAttach !== undefined && (
-        <button
-          type="button"
-          className="composer-attach"
-          disabled={disabled || attachDisabled || attachmentUploadBusy}
-          onClick={() => {
-            if (attaching.current) return;
-            attaching.current = true;
-            setIsAttaching(true);
-            void (async () => {
-              try {
-                await onAttach();
-              } finally {
-                attaching.current = false;
-                setIsAttaching(false);
-              }
-            })();
-          }}
-        >
-          Attach files
+        {onAttach !== undefined && (
+          <button
+            type="button"
+            className="composer-attach"
+            disabled={disabled || attachDisabled || attachmentUploadBusy}
+            onClick={() => {
+              if (attaching.current) return;
+              attaching.current = true;
+              setIsAttaching(true);
+              void (async () => {
+                try {
+                  await onAttach();
+                } finally {
+                  attaching.current = false;
+                  setIsAttaching(false);
+                }
+              })();
+            }}
+          >
+            Attach files
+          </button>
+        )}
+        <button type="submit" disabled={sendDisabled}>
+          {submitLabel}
         </button>
-      )}
-      <button type="submit" disabled={sendDisabled}>
-        {submitLabel}
-      </button>
+      </div>
       {error !== "" && (
         <p className="composer-error" role="alert">
           {error}

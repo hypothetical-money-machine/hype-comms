@@ -234,7 +234,7 @@ textarea:focus-visible {
 }
 
 .signin-card button,
-.composer > button[type="submit"] {
+.composer-input > button[type="submit"] {
   padding: 12px 18px;
   border: 0;
   border-radius: 9px;
@@ -3993,7 +3993,7 @@ html[data-show-profile-titles="false"] .message-author-title {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: var(--density-composer-padding);
   border-top: 1px solid var(--theme-border-subtle);
@@ -4072,11 +4072,18 @@ html[data-show-profile-titles="false"] .message-author-title {
 
 .composer-input {
   display: grid;
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 5px 10px;
   min-width: 0;
 }
 
+.composer-input > button {
+  grid-row: 2;
+}
+
 .composer-field {
+  grid-column: 1;
+  grid-row: 2;
   position: relative;
   display: grid;
 }
@@ -4135,6 +4142,7 @@ html[data-show-profile-titles="false"] .message-author-title {
 }
 
 .composer-toolbar {
+  grid-column: 1;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -4258,11 +4266,13 @@ html[data-show-profile-titles="false"] .message-author-title {
   color: var(--theme-action-primary-text);
 }
 
-.composer > button[type="submit"] {
+.composer-input > button[type="submit"] {
   align-self: start;
 }
 
 .composer-hint {
+  grid-column: 1 / -1;
+  grid-row: 3;
   margin: 0 2px;
   color: var(--theme-text-subtle);
   font-size: 10px;
