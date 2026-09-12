@@ -1,10 +1,22 @@
-import { chmod, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHash } from "node:crypto";
+import type { BigIntStats } from "node:fs";
+import type { AgentWakeAncestorStat } from "./agent-wake-configuration";
 import {
   AGENT_WAKE_CONFIGURATION_ENV,
   AGENT_WAKE_CONFIGURATION_MAX_BYTES,
@@ -18,6 +30,69 @@ import {
 const API_ORIGIN = "https://chat.example.test";
 const CLI_ENTRYPOINT = Buffer.from("#!/usr/bin/env node\n");
 const temporaryDirectories = new Set<string>();
+
+/**
+ * Test-only ancestor stat that clears the group/world write bits (and nothing else) from every
+ * directory's real `lstat` result before the production ancestor-pin policy sees it. This lets
+ * fixtures created under `process.cwd()` pass the policy regardless of whether the checkout's own
+ * ancestor directories (e.g. a group-writable worktree parent) happen to be mode 775 on this host.
+ * It does not touch ownership, device, inode, or the directory/symlink type bits the policy also
+ * checks, so it cannot be used to launder a genuinely untrustworthy ancestor past the check; see
+ * "still rejects a group-writable ancestor whose real permissions are left unmasked by the
+ * injected seam" below, which proves the production ancestor policy still rejects a genuinely
+ * group-writable directory even when this helper is used to trust every other ancestor.
+ */
+const clearAncestorWriteBits: AgentWakeAncestorStat = async (ancestorPath) => {
+  const real = await lstat(ancestorPath, { bigint: true });
+  const masked: BigIntStats = Object.assign(Object.create(Object.getPrototypeOf(real)), real, {
+    mode: real.isDirectory() && !real.isSymbolicLink() ? real.mode & ~0o022n : real.mode,
+  });
+  return masked;
+};
+
+/**
+ * Test-only ancestor stat that trusts every ancestor via `clearAncestorWriteBits` except one path,
+ * whose real, unmasked `lstat` result passes straight through the production ancestor policy. This
+ * isolates a rejection to exactly the named ancestor's own permissions, independent of whether this
+ * checkout's ambient ancestors (e.g. a group-writable worktree parent) happen to be mode 775 on this
+ * host.
+ */
+function trustedAncestorsExcept(untrustedAncestorPath: string): AgentWakeAncestorStat {
+  return (ancestorPath) =>
+    ancestorPath === untrustedAncestorPath
+      ? lstat(ancestorPath, { bigint: true })
+      : clearAncestorWriteBits(ancestorPath);
+}
+
+/**
+ * Test-only wrappers that default every call in this suite to `clearAncestorWriteBits`, so
+ * fixtures created under `process.cwd()` are unaffected by this checkout's own ancestor
+ * permissions. Tests exercising the ancestor policy itself call the real, unwrapped exports
+ * directly (see "rejects writable or symlinked executable ancestors" and the seam-safety test
+ * below) so the policy is never validated against a masked stand-in.
+ */
+function loadConfiguration(
+  options: Parameters<typeof loadAgentWakeConfiguration>[0],
+): ReturnType<typeof loadAgentWakeConfiguration> {
+  return loadAgentWakeConfiguration({ statAncestor: clearAncestorWriteBits, ...options });
+}
+
+function pinExecutable(
+  executablePath: string,
+  options: Parameters<typeof pinAgentWakeExecutable>[1] = {},
+): ReturnType<typeof pinAgentWakeExecutable> {
+  return pinAgentWakeExecutable(executablePath, {
+    statAncestor: clearAncestorWriteBits,
+    ...options,
+  });
+}
+
+function verifyPin(
+  pin: Parameters<typeof verifyAgentWakeExecutablePin>[0],
+  options: Parameters<typeof verifyAgentWakeExecutablePin>[1] = {},
+): ReturnType<typeof verifyAgentWakeExecutablePin> {
+  return verifyAgentWakeExecutablePin(pin, { statAncestor: clearAncestorWriteBits, ...options });
+}
 
 afterEach(async () => {
   const directories = [...temporaryDirectories];
@@ -190,7 +265,7 @@ describe("agent wake configuration", () => {
     const file = await privateConfigurationFile(value);
 
     await expect(
-      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
   });
 
@@ -204,14 +279,14 @@ describe("agent wake configuration", () => {
     const file = await privateConfigurationFile(value);
 
     await expect(
-      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
   });
 
   it("loads one unambiguous agent, source profile, and opaque runtime adapter", async () => {
     const grokBot = await executableConfiguration();
     const grokBotEnrollmentFile = await privateConfigurationFile(grokBot.value);
-    const loaded = await loadAgentWakeConfiguration({
+    const loaded = await loadConfiguration({
       filePath: grokBotEnrollmentFile,
       expectedApiOrigin: API_ORIGIN,
     });
@@ -241,7 +316,7 @@ describe("agent wake configuration", () => {
     };
     const customRuntimeFile = await privateConfigurationFile(customRuntime);
     await expect(
-      loadAgentWakeConfiguration({ filePath: customRuntimeFile, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: customRuntimeFile, expectedApiOrigin: API_ORIGIN }),
     ).resolves.toMatchObject({
       target: { adapterId: "custom-runtime-v2", arguments: [] },
     });
@@ -264,7 +339,7 @@ describe("agent wake configuration", () => {
       });
 
       await expect(
-        loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+        loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
       ).rejects.toMatchObject({ code: "configuration-invalid" });
     }
   });
@@ -289,12 +364,12 @@ describe("agent wake configuration", () => {
     for (const value of invalidValues) {
       const file = await privateConfigurationFile(value);
       await expect(
-        loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+        loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
       ).rejects.toMatchObject({ code: "configuration-invalid" });
     }
     const file = await privateConfigurationFile(executable.value);
     await expect(
-      loadAgentWakeConfiguration({
+      loadConfiguration({
         filePath: file,
         expectedApiOrigin: "https://another.example.test",
       }),
@@ -306,20 +381,20 @@ describe("agent wake configuration", () => {
     const file = await privateConfigurationFile(executable.value);
     await chmod(file, 0o644);
     await expect(
-      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
 
     await writeFile(file, "x".repeat(AGENT_WAKE_CONFIGURATION_MAX_BYTES + 1));
     await chmod(file, 0o600);
     await expect(
-      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
 
     const target = await privateConfigurationFile(executable.value);
     const link = path.join(path.dirname(target), "wake-link.json");
     await symlink(target, link);
     await expect(
-      loadAgentWakeConfiguration({ filePath: link, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: link, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
   });
 
@@ -330,7 +405,7 @@ describe("agent wake configuration", () => {
     for (const mode of [0o600, 0o720, 0o702]) {
       await chmod(executable.runtimePath, mode);
       await expect(
-        loadAgentWakeConfiguration({ filePath: enrollmentFile, expectedApiOrigin: API_ORIGIN }),
+        loadConfiguration({ filePath: enrollmentFile, expectedApiOrigin: API_ORIGIN }),
       ).rejects.toMatchObject({ code: "configuration-invalid" });
     }
     await chmod(executable.runtimePath, 0o700);
@@ -346,7 +421,7 @@ describe("agent wake configuration", () => {
       }),
     );
     await expect(
-      loadAgentWakeConfiguration({ filePath: linkedEnrollment, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: linkedEnrollment, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
 
     const directoryConfiguration = await executableConfiguration();
@@ -363,7 +438,7 @@ describe("agent wake configuration", () => {
       }),
     );
     await expect(
-      loadAgentWakeConfiguration({ filePath: directoryEnrollment, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: directoryEnrollment, expectedApiOrigin: API_ORIGIN }),
     ).rejects.toMatchObject({ code: "configuration-invalid" });
   });
 
@@ -393,7 +468,7 @@ describe("agent wake configuration", () => {
       );
 
       await expect(
-        loadAgentWakeConfiguration({
+        loadConfiguration({
           filePath: file,
           expectedApiOrigin: API_ORIGIN,
           platform: "darwin",
@@ -425,7 +500,7 @@ describe("agent wake configuration", () => {
     );
 
     await expect(
-      loadAgentWakeConfiguration({
+      loadConfiguration({
         filePath: file,
         expectedApiOrigin: API_ORIGIN,
         platform: "darwin",
@@ -464,7 +539,7 @@ describe("agent wake configuration", () => {
       );
 
       await expect(
-        loadAgentWakeConfiguration({
+        loadConfiguration({
           filePath: file,
           expectedApiOrigin: API_ORIGIN,
           platform: "darwin",
@@ -480,7 +555,7 @@ describe("agent wake configuration", () => {
     const file = await privateConfigurationFile(executable.value);
 
     await expect(
-      loadAgentWakeConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
+      loadConfiguration({ filePath: file, expectedApiOrigin: API_ORIGIN }),
     ).resolves.toMatchObject({
       source: { cliEntrypointPin: { fileKind: "cli-entrypoint", mode: 0o100600 } },
     });
@@ -493,7 +568,7 @@ describe("agent wake configuration", () => {
     const executable = await executableConfiguration();
 
     await expect(
-      pinAgentWakeExecutable(executable.runtimePath, { currentUid: process.getuid() + 1 }),
+      pinExecutable(executable.runtimePath, { currentUid: process.getuid() + 1 }),
     ).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
       message: "Agent wake executable integrity verification failed",
@@ -507,6 +582,8 @@ describe("agent wake configuration", () => {
     await chmod(writableParent, 0o770);
     const writableExecutable = path.join(writableParent, "runtime");
     await writeFile(writableExecutable, arm64MachOExecutable(), { mode: 0o700 });
+    // Uses the real, unmasked production default (no `statAncestor` override) so this test proves
+    // the actual policy, not a masked stand-in.
     await expect(pinAgentWakeExecutable(writableExecutable)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
@@ -522,40 +599,66 @@ describe("agent wake configuration", () => {
     });
   });
 
+  it("still rejects a group-writable ancestor whose real permissions are left unmasked by the injected seam", async () => {
+    const directory = await temporaryDirectory(
+      path.join(process.cwd(), ".hype-wake-ancestor-seam-"),
+    );
+    const writableParent = path.join(directory, "writable");
+    await mkdir(writableParent, { mode: 0o775 });
+    await chmod(writableParent, 0o775);
+    const executablePath = path.join(writableParent, "runtime");
+    await writeFile(executablePath, arm64MachOExecutable(), { mode: 0o700 });
+
+    // `trustedAncestorsExcept` trusts every ancestor above `writableParent`, masking this
+    // checkout's own ambient ancestor permissions (already group-writable on this host), and
+    // passes `writableParent` itself through to the real, unmasked production policy. That
+    // isolates the rejection to exactly the fixture's own deliberately group-writable directory,
+    // not to an ambient checkout ancestor. The seam exists only for tests to opt into; it must
+    // never be wired into `pinAgentWakeExecutable`, `pinAgentWakeCliEntrypoint`,
+    // `verifyAgentWakeExecutablePin`, or `loadAgentWakeConfiguration` by default.
+    await expect(
+      pinAgentWakeExecutable(executablePath, {
+        statAncestor: trustedAncestorsExcept(writableParent),
+      }),
+    ).rejects.toMatchObject({
+      name: "AgentWakeExecutableIntegrityError",
+    });
+  });
+
   it("rechecks pinned ancestor permissions before use", async () => {
     const executable = await executableConfiguration();
-    const pin = await pinAgentWakeExecutable(executable.runtimePath);
+    const pin = await pinExecutable(executable.runtimePath);
     const parent = path.dirname(executable.runtimePath);
 
     await chmod(parent, 0o770);
-    await expect(verifyAgentWakeExecutablePin(pin)).rejects.toMatchObject({
+    await expect(verifyPin(pin)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
   });
 
   it("detects path replacement, symlink substitution, and in-place content changes after pinning", async () => {
     const replaced = await executableConfiguration();
-    const replacedPin = await pinAgentWakeExecutable(replaced.runtimePath);
+    const replacedPin = await pinExecutable(replaced.runtimePath);
     const replacementPath = path.join(path.dirname(replaced.runtimePath), "replacement-node");
     await writeFile(replacementPath, "#!/bin/sh\nexit 7\n", { mode: 0o700 });
     await rename(replacementPath, replaced.runtimePath);
-    await expect(verifyAgentWakeExecutablePin(replacedPin)).rejects.toMatchObject({
+    await expect(verifyPin(replacedPin)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
 
     const linked = await executableConfiguration();
-    const linkedPin = await pinAgentWakeExecutable(linked.runtimePath);
+    const linkedPin = await pinExecutable(linked.runtimePath);
     const originalPath = path.join(path.dirname(linked.runtimePath), "original-node");
     await rename(linked.runtimePath, originalPath);
     await symlink(originalPath, linked.runtimePath);
-    await expect(verifyAgentWakeExecutablePin(linkedPin)).rejects.toMatchObject({
+    await expect(verifyPin(linkedPin)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
 
     const modified = await executableConfiguration();
-    const modifiedPin = await pinAgentWakeExecutable(modified.runtimePath);
+    const modifiedPin = await pinExecutable(modified.runtimePath);
     await writeFile(modified.runtimePath, "#!/bin/sh\nexit 9\n", { mode: 0o700 });
-    await expect(verifyAgentWakeExecutablePin(modifiedPin)).rejects.toMatchObject({
+    await expect(verifyPin(modifiedPin)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
   });
@@ -563,7 +666,7 @@ describe("agent wake configuration", () => {
   it("detects replacement of the self-contained CLI entrypoint after pinning", async () => {
     const executable = await executableConfiguration();
     const enrollment = await privateConfigurationFile(executable.value);
-    const loaded = await loadAgentWakeConfiguration({
+    const loaded = await loadConfiguration({
       filePath: enrollment,
       expectedApiOrigin: API_ORIGIN,
     });
@@ -576,7 +679,7 @@ describe("agent wake configuration", () => {
     await writeFile(replacementPath, "throw new Error('replacement');\n", { mode: 0o600 });
     await rename(replacementPath, executable.entrypointPath);
 
-    await expect(verifyAgentWakeExecutablePin(pin!)).rejects.toMatchObject({
+    await expect(verifyPin(pin!)).rejects.toMatchObject({
       name: "AgentWakeExecutableIntegrityError",
     });
   });
