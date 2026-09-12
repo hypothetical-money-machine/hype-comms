@@ -1,90 +1,91 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  conversationAudience,
+  conversationVisibilitySql,
+  requireVisibleConversation,
+} from "./conversation-access.js";
+import { ConversationEventWriter } from "./conversation-events.js";
+import { UUID_PATTERN } from "./pagination.js";
+import { WorkspaceTaskOperations } from "./task-operations.js";
+import { mapTask, type TaskRow } from "./task-records.js";
+import { runWorkspaceTransaction } from "./transaction.js";
+import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 
 import {
+  addReactionResponseSchema,
+  advanceReadCursorResponseSchema,
   AGENT_CONTEXT_PACK_MAX_BYTES,
+  agentContextHistoryResponseSchema,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENTS_PER_MESSAGE_MAX,
-  CONVERSATION_FILES_MAX_LIMIT,
-  CONVERSATION_PAGE_DEFAULT_LIMIT,
-  CONVERSATION_PAGE_MAX_LIMIT,
-  MESSAGE_HISTORY_MAX_LIMIT,
-  MESSAGE_SEARCH_MAX_LIMIT,
-  POSTGRES_BIGINT_MAX,
-  REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
-  REACTIONS_PER_MESSAGE_MAX,
-  TASK_PAGE_MAX_LIMIT,
-  addReactionResponseSchema,
-  agentContextHistoryResponseSchema,
   attachmentSchema,
-  completeFileUploadResponseSchema,
-  conversationFilesResponseSchema,
-  createFileUploadResponseSchema,
-  listMessageAttachmentsResponseSchema,
-  advanceReadCursorResponseSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
   COMMUNICATION_PATHS_MAX_PATHS,
   communicationPathsResponseSchema,
+  completeFileUploadResponseSchema,
+  CONVERSATION_FILES_MAX_LIMIT,
+  CONVERSATION_PAGE_DEFAULT_LIMIT,
+  CONVERSATION_PAGE_MAX_LIMIT,
+  conversationFilesResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
+  createFileUploadResponseSchema,
+  injectionSafeCompactJsonByteLength,
+  isPostgresBigintString,
   listConversationsResponseSchema,
-  listPublicChannelsResponseSchema,
-  listMessageReactionsResponseSchema,
   listMembersResponseSchema,
-  messageHistoryResponseSchema,
+  listMessageAttachmentsResponseSchema,
+  listMessageReactionsResponseSchema,
+  listPublicChannelsResponseSchema,
+  MESSAGE_HISTORY_MAX_LIMIT,
+  MESSAGE_SEARCH_MAX_LIMIT,
   messageByIdResponseSchema,
+  messageHistoryResponseSchema,
   messageSearchResponseSchema,
   messageThreadResponseSchema,
   reactionEmojiSchema,
+  REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
+  REACTIONS_PER_MESSAGE_MAX,
   reactionSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
   retractMessageResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
-  taskListResponseSchema,
-  taskMutationResponseSchema,
-  taskRecordListResponseSchema,
-  taskRecordMutationResponseSchema,
-  taskRecordResponseSchema,
-  taskRecordSchema,
-  taskSchema,
   userSchema,
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
-  injectionSafeCompactJsonByteLength,
-  isPostgresBigintString,
-  type AdvanceReadCursorResponse,
   type AddReactionResponse,
+  type AdvanceReadCursorResponse,
   type AgentContextAuthor,
   type AgentContextHistoryResponse,
   type AgentContextLocation,
   type AgentContextMessage,
   type Attachment,
-  type CompleteFileUploadRequest,
-  type CompleteFileUploadResponse,
-  type ConversationFilesResponse,
-  type CreateFileUploadRequest,
-  type CreateFileUploadResponse,
-  type ListMessageAttachmentsResponse,
+  type ChannelAccess,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type CommunicationPathsResponse,
+  type CompleteFileUploadRequest,
+  type CompleteFileUploadResponse,
   type Conversation,
-  type ChannelAccess,
+  type ConversationFilesResponse,
   type ConversationMutationResponse,
   type ConversationSummary,
   type CreateChannelRequest,
-  type CreateTaskRequest,
+  type CreateFileUploadRequest,
+  type CreateFileUploadResponse,
   type DirectConversationRequest,
   type GroupDirectConversationRequest,
   type ListConversationsResponse,
-  type ListPublicChannelsResponse,
-  type ListMessageReactionsResponse,
   type ListMembersResponse,
-  type MessageHistoryResponse,
+  type ListMessageAttachmentsResponse,
+  type ListMessageReactionsResponse,
+  type ListPublicChannelsResponse,
   type MessageByIdResponse,
+  type MessageHistoryResponse,
   type MessageSearchResponse,
   type MessageThreadResponse,
   type MessageThreadSummary,
@@ -95,18 +96,6 @@ import {
   type SendConversationMessageRequest,
   type SendMessageResponse,
   type SyncResponse,
-  type Task,
-  type TaskListFilters,
-  type TaskListResponse,
-  type TaskMutationResponse,
-  type TaskNumber,
-  type TaskRecord,
-  type TaskRecordListResponse,
-  type TaskRecordMutationResponse,
-  type TaskRecordResponse,
-  type TaskStatus,
-  type MoveTaskRequest,
-  type UpdateTaskRequest,
   type UpsertChannelMemberRequest,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
@@ -114,7 +103,11 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
+import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
+import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
+import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
+import type { SystemBulletin } from "../system-channels/release-notes.js";
 import {
   ATTACHMENT_UPLOAD_TTL_MS,
   isRejectedAttachment,
@@ -123,9 +116,6 @@ import {
   sha256Hex,
   type AttachmentStore,
 } from "./file-store.js";
-import type { AuthenticatedBotIdentity } from "../bots/service.js";
-import type { AuthenticatedIdentity } from "../identity/service.js";
-import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import {
   fingerprintApiRequest,
@@ -137,35 +127,29 @@ import {
   insertSyncEventWithSequence,
   nextWorkspaceSequence,
 } from "./sync-events.js";
-import type { SystemBulletin } from "../system-channels/release-notes.js";
-import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
 
 const REALTIME_TICKET_TTL_MS = 30_000;
 const SYNC_RETENTION_DAYS = 90;
 const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
 const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
-const TASK_RANK_STEP = 1_024n;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type AuthenticatedTaskIdentity = AuthenticatedIdentity | AuthenticatedBotIdentity;
-
-import {
-  iso,
-  nullableIso,
-  mapConversation,
-  mapMessage,
-  mapReadCursor,
-  participants,
-  type ConversationRow,
-  type MessageRow,
-  type ReadCursorRow,
-} from "./records.js";
 import {
   readConversationSummaries,
   readUnreadCounts,
   type UnreadCounts,
 } from "./conversation-summary-reader.js";
+import {
+  iso,
+  mapConversation,
+  mapMessage,
+  mapReadCursor,
+  nullableIso,
+  participants,
+  type ConversationRow,
+  type MessageRow,
+  type ReadCursorRow,
+} from "./records.js";
 
 interface WorkspaceRow extends QueryResultRow {
   id: string;
@@ -282,27 +266,6 @@ interface ReactionRow extends QueryResultRow {
   user_id: string;
   emoji: string;
   created_at: Date | string;
-}
-
-interface TaskRow extends QueryResultRow {
-  id: string;
-  workspace_id: string;
-  conversation_id: string;
-  number: string;
-  version: number;
-  title: string;
-  description: string | null;
-  status: TaskStatus;
-  priority: Task["priority"];
-  assignee_id: string | null;
-  due_on: Date | string | null;
-  source_message_id: string | null;
-  rank: string;
-  created_by: string;
-  updated_by: string;
-  completed_at: Date | string | null;
-  created_at: Date | string;
-  updated_at: Date | string;
 }
 
 interface ReactionCountRow extends QueryResultRow {
@@ -473,79 +436,6 @@ function mapStoredConversation(row: ConversationRow): Conversation {
   });
 }
 
-function conversationVisibilitySql(
-  alias: "conversation" | "anchor",
-  userParameter: string,
-): string {
-  return `(
-    (
-      EXISTS (
-        SELECT 1 FROM users AS visible_actor
-         WHERE visible_actor.id = ${userParameter}
-           AND visible_actor.kind IN ('human', 'agent')
-           AND (
-            (
-              ${alias}.kind = 'channel'
-              AND ${alias}.channel_access = 'workspace'
-              AND (
-                visible_actor.kind = 'human'
-                OR EXISTS (
-                  SELECT 1
-                    FROM conversation_memberships AS public_membership
-                   WHERE public_membership.conversation_id = ${alias}.id
-                     AND public_membership.user_id = ${userParameter}
-                     AND public_membership.left_at IS NULL
-                )
-              )
-            )
-            OR (
-              ${alias}.kind = 'channel'
-              AND ${alias}.human_only
-              AND visible_actor.kind = 'human'
-            )
-            OR (
-              ${alias}.kind = 'channel'
-              AND ${alias}.channel_access = 'members'
-              AND NOT ${alias}.human_only
-              AND EXISTS (
-                SELECT 1
-                  FROM conversation_memberships AS visible_membership
-                 WHERE visible_membership.conversation_id = ${alias}.id
-                   AND visible_membership.user_id = ${userParameter}
-                   AND visible_membership.left_at IS NULL
-              )
-            )
-            OR ${alias}.dm_user_low_id = ${userParameter}
-            OR ${alias}.dm_user_high_id = ${userParameter}
-            OR (
-              ${alias}.kind = 'group_direct_message'
-              AND EXISTS (
-                SELECT 1
-                  FROM conversation_memberships AS group_membership
-                 WHERE group_membership.conversation_id = ${alias}.id
-                   AND group_membership.user_id = ${userParameter}
-                   AND group_membership.left_at IS NULL
-              )
-            )
-          )
-      )
-    )
-    OR (
-      ${alias}.kind = 'channel'
-      AND NOT ${alias}.human_only
-      AND EXISTS (
-        SELECT 1
-          FROM bot_channel_grants AS visible_bot_grant
-          JOIN users AS visible_bot
-            ON visible_bot.id = visible_bot_grant.bot_user_id
-           AND visible_bot.kind = 'bot'
-         WHERE visible_bot_grant.conversation_id = ${alias}.id
-           AND visible_bot_grant.bot_user_id = ${userParameter}
-      )
-    )
-  )`;
-}
-
 /**
  * The projection every `AgentContextMessageRow` is read through.
  *
@@ -654,38 +544,6 @@ function mapReaction(row: ReactionRow): Reaction {
     emoji: row.emoji,
     createdAt: iso(row.created_at),
   });
-}
-
-function taskDueOn(value: Date | string | null): string | null {
-  if (value === null) return null;
-  if (typeof value === "string") return value.slice(0, 10);
-  return value.toISOString().slice(0, 10);
-}
-
-function mapTask(row: TaskRow): Task {
-  return taskSchema.parse({
-    id: row.id,
-    workspaceId: row.workspace_id,
-    conversationId: row.conversation_id,
-    number: row.number,
-    version: row.version,
-    title: row.title,
-    description: row.description,
-    status: row.status,
-    priority: row.priority,
-    assigneeId: row.assignee_id,
-    dueOn: taskDueOn(row.due_on),
-    sourceMessageId: row.source_message_id,
-    rank: row.rank,
-    createdBy: row.created_by,
-    completedAt: nullableIso(row.completed_at),
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  });
-}
-
-function mapTaskRecord(row: TaskRow): TaskRecord {
-  return taskRecordSchema.parse({ ...mapTask(row), updatedBy: row.updated_by });
 }
 
 function encodeHistoryCursor(sequence: string): string {
@@ -799,111 +657,6 @@ function decodeConversationCursor(cursor: string | undefined): string | null {
   }
 }
 
-interface TaskCursor {
-  readonly createdAt: string;
-  readonly id: string;
-  readonly filterHash: string;
-}
-
-function taskFilterHash(filters: TaskListFilters): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        status: filters.status ?? null,
-        priority: filters.priority ?? null,
-        assignee: filters.assignee ?? null,
-        dueAfter: filters.dueAfter ?? null,
-        dueBefore: filters.dueBefore ?? null,
-        updatedAfter: filters.updatedAfter ?? null,
-        updatedBy: filters.updatedBy ?? null,
-      }),
-    )
-    .digest("base64url");
-}
-
-const EMPTY_TASK_FILTER_HASH = taskFilterHash({});
-
-function encodeTaskCursor(row: TaskRow, filterHash: string): string {
-  return Buffer.from(
-    JSON.stringify({ createdAt: iso(row.created_at), id: row.id, filterHash } satisfies TaskCursor),
-    "utf8",
-  ).toString("base64url");
-}
-
-function decodeTaskCursor(
-  cursor: string | undefined,
-  expectedFilterHash: string,
-): TaskCursor | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("createdAt" in parsed) ||
-      typeof parsed.createdAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.createdAt)) ||
-      !("id" in parsed) ||
-      typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id) ||
-      ("filterHash" in parsed &&
-        (typeof parsed.filterHash !== "string" || parsed.filterHash !== expectedFilterHash)) ||
-      (!("filterHash" in parsed) && expectedFilterHash !== EMPTY_TASK_FILTER_HASH)
-    ) {
-      throw new Error("Invalid cursor");
-    }
-    return {
-      createdAt: new Date(parsed.createdAt).toISOString(),
-      id: parsed.id,
-      filterHash: expectedFilterHash,
-    };
-  } catch {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid task cursor");
-  }
-}
-
-function taskListFilterParameters(
-  identity: AuthenticatedTaskIdentity,
-  filters: TaskListFilters,
-): readonly unknown[] {
-  const assigneeFilter = filters.assignee;
-  const assigneeId =
-    assigneeFilter === "me"
-      ? identity.currentUser.user.id
-      : assigneeFilter === "unassigned" || assigneeFilter === undefined
-        ? null
-        : assigneeFilter;
-  const updatedById =
-    filters.updatedBy === "me" ? identity.currentUser.user.id : (filters.updatedBy ?? null);
-  return [
-    filters.status ?? null,
-    filters.priority ?? null,
-    assigneeFilter !== undefined,
-    assigneeFilter === "unassigned",
-    assigneeId,
-    filters.dueAfter ?? null,
-    filters.dueBefore ?? null,
-    filters.updatedAfter ?? null,
-    updatedById,
-  ];
-}
-
-function taskListFilterSql(alias: "task", firstParameter: number): string {
-  const parameter = (offset: number) => `$${firstParameter + offset}`;
-  return `
-    AND (${parameter(0)}::text IS NULL OR ${alias}.status = ${parameter(0)})
-    AND (${parameter(1)}::text IS NULL OR ${alias}.priority = ${parameter(1)})
-    AND (
-      ${parameter(2)}::boolean = false
-      OR (${parameter(3)}::boolean = true AND ${alias}.assignee_id IS NULL)
-      OR (${parameter(3)}::boolean = false AND ${alias}.assignee_id = ${parameter(4)}::uuid)
-    )
-    AND (${parameter(5)}::date IS NULL OR ${alias}.due_on >= ${parameter(5)}::date)
-    AND (${parameter(6)}::date IS NULL OR ${alias}.due_on <= ${parameter(6)}::date)
-    AND (${parameter(7)}::timestamptz IS NULL OR ${alias}.updated_at > ${parameter(7)})
-    AND (${parameter(8)}::uuid IS NULL OR ${alias}.updated_by = ${parameter(8)}::uuid)`;
-}
-
 function fingerprintMessage(conversationId: string, input: SendConversationMessageRequest): Buffer {
   return createHash("sha256")
     .update(
@@ -930,10 +683,16 @@ function mentionPattern(username: string): RegExp {
 }
 
 export class WorkspaceRepository {
+  private readonly tasks: WorkspaceTaskOperations;
+  private readonly events: ConversationEventWriter;
+
   constructor(
     private readonly pool: Pool,
     private readonly hooks: WorkspaceRepositoryHooks = {},
-  ) {}
+  ) {
+    this.events = new ConversationEventWriter(this.announcementChannelsEnabled);
+    this.tasks = new WorkspaceTaskOperations(pool, this.events);
+  }
 
   get announcementChannelsEnabled(): boolean {
     return this.hooks.announcementChannelsEnabled ?? false;
@@ -979,7 +738,8 @@ export class WorkspaceRepository {
         [identity.currentUser.workspaceId],
       );
     }
-    return this.#transaction(
+    return runWorkspaceTransaction(
+      this.pool,
       async (client) => {
         const workspaceResult = await client.query<WorkspaceRow>(
           `SELECT id, name, slug, created_by, created_at, updated_at, last_event_sequence,
@@ -1189,7 +949,8 @@ export class WorkspaceRepository {
    * human/agent members the pair count is at most C(25,2), which equals the cap exactly.
    */
   async communicationPaths(identity: AuthenticatedIdentity): Promise<CommunicationPathsResponse> {
-    return this.#transaction(
+    return runWorkspaceTransaction(
+      this.pool,
       async (client) => {
         const members = await this.#members(client, identity.currentUser.workspaceId);
         const result = await client.query<CommunicationPathRow>(
@@ -1344,7 +1105,8 @@ export class WorkspaceRepository {
     includeSystemChannels = false,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
-    return this.#transaction(
+    return runWorkspaceTransaction(
+      this.pool,
       async (client) => {
         const page = await this.#conversationSummaries(
           client,
@@ -1433,7 +1195,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
   ): Promise<ConversationMutationResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const locked = await client.query<ConversationRow>(
         `SELECT *
            FROM conversations
@@ -1470,7 +1232,7 @@ export class WorkspaceRepository {
           syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
         });
       }
-      const audienceBefore = await this.#conversationAudience(client, conversation);
+      const audienceBefore = await conversationAudience(client, conversation);
       await client.query(
         `INSERT INTO conversation_memberships
            (conversation_id, workspace_id, user_id, role)
@@ -1482,8 +1244,8 @@ export class WorkspaceRepository {
                updated_at = clock_timestamp()`,
         [conversationId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
-      const audienceAfter = await this.#conversationAudience(client, conversation);
-      const event = await this.#insertEvent(client, identity, {
+      const audienceAfter = await conversationAudience(client, conversation);
+      const event = await this.events.insert(client, identity, {
         type: "channel.membership_changed",
         conversation,
         payload: { memberId: identity.currentUser.user.id, action: "added" },
@@ -1505,7 +1267,7 @@ export class WorkspaceRepository {
     defaultAgentAgencyEnabled = true,
   ): Promise<ConversationMutationResponse> {
     let acceptedAnnouncementId: string | undefined;
-    const response = await this.#transaction(async (client) => {
+    const response = await runWorkspaceTransaction(this.pool, async (client) => {
       const create = async (): Promise<ConversationMutationResponse> => {
         const channelMode = input.channelMode ?? "chat";
         const principal =
@@ -1521,7 +1283,7 @@ export class WorkspaceRepository {
           throw new ApiError(403, "FORBIDDEN", "Humans-only channels are unavailable");
         }
         if (channelMode === "announcement") {
-          const announcementChannelsAvailable = await this.#announcementChannelsAvailable(
+          const announcementChannelsAvailable = await this.events.announcementChannelsAvailable(
             client,
             identity.currentUser.workspaceId,
           );
@@ -1582,8 +1344,8 @@ export class WorkspaceRepository {
             [row.id, row.workspace_id, identity.currentUser.user.id],
           );
         }
-        const audienceUserIds = await this.#conversationAudience(client, row);
-        const event = await this.#insertEvent(client, identity, {
+        const audienceUserIds = await conversationAudience(client, row);
+        const event = await this.events.insert(client, identity, {
           type: "channel.created",
           conversation: row,
           payload: {
@@ -1633,7 +1395,7 @@ export class WorkspaceRepository {
   ): Promise<ChannelMembersResponse> {
     const client = await this.pool.connect();
     try {
-      const conversation = await this.#requireVisibleConversation(
+      const conversation = await requireVisibleConversation(
         client,
         identity,
         conversationId,
@@ -1654,7 +1416,7 @@ export class WorkspaceRepository {
     memberId: string,
     input: UpsertChannelMemberRequest,
   ): Promise<ChannelMembershipMutationResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const conversation = await this.#requireManagedChannel(client, identity, conversationId);
       const target = await client.query(
         `SELECT 1
@@ -1688,7 +1450,7 @@ export class WorkspaceRepository {
       if (current?.left_at === null && current.role === "owner" && input.role === "member") {
         await this.#requireAnotherChannelOwner(client, conversationId, memberId);
       }
-      const audienceBefore = await this.#conversationAudience(client, conversation);
+      const audienceBefore = await conversationAudience(client, conversation);
       await client.query(
         `INSERT INTO conversation_memberships
            (conversation_id, workspace_id, user_id, role)
@@ -1704,9 +1466,9 @@ export class WorkspaceRepository {
                updated_at = clock_timestamp()`,
         [conversationId, identity.currentUser.workspaceId, memberId, input.role],
       );
-      const audienceAfter = await this.#conversationAudience(client, conversation);
+      const audienceAfter = await conversationAudience(client, conversation);
       const action = current === undefined || current.left_at !== null ? "added" : "updated";
-      const event = await this.#insertEvent(client, identity, {
+      const event = await this.events.insert(client, identity, {
         type: "channel.membership_changed",
         conversation,
         payload: { memberId, action },
@@ -1724,7 +1486,7 @@ export class WorkspaceRepository {
     conversationId: string,
     memberId: string,
   ): Promise<ChannelMembershipMutationResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const conversation = await this.#requireManagedChannel(client, identity, conversationId);
       await this.hooks.afterRemoveChannelMemberConversationLocked?.();
       await lockIdempotencyScope(client, `channel-membership:${conversationId}:${memberId}`);
@@ -1747,7 +1509,7 @@ export class WorkspaceRepository {
       if (current.role === "owner") {
         await this.#requireAnotherChannelOwner(client, conversationId, memberId);
       }
-      const audienceBefore = await this.#conversationAudience(client, conversation);
+      const audienceBefore = await conversationAudience(client, conversation);
       await client.query(
         `UPDATE conversation_memberships
             SET left_at = clock_timestamp(), updated_at = clock_timestamp()
@@ -1755,7 +1517,7 @@ export class WorkspaceRepository {
             AND user_id = $2`,
         [conversationId, memberId],
       );
-      const audienceAfter = await this.#conversationAudience(client, conversation);
+      const audienceAfter = await conversationAudience(client, conversation);
       const unassigned = await client.query<TaskRow>(
         `UPDATE tasks
             SET assignee_id = NULL,
@@ -1769,7 +1531,7 @@ export class WorkspaceRepository {
       );
       for (const row of unassigned.rows) {
         const task = mapTask(row);
-        await this.#insertEvent(client, identity, {
+        await this.events.insert(client, identity, {
           type: "task.updated",
           conversation,
           entityVersion: task.version,
@@ -1777,7 +1539,7 @@ export class WorkspaceRepository {
           audienceUserIds: audienceAfter,
         });
       }
-      const event = await this.#insertEvent(client, identity, {
+      const event = await this.events.insert(client, identity, {
         type: "channel.membership_changed",
         conversation,
         payload: { memberId, action: "removed" },
@@ -1867,7 +1629,7 @@ export class WorkspaceRepository {
     workspaceId: string,
     definition: BuiltInChannelDefinition,
   ): Promise<ConversationRow> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       // The publisher needs a membership row because messages.author_id references one. It stays
       // `invited` so it never occupies an active seat, never appears in the member directory, and
       // never joins an event audience.
@@ -1903,7 +1665,7 @@ export class WorkspaceRepository {
         if (found === undefined) throw new Error("Built-in channel could not be resolved");
         return found;
       }
-      const audienceUserIds = await this.#conversationAudience(client, row);
+      const audienceUserIds = await conversationAudience(client, row);
       await insertSyncEvent(client, {
         workspaceId,
         actorUserId: SYSTEM_USER_ID,
@@ -1932,7 +1694,7 @@ export class WorkspaceRepository {
     channelSlug: string,
     bulletin: SystemBulletin,
   ): Promise<boolean> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       // Same lock order as message delivery: the conversation row first, the workspace sequence
       // last. Taking the conversation lock also serializes two nodes seeding the same channel.
       const locked = await client.query<ConversationRow>(
@@ -1989,7 +1751,7 @@ export class WorkspaceRepository {
       const row = inserted.rows[0];
       if (row === undefined) throw new Error("Bulletin insert returned no row");
 
-      const audienceUserIds = await this.#conversationAudience(client, current);
+      const audienceUserIds = await conversationAudience(client, current);
       // Availability was confirmed before seeding, so stored events keep their channel mode.
       await insertSyncEventWithSequence(client, workspaceSequence, {
         workspaceId: current.workspace_id,
@@ -2016,7 +1778,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
   ): Promise<ConversationMutationResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const locked = await client.query<ConversationRow>(
         `SELECT *
            FROM conversations AS conversation
@@ -2053,8 +1815,8 @@ export class WorkspaceRepository {
       );
       const row = updated.rows[0];
       if (row === undefined) throw new Error("Channel archive returned no row");
-      const audienceUserIds = await this.#conversationAudience(client, row);
-      const event = await this.#insertEvent(client, identity, {
+      const audienceUserIds = await conversationAudience(client, row);
+      const event = await this.events.insert(client, identity, {
         type: "channel.archived",
         conversation: row,
         payload: {
@@ -2074,7 +1836,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       await this.#requireActiveConversationParticipants(client, identity, [input.memberId]);
       const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
       const inserted = await client.query<ConversationRow>(
@@ -2101,7 +1863,7 @@ export class WorkspaceRepository {
         syncCursor = await this.#highWater(client, identity.currentUser.workspaceId);
       } else {
         const participantIds = participants(row);
-        const event = await this.#insertEvent(client, identity, {
+        const event = await this.events.insert(client, identity, {
           type: "direct_conversation.created",
           conversation: row,
           payload: {
@@ -2128,7 +1890,7 @@ export class WorkspaceRepository {
     if (memberIds.includes(identity.currentUser.user.id)) {
       throw new ApiError(400, "BAD_REQUEST", "The caller is already a group participant");
     }
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       return runIdempotentMutation(
         client,
         {
@@ -2176,7 +1938,7 @@ export class WorkspaceRepository {
                 AND kind = 'group_direct_message'`,
             [conversation.id, identity.currentUser.workspaceId],
           );
-          const event = await this.#insertEvent(client, identity, {
+          const event = await this.events.insert(client, identity, {
             type: "direct_conversation.created",
             conversation,
             payload: { conversation: mapStoredConversation(conversation), participantIds },
@@ -2195,7 +1957,8 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse | null> {
-    return this.#transaction(
+    return runWorkspaceTransaction(
+      this.pool,
       async (client) => {
         const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
         const existing = await client.query<ConversationRow>(
@@ -2251,7 +2014,7 @@ export class WorkspaceRepository {
   ): Promise<MessageHistoryResponse> {
     const client = await this.pool.connect();
     try {
-      await this.#requireVisibleConversation(client, identity, conversationId, false);
+      await requireVisibleConversation(client, identity, conversationId, false);
       const beforeSequence = decodeHistoryCursor(before);
       const threadScope = includeThreadReplies ? "" : "AND thread_root_id IS NULL";
       const result = await client.query<MessageRow>(
@@ -2299,9 +2062,10 @@ export class WorkspaceRepository {
     throughMessageId: string | undefined,
     limit: number,
   ): Promise<AgentContextHistoryResponse> {
-    return this.#transaction(
+    return runWorkspaceTransaction(
+      this.pool,
       async (client) => {
-        const conversation = await this.#requireVisibleConversation(
+        const conversation = await requireVisibleConversation(
           client,
           identity,
           conversationId,
@@ -2535,8 +2299,8 @@ export class WorkspaceRepository {
       throw new ApiError(400, "BAD_REQUEST", "File exceeds the 25 MiB limit");
     }
     this.#attachmentStore();
-    return this.#transaction(async (client) => {
-      await this.#requireVisibleConversation(client, identity, input.conversationId, true);
+    return runWorkspaceTransaction(this.pool, async (client) => {
+      await requireVisibleConversation(client, identity, input.conversationId, true);
       await this.#requireActivePrincipal(client, identity);
       return runIdempotentMutation(
         client,
@@ -2647,7 +2411,7 @@ export class WorkspaceRepository {
     idempotencyKey: string,
   ): Promise<CompleteFileUploadResponse> {
     const store = this.#attachmentStore();
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       return runIdempotentMutation(
         client,
         {
@@ -2726,7 +2490,7 @@ export class WorkspaceRepository {
   ): Promise<ConversationFilesResponse> {
     const client = await this.pool.connect();
     try {
-      await this.#requireVisibleConversation(client, identity, conversationId, false);
+      await requireVisibleConversation(client, identity, conversationId, false);
       const cursor = decodeFilesCursor(before);
       if (before !== undefined && cursor === null) {
         throw new ApiError(400, "BAD_REQUEST", "Invalid files cursor");
@@ -2921,7 +2685,7 @@ export class WorkspaceRepository {
     input: ReactionEmoji,
   ): Promise<AddReactionResponse> {
     const emoji = this.#reactionEmoji(input);
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
       await this.#requireActivePrincipal(client, identity);
       const existing = await client.query<ReactionRow>(
@@ -2978,12 +2742,12 @@ export class WorkspaceRepository {
       const row = inserted.rows[0];
       if (row === undefined) throw new Error("Reaction insert returned no row");
       const reaction = mapReaction(row);
-      const event = await this.#insertEvent(client, identity, {
+      const event = await this.events.insert(client, identity, {
         type: "reaction.added",
         conversation,
         conversationSequence: message.conversation_sequence,
         payload: { reaction },
-        audienceUserIds: await this.#conversationAudience(client, conversation),
+        audienceUserIds: await conversationAudience(client, conversation),
       });
       return addReactionResponseSchema.parse({ reaction, syncCursor: event.workspaceSequence });
     });
@@ -2995,7 +2759,7 @@ export class WorkspaceRepository {
     input: ReactionEmoji,
   ): Promise<RemoveReactionResponse> {
     const emoji = this.#reactionEmoji(input);
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const { conversation, message } = await this.#reactionTarget(client, identity, messageId);
       await this.#requireActivePrincipal(client, identity);
       const removed = await client.query<ReactionRow>(
@@ -3013,12 +2777,12 @@ export class WorkspaceRepository {
           syncCursor: await this.#highWater(client, identity.currentUser.workspaceId),
         });
       }
-      const event = await this.#insertEvent(client, identity, {
+      const event = await this.events.insert(client, identity, {
         type: "reaction.removed",
         conversation,
         conversationSequence: message.conversation_sequence,
         payload: { reaction: mapReaction(row) },
-        audienceUserIds: await this.#conversationAudience(client, conversation),
+        audienceUserIds: await conversationAudience(client, conversation),
       });
       return removeReactionResponseSchema.parse({
         removed: true,
@@ -3092,525 +2856,58 @@ export class WorkspaceRepository {
     }
   }
 
-  async listConversationTasks(
-    identity: AuthenticatedTaskIdentity,
-    conversationId: string,
-    after: string | undefined,
-    limit: number,
-    filters: TaskListFilters = {},
-  ): Promise<TaskListResponse> {
-    const filterHash = taskFilterHash(filters);
-    const cursor = decodeTaskCursor(after, filterHash);
-    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const conversation = await this.#requireVisibleConversation(
-        client,
-        identity,
-        conversationId,
-        false,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
-           FROM tasks AS task
-          WHERE task.conversation_id = $1
-            AND (
-              $2::timestamptz IS NULL
-              OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
-            )
-            ${taskListFilterSql("task", 4)}
-          ORDER BY task.created_at DESC, task.id DESC
-          LIMIT $13`,
-        [
-          conversationId,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskListResponseSchema.parse({
-        tasks: rows.map(mapTask),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+  listConversationTasks(
+    ...args: Parameters<WorkspaceTaskOperations["listConversationTasks"]>
+  ): ReturnType<WorkspaceTaskOperations["listConversationTasks"]> {
+    return this.tasks.listConversationTasks(...args);
   }
 
-  async listMyTasks(
-    identity: AuthenticatedTaskIdentity,
-    after: string | undefined,
-    limit: number,
-    filters: TaskListFilters = {},
-  ): Promise<TaskListResponse> {
-    const filterHash = taskFilterHash(filters);
-    const cursor = decodeTaskCursor(after, filterHash);
-    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
-           FROM tasks AS task
-           JOIN conversations AS conversation
-             ON conversation.id = task.conversation_id
-            AND conversation.workspace_id = task.workspace_id
-          WHERE task.workspace_id = $1
-            AND conversation.is_archived = false
-            AND conversation.channel_mode IS DISTINCT FROM 'announcement'
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            AND (
-              task.assignee_id = $2
-              OR (
-                conversation.kind = 'direct_message'
-                AND conversation.dm_user_low_id = $2
-                AND conversation.dm_user_high_id = $2
-              )
-            )
-            AND (
-              $3::timestamptz IS NULL
-              OR (task.created_at, task.id) < ($3::timestamptz, $4::uuid)
-            )
-            ${taskListFilterSql("task", 5)}
-          ORDER BY task.created_at DESC, task.id DESC
-          LIMIT $14`,
-        [
-          identity.currentUser.workspaceId,
-          identity.currentUser.user.id,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskListResponseSchema.parse({
-        tasks: rows.map(mapTask),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+  listMyTasks(
+    ...args: Parameters<WorkspaceTaskOperations["listMyTasks"]>
+  ): ReturnType<WorkspaceTaskOperations["listMyTasks"]> {
+    return this.tasks.listMyTasks(...args);
   }
 
-  async listChannelTasks(
-    identity: AuthenticatedTaskIdentity,
-    channelSlug: string,
-    after: string | undefined,
-    limit: number,
-    filters: TaskListFilters = {},
-  ): Promise<TaskRecordListResponse> {
-    const filterHash = taskFilterHash(filters);
-    const cursor = decodeTaskCursor(after, filterHash);
-    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const conversation = await this.#requireVisibleChannelBySlug(
-        client,
-        identity,
-        channelSlug,
-        false,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
-           FROM tasks AS task
-          WHERE task.conversation_id = $1
-            AND (
-              $2::timestamptz IS NULL
-              OR (task.created_at, task.id) < ($2::timestamptz, $3::uuid)
-            )
-            ${taskListFilterSql("task", 4)}
-          ORDER BY task.created_at DESC, task.id DESC
-          LIMIT $13`,
-        [
-          conversation.id,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskRecordListResponseSchema.parse({
-        tasks: rows.map(mapTaskRecord),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+  listChannelTasks(
+    ...args: Parameters<WorkspaceTaskOperations["listChannelTasks"]>
+  ): ReturnType<WorkspaceTaskOperations["listChannelTasks"]> {
+    return this.tasks.listChannelTasks(...args);
   }
 
-  async getTask(identity: AuthenticatedTaskIdentity, taskId: string): Promise<TaskRecordResponse> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
-           FROM tasks AS task
-           JOIN conversations AS conversation
-             ON conversation.id = task.conversation_id
-            AND conversation.workspace_id = task.workspace_id
-          WHERE task.id = $1
-            AND task.workspace_id = $2
-            AND ${conversationVisibilitySql("conversation", "$3")}
-            AND (
-              conversation.kind = 'channel'
-              OR (
-                conversation.kind = 'direct_message'
-                AND conversation.dm_user_low_id = $3
-                AND conversation.dm_user_high_id = $3
-              )
-            )`,
-        [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
-      );
-      const row = result.rows[0];
-      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
-      const conversation = await this.#requireVisibleConversation(
-        client,
-        identity,
-        row.conversation_id,
-        false,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
-    } finally {
-      client.release();
-    }
+  getTask(
+    ...args: Parameters<WorkspaceTaskOperations["getTask"]>
+  ): ReturnType<WorkspaceTaskOperations["getTask"]> {
+    return this.tasks.getTask(...args);
   }
 
-  async getChannelTaskByNumber(
-    identity: AuthenticatedTaskIdentity,
-    channelSlug: string,
-    taskNumber: TaskNumber,
-  ): Promise<TaskRecordResponse> {
-    const client = await this.pool.connect();
-    try {
-      const conversation = await this.#requireVisibleChannelBySlug(
-        client,
-        identity,
-        channelSlug,
-        false,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
-           FROM tasks AS task
-          WHERE task.conversation_id = $1
-            AND task.number = $2`,
-        [conversation.id, taskNumber],
-      );
-      const row = result.rows[0];
-      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
-      return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
-    } finally {
-      client.release();
-    }
+  getChannelTaskByNumber(
+    ...args: Parameters<WorkspaceTaskOperations["getChannelTaskByNumber"]>
+  ): ReturnType<WorkspaceTaskOperations["getChannelTaskByNumber"]> {
+    return this.tasks.getChannelTaskByNumber(...args);
   }
 
-  async createTask(
-    identity: AuthenticatedTaskIdentity,
-    conversationId: string,
-    input: CreateTaskRequest,
-    idempotencyKey: string,
-  ): Promise<TaskMutationResponse> {
-    return this.#transaction(async (client) => {
-      const conversation = await this.#requireVisibleConversation(
-        client,
-        identity,
-        conversationId,
-        true,
-        true,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      return runIdempotentMutation(
-        client,
-        {
-          actorUserId: identity.currentUser.user.id,
-          route: `/v1/conversations/${conversationId}/tasks`,
-          idempotencyKey,
-          requestFingerprint: fingerprintApiRequest(input),
-          responseStatus: 201,
-          responseSchema: taskMutationResponseSchema,
-        },
-        async () => {
-          await this.#validateTaskReferences(client, identity, conversation, input);
-          const numberResult = await client.query<{ next: string } & QueryResultRow>(
-            `UPDATE conversations
-                SET last_task_number = last_task_number + 1,
-                    updated_at = clock_timestamp()
-              WHERE id = $1
-              RETURNING last_task_number::text AS next`,
-            [conversationId],
-          );
-          const number = numberResult.rows[0]?.next;
-          if (number === undefined) throw new Error("Could not allocate task number");
-          const rankResult = await client.query<{ next: string } & QueryResultRow>(
-            `SELECT (coalesce(max(rank), 0) + $2::bigint)::text AS next
-               FROM tasks
-              WHERE conversation_id = $1
-                AND status = 'todo'`,
-            [conversationId, TASK_RANK_STEP.toString()],
-          );
-          const rank = rankResult.rows[0]?.next;
-          if (rank === undefined) throw new Error("Could not allocate task rank");
-          const inserted = await client.query<TaskRow>(
-            `INSERT INTO tasks (
-               id, workspace_id, conversation_id, number, title, description, status,
-               priority, assignee_id, due_on, source_message_id, rank, created_by, updated_by
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, 'todo', $7, $8, $9, $10, $11, $12, $12)
-             RETURNING *`,
-            [
-              randomUUID(),
-              identity.currentUser.workspaceId,
-              conversationId,
-              number,
-              input.title,
-              input.description,
-              input.priority,
-              input.assigneeId,
-              input.dueOn,
-              input.sourceMessageId,
-              rank,
-              identity.currentUser.user.id,
-            ],
-          );
-          const row = inserted.rows[0];
-          if (row === undefined) throw new Error("Task insert returned no row");
-          const task = mapTask(row);
-          const event = await this.#insertEvent(client, identity, {
-            type: "task.created",
-            conversation,
-            entityVersion: task.version,
-            payload: { task },
-            audienceUserIds: await this.#conversationAudience(client, conversation),
-          });
-          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
-        },
-      );
-    });
+  createTask(
+    ...args: Parameters<WorkspaceTaskOperations["createTask"]>
+  ): ReturnType<WorkspaceTaskOperations["createTask"]> {
+    return this.tasks.createTask(...args);
   }
 
-  async createChannelTask(
-    identity: AuthenticatedTaskIdentity,
-    channelSlug: string,
-    input: CreateTaskRequest,
-    idempotencyKey: string,
-  ): Promise<TaskRecordMutationResponse> {
-    const conversationId = await this.#visibleChannelIdBySlug(identity, channelSlug, true);
-    const created = await this.createTask(identity, conversationId, input, idempotencyKey);
-    return taskRecordMutationResponseSchema.parse({
-      task: { ...created.task, updatedBy: created.task.createdBy },
-      syncCursor: created.syncCursor,
-    });
+  createChannelTask(
+    ...args: Parameters<WorkspaceTaskOperations["createChannelTask"]>
+  ): ReturnType<WorkspaceTaskOperations["createChannelTask"]> {
+    return this.tasks.createChannelTask(...args);
   }
 
-  async updateTask(
-    identity: AuthenticatedTaskIdentity,
-    taskId: string,
-    input: UpdateTaskRequest,
-    idempotencyKey: string,
-  ): Promise<TaskMutationResponse> {
-    return this.#transaction(async (client) => {
-      const { conversation, task: current } = await this.#requireTaskTarget(
-        client,
-        identity,
-        taskId,
-      );
-      return runIdempotentMutation(
-        client,
-        {
-          actorUserId: identity.currentUser.user.id,
-          route: `/v1/tasks/${taskId}`,
-          idempotencyKey,
-          requestFingerprint: fingerprintApiRequest(input),
-          responseStatus: 200,
-          responseSchema: taskMutationResponseSchema,
-        },
-        async () => {
-          if (current.version !== input.expectedVersion) {
-            throw new ApiError(409, "CONFLICT", "The task changed on another device");
-          }
-          await this.#validateTaskReferences(client, identity, conversation, input);
-          const updated = await client.query<TaskRow>(
-            `UPDATE tasks
-                SET title = $2,
-                    description = $3,
-                    priority = $4,
-                    assignee_id = $5,
-                    due_on = $6,
-                    updated_by = $7,
-                    version = version + 1,
-                    updated_at = clock_timestamp()
-              WHERE id = $1
-              RETURNING *`,
-            [
-              taskId,
-              input.title,
-              input.description,
-              input.priority,
-              input.assigneeId,
-              input.dueOn,
-              identity.currentUser.user.id,
-            ],
-          );
-          const row = updated.rows[0];
-          if (row === undefined) throw new Error("Task update returned no row");
-          const task = mapTask(row);
-          const event = await this.#insertEvent(client, identity, {
-            type: "task.updated",
-            conversation,
-            entityVersion: task.version,
-            payload: { task },
-            audienceUserIds: await this.#conversationAudience(client, conversation),
-          });
-          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
-        },
-      );
-    });
+  updateTask(
+    ...args: Parameters<WorkspaceTaskOperations["updateTask"]>
+  ): ReturnType<WorkspaceTaskOperations["updateTask"]> {
+    return this.tasks.updateTask(...args);
   }
 
-  async moveTask(
-    identity: AuthenticatedTaskIdentity,
-    taskId: string,
-    input: MoveTaskRequest,
-    idempotencyKey: string,
-  ): Promise<TaskMutationResponse> {
-    return this.#transaction(async (client) => {
-      const { conversation, task: current } = await this.#requireTaskTarget(
-        client,
-        identity,
-        taskId,
-      );
-      return runIdempotentMutation(
-        client,
-        {
-          actorUserId: identity.currentUser.user.id,
-          route: `/v1/tasks/${taskId}/move`,
-          idempotencyKey,
-          requestFingerprint: fingerprintApiRequest(input),
-          responseStatus: 200,
-          responseSchema: taskMutationResponseSchema,
-        },
-        async () => {
-          if (current.version !== input.expectedVersion) {
-            throw new ApiError(409, "CONFLICT", "The task changed on another device");
-          }
-          const orderedResult = await client.query<TaskRow>(
-            `SELECT *
-               FROM tasks
-              WHERE conversation_id = $1
-                AND status = $2
-                AND id <> $3
-              ORDER BY rank, id
-              FOR UPDATE`,
-            [conversation.id, input.status, taskId],
-          );
-          const ordered = orderedResult.rows;
-          const insertionIndex =
-            input.beforeTaskId === null
-              ? ordered.length
-              : ordered.findIndex((task) => task.id === input.beforeTaskId);
-          if (insertionIndex < 0) {
-            throw new ApiError(400, "BAD_REQUEST", "The Kanban destination is invalid");
-          }
-          const previousRank =
-            insertionIndex === 0 ? 0n : BigInt(ordered[insertionIndex - 1]?.rank ?? "0");
-          const nextRank =
-            insertionIndex === ordered.length ? null : BigInt(ordered[insertionIndex]?.rank ?? "0");
-          const canAppend =
-            nextRank === null && previousRank <= POSTGRES_BIGINT_MAX - TASK_RANK_STEP;
-          const hasGap = nextRank !== null && nextRank - previousRank > 1n;
-          const changed: TaskRow[] = [];
-
-          if (canAppend || hasGap) {
-            const rank = canAppend
-              ? previousRank + TASK_RANK_STEP
-              : (previousRank + (nextRank ?? previousRank)) / 2n;
-            const moved = await client.query<TaskRow>(
-              `UPDATE tasks
-                  SET status = $2,
-                      rank = $3,
-                      completed_at = CASE
-                        WHEN $2 = 'done' THEN coalesce(completed_at, clock_timestamp())
-                        ELSE NULL
-                      END,
-                      version = version + 1,
-                      updated_by = $4,
-                      updated_at = clock_timestamp()
-                WHERE id = $1
-                RETURNING *`,
-              [taskId, input.status, rank.toString(), identity.currentUser.user.id],
-            );
-            const row = moved.rows[0];
-            if (row === undefined) throw new Error("Task move returned no row");
-            changed.push(row);
-          } else {
-            const ids = ordered.map((task) => task.id);
-            ids.splice(insertionIndex, 0, taskId);
-            for (const [index, id] of ids.entries()) {
-              const rank = BigInt(index + 1) * TASK_RANK_STEP;
-              const updated = await client.query<TaskRow>(
-                `UPDATE tasks
-                    SET status = CASE WHEN id = $1 THEN $2 ELSE status END,
-                        rank = $3,
-                        completed_at = CASE
-                          WHEN id = $1 AND $2 = 'done' THEN coalesce(completed_at, clock_timestamp())
-                          WHEN id = $1 THEN NULL
-                          ELSE completed_at
-                        END,
-                        version = version + 1,
-                        updated_by = $5,
-                        updated_at = clock_timestamp()
-                  WHERE id = $4
-                  RETURNING *`,
-                [taskId, input.status, rank.toString(), id, identity.currentUser.user.id],
-              );
-              const row = updated.rows[0];
-              if (row === undefined) throw new Error("Task rebalance returned no row");
-              changed.push(row);
-            }
-          }
-
-          const audienceUserIds = await this.#conversationAudience(client, conversation);
-          let syncCursor = "0";
-          for (const row of changed) {
-            const task = mapTask(row);
-            const event = await this.#insertEvent(client, identity, {
-              type: "task.updated",
-              conversation,
-              entityVersion: task.version,
-              payload: { task },
-              audienceUserIds,
-            });
-            syncCursor = event.workspaceSequence;
-          }
-          const moved = changed.find((row) => row.id === taskId);
-          if (moved === undefined) throw new Error("Moved task was not returned");
-          return taskMutationResponseSchema.parse({ task: mapTask(moved), syncCursor });
-        },
-      );
-    });
+  moveTask(
+    ...args: Parameters<WorkspaceTaskOperations["moveTask"]>
+  ): ReturnType<WorkspaceTaskOperations["moveTask"]> {
+    return this.tasks.moveTask(...args);
   }
 
   async sendMessage(
@@ -3628,7 +2925,7 @@ export class WorkspaceRepository {
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     let bulletinAccepted = false;
-    const response = await this.#transaction(async (client) => {
+    const response = await runWorkspaceTransaction(this.pool, async (client) => {
       // Global lock order for delivery and revocation is: per-message idempotency advisory lock,
       // conversation row, sender workspace-membership row, domain rows, then workspace sequence.
       // Archive and channel-membership mutations start with the same conversation row; identity
@@ -3922,8 +3219,8 @@ export class WorkspaceRepository {
           ],
         );
       }
-      const audienceUserIds = await this.#conversationAudience(client, conversation);
-      const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
+      const audienceUserIds = await conversationAudience(client, conversation);
+      const event = await this.events.insertWithSequence(client, identity, workspaceSequence, {
         type: "message.created",
         conversation,
         conversationSequence,
@@ -4011,7 +3308,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     messageId: string,
   ): Promise<RetractMessageResponse> {
-    return this.#transaction(async (client) => {
+    return runWorkspaceTransaction(this.pool, async (client) => {
       const located = await client.query<{ conversation_id: string } & QueryResultRow>(
         `SELECT conversation_id
            FROM messages
@@ -4022,7 +3319,7 @@ export class WorkspaceRepository {
       const conversationId = located.rows[0]?.conversation_id;
       if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
 
-      const conversation = await this.#requireVisibleConversation(
+      const conversation = await requireVisibleConversation(
         client,
         identity,
         conversationId,
@@ -4083,7 +3380,7 @@ export class WorkspaceRepository {
       if (tombstone.deletedAt === null) {
         throw new Error("Retract committed without a deletedAt tombstone");
       }
-      const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
+      const event = await this.events.insertWithSequence(client, identity, workspaceSequence, {
         type: "message.retracted",
         conversation,
         conversationSequence: retracted.conversation_sequence,
@@ -4092,7 +3389,7 @@ export class WorkspaceRepository {
           messageId: tombstone.id,
           deletedAt: tombstone.deletedAt,
         },
-        audienceUserIds: await this.#conversationAudience(client, conversation),
+        audienceUserIds: await conversationAudience(client, conversation),
       });
       return retractMessageResponseSchema.parse({
         message: tombstone,
@@ -4106,8 +3403,8 @@ export class WorkspaceRepository {
     conversationId: string,
     messageId: string,
   ): Promise<AdvanceReadCursorResponse> {
-    return this.#transaction(async (client) => {
-      const conversation = await this.#requireVisibleConversation(
+    return runWorkspaceTransaction(this.pool, async (client) => {
+      const conversation = await requireVisibleConversation(
         client,
         identity,
         conversationId,
@@ -4158,7 +3455,7 @@ export class WorkspaceRepository {
           identity.currentUser.user.id,
           conversationId,
         );
-        const event = await this.#insertEventWithSequence(client, identity, workspaceSequence, {
+        const event = await this.events.insertWithSequence(client, identity, workspaceSequence, {
           type: "read_cursor.updated",
           conversation,
           payload: { readCursor: mapReadCursor(cursor), ...counts },
@@ -4636,7 +3933,7 @@ export class WorkspaceRepository {
     const failures: AttachmentCleanupFailure[] = [];
 
     while (true) {
-      const batch = await this.#transaction(async (client) => {
+      const batch = await runWorkspaceTransaction(this.pool, async (client) => {
         const expired =
           kind === "pending"
             ? await client.query<ExpiredAttachmentRow>(
@@ -4897,119 +4194,6 @@ export class WorkspaceRepository {
     return counts.get(conversationId) ?? { unreadCount: 0, mentionCount: 0 };
   }
 
-  #requireTaskConversation(
-    identity: AuthenticatedTaskIdentity,
-    conversation: ConversationRow,
-  ): void {
-    if (conversation.kind === "channel" && conversation.channel_mode === "announcement") {
-      throw new ApiError(404, "NOT_FOUND", "Tasks are not available in this channel");
-    }
-    if (conversation.kind === "channel") return;
-    if (
-      identity.principalKind === "human" &&
-      conversation.dm_user_low_id === identity.currentUser.user.id &&
-      conversation.dm_user_high_id === identity.currentUser.user.id
-    ) {
-      return;
-    }
-    throw new ApiError(404, "NOT_FOUND", "Tasks are available in channels and self messages");
-  }
-
-  async #requireTaskTarget(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    taskId: string,
-  ): Promise<{ readonly conversation: ConversationRow; readonly task: TaskRow }> {
-    const located = await client.query<{ conversation_id: string } & QueryResultRow>(
-      `SELECT task.conversation_id
-         FROM tasks AS task
-         JOIN conversations AS conversation
-           ON conversation.id = task.conversation_id
-          AND conversation.workspace_id = task.workspace_id
-        WHERE task.id = $1
-          AND task.workspace_id = $2
-          AND ${conversationVisibilitySql("conversation", "$3")}`,
-      [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
-    );
-    const conversationId = located.rows[0]?.conversation_id;
-    if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
-    const conversation = await this.#requireVisibleConversation(
-      client,
-      identity,
-      conversationId,
-      true,
-      true,
-    );
-    this.#requireTaskConversation(identity, conversation);
-    const taskResult = await client.query<TaskRow>(
-      `SELECT * FROM tasks WHERE id = $1 AND conversation_id = $2 FOR UPDATE`,
-      [taskId, conversation.id],
-    );
-    const task = taskResult.rows[0];
-    if (task === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
-    return { conversation, task };
-  }
-
-  async #validateTaskReferences(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    conversation: ConversationRow,
-    input: {
-      readonly assigneeId: string | null;
-      readonly sourceMessageId?: string | null;
-    },
-  ): Promise<void> {
-    if (input.assigneeId !== null) {
-      const audience = new Set(await this.#conversationAudience(client, conversation));
-      if (!audience.has(input.assigneeId)) {
-        throw new ApiError(400, "BAD_REQUEST", "The assignee cannot access this task");
-      }
-    }
-    if (input.sourceMessageId !== undefined && input.sourceMessageId !== null) {
-      const source = await client.query(
-        `SELECT 1 FROM messages WHERE id = $1 AND conversation_id = $2 AND deleted_at IS NULL`,
-        [input.sourceMessageId, conversation.id],
-      );
-      if (source.rowCount !== 1) {
-        throw new ApiError(400, "BAD_REQUEST", "The source message is unavailable");
-      }
-    }
-    if (
-      conversation.kind === "direct_message" &&
-      input.assigneeId !== null &&
-      input.assigneeId !== identity.currentUser.user.id
-    ) {
-      throw new ApiError(400, "BAD_REQUEST", "Personal tasks can only be assigned to you");
-    }
-  }
-
-  async #requireVisibleConversation(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    conversationId: string,
-    requireWritable: boolean,
-    lock = false,
-  ): Promise<ConversationRow> {
-    const result = await client.query<ConversationRow>(
-      `SELECT *
-         FROM conversations AS conversation
-        WHERE conversation.id = $1
-          AND conversation.workspace_id = $2
-          AND ${conversationVisibilitySql("conversation", "$3")}
-          AND ($4::boolean = false OR conversation.is_archived = false)
-        ${lock ? "FOR UPDATE" : ""}`,
-      [
-        conversationId,
-        identity.currentUser.workspaceId,
-        identity.currentUser.user.id,
-        requireWritable,
-      ],
-    );
-    const row = result.rows[0];
-    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
-    return row;
-  }
-
   async #requireActivePrincipal(
     client: PoolClient,
     identity: AuthenticatedIdentity,
@@ -5113,47 +4297,6 @@ export class WorkspaceRepository {
     }
   }
 
-  async #visibleChannelIdBySlug(
-    identity: AuthenticatedTaskIdentity,
-    channelSlug: string,
-    requireWritable: boolean,
-  ): Promise<string> {
-    const client = await this.pool.connect();
-    try {
-      return (
-        await this.#requireVisibleChannelBySlug(client, identity, channelSlug, requireWritable)
-      ).id;
-    } finally {
-      client.release();
-    }
-  }
-
-  async #requireVisibleChannelBySlug(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    channelSlug: string,
-    requireWritable: boolean,
-  ): Promise<ConversationRow> {
-    const result = await client.query<ConversationRow>(
-      `SELECT *
-         FROM conversations AS conversation
-        WHERE conversation.workspace_id = $1
-          AND conversation.kind = 'channel'
-          AND conversation.slug = $2
-          AND ${conversationVisibilitySql("conversation", "$3")}
-          AND ($4::boolean = false OR conversation.is_archived = false)`,
-      [
-        identity.currentUser.workspaceId,
-        channelSlug,
-        identity.currentUser.user.id,
-        requireWritable,
-      ],
-    );
-    const row = result.rows[0];
-    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
-    return row;
-  }
-
   async #requireManagedChannel(
     client: PoolClient,
     identity: AuthenticatedIdentity,
@@ -5161,7 +4304,7 @@ export class WorkspaceRepository {
   ): Promise<ConversationRow> {
     // Membership mutations take message delivery's canonical conversation row lock before
     // inspecting or changing conversation_memberships.
-    const conversation = await this.#requireVisibleConversation(
+    const conversation = await requireVisibleConversation(
       client,
       identity,
       conversationId,
@@ -5314,104 +4457,6 @@ export class WorkspaceRepository {
     });
   }
 
-  async #conversationAudience(
-    client: PoolClient,
-    conversation: ConversationRow,
-  ): Promise<string[]> {
-    if (conversation.kind === "direct_message") return participants(conversation);
-    if (conversation.kind === "group_direct_message") {
-      const result = await client.query<{ user_id: string } & QueryResultRow>(
-        `SELECT membership.user_id
-           FROM conversation_memberships AS membership
-           JOIN workspace_memberships AS workspace_membership
-             ON workspace_membership.workspace_id = membership.workspace_id
-            AND workspace_membership.user_id = membership.user_id
-           JOIN users AS user_account ON user_account.id = membership.user_id
-          WHERE membership.conversation_id = $1
-            AND membership.left_at IS NULL
-            AND workspace_membership.status = 'active'
-            AND user_account.kind IN ('human', 'agent')
-          ORDER BY membership.user_id`,
-        [conversation.id],
-      );
-      return result.rows.map((row) => row.user_id);
-    }
-    if (conversation.human_only) {
-      const result = await client.query<{ user_id: string } & QueryResultRow>(
-        `SELECT membership.user_id
-           FROM workspace_memberships AS membership
-           JOIN users AS user_account ON user_account.id = membership.user_id
-          WHERE membership.workspace_id = $1
-            AND membership.status = 'active'
-            AND user_account.kind = 'human'
-          ORDER BY membership.user_id`,
-        [conversation.workspace_id],
-      );
-      return result.rows.map((row) => row.user_id);
-    }
-    if (conversation.channel_access === "workspace") {
-      const result = await client.query<{ user_id: string } & QueryResultRow>(
-        `SELECT membership.user_id
-           FROM workspace_memberships AS membership
-           JOIN users AS user_account ON user_account.id = membership.user_id
-          WHERE membership.workspace_id = $1
-            AND membership.status = 'active'
-            AND (
-              user_account.kind = 'human'
-              OR (
-                user_account.kind = 'agent'
-                AND EXISTS (
-                  SELECT 1
-                    FROM conversation_memberships AS public_membership
-                   WHERE public_membership.conversation_id = $2
-                     AND public_membership.user_id = membership.user_id
-                     AND public_membership.left_at IS NULL
-                )
-              )
-              OR EXISTS (
-                SELECT 1
-                  FROM bot_channel_grants AS grant_record
-                 WHERE grant_record.conversation_id = $2
-                   AND grant_record.bot_user_id = membership.user_id
-              )
-            )
-          ORDER BY membership.user_id`,
-        [conversation.workspace_id, conversation.id],
-      );
-      return result.rows.map((row) => row.user_id);
-    }
-    const result = await client.query<{ user_id: string } & QueryResultRow>(
-      `SELECT audience.user_id
-         FROM (
-           SELECT membership.user_id
-             FROM conversation_memberships AS membership
-             JOIN workspace_memberships AS workspace_membership
-               ON workspace_membership.workspace_id = membership.workspace_id
-              AND workspace_membership.user_id = membership.user_id
-             JOIN users AS user_account ON user_account.id = membership.user_id
-            WHERE membership.conversation_id = $1
-              AND membership.left_at IS NULL
-              AND workspace_membership.status = 'active'
-              AND user_account.kind IN ('human', 'agent')
-              AND (NOT $2::boolean OR user_account.kind = 'human')
-           UNION
-           SELECT grant_record.bot_user_id AS user_id
-             FROM bot_channel_grants AS grant_record
-             JOIN workspace_memberships AS workspace_membership
-               ON workspace_membership.workspace_id = grant_record.workspace_id
-              AND workspace_membership.user_id = grant_record.bot_user_id
-             JOIN users AS user_account ON user_account.id = grant_record.bot_user_id
-            WHERE grant_record.conversation_id = $1
-              AND workspace_membership.status = 'active'
-              AND user_account.kind = 'bot'
-              AND NOT $2::boolean
-         ) AS audience
-        ORDER BY audience.user_id`,
-      [conversation.id, conversation.human_only],
-    );
-    return result.rows.map((row) => row.user_id);
-  }
-
   #attachmentStore(): AttachmentStore {
     const store = this.hooks.attachmentStore;
     if (store === undefined) {
@@ -5514,7 +4559,7 @@ export class WorkspaceRepository {
 
     // Locking the conversation serializes reaction capacity checks and prevents an archive or
     // membership removal from committing between authorization and the reaction event audience.
-    const conversation = await this.#requireVisibleConversation(
+    const conversation = await requireVisibleConversation(
       client,
       identity,
       conversationId,
@@ -5546,7 +4591,7 @@ export class WorkspaceRepository {
       throw new ApiError(400, "BAD_REQUEST", "Mentioned members must be unique");
     }
     if (ids.length === 0) return;
-    const audience = new Set(await this.#conversationAudience(client, conversation));
+    const audience = new Set(await conversationAudience(client, conversation));
     if (ids.some((id) => !audience.has(id))) {
       throw new ApiError(400, "BAD_REQUEST", "A mentioned member cannot access this conversation");
     }
@@ -5570,95 +4615,6 @@ export class WorkspaceRepository {
         throw new ApiError(400, "BAD_REQUEST", `The message does not contain @${user.username}`);
       }
     }
-  }
-
-  /**
-   * Thin, conversation-flavored wrapper over the shared {@link insertSyncEvent} primitive (see
-   * `./sync-events.ts`). Every workspace mutation in this repository publishes through a
-   * `ConversationRow`, so the wrapper exists to keep those call sites unchanged; the actual
-   * `sync_events` / `sync_event_audiences` / `pg_notify` mechanics live in the shared module so
-   * the agent-lifecycle path (which has no conversation) can reuse them instead of duplicating
-   * the SQL.
-   */
-  async #insertEvent(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    input: {
-      readonly type: WorkspaceEvent["type"];
-      readonly conversation: ConversationRow;
-      readonly conversationSequence?: string;
-      readonly entityVersion?: number;
-      readonly payload: WorkspaceEvent["payload"];
-      readonly audienceUserIds?: readonly string[];
-    },
-  ): Promise<WorkspaceEvent> {
-    return insertSyncEvent(client, {
-      workspaceId: identity.currentUser.workspaceId,
-      actorUserId: identity.currentUser.user.id,
-      type: input.type,
-      conversationId: input.conversation.id,
-      conversationSequence: input.conversationSequence,
-      entityVersion: input.entityVersion,
-      payload: input.payload,
-      audienceUserIds: input.audienceUserIds,
-      stripChannelMode: !(await this.#announcementChannelsAvailable(
-        client,
-        identity.currentUser.workspaceId,
-      )),
-    });
-  }
-
-  async #insertEventWithSequence(
-    client: PoolClient,
-    identity: AuthenticatedTaskIdentity,
-    sequence: string,
-    input: {
-      readonly type: WorkspaceEvent["type"];
-      readonly conversation: ConversationRow;
-      readonly conversationSequence?: string;
-      readonly entityVersion?: number;
-      readonly payload: WorkspaceEvent["payload"];
-      readonly audienceUserIds?: readonly string[];
-    },
-  ): Promise<WorkspaceEvent> {
-    return insertSyncEventWithSequence(client, sequence, {
-      workspaceId: identity.currentUser.workspaceId,
-      actorUserId: identity.currentUser.user.id,
-      type: input.type,
-      conversationId: input.conversation.id,
-      conversationSequence: input.conversationSequence,
-      entityVersion: input.entityVersion,
-      payload: input.payload,
-      audienceUserIds: input.audienceUserIds,
-      stripChannelMode: !(await this.#announcementChannelsAvailable(
-        client,
-        identity.currentUser.workspaceId,
-      )),
-    });
-  }
-
-  async #announcementChannelsAvailable(client: PoolClient, workspaceId: string): Promise<boolean> {
-    if (this.announcementChannelsEnabled) {
-      await client.query(
-        `UPDATE workspaces
-            SET announcement_channels_available = true
-          WHERE id = $1
-            AND announcement_channels_available = false`,
-        [workspaceId],
-      );
-    }
-    const result = await client.query<
-      { announcement_channels_available: boolean } & QueryResultRow
-    >(
-      `SELECT announcement_channels_available
-         FROM workspaces
-        WHERE id = $1
-        FOR UPDATE`,
-      [workspaceId],
-    );
-    const workspace = result.rows[0];
-    if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
-    return workspace.announcement_channels_available;
   }
 
   async #humansOnlyChannelsAvailable(client: PoolClient, workspaceId: string): Promise<boolean> {
@@ -5798,29 +4754,5 @@ export class WorkspaceRepository {
     const member: Partial<typeof event.payload.member> = { ...event.payload.member };
     delete member.title;
     return { ...event, payload: { member } } as unknown as WorkspaceEvent;
-  }
-
-  async #transaction<T>(
-    operation: (client: PoolClient) => Promise<T>,
-    options: {
-      readonly isolationLevel?: "repeatable_read";
-      readonly readOnly?: boolean;
-    } = {},
-  ): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      const isolation =
-        options.isolationLevel === "repeatable_read" ? " ISOLATION LEVEL REPEATABLE READ" : "";
-      const accessMode = options.readOnly === true ? " READ ONLY" : "";
-      await client.query(`BEGIN TRANSACTION${isolation}${accessMode}`);
-      const result = await operation(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
   }
 }
