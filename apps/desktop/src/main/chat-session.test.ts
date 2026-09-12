@@ -78,7 +78,10 @@ class MemoryCookies implements SessionCookieStore {
   async get(filter: { readonly url: string; readonly name: string }) {
     const value = this.values.get(filter.name);
     if (value === undefined) return [];
-    return [{ name: filter.name, value, expirationDate: this.expirations.get(filter.name) }];
+    const expirationDate = this.expirations.get(filter.name);
+    return [
+      { name: filter.name, value, ...(expirationDate === undefined ? {} : { expirationDate }) },
+    ];
   }
 
   async remove(_url: string, name: string): Promise<void> {

@@ -1,3 +1,4 @@
+import { devicePreferencesSchema } from "@hype-comms/contracts";
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,7 +41,7 @@ class FakeDevicePreferencesTransport implements DevicePreferencesTransport {
   async updateDevicePreferences(patch: DevicePreferencesPatch): Promise<DevicePreferences> {
     this.patches.push(patch);
     if (this.updateError !== null) throw this.updateError;
-    this.state = { ...this.state, ...patch };
+    this.state = devicePreferencesSchema.parse({ ...this.state, ...patch });
     return this.state;
   }
 

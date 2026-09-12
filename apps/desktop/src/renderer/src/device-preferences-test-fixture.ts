@@ -1,3 +1,4 @@
+import { devicePreferencesSchema } from "@hype-comms/contracts";
 import type { DevicePreferences, DevicePreferencesPatch } from "@hype-comms/contracts";
 
 import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
@@ -19,7 +20,7 @@ class TestDevicePreferencesTransport implements DevicePreferencesTransport {
   }
 
   updateDevicePreferences(patch: DevicePreferencesPatch): Promise<DevicePreferences> {
-    this.#state = { ...this.#state, ...patch };
+    this.#state = devicePreferencesSchema.parse({ ...this.#state, ...patch });
     for (const listener of this.listeners) listener(this.#state);
     return Promise.resolve(this.#state);
   }

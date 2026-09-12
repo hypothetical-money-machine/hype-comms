@@ -202,11 +202,11 @@ interface PreferencesHarnessProps {
   readonly devicePreferences: PreferencesDevicePreferencesRuntime;
   readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
-  readonly notifications?: NotificationTransport;
+  readonly notifications?: NotificationTransport | undefined;
   readonly platform: DesktopPlatform;
   readonly currentUser: User;
   readonly onUpdateProfile: (title: string | null) => Promise<void>;
-  readonly onNavigationResult?: (allowed: boolean) => void;
+  readonly onNavigationResult?: ((allowed: boolean) => void) | undefined;
 }
 
 function PreferencesHarness({
@@ -288,10 +288,10 @@ function makeUser(title: string | null = null): User {
 }
 
 interface RenderPreferencesOptions {
-  readonly notifications?: NotificationTransport;
+  readonly notifications?: NotificationTransport | undefined;
   readonly currentUser?: User;
   readonly onUpdateProfile?: (title: string | null) => Promise<void>;
-  readonly onNavigationResult?: (allowed: boolean) => void;
+  readonly onNavigationResult?: ((allowed: boolean) => void) | undefined;
 }
 
 async function renderPreferences({

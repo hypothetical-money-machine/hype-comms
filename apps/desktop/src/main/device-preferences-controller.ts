@@ -27,7 +27,9 @@ export class DevicePreferencesController extends PersistedPreference<DevicePrefe
   update(patch: DevicePreferencesPatch): Promise<DevicePreferences> {
     try {
       const canonicalPatch = devicePreferencesPatchSchema.parse(patch);
-      return this.change((current) => ({ ...current, ...canonicalPatch }));
+      return this.change((current) =>
+        devicePreferencesSchema.parse({ ...current, ...canonicalPatch }),
+      );
     } catch (error) {
       return Promise.reject(error);
     }

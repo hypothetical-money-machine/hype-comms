@@ -85,13 +85,13 @@ export function MessageRow({
   readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
   readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
-  readonly onCreateTask?: () => Promise<void>;
+  readonly onCreateTask?: (() => Promise<void>) | undefined;
   readonly onRetract?: () => Promise<void>;
   readonly highlighted: boolean;
   readonly continuation: boolean;
-  readonly onOpenThread?: () => void;
-  readonly replyCount?: number;
-  readonly domIdPrefix?: string;
+  readonly onOpenThread?: (() => void) | undefined;
+  readonly replyCount?: number | undefined;
+  readonly domIdPrefix?: string | undefined;
   readonly channelReferences?: readonly ChannelReferenceTarget[];
   readonly onOpenChannel?: (conversationId: string) => void;
   readonly timestampFormat?: TimestampFormatPreference;

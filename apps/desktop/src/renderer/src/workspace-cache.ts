@@ -816,19 +816,20 @@ function mergeMetadataRow(
   scope: CacheScope,
   patch: Partial<Omit<MetadataRow, "id">>,
 ): MetadataRow {
+  const collections = patch.collections ?? current?.collections;
+  const repairMarker =
+    patch.repairMarker !== undefined ? patch.repairMarker : current?.repairMarker;
+  const retractReservations = patch.retractReservations ?? current?.retractReservations;
   return {
     id: "state",
-    collections: patch.collections ?? current?.collections,
+    ...(collections === undefined ? {} : { collections }),
     userId: patch.userId ?? current?.userId ?? scope.userId,
     workspaceId: patch.workspaceId ?? current?.workspaceId ?? scope.workspaceId,
     syncCursor: patch.syncCursor !== undefined ? patch.syncCursor : (current?.syncCursor ?? null),
     lastSyncedAt:
       patch.lastSyncedAt !== undefined ? patch.lastSyncedAt : (current?.lastSyncedAt ?? null),
-    repairMarker: patch.repairMarker !== undefined ? patch.repairMarker : current?.repairMarker,
-    retractReservations:
-      patch.retractReservations !== undefined
-        ? patch.retractReservations
-        : current?.retractReservations,
+    ...(repairMarker === undefined ? {} : { repairMarker }),
+    ...(retractReservations === undefined ? {} : { retractReservations }),
   };
 }
 
@@ -1182,12 +1183,13 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             })),
           );
           await this.#database.messages.bulkPut(
-            parsedMessages.map((message) => ({
-              ...messageRow(message, encrypted),
-              ...(collections?.reactionPositions.has(message.id) === true
-                ? { reactionSnapshotPosition: collections.reactionPositions.get(message.id) }
-                : {}),
-            })),
+            parsedMessages.map((message) => {
+              const reactionSnapshotPosition = collections?.reactionPositions.get(message.id);
+              return {
+                ...messageRow(message, encrypted),
+                ...(reactionSnapshotPosition === undefined ? {} : { reactionSnapshotPosition }),
+              };
+            }),
           );
           await this.#database.reactions.bulkPut(
             reactionRows(parsedReactions, parsedMessages, encrypted),
@@ -2026,13 +2028,17 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             await this.#database.messages.bulkPut(
               parsed
                 .filter((message, index) => retainedMessages[index] === message)
-                .map((message) => ({
-                  ...existingRows.find((row) => row?.id === message.id),
-                  ...messageRow(message, encrypted),
-                  ...(collection === undefined || parsedReactions === undefined
-                    ? {}
-                    : { reactionSnapshotPosition: collection.state.snapshotPosition ?? undefined }),
-                })),
+                .map((message) => {
+                  const previous = existingRows.find((row) => row?.id === message.id);
+                  const reactionSnapshotPosition =
+                    collection === undefined || parsedReactions === undefined
+                      ? previous?.reactionSnapshotPosition
+                      : (collection.state.snapshotPosition ?? undefined);
+                  return {
+                    ...messageRow(message, encrypted),
+                    ...(reactionSnapshotPosition === undefined ? {} : { reactionSnapshotPosition }),
+                  };
+                }),
             );
             if (collection?.state.snapshotPosition != null && parsedReactions !== undefined) {
               for (const [index, message] of parsed.entries())
