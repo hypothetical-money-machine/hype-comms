@@ -143,11 +143,11 @@ function ChannelAwareText({
 interface MarkdownBodyProps {
   readonly body: string;
   readonly className: string;
-  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode | undefined;
   readonly suffix?: ReactNode;
-  readonly channels?: readonly ChannelReferenceTarget[];
+  readonly channels?: readonly ChannelReferenceTarget[] | undefined;
   readonly members?: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }
 
 export const MarkdownBody = memo(function MarkdownBody({
@@ -304,11 +304,11 @@ export const MessageBody = memo(function MessageBody({
   onOpenChannel,
 }: {
   readonly body: string;
-  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode | undefined;
   readonly suffix?: ReactNode;
-  readonly channels?: readonly ChannelReferenceTarget[];
+  readonly channels?: readonly ChannelReferenceTarget[] | undefined;
   readonly members?: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }) {
   return (
     <MarkdownBody

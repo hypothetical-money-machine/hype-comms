@@ -104,7 +104,7 @@ export function createMacosNotificationAuthorization(options: {
   try {
     return new MacosNotificationAuthorization({
       addonPath: path.join(options.resourcesPath, ADDON_FILENAME),
-      load: options.load,
+      ...(options.load === undefined ? {} : { load: options.load }),
     });
   } catch {
     return null;

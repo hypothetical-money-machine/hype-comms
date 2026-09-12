@@ -1063,7 +1063,11 @@ class FakeWorkspaceClient implements WorkspaceClient {
     input: Partial<TaskListQuery> = {},
   ): Promise<WireTaskListResponse> {
     this.conversationTaskRequests.push(conversationId);
-    this.conversationTaskPageRequests.push({ conversationId, ...input });
+    this.conversationTaskPageRequests.push({
+      conversationId,
+      ...(input.after === undefined ? {} : { after: input.after }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    });
     const snapshotPosition = this.readPosition;
     return {
       snapshotPosition,

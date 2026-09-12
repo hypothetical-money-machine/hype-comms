@@ -146,7 +146,7 @@ export function MessageComposer({
   onRemoveAttachment,
   onSubmit,
 }: {
-  readonly contextKey?: string;
+  readonly contextKey?: string | undefined;
   readonly conversationName: string | null;
   readonly draft: string;
   readonly pendingAttachments?: readonly Attachment[];
@@ -159,7 +159,7 @@ export function MessageComposer({
   readonly inputRef?: Ref<HTMLTextAreaElement>;
   readonly members?: readonly User[];
   readonly currentUserId?: string;
-  readonly placeholder?: string;
+  readonly placeholder?: string | undefined;
   readonly submitLabel?: string;
   readonly variantClassName?: string;
   readonly typingIndicator?: ReactNode;
@@ -167,8 +167,8 @@ export function MessageComposer({
   readonly sendMessageShortcut?: SendMessageShortcutPreference;
   readonly spellCheck?: boolean;
   readonly onDraftChange: (value: string) => void;
-  readonly onAttach?: () => Promise<void>;
-  readonly onRemoveAttachment?: (attachmentId: string) => void;
+  readonly onAttach?: (() => Promise<void>) | undefined;
+  readonly onRemoveAttachment?: ((attachmentId: string) => void) | undefined;
   readonly onSubmit: () => Promise<void>;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
