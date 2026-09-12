@@ -28,6 +28,35 @@ export default tseslint.config(
     },
   },
   {
+    files: ["apps/server/src/modules/**/*routes.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "fastify",
+              importNames: [
+                "default",
+                "fastify",
+                "FastifyInstance",
+                "FastifyPluginAsync",
+                "FastifyPluginCallback",
+              ],
+              message:
+                "Route modules receive a typed registrar through routeModule; authentication policy and request schemas are required in every declaration.",
+            },
+            {
+              name: "../../http/route-registrar.js",
+              importNames: ["RouteRegistrar"],
+              message: "Use routeModule so the route module has no unrestricted Fastify instance.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["apps/desktop/src/main/**/*.ts", "apps/desktop/src/preload/**/*.ts"],
     rules: {
       "no-restricted-syntax": [
