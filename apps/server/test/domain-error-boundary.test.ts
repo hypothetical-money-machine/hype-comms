@@ -29,6 +29,7 @@ describe("domain errors at the HTTP boundary", () => {
     ["not_found", 404, "NOT_FOUND", "Thread not found"],
     ["conflict", 409, "CONFLICT", "The task changed on another device"],
     ["sync_position_expired", 410, "CURSOR_EXPIRED", "The sync cursor has expired"],
+    ["unavailable", 503, "SERVICE_UNAVAILABLE", "Workspace protocol cutover has not completed"],
     ["integrity_failure", 500, "INTERNAL_ERROR", "Stored file failed its integrity check"],
   ] satisfies [DomainErrorKind, number, string, string][])(
     "preserves the %s response consumed by existing clients",

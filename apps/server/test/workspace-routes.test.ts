@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -163,7 +164,7 @@ class FakeWorkspaceRepository {
     ],
     conversationsNextCursor: null,
     conversationsHasMore: false,
-    syncCursor: "0",
+    syncCursor: testPosition("0"),
     featureFlags: {
       channels: true,
       directMessages: true,
@@ -185,15 +186,15 @@ class FakeWorkspaceRepository {
   }));
   readonly createChannel = vi.fn(async () => ({
     conversation: (await this.bootstrap()).conversations[0],
-    syncCursor: "1",
+    syncCursor: testPosition("1"),
   }));
   readonly archiveChannel = vi.fn(async () => ({
     conversation: (await this.bootstrap()).conversations[0],
-    syncCursor: "2",
+    syncCursor: testPosition("2"),
   }));
   readonly createDirectConversation = vi.fn(async () => ({
     conversation: (await this.bootstrap()).conversations[0],
-    syncCursor: "3",
+    syncCursor: testPosition("3"),
   }));
   readonly history = vi.fn(async () => ({
     messages: [
@@ -326,7 +327,7 @@ class FakeWorkspaceRepository {
       createdAt: now,
       updatedAt: now,
     },
-    syncCursor: "3",
+    syncCursor: testPosition("3"),
   }));
   readonly sendMessage = vi.fn(async (_identity: unknown, targetConversationId: string) => ({
     message: {
@@ -344,7 +345,7 @@ class FakeWorkspaceRepository {
       createdAt: now,
       updatedAt: now,
     },
-    syncCursor: "2",
+    syncCursor: testPosition("2"),
   }));
   readonly sync = vi.fn(async () => ({
     events: [
@@ -355,26 +356,30 @@ class FakeWorkspaceRepository {
         occurredAt: now,
         workspaceId,
         conversationId: null,
-        workspaceSequence: "1",
+        position: testPosition("1"),
         conversationSequence: null,
         entityVersion: 1,
         delivery: "at_least_once" as const,
         payload: { member: currentUser.user },
       },
     ],
-    nextCursor: "0",
-    highWaterCursor: "0",
+    nextCursor: testPosition("0"),
+    highWaterCursor: testPosition("0"),
     hasMore: false,
   }));
-  readonly issueRealtimeTicket = vi.fn(async () => ({ ticket: "b".repeat(32), expiresAt: now }));
+  readonly issueRealtimeTicket = vi.fn(async () => ({
+    ticket: "b".repeat(32),
+    position: testPosition("0"),
+    expiresAt: now,
+  }));
   readonly listMessageReactions = vi.fn(async () => ({ reactions: [] }));
   readonly addReaction = vi.fn(
     async (_identity: unknown, targetMessageId: string, emoji: string) => ({
       reaction: { id: reactionId, messageId: targetMessageId, userId, emoji, createdAt: now },
-      syncCursor: "7",
+      syncCursor: testPosition("7"),
     }),
   );
-  readonly removeReaction = vi.fn(async () => ({ removed: true, syncCursor: "8" }));
+  readonly removeReaction = vi.fn(async () => ({ removed: true, syncCursor: testPosition("8") }));
   readonly listConversationTasks = vi.fn(async () => ({
     tasks: [],
     nextCursor: null,
@@ -388,10 +393,19 @@ class FakeWorkspaceRepository {
   readonly listMyTasks = vi.fn(async () => ({ tasks: [], nextCursor: null, hasMore: false }));
   readonly getTask = vi.fn(async () => ({ task: { id: taskId } }));
   readonly getChannelTaskByNumber = vi.fn(async () => ({ task: { id: taskId } }));
-  readonly createTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
-  readonly createChannelTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "9" }));
-  readonly updateTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "10" }));
-  readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: "11" }));
+  readonly createTask = vi.fn(async () => ({
+    task: { id: taskId },
+    syncCursor: testPosition("9"),
+  }));
+  readonly createChannelTask = vi.fn(async () => ({
+    task: { id: taskId },
+    syncCursor: testPosition("9"),
+  }));
+  readonly updateTask = vi.fn(async () => ({
+    task: { id: taskId },
+    syncCursor: testPosition("10"),
+  }));
+  readonly moveTask = vi.fn(async () => ({ task: { id: taskId }, syncCursor: testPosition("11") }));
   readonly communicationPaths = vi.fn(async () => ({
     generatedAt: now,
     members: [currentUser.user],
@@ -608,12 +622,12 @@ describe("canonical workspace routes", () => {
 
     const legacySync = await app.inject({
       method: "GET",
-      url: "/v2/sync?after=0&limit=100",
+      url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}&limit=100`,
       headers: legacyHeaders,
     });
     const capableSync = await app.inject({
       method: "GET",
-      url: "/v2/sync?after=0&limit=100",
+      url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}&limit=100`,
       headers: capableHeaders,
     });
     expect(legacySync.json().events[0].payload.member).toMatchObject({
@@ -775,7 +789,11 @@ describe("canonical workspace routes", () => {
         `${"humans-only-channels-v1"}, ${"system-channels-v1"}`,
     };
 
-    const sync = await app.inject({ method: "GET", url: "/v2/sync?after=0&limit=100", headers });
+    const sync = await app.inject({
+      method: "GET",
+      url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}&limit=100`,
+      headers,
+    });
     const ticketResponse = await app.inject({
       method: "POST",
       url: "/v2/realtime/tickets",
@@ -786,7 +804,7 @@ describe("canonical workspace routes", () => {
     expect(ticketResponse.statusCode).toBe(200);
     expect(repository.sync).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
-      "0",
+      testPosition("0"),
       100,
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
@@ -801,7 +819,7 @@ describe("canonical workspace routes", () => {
 
     const legacy = await app.inject({
       method: "GET",
-      url: "/v2/sync?after=0&limit=100",
+      url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}&limit=100`,
       headers,
     });
     const malformed = await app.inject({
@@ -813,7 +831,7 @@ describe("canonical workspace routes", () => {
     expect(legacy.statusCode).toBe(200);
     expect(repository.sync).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
-      "0",
+      testPosition("0"),
       100,
     );
     expect(malformed.statusCode).toBe(200);
@@ -855,7 +873,7 @@ describe("canonical workspace routes", () => {
     expect(added.statusCode).toBe(200);
     expect(added.json()).toMatchObject({ reaction: { messageId, emoji: "👩🏽‍💻" } });
     expect(removed.statusCode).toBe(200);
-    expect(removed.json()).toEqual({ removed: true, syncCursor: "8" });
+    expect(removed.json()).toEqual({ removed: true, syncCursor: testPosition("8") });
     expect(repository.addReaction).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       messageId,
@@ -1264,7 +1282,7 @@ describe("message thread routes", () => {
     expect(retracted.statusCode).toBe(200);
     expect(retracted.json()).toMatchObject({
       message: { id: messageId, body: "Root", deletedAt: now },
-      syncCursor: "3",
+      syncCursor: testPosition("3"),
     });
     expect(repository.retractMessage).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),

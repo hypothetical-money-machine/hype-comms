@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import type {
   AgentCurrentPrincipal,
   ConversationSummary,
@@ -77,7 +78,7 @@ export function bootstrap(): WorkspaceBootstrapResponse {
     conversations: [],
     conversationsNextCursor: null,
     conversationsHasMore: false,
-    syncCursor: "5",
+    syncCursor: testPosition("5"),
     featureFlags: {
       channels: true,
       directMessages: true,

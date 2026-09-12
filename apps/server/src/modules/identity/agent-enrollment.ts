@@ -425,6 +425,7 @@ export class AgentEnrollmentModule {
         client,
         {
           actorUserId: actor.userId,
+          workspaceId: actor.workspaceId,
           route: REQUEST_ROUTE,
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),

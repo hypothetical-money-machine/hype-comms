@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -213,7 +214,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -482,7 +483,7 @@ describe("in-app Unreads destination", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: LAUNCH_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: horseMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",

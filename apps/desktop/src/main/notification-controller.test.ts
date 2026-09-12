@@ -1,3 +1,4 @@
+import { testPosition } from "../shared/test-support/sync-position";
 import type {
   ConversationSummary,
   NotificationAction,
@@ -111,7 +112,7 @@ function connectedEvent(options?: {
     occurredAt: NOW,
     workspaceId: options?.workspaceId ?? WORKSPACE_ID,
     conversationId: null,
-    workspaceSequence: options?.sequence ?? "5",
+    position: testPosition(options?.sequence ?? "5"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -144,7 +145,7 @@ function messageEvent(options: {
     occurredAt: NOW,
     workspaceId: options.workspaceId ?? WORKSPACE_ID,
     conversationId,
-    workspaceSequence: sequence,
+    position: testPosition(sequence),
     conversationSequence: sequence,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -180,7 +181,7 @@ function membershipRemovedEvent(sequence: number): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: CONVERSATION_ID,
-    workspaceSequence: String(sequence),
+    position: testPosition(String(sequence)),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -196,7 +197,7 @@ function memberUpdatedEvent(sequence: number): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: null,
-    workspaceSequence: String(sequence),
+    position: testPosition(String(sequence)),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -216,7 +217,7 @@ function directConversationCreatedEvent(sequence: number): ProductRealtimeEvent 
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: summary.conversation.id,
-    workspaceSequence: String(sequence),
+    position: testPosition(String(sequence)),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -320,7 +321,7 @@ function createHarness(options?: {
     sessionGeneration: 1,
     userId: USER_ID,
     workspaceId: WORKSPACE_ID,
-    bootstrapCursor: options?.baseline ?? "5",
+    bootstrapCursor: testPosition(options?.baseline ?? "5"),
   });
   controller.replaceMembers(options?.members ?? [CURRENT_USER, AUTHOR, OTHER_USER]);
   controller.replaceConversations(options?.conversations ?? [conversationSummary()]);
@@ -370,7 +371,7 @@ describe("NotificationController freshness and policy integration", () => {
       sessionGeneration: 1,
       userId: USER_ID,
       workspaceId: WORKSPACE_ID,
-      bootstrapCursor: "5",
+      bootstrapCursor: testPosition("5"),
     });
     controller.replaceMembers([CURRENT_USER, AUTHOR]);
     controller.replaceConversations([conversationSummary()]);
@@ -474,7 +475,7 @@ describe("NotificationController freshness and policy integration", () => {
     expect(reconnectReplay).toMatchObject({
       policy: { decision: "suppressed", reason: "pre_live_replay" },
     });
-    expect(harness.controller.diagnostics.watermark).toBe("13");
+    expect(harness.controller.diagnostics.watermark).toEqual(testPosition("13"));
   });
 
   it("passes metadata-only native content and queues an exact body-free click action", () => {
@@ -869,7 +870,7 @@ describe("NotificationController freshness and policy integration", () => {
     });
     expect(harness.settings.markPresenterFailure).toHaveBeenCalledOnce();
     expect(harness.controller.diagnostics).toMatchObject({
-      watermark: "6",
+      watermark: testPosition("6"),
       presenterFailed: true,
     });
 
@@ -908,7 +909,7 @@ describe("NotificationController resource and lifecycle bounds", () => {
       policy: { decision: "eligible" },
       presentationAttempted: true,
     });
-    expect(harness.controller.diagnostics.watermark).toBe("6");
+    expect(harness.controller.diagnostics.watermark).toEqual(testPosition("6"));
     expect(presenter.attempts).toBe(0);
     expect(scheduled).toHaveLength(1);
 
@@ -934,7 +935,7 @@ describe("NotificationController resource and lifecycle bounds", () => {
     expect(harness.controller.diagnostics).toMatchObject({
       pendingPresentations: NOTIFICATION_PENDING_PRESENTATION_LIMIT,
       droppedPresentations: 1,
-      watermark: String(NOTIFICATION_PENDING_PRESENTATION_LIMIT + 1),
+      watermark: testPosition(String(NOTIFICATION_PENDING_PRESENTATION_LIMIT + 1)),
     });
 
     scheduled.shift()?.();
@@ -1024,7 +1025,7 @@ describe("NotificationController resource and lifecycle bounds", () => {
       sessionGeneration: 1,
       userId: USER_ID,
       workspaceId: WORKSPACE_ID,
-      bootstrapCursor: "5",
+      bootstrapCursor: testPosition("5"),
     });
     controller.replaceMembers([CURRENT_USER, AUTHOR]);
     controller.replaceConversations([conversationSummary()]);
@@ -1068,7 +1069,7 @@ describe("NotificationController resource and lifecycle bounds", () => {
       harness.controller.handleEvent(messageEvent({ eventNumber: index, sequence: index }));
     }
     expect(harness.controller.diagnostics).toMatchObject({
-      watermark: String(NOTIFICATION_HANDLED_EVENT_ID_LIMIT + 1),
+      watermark: testPosition(String(NOTIFICATION_HANDLED_EVENT_ID_LIMIT + 1)),
       handledEventIds: NOTIFICATION_HANDLED_EVENT_ID_LIMIT,
     });
 
@@ -1318,12 +1319,12 @@ describe("NotificationController resource and lifecycle bounds", () => {
       sessionGeneration: 2,
       userId: OTHER_USER_ID,
       workspaceId: OTHER_WORKSPACE_ID,
-      bootstrapCursor: "2",
+      bootstrapCursor: testPosition("2"),
     });
     expect(presenter.presentations[0]?.handle.close).toHaveBeenCalledOnce();
     staleClick?.();
     expect(harness.controller.diagnostics).toMatchObject({
-      watermark: "2",
+      watermark: testPosition("2"),
       handledEventIds: 0,
       pendingActions: 0,
       liveHandles: 0,
@@ -1372,4 +1373,30 @@ describe("NotificationController headless capture", () => {
     expect(harness.controller.diagnostics.pendingActions).toBe(1);
     expect(harness.click).toHaveBeenCalledOnce();
   });
+});
+
+it("replaces the notification replay baseline on epoch change and ignores late old frames", () => {
+  const harness = createHarness();
+  arm(harness.controller);
+  const next = testPosition("20", "eeeeeeee-0000-4000-8000-000000000002");
+  const settingsBefore = harness.settings.state;
+  harness.controller.startSession({
+    sessionGeneration: 1,
+    userId: USER_ID,
+    workspaceId: WORKSPACE_ID,
+    bootstrapCursor: next,
+  });
+  expect(harness.controller.diagnostics).toMatchObject({ watermark: next, connectionArmed: false });
+  expect(harness.controller.handleEvent(connectedEvent())).toEqual({ status: "rejected_boundary" });
+  expect(harness.controller.handleEvent(messageEvent({ eventNumber: 1, sequence: 6 }))).toEqual({
+    status: "rejected_boundary",
+  });
+  expect(harness.controller.diagnostics.watermark).toEqual(next);
+  harness.controller.replaceMembers([CURRENT_USER, AUTHOR, OTHER_USER]);
+  harness.controller.replaceConversations([conversationSummary()]);
+  expect(harness.controller.handleEvent({ ...connectedEvent(), position: next })).toEqual({
+    status: "armed",
+  });
+  expect(harness.settings.state).toEqual(settingsBefore);
+  harness.controller.shutdown();
 });

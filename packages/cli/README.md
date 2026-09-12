@@ -204,10 +204,15 @@ Errors have this stable shape:
 }
 ```
 
-`watch --json [--after DECIMAL_CURSOR]` emits one complete product event per line, preserving
-cursor strings exactly. It reconnects with jitter from the last accepted cursor. If no cursor is
-given, it starts at bootstrap's current cursor rather than replaying history. A cursor expiry emits
-`system.resync_required` before exit so callers can bootstrap cleanly.
+`watch --json [--after JSON_POSITION]` emits one complete product event per line. Protocol 2
+positions have the shape `{"epoch":"UUID","sequence":"123"}`; the sequence remains a decimal
+string to preserve PostgreSQL bigint precision. Quote the JSON when passing it through a shell.
+`sync --after JSON_POSITION` accepts the same shape. Ordinary history and listing pagination
+cursors remain opaque strings.
+
+Watch reconnects from the last successfully written position. If no position is given, it uses
+bootstrap's current position. An expired position or changed epoch emits `system.resync_required`
+before exit so callers can bootstrap again. Parsing a frame does not acknowledge it.
 
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
 `GET /v2/messages/:id`.

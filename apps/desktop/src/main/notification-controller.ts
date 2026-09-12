@@ -1,12 +1,13 @@
 import {
   NOTIFICATION_PENDING_ACTION_LIMIT,
+  compareSyncPositions,
   entityIdSchema,
   notificationActionAcknowledgementSchema,
   notificationActionDrainRequestSchema,
   notificationActionDrainResponseSchema,
   notificationActionSchema,
   notificationActivityUpdateSchema,
-  sequenceSchema,
+  syncPositionSchema,
   type ConversationKind,
   type ConversationSummary,
   type NotificationAction,
@@ -17,6 +18,7 @@ import {
   type NotificationContext,
   type NotificationState,
   type ProductRealtimeEvent,
+  type SyncPosition,
   type User,
   type UserKind,
 } from "@hype-comms/contracts";
@@ -29,12 +31,12 @@ import {
   type NotificationPolicyResult,
   type NotificationWindowState,
 } from "./notification-policy";
-import type { NotificationSettingsController } from "./notification-settings-controller";
 import type {
   NotificationPresentation,
   NotificationPresenter,
   PresentedNotificationHandle,
 } from "./notification-presenter";
+import type { NotificationSettingsController } from "./notification-settings-controller";
 import type { RealtimeConnectionState } from "./workspace-realtime";
 
 export const NOTIFICATION_HANDLED_EVENT_ID_LIMIT = 1_024;
@@ -49,7 +51,7 @@ export interface NotificationSessionStart {
   readonly sessionGeneration: number;
   readonly userId: string;
   readonly workspaceId: string;
-  readonly bootstrapCursor: string;
+  readonly bootstrapCursor: SyncPosition;
 }
 
 export interface NotificationEventContext {
@@ -70,7 +72,7 @@ export type NotificationEventResult =
 export type NotificationRepairReason = "conversations" | "members";
 
 export interface NotificationControllerDiagnostics {
-  readonly watermark: string;
+  readonly watermark: SyncPosition | null;
   readonly handledEventIds: number;
   readonly pendingActions: number;
   readonly pendingPresentations: number;
@@ -135,8 +137,8 @@ function boundedLabel(value: string, limit: number): string {
   return [...value].slice(0, limit).join("");
 }
 
-function maxSequence(left: string, right: string): string {
-  return BigInt(left) >= BigInt(right) ? left : right;
+function maxPosition(left: SyncPosition | null, right: SyncPosition): SyncPosition {
+  return left !== null && compareSyncPositions(left, right) >= 0 ? left : right;
 }
 
 function notificationActionKey(action: NotificationAction): string {
@@ -170,7 +172,7 @@ export class NotificationController {
   #sessionStatus: "active" | "signed_out" | "replacing" = "signed_out";
   #session: ActiveSession | null = null;
   #lastSessionGeneration = 0;
-  #watermark = "0";
+  #watermark: SyncPosition | null = null;
   #armedConnectionId: string | null = null;
   #handledEventIds = new Set<string>();
   #handledEventOrder: string[] = [];
@@ -263,7 +265,7 @@ export class NotificationController {
     if (!isPositiveSafeInteger(input.sessionGeneration)) {
       throw new Error("Notification session generation must be a positive safe integer");
     }
-    const bootstrapCursor = sequenceSchema.parse(input.bootstrapCursor);
+    const bootstrapCursor = syncPositionSchema.parse(input.bootstrapCursor);
     const userId = entityIdSchema.parse(input.userId);
     const workspaceId = entityIdSchema.parse(input.workspaceId);
     const current = this.#session;
@@ -273,7 +275,20 @@ export class NotificationController {
       current.userId === userId &&
       current.workspaceId === workspaceId
     ) {
-      this.#watermark = maxSequence(this.#watermark, bootstrapCursor);
+      if (this.#watermark !== null && this.#watermark.epoch !== bootstrapCursor.epoch) {
+        // The account is unchanged, but old replay/notification work belongs to an obsolete epoch.
+        this.#closeAllNotifications();
+        this.#cancelPendingPresentations();
+        this.#pendingActions = [];
+        this.#handledEventIds.clear();
+        this.#handledEventOrder = [];
+        this.#armedConnectionId = null;
+        this.#conversations.clear();
+        this.#members.clear();
+        this.#watermark = bootstrapCursor;
+      } else {
+        this.#watermark = maxPosition(this.#watermark, bootstrapCursor);
+      }
       return;
     }
     if (input.sessionGeneration <= this.#lastSessionGeneration) {
@@ -568,6 +583,9 @@ export class NotificationController {
     context: NotificationEventContext = {},
   ): NotificationEventResult {
     this.#assertUsable();
+    if (this.#watermark !== null && event.position.epoch !== this.#watermark.epoch) {
+      return { status: "rejected_boundary" };
+    }
     if (event.type === "system.connected") return this.#handleConnected(event, context);
 
     const session = this.#session;
@@ -973,12 +991,14 @@ export class NotificationController {
   #isDuplicate(event: ProductRealtimeEvent): boolean {
     return (
       this.#handledEventIds.has(event.id) ||
-      BigInt(event.workspaceSequence) <= BigInt(this.#watermark)
+      (this.#watermark !== null &&
+        (event.position.epoch !== this.#watermark.epoch ||
+          compareSyncPositions(event.position, this.#watermark) <= 0))
     );
   }
 
   #rememberEvent(event: ProductRealtimeEvent): void {
-    this.#watermark = maxSequence(this.#watermark, event.workspaceSequence);
+    this.#watermark = maxPosition(this.#watermark, event.position);
     if (this.#handledEventIds.has(event.id)) return;
     this.#handledEventIds.add(event.id);
     this.#handledEventOrder.push(event.id);
@@ -1063,7 +1083,7 @@ export class NotificationController {
     this.#cancelPendingPresentations();
     this.#handledEventIds.clear();
     this.#handledEventOrder = [];
-    this.#watermark = "0";
+    this.#watermark = null;
     this.#conversations.clear();
     this.#members.clear();
     this.#memberProjectionHealthy = true;

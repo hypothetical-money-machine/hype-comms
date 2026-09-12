@@ -376,12 +376,12 @@ export const DESKTOP_INVOKE_CONTRACTS = Object.freeze({
   ),
   workspaceSync: invokeContract(
     DESKTOP_CHANNELS.workspaceSync,
-    z.tuple([c.sequenceSchema]),
+    z.tuple([c.syncPositionSchema]),
     c.syncAttemptResultSchema,
   ),
   workspaceRealtimeStart: invokeContract(
     DESKTOP_CHANNELS.workspaceRealtimeStart,
-    z.tuple([c.sequenceSchema]),
+    z.tuple([c.syncPositionSchema]),
     c.realtimeSessionScopeSchema,
   ),
   workspaceRealtimeActivate: invokeContract(
