@@ -367,7 +367,7 @@ describe("ChannelMembersDialog", () => {
     expect(document.activeElement).toBe(close);
   });
 
-  it("restores focus to the trigger when unmounted", () => {
+  it("restores focus to the trigger when unmounted", async () => {
     const triggerRef = createRef<HTMLButtonElement>();
     const dialog = createElement(ChannelMembersDialog, {
       source: "workspace",
@@ -390,7 +390,7 @@ describe("ChannelMembersDialog", () => {
         createElement("button", { key: "trigger", ref: triggerRef, type: "button" }, "People"),
       ]),
     );
-    expect(document.activeElement).toBe(triggerRef.current);
+    await waitFor(() => expect(document.activeElement).toBe(triggerRef.current));
   });
 
   it("reports compact-chrome open and close around its mount lifetime", () => {
