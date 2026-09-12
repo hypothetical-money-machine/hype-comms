@@ -1,7 +1,7 @@
 import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AiChannelState,
   ChatSessionState,
@@ -12,6 +12,7 @@ import type {
   ProductRealtimeEvent,
   RealtimeSessionScope,
   ScopedProductRealtimeEvent,
+  ScopedEphemeralActivityFrame,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -19,6 +20,7 @@ import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
+import * as conversationIndicators from "./conversation-indicators";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
@@ -272,6 +274,8 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
 
 interface ClientHarness {
   readonly client: DesktopApi;
+  readonly emitTyping: (conversationId: string, typing: boolean) => void;
+  readonly realtimeActive: () => boolean;
   readonly emitWorkspaceEvent: (event: ProductRealtimeEvent) => void;
   readonly signOut: () => Promise<{ readonly status: "signed-out" }>;
 }
@@ -280,6 +284,8 @@ function createClient(
   bootstrapResponse: HumanWorkspaceBootstrapResponse = bootstrap,
 ): ClientHarness {
   let realtimeStarts = 0;
+  let active = false;
+  const activityListeners = new Set<(frame: ScopedEphemeralActivityFrame) => void>();
   let realtimeScope: RealtimeSessionScope | null = null;
   const eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
   const signOut = vi
@@ -359,7 +365,13 @@ function createClient(
       });
       return realtimeScope;
     },
-    activateWorkspaceRealtime: async () => undefined,
+    activateWorkspaceRealtime: async () => {
+      active = true;
+    },
+    onWorkspaceActivity: (listener: (frame: ScopedEphemeralActivityFrame) => void) => {
+      activityListeners.add(listener);
+      return () => activityListeners.delete(listener);
+    },
     stopWorkspaceRealtime: async () => undefined,
     acknowledgeWorkspaceEvent: async () => undefined,
     getRealtimeState: async () => "offline",
@@ -392,6 +404,22 @@ function createClient(
   return {
     client,
     signOut,
+    realtimeActive: () => active,
+    emitTyping: (conversationId, typing) => {
+      if (realtimeScope === null) throw new Error("Realtime has not started");
+      for (const listener of activityListeners)
+        listener({
+          scope: realtimeScope,
+          activity: {
+            version: 1,
+            type: "activity.typing",
+            workspaceId: WORKSPACE_ID,
+            conversationId,
+            userId: DAN_ID,
+            typing,
+          },
+        });
+    },
     emitWorkspaceEvent: (event: ProductRealtimeEvent): void => {
       if (realtimeScope === null) return;
       for (const listener of eventListeners) listener({ scope: realtimeScope, event });
@@ -446,9 +474,34 @@ async function renderWorkspace(
   return client;
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe("in-app Unreads destination", () => {
+  it("updates and expires typing without rerendering workspace navigation", async () => {
+    const navigation = vi.spyOn(conversationIndicators, "ConversationBadge");
+    const client = await renderWorkspace();
+    await waitFor(() => expect(client.realtimeActive()).toBe(true));
+    await act(async () => {
+      for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+    });
+    const rendered = navigation.mock.calls.length;
+    vi.useFakeTimers();
+    await act(async () => client.emitTyping(GENERAL_ID, true));
+    expect(screen.getByText("Dan is typing…")).toBeTruthy();
+    expect(navigation).toHaveBeenCalledTimes(rendered);
+    await act(async () => client.emitTyping(LAUNCH_ID, true));
+    expect(navigation).toHaveBeenCalledTimes(rendered);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8_000);
+    });
+    expect(screen.queryByText("Dan is typing…")).toBeNull();
+    expect(navigation).toHaveBeenCalledTimes(rendered);
+  });
+
   it("shows and opens a group conversation under direct messages", async () => {
     await renderWorkspace();
 
