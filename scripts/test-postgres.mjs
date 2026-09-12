@@ -28,6 +28,15 @@ function databaseName(databaseUrl) {
   return name;
 }
 
+/**
+ * Environment passed to the spawned server test suite: always opts into
+ * apps/server/test/setup/require-test-database.mjs, so `npm run test:postgres` enforces its own
+ * database requirement regardless of what the caller (a workflow, a developer's shell) set.
+ */
+export function serverSuiteEnvironment(environment = process.env) {
+  return { ...environment, HYPE_COMMS_REQUIRE_TEST_DATABASE: "1" };
+}
+
 export function requireTestDatabaseUrl(environment) {
   const databaseUrl = environment.HYPE_COMMS_TEST_DATABASE_URL?.trim() ?? "";
   if (databaseUrl === "") throw new Error("HYPE_COMMS_TEST_DATABASE_URL is required");
@@ -87,7 +96,7 @@ async function runServerSuite(arguments_) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const child = spawn(npm, ["test", "--workspace", "@hype-comms/server", "--", ...arguments_], {
     cwd: new URL("..", import.meta.url),
-    env: process.env,
+    env: serverSuiteEnvironment(process.env),
     stdio: "inherit",
   });
   const [code, signal] = await once(child, "close");

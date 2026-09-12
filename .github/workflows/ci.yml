@@ -71,6 +71,10 @@ jobs:
       - name: Run the complete PostgreSQL suite
         env:
           HYPE_COMMS_TEST_DATABASE_URL: postgresql://hype_comms:hype-comms-test-password@127.0.0.1:55432/hype_comms_test
+          # Opt this step into apps/server/test/setup/require-test-database.mjs, so removing the
+          # URL above in a future change reddens this run instead of silently skipping the
+          # PostgreSQL-backed tests.
+          HYPE_COMMS_REQUIRE_TEST_DATABASE: "1"
         # Bound database concurrency so the hosted runner and service remain deterministic.
         run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000
 
