@@ -1,23 +1,18 @@
-export const DESKTOP_CHANNELS = Object.freeze({
+export const DESKTOP_INVOKE_CHANNELS = Object.freeze({
   appVersion: "desktop:app-version",
-  automationHeadless: "desktop:automation-headless",
   serverStatus: "desktop:server-status",
   protocolHandlerState: "desktop:protocol-handler-state",
   updateState: "desktop:update-state",
   updateCheck: "desktop:update-check",
   updateInstall: "desktop:update-install",
-  updateChanged: "desktop:update-changed",
   themeState: "theme:state",
   themeSystemState: "theme:system-state",
   themeSet: "theme:set",
   themeDesignSet: "theme:design-set",
-  themeChanged: "theme:changed",
   compactModeState: "compact-mode:state",
   compactModeSet: "compact-mode:set",
-  compactModeChanged: "compact-mode:changed",
   devicePreferencesState: "device-preferences:state",
   devicePreferencesUpdate: "device-preferences:update",
-  devicePreferencesChanged: "device-preferences:changed",
   aiChannelState: "ai-channel:state",
   aiChannelStart: "ai-channel:start",
   aiChannelWorkspaceChoose: "ai-channel:workspace-choose",
@@ -25,14 +20,12 @@ export const DESKTOP_CHANNELS = Object.freeze({
   aiChannelPromptSend: "ai-channel:prompt-send",
   aiChannelPromptCancel: "ai-channel:prompt-cancel",
   aiChannelPermissionRespond: "ai-channel:permission-respond",
-  aiChannelChanged: "ai-channel:changed",
   sessionState: "chat:session-state",
   sessionRetry: "chat:session-retry",
   sessionAuthCapabilities: "chat:session-auth-capabilities",
   sessionStartAuthKit: "chat:session-start-authkit",
   sessionRequestMagicLink: "chat:session-request-magic-link",
   sessionSignOut: "chat:session-sign-out",
-  sessionChanged: "chat:session-changed",
   cacheCryptoInitialize: "cache:crypto-initialize",
   cacheCryptoEncrypt: "cache:crypto-encrypt",
   cacheCryptoDecrypt: "cache:crypto-decrypt",
@@ -75,11 +68,8 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceRealtimeActivate: "workspace:realtime-activate",
   workspaceRealtimeStop: "workspace:realtime-stop",
   workspaceRealtimeAcknowledge: "workspace:realtime-acknowledge",
-  workspaceEvent: "workspace:event",
   workspaceActivityTypingSet: "workspace:activity-typing-set",
-  workspaceActivity: "workspace:activity",
   realtimeStateGet: "realtime:state-get",
-  realtimeStateChanged: "realtime:state-changed",
   notificationContext: "notification:context",
   notificationActivityUpdate: "notification:activity-update",
   notificationActionsDrain: "notification:actions-drain",
@@ -87,7 +77,31 @@ export const DESKTOP_CHANNELS = Object.freeze({
   notificationState: "notification:state",
   notificationPreferenceSet: "notification:preference-set",
   notificationCapabilityRefresh: "notification:capability-refresh",
-  notificationStateChanged: "notification:state-changed",
-  notificationAction: "desktop:notification-action",
   notificationCaptureActivate: "notification:capture-activate",
 } as const);
+
+export const DESKTOP_INITIAL_CHANNELS = Object.freeze({
+  automationHeadless: "desktop:automation-headless",
+} as const);
+
+export const DESKTOP_PUSH_CHANNELS = Object.freeze({
+  updateChanged: "desktop:update-changed",
+  themeChanged: "theme:changed",
+  compactModeChanged: "compact-mode:changed",
+  devicePreferencesChanged: "device-preferences:changed",
+  aiChannelChanged: "ai-channel:changed",
+  sessionChanged: "chat:session-changed",
+  workspaceEvent: "workspace:event",
+  workspaceActivity: "workspace:activity",
+  realtimeStateChanged: "realtime:state-changed",
+  notificationStateChanged: "notification:state-changed",
+  notificationAction: "desktop:notification-action",
+} as const);
+
+export const DESKTOP_CHANNELS = Object.freeze({
+  ...DESKTOP_INVOKE_CHANNELS,
+  ...DESKTOP_INITIAL_CHANNELS,
+  ...DESKTOP_PUSH_CHANNELS,
+});
+
+export type DesktopPushChannel = (typeof DESKTOP_PUSH_CHANNELS)[keyof typeof DESKTOP_PUSH_CHANNELS];
