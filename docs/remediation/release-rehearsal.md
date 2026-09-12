@@ -5,6 +5,10 @@ candidate revision, compatible rollback revision, package checksums and backup/r
 one release record. A green pull-request package job alone does not establish a signed release,
 installed upgrade, or safe production rollback.
 
+The Kubernetes target, maintenance sequence, backup procedure and rollback rules are in
+[the production cutover runbook](production-cutover.md). Its disposable server rehearsal checks a
+separate protocol-2 rollback image against messages accepted after epoch activation.
+
 ## Repeatable checks
 
 Run `npm run check` with the documented PostgreSQL and Python tools. It includes the memory and
@@ -55,6 +59,16 @@ matrix; the separate installed-notification evidence flow retains its existing p
 These candidates retain the current desktop version for rehearsal only. They must not be
 published over the existing version. Prepare the next unused stable version through the normal
 release command after the stack is integrated, then rerun the package checks on that final revision.
+
+The [2026-09-12 native record](evidence/native-rehearsal-2026-09-12.json) contains the successful
+run at `e28770d`, package checksums verified against downloaded bytes, and each native-cache result.
+It covers macOS, Windows and Linux ARM64 native storage, plus x64 and ARM64 packages on each OS.
+macOS signatures and stapled notarization tickets passed; Windows was unsigned under the existing
+policy. The earlier Linux/x64 native run is recorded in the decision trail.
+
+The [server cutover record](evidence/server-cutover-2026-09-12.json) covers 35 restored table
+fingerprints, attachment restoration and a separately built compatible server rollback retaining
+post-cutover messages. Both records state their limits and do not establish production acceptance.
 
 ## Remaining acceptance before the maintenance window
 
