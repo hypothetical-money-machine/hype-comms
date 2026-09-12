@@ -49,7 +49,7 @@
     "start:server": "npm run start --workspace @hype-comms/server",
     "test": "npm run test:unit && npm run test:integration",
     "test:scripts": "node --test scripts/*.test.mjs",
-    "test:hermes-plugin": "node scripts/test-hermes-plugin.mjs",
+    "test:hermes-plugin": "npm run build --workspace @hype-comms/cli && node scripts/test-hermes-plugin.mjs",
     "test:db": "scripts/test-database.sh",
     "test:postgres": "node scripts/test-postgres.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",

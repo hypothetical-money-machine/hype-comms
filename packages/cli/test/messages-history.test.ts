@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { executeCli, HELP } from "../src/cli.js";
 import { EXIT_CONTRACT, EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
-import { CONVERSATION_ID, MESSAGE_ID } from "./fixtures.js";
+import { CONVERSATION_ID, MESSAGE_ID, TIMESTAMP, USER_ID } from "./fixtures.js";
 import { jsonResponse, testRuntime } from "./helpers.js";
 
 async function home(): Promise<string> {
@@ -83,6 +83,24 @@ describe("messages history", () => {
 
   it("anchors context-pack history", async () => {
     const response = contextHistoryResponse();
+    response.contextPack.anchorMessageId = MESSAGE_ID;
+    response.contextPack.readThroughMessageId = MESSAGE_ID;
+    response.contextPack.replyTarget = {
+      kind: "thread",
+      conversationId: CONVERSATION_ID,
+      rootMessageId: MESSAGE_ID,
+    };
+    response.contextPack.messages = [
+      {
+        id: MESSAGE_ID,
+        conversationSequence: "1",
+        createdAt: TIMESTAMP,
+        body: "The requested context anchor",
+        mentionedYou: true,
+        threadRootId: null,
+        author: { id: USER_ID, kind: "human", username: "member", displayName: "Member" },
+      },
+    ];
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
       expect(url.pathname).toBe(`/v2/conversations/${CONVERSATION_ID}/messages`);
