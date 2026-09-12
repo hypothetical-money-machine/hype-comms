@@ -5,10 +5,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "prebuild": "npm run build --workspace @hype-comms/contracts",
-    "build": "tsc -p tsconfig.json && node ./scripts/copy-migrations.mjs && node ./scripts/copy-release-notes.mjs",
-    "predev": "npm run build --workspace @hype-comms/contracts",
-    "dev": "tsx watch src/main.ts",
+    "build": "tsc --build --pretty false && node ./scripts/copy-migrations.mjs && node ./scripts/copy-release-notes.mjs",
+    "dev": "npm run --prefix ../.. build:contracts && tsx watch src/main.ts",
     "seed:demo": "node --env-file-if-exists=../../.env.local ../../scripts/demo.mjs --seed-only",
     "invite": "tsx src/modules/identity/invite-cli.ts",
     "invite:dist": "node dist/modules/identity/invite-cli.js",
@@ -21,10 +19,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",
-    "pretest": "npm run build --workspace @hype-comms/contracts",
-    "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "npm run --prefix ../.. build:contracts && vitest run",
+    "typecheck": "tsc --build --pretty false"
   },
   "engines": {
     "node": ">=24"

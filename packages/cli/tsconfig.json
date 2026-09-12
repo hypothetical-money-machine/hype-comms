@@ -5,13 +5,11 @@
     "lib": ["ES2024"],
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
     "composite": true,
-    "rewriteRelativeImportExtensions": true,
-    "exactOptionalPropertyTypes": true
+    "rewriteRelativeImportExtensions": true
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test"]
 }
