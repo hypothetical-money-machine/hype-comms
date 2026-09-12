@@ -501,17 +501,22 @@ describe("workspace member directory", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: /Humans-only channel: People Planning/u }));
-    const firstArticle = (await screen.findByText(humansThreadRoot.body)).closest("article");
-    const followUpArticle = (await screen.findByText(humansFollowUp.body)).closest("article");
-    if (firstArticle === null || followUpArticle === null) {
-      throw new Error("Expected both consecutive messages to render in the timeline");
-    }
-
-    for (const article of [firstArticle, followUpArticle]) {
-      expect(article.classList).not.toContain("message-continuation");
-      expect(article.querySelector("header")?.classList).not.toContain("sr-only");
-      expect(within(article).getByText("Sam")).toBeTruthy();
-    }
+    await waitFor(() => {
+      const firstArticle = screen
+        .getByText(humansThreadRoot.body, { selector: "article *" })
+        .closest("article");
+      const followUpArticle = screen
+        .getByText(humansFollowUp.body, { selector: "article *" })
+        .closest("article");
+      if (firstArticle === null || followUpArticle === null) {
+        throw new Error("Expected both consecutive messages to render in the timeline");
+      }
+      for (const article of [firstArticle, followUpArticle]) {
+        expect(article.classList).not.toContain("message-continuation");
+        expect(article.querySelector("header")?.classList).not.toContain("sr-only");
+        expect(within(article).getByText("Sam")).toBeTruthy();
+      }
+    });
   });
 });
 
