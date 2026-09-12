@@ -36,11 +36,24 @@ rule. Thread summary positions serve the corresponding purpose for renderer aggr
 An event affecting a collection records invalidation even if that collection has never loaded.
 Refreshing the first page clears only invalidation at or before that page's position. Later pages
 retain the first page's snapshot position and require its existing pagination state. A newer invalidation
-remains visible to recovery policy. The next remediation steps replace eager startup hydration and
-assign collection recovery ownership; this change retains the existing startup orchestration and
-loads all requested task/file pages, committing each at its own position.
+remains visible to recovery policy. Task/file panes currently load all their requested pages,
+committing each at its own position. Collection recovery ownership is the next remediation step.
 
 Metadata refresh has a separate cache operation. It replaces the complete conversation catalog only
 at the applied workspace position, preserves retained collection records and reaction positions,
 and removes rows for revoked conversations in the same transaction. A page committed during
 metadata encryption survives the refresh. This operation does not advance acknowledgement.
+
+Startup stages conversation metadata pages while the selected timeline loads through the same
+collection path used for navigation. Staging never prunes unseen records or advances replay. A
+complete catalog can then install the bootstrap position and prune revoked conversations without
+rewriting retained collection records. Older retained collections remain invalidated at that new
+position. Cached startup catches up first and can publish metadata pages immediately when their
+position matches the applied replica. A catalog ahead of the replica waits for catch-up before
+replacing counters.
+
+The 50-conversation fresh/cached fixtures hold the second metadata page open and verify that the
+selected timeline is usable after one combined request. No unselected history, reaction, task or
+file request runs. Pending work for a conversation on the second page survives and stays blocked
+until the complete catalog and final catch-up finish. Failure/restart fixtures exercise both a
+partial startup catalog and a post-mutation metadata failure.
