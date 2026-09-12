@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   DEFAULT_AGENT_AGENCY_PROFILE,
@@ -24,6 +24,7 @@ import { z } from "zod";
 
 import { withTransaction } from "../../db/pool.js";
 import { ApiError } from "../../errors.js";
+import { hashToken } from "./tokens.js";
 import {
   fingerprintApiRequest,
   lockIdempotencyScope,
@@ -202,10 +203,6 @@ function isUniqueConstraintViolation(error: unknown, constraint: string): boolea
     "constraint" in error &&
     error.constraint === constraint
   );
-}
-
-function credentialHash(token: string): Buffer {
-  return createHash("sha256").update(token, "utf8").digest();
 }
 
 function verifierBuffer(verifier: string): Buffer {
@@ -706,7 +703,7 @@ export class AgentEnrollmentModule {
     enrollmentId: EntityId,
     candidateCredential: AgentTokenSecret,
   ): Promise<RedeemAgentEnrollmentResponse> {
-    const candidateHash = credentialHash(candidateCredential);
+    const candidateHash = hashToken(candidateCredential);
     let outcome: RedeemResult;
     try {
       outcome = await this.#transaction(async (client): Promise<RedeemResult> => {
@@ -921,7 +918,7 @@ export class AgentEnrollmentModule {
     if (found === undefined) {
       throw new ApiError(404, "NOT_FOUND", "Agent enrollment not found");
     }
-    const candidateHash = credentialHash(candidateCredential);
+    const candidateHash = hashToken(candidateCredential);
     const verifier = enrollmentCredentialVerifierBufferSchema.parse(found.credential_verifier);
     if (!sameHash(verifier, candidateHash)) {
       throw new ApiError(401, "UNAUTHORIZED", "Enrollment credential is invalid");

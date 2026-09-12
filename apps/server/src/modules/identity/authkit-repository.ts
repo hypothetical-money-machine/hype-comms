@@ -23,10 +23,11 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { withTransaction } from "../../db/pool.js";
 import {
+  IdentityRepository,
   lockHumanActivationSyncAudienceMemberships,
   publishHumanActivationSyncEvents,
 } from "./repository.js";
-import { issueToken } from "./tokens.js";
+import { hashToken, issueToken } from "./tokens.js";
 
 const AUTHKIT_HANDOFF_TTL_MS = 5 * 60 * 1_000;
 const WORKOS_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -199,10 +200,6 @@ export class AuthKitCredentialRejectedError extends Error {
     super("AuthKit credential was rejected");
     this.name = "AuthKitCredentialRejectedError";
   }
-}
-
-function hashCredential(credential: string): Buffer {
-  return createHash("sha256").update(credential, "utf8").digest();
 }
 
 function requirePattern(value: string, pattern: RegExp, description: string): string {
@@ -514,7 +511,7 @@ export class AuthKitRepository {
     const desktopAuthVariant = desktopAuthVariantSchema.parse(input.desktopAuthVariant);
     const expiresAt = requireDate(input.expiresAt, "a transaction expiry date");
     const id = randomUUID();
-    const providerStateHash = hashCredential(providerState);
+    const providerStateHash = hashToken(providerState);
     const associatedData = transactionAssociatedData({
       id,
       providerStateHash,
@@ -562,7 +559,7 @@ export class AuthKitRepository {
       "an opaque OAuth state value",
     );
     const now = requireDate(nowValue, "a transaction consumption date");
-    const providerStateHash = hashCredential(providerState);
+    const providerStateHash = hashToken(providerState);
 
     return withTransaction(this.#pool, async (client) => {
       const result = await client.query<AuthKitTransactionRow>(
@@ -745,7 +742,7 @@ export class AuthKitRepository {
             AND handoff.consumed_at IS NULL
             AND handoff.expires_at > $2
           FOR UPDATE OF handoff, membership`,
-        [hashCredential(handoffCode), now],
+        [hashToken(handoffCode), now],
       );
       const handoff = result.rows[0];
       if (
@@ -773,28 +770,16 @@ export class AuthKitRepository {
       );
       if (consumed.rowCount !== 1) throw new AuthKitCredentialRejectedError();
 
-      await client.query(
-        `INSERT INTO device_sessions (
-           id,
-           user_id,
-           token_hash,
-           label,
-           created_at,
-           last_seen_at,
-           expires_at,
-           workos_session_id
-         )
-         VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
-        [
-          randomUUID(),
-          handoff.user_id,
-          session.hash,
-          label,
-          now,
-          expiresAt,
-          handoff.workos_session_id,
-        ],
-      );
+      await new IdentityRepository(client).insertDeviceSession({
+        id: randomUUID(),
+        userId: entityIdSchema.parse(handoff.user_id),
+        tokenHash: session.hash,
+        label,
+        createdAt: isoDateTimeSchema.parse(now.toISOString()),
+        lastSeenAt: isoDateTimeSchema.parse(now.toISOString()),
+        expiresAt: isoDateTimeSchema.parse(expiresAt.toISOString()),
+        workosSessionId: authKitProviderSessionIdSchema.parse(handoff.workos_session_id),
+      });
 
       return {
         token: sessionTokenSchema.parse(session.token),
