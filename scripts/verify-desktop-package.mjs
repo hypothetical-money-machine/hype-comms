@@ -14,7 +14,6 @@ const requiredAsarEntries = [
   "/dist/main/build-metadata.json",
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
-  "/dist/main/codex-app-server-worker.js",
   "/dist/preload/index.js",
   "/dist/renderer/index.html",
   "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
@@ -170,7 +169,7 @@ export function verifyPackageEntries(asarPath, entries) {
   );
   if (packagedCodexPackages.length > 0) {
     throw new Error(
-      `${asarPath} contains bundled official Codex packages; AI Channel must use the user-installed Codex CLI`,
+      `${asarPath} contains bundled official Codex packages; the Codex integration is retired`,
     );
   }
 
@@ -179,7 +178,7 @@ export function verifyPackageEntries(asarPath, entries) {
   );
   if (packagedCodexExecutables.length > 0) {
     throw new Error(
-      `${asarPath} contains a bundled Codex executable; AI Channel must use the user-installed Codex CLI`,
+      `${asarPath} contains a bundled Codex executable; the Codex integration is retired`,
     );
   }
 }
