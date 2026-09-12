@@ -17,7 +17,7 @@ import {
 import type { NotificationPresenter } from "../../desktop/src/main/notification-presenter.js";
 import { WorkspaceRealtime } from "../../desktop/src/main/workspace-realtime.js";
 import { buildApp } from "../src/app.js";
-import { ApiError } from "../src/errors.js";
+import { DomainError } from "../src/domain-errors.js";
 import type { EphemeralActivityHub } from "../src/modules/realtime/activity-hub.js";
 import type {
   RealtimePrincipal,
@@ -466,7 +466,7 @@ describe("realtime session revalidation", () => {
       deviceSessionId: null,
       agentTokenId: "10000000-0000-4000-8000-000000000011",
     };
-    repository.syncError = new ApiError(409, "CURSOR_EXPIRED", "Cursor expired");
+    repository.syncError = new DomainError("sync_position_expired", "Cursor expired");
     const app = await buildApp({
       allowedOrigins: ["app://bundle"],
       workspace: {

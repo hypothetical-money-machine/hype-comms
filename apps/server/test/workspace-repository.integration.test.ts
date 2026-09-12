@@ -22,7 +22,7 @@ import {
   type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
-import { ApiError } from "../src/errors.js";
+import { DomainError } from "../src/domain-errors.js";
 import type {
   AuthenticatedAgentIdentity,
   AuthenticatedIdentity,
@@ -159,11 +159,11 @@ function taskInput(title: string, overrides: Partial<CreateTaskRequest> = {}): C
   };
 }
 
-async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> {
+async function rejectedDomainError(operation: Promise<unknown>): Promise<DomainError> {
   try {
     await operation;
   } catch (error) {
-    if (error instanceof ApiError) return error;
+    if (error instanceof DomainError) return error;
     throw error;
   }
   throw new Error("Expected the operation to reject");
@@ -420,7 +420,7 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.sendMessage(owner, generalId, message(clientMessageId, "changed @member")),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
   });
 
   it("lets an author retract their own message within five minutes and fans the tombstone out", async () => {
@@ -462,9 +462,8 @@ describe("WorkspaceRepository", () => {
     const replyRetract = await repository.retractMessage(owner, reply.message.id);
 
     await expect(repository.retractMessage(member, channel.message.id)).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
-    } satisfies Partial<ApiError>);
+      kind: "access_denied",
+    } satisfies Partial<DomainError>);
 
     const history = await repository.history(member, generalId, undefined, 50);
     expect(history.messages.some((item) => item.id === channel.message.id)).toBe(false);
@@ -479,9 +478,8 @@ describe("WorkspaceRepository", () => {
     expect(search.results.map(({ message: result }) => result.id)).toEqual([]);
 
     await expect(repository.messageById(member, channel.message.id)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     const afterCreate = channel.syncCursor;
     const legacy = await repository.sync(observer, afterCreate, 100);
@@ -560,22 +558,19 @@ describe("WorkspaceRepository", () => {
     await repository.retractMessage(owner, root.message.id);
 
     const [retracted, nonexistent] = await Promise.all([
-      rejectedApiError(repository.thread(member, root.message.id, undefined, 50)),
-      rejectedApiError(repository.thread(member, randomUUID(), undefined, 50)),
+      rejectedDomainError(repository.thread(member, root.message.id, undefined, 50)),
+      rejectedDomainError(repository.thread(member, randomUUID(), undefined, 50)),
     ]);
 
     expect({
-      statusCode: retracted.statusCode,
-      code: retracted.code,
+      kind: retracted.kind,
       message: retracted.message,
-    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Thread not found" });
+    }).toEqual({ kind: "not_found", message: "Thread not found" });
     expect({
-      statusCode: retracted.statusCode,
-      code: retracted.code,
+      kind: retracted.kind,
       message: retracted.message,
     }).toEqual({
-      statusCode: nonexistent.statusCode,
-      code: nonexistent.code,
+      kind: nonexistent.kind,
       message: nonexistent.message,
     });
   });
@@ -615,12 +610,11 @@ describe("WorkspaceRepository", () => {
     const reaction = await repository.addReaction(member, sent.message.id, "🎉");
     const retracted = await repository.retractMessage(owner, sent.message.id);
 
-    const replayError = await rejectedApiError(repository.sendMessage(owner, generalId, input));
+    const replayError = await rejectedDomainError(repository.sendMessage(owner, generalId, input));
     expect({
-      statusCode: replayError.statusCode,
-      code: replayError.code,
+      kind: replayError.kind,
       message: replayError.message,
-    }).toEqual({ statusCode: 404, code: "NOT_FOUND", message: "Message not found" });
+    }).toEqual({ kind: "not_found", message: "Message not found" });
 
     const sync = await repository.sync(observer, "0", 100, { messageRetractEvents: true });
     expect(sync.events).toEqual([
@@ -649,9 +643,8 @@ describe("WorkspaceRepository", () => {
     });
 
     await expect(repository.retractMessage(owner, theirs.message.id)).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
-    } satisfies Partial<ApiError>);
+      kind: "access_denied",
+    } satisfies Partial<DomainError>);
 
     await pool.query(
       `UPDATE messages
@@ -661,9 +654,8 @@ describe("WorkspaceRepository", () => {
       [own.message.id],
     );
     await expect(repository.retractMessage(owner, own.message.id)).rejects.toMatchObject({
-      statusCode: 409,
-      code: "CONFLICT",
-    } satisfies Partial<ApiError>);
+      kind: "conflict",
+    } satisfies Partial<DomainError>);
 
     const persisted = await repository.messageById(member, own.message.id);
     expect(persisted.message).toMatchObject({
@@ -948,7 +940,7 @@ describe("WorkspaceRepository", () => {
     });
     await expect(
       repository.contextHistory(observer, directConversationId, undefined, undefined, 8),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
   });
 
   it("returns exact null invariants when visible history is empty", async () => {
@@ -1016,10 +1008,10 @@ describe("WorkspaceRepository", () => {
     });
     await expect(
       repository.contextHistory(member, privateConversationId, undefined, undefined, 8),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       repository.contextHistory(member, generalId, undefined, privateMessage.message.id, 8),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     const retracted = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "soon retracted context"),
@@ -1028,7 +1020,7 @@ describe("WorkspaceRepository", () => {
     await repository.retractMessage(owner, retracted.message.id);
     await expect(
       repository.contextHistory(member, generalId, undefined, retracted.message.id, 8),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
   });
 
   it("keeps context packs below 64 KiB by dropping only whole oldest messages", async () => {
@@ -1151,17 +1143,15 @@ describe("WorkspaceRepository", () => {
     ).toString("base64url");
 
     await expect(repository.history(member, generalId, oversizedCursor, 50)).rejects.toMatchObject({
-      statusCode: 400,
-      code: "BAD_REQUEST",
+      kind: "invalid_input",
       message: "Invalid history cursor",
-    } satisfies Partial<ApiError>);
+    } satisfies Partial<DomainError>);
     await expect(
       repository.thread(member, root.message.id, oversizedCursor, 50),
     ).rejects.toMatchObject({
-      statusCode: 400,
-      code: "BAD_REQUEST",
+      kind: "invalid_input",
       message: "Invalid history cursor",
-    } satisfies Partial<ApiError>);
+    } satisfies Partial<DomainError>);
   });
 
   it("enforces announcement publishing while preserving threads, reactions, and replay", async () => {
@@ -1221,13 +1211,13 @@ describe("WorkspaceRepository", () => {
         undefined,
         true,
       ),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
     await expect(
       repository.sendMessage(member, announcementId, {
         ...message(randomUUID(), "member root"),
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
     await expect(
       repository.sendMessage(owner, announcementId, {
@@ -1235,10 +1225,9 @@ describe("WorkspaceRepository", () => {
         mentionedUserIds: [],
       }),
     ).rejects.toMatchObject({
-      statusCode: 403,
-      code: "FORBIDDEN",
+      kind: "access_denied",
       message: "A compatible client is required to post bulletins",
-    } satisfies Partial<ApiError>);
+    } satisfies Partial<DomainError>);
 
     const request = { ...message(randomUUID(), "owner bulletin"), mentionedUserIds: [] };
     const bulletin = await repository.sendMessage(owner, announcementId, request, undefined, true);
@@ -1264,13 +1253,12 @@ describe("WorkspaceRepository", () => {
     await expect(
       repository.listConversationTasks(member, announcementId, undefined, 50),
     ).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
+      kind: "not_found",
       message: "Tasks are not available in this channel",
-    } satisfies Partial<ApiError>);
+    } satisfies Partial<DomainError>);
     await expect(
       repository.createTask(member, announcementId, taskInput("Not allowed"), randomUUID()),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       pool.query(`UPDATE conversations SET channel_mode = 'chat' WHERE id = $1`, [announcementId]),
     ).rejects.toMatchObject({ code: "23514" });
@@ -1280,9 +1268,8 @@ describe("WorkspaceRepository", () => {
       [workspaceId, ownerId],
     );
     await expect(repository.sendMessage(owner, announcementId, request)).rejects.toMatchObject({
-      statusCode: 401,
-      code: "UNAUTHORIZED",
-    } satisfies Partial<ApiError>);
+      kind: "authentication_required",
+    } satisfies Partial<DomainError>);
     expect(audits).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1358,7 +1345,7 @@ describe("WorkspaceRepository", () => {
     } finally {
       await pool.query("ALTER TABLE tasks ENABLE TRIGGER tasks_reject_announcement_channel");
     }
-    const taskless = { statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>;
+    const taskless = { kind: "not_found" } satisfies Partial<DomainError>;
     await expect(
       repository.listConversationTasks(member, announcementId, undefined, 50),
     ).rejects.toMatchObject(taskless);
@@ -1486,7 +1473,7 @@ describe("WorkspaceRepository", () => {
       const result = await attempt.outcome;
       expect(result.status).toBe("rejected");
       if (result.status === "rejected") {
-        expect(result.error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+        expect(result.error).toMatchObject({ kind: "not_found" });
       }
     } finally {
       await removal.query("ROLLBACK");
@@ -1522,7 +1509,7 @@ describe("WorkspaceRepository", () => {
       const result = await attempt.outcome;
       expect(result.status).toBe("rejected");
       if (result.status === "rejected") {
-        expect(result.error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+        expect(result.error).toMatchObject({ kind: "not_found" });
       }
     } finally {
       await archive.query("ROLLBACK");
@@ -1557,7 +1544,7 @@ describe("WorkspaceRepository", () => {
       const result = await attempt.outcome;
       expect(result.status).toBe("rejected");
       if (result.status === "rejected") {
-        expect(result.error).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+        expect(result.error).toMatchObject({ kind: "access_denied" });
       }
     } finally {
       await demotion.query("ROLLBACK");
@@ -1586,7 +1573,7 @@ describe("WorkspaceRepository", () => {
         undefined,
         true,
       ),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
     const compatibleChat = await rolloutRepository.createChannel(owner, {
       name: "Compatible Chat",
@@ -1621,7 +1608,7 @@ describe("WorkspaceRepository", () => {
         undefined,
         false,
       ),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
     const announcement = await enabledRepository.createChannel(
       owner,
@@ -1797,14 +1784,14 @@ describe("WorkspaceRepository", () => {
         threadRootId: reply.message.id,
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       repository.sendMessage(owner, generalId, {
         ...message(randomUUID(), "missing root"),
         threadRootId: randomUUID(),
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     const privateChannel = await repository.createChannel(owner, {
       name: "Private Threads",
@@ -1823,14 +1810,13 @@ describe("WorkspaceRepository", () => {
         threadRootId: root.message.id,
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       repository.thread(member, privateRoot.message.id, undefined, 50),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(repository.thread(owner, reply.message.id, undefined, 50)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
   });
 
   it("replays channel mutations without duplicating rows or sync events", async () => {
@@ -1848,7 +1834,7 @@ describe("WorkspaceRepository", () => {
     expect(replayedCreate).toEqual(created);
     await expect(
       repository.createChannel(owner, { ...input, slug: "different-channel" }, idempotencyKey),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
 
     const conversationId = created.conversation.conversation.id;
     const [added, replayedAdd] = await Promise.all([
@@ -1958,22 +1944,19 @@ describe("WorkspaceRepository", () => {
     await repository.retractMessage(owner, sent.message.id);
 
     const [retracted, nonexistent] = await Promise.all([
-      rejectedApiError(repository.listMessageReactions(observer, [sent.message.id])),
-      rejectedApiError(repository.listMessageReactions(observer, [randomUUID()])),
+      rejectedDomainError(repository.listMessageReactions(observer, [sent.message.id])),
+      rejectedDomainError(repository.listMessageReactions(observer, [randomUUID()])),
     ]);
     const retractedShape = {
-      statusCode: retracted.statusCode,
-      code: retracted.code,
+      kind: retracted.kind,
       message: retracted.message,
     };
     expect(retractedShape).toEqual({
-      statusCode: 404,
-      code: "NOT_FOUND",
+      kind: "not_found",
       message: "One or more messages were not found",
     });
     expect(retractedShape).toEqual({
-      statusCode: nonexistent.statusCode,
-      code: nonexistent.code,
+      kind: nonexistent.kind,
       message: nonexistent.message,
     });
   });
@@ -2045,10 +2028,9 @@ describe("WorkspaceRepository", () => {
     );
 
     expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(failure?.reason as ApiError).toMatchObject({
-      statusCode: 409,
-      code: "CONFLICT",
-    } satisfies Partial<ApiError>);
+    expect(failure?.reason as DomainError).toMatchObject({
+      kind: "conflict",
+    } satisfies Partial<DomainError>);
     expect(
       (
         await pool.query<{ count: string }>(
@@ -2065,7 +2047,7 @@ describe("WorkspaceRepository", () => {
         sent.message.id,
         reactionEmojis[REACTIONS_PER_MEMBER_PER_MESSAGE_MAX + 1],
       ),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
   });
 
   it("serializes the total reaction cap at its concurrent boundary", async () => {
@@ -2113,10 +2095,9 @@ describe("WorkspaceRepository", () => {
     );
 
     expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(failure?.reason as ApiError).toMatchObject({
-      statusCode: 409,
-      code: "CONFLICT",
-    } satisfies Partial<ApiError>);
+    expect(failure?.reason as DomainError).toMatchObject({
+      kind: "conflict",
+    } satisfies Partial<DomainError>);
     expect(
       (
         await pool.query<{ count: string }>(
@@ -2127,7 +2108,7 @@ describe("WorkspaceRepository", () => {
     ).toBe(String(REACTIONS_PER_MESSAGE_MAX));
     await expect(
       repository.addReaction(finalIdentity, sent.message.id, reactionEmojis[11]),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
   });
 
   it("enforces conversation visibility and archived-channel write rules for reactions", async () => {
@@ -2144,26 +2125,22 @@ describe("WorkspaceRepository", () => {
     });
 
     await expect(repository.addReaction(member, sent.message.id, "👍")).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(repository.listMessageReactions(member, [sent.message.id])).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
     await expect(repository.addReaction(member, sent.message.id, "👍")).resolves.toMatchObject({
       reaction: { userId: memberId, messageId: sent.message.id, emoji: "👍" },
     });
     await repository.removeChannelMember(owner, conversationId, memberId);
     await expect(repository.removeReaction(member, sent.message.id, "👍")).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(repository.listMessageReactions(member, [sent.message.id])).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     const publicChannel = await repository.createChannel(owner, {
       name: "Archived Reactions",
@@ -2179,7 +2156,7 @@ describe("WorkspaceRepository", () => {
     await repository.archiveChannel(owner, archivedConversationId);
     await expect(
       repository.addReaction(owner, archivedMessage.message.id, "👍"),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
   });
 
   it("hydrates an exact message only while the requester can access its conversation", async () => {
@@ -2200,9 +2177,8 @@ describe("WorkspaceRepository", () => {
       attachments: [],
     });
     await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
     await expect(repository.messageById(member, sent.message.id)).resolves.toEqual({
@@ -2212,13 +2188,11 @@ describe("WorkspaceRepository", () => {
 
     await repository.removeChannelMember(owner, conversationId, memberId);
     await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(repository.messageById(member, randomUUID())).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
   });
 
   it("keeps direct-message history and events private while advancing other cursors", async () => {
@@ -2235,8 +2209,7 @@ describe("WorkspaceRepository", () => {
     expect(observerSync.nextCursor).toBe(observerSync.highWaterCursor);
     await expect(repository.history(observer, conversationId, undefined, 50)).rejects.toMatchObject(
       {
-        statusCode: 404,
-        code: "NOT_FOUND",
+        kind: "not_found",
       },
     );
   });
@@ -2461,7 +2434,7 @@ describe("WorkspaceRepository", () => {
         },
         randomUUID(),
       ),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
     const completedA = await repository.moveTask(
       owner,
       createdA.task.id,
@@ -2494,7 +2467,7 @@ describe("WorkspaceRepository", () => {
         taskInput("Not a shared-DM task"),
         randomUUID(),
       ),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     const selfDirect = await repository.createDirectConversation(owner, { memberId: ownerId });
     const personal = await repository.createTask(
@@ -2539,7 +2512,7 @@ describe("WorkspaceRepository", () => {
         1,
         { status: "done", assignee: memberId, updatedBy: ownerId },
       ),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
     const firstPageIds = new Set(boardFirstPage.tasks.map((task) => task.id));
     expect(new Set(myFirstPage.tasks.map((task) => task.id))).toEqual(firstPageIds);
     const unseen = created.find(({ task }) => !firstPageIds.has(task.id));
@@ -2652,7 +2625,7 @@ describe("WorkspaceRepository", () => {
       expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
       await expect(
         repository.listConversationTasks(member, conversationId, undefined, 10),
-      ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+      ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
       const memberSync = await repository.sync(member, created.syncCursor, 100, {
         taskEvents: true,
       });
@@ -2666,9 +2639,8 @@ describe("WorkspaceRepository", () => {
     await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
 
     await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
-      statusCode: 410,
-      code: "CURSOR_EXPIRED",
-    } satisfies Partial<ApiError>);
+      kind: "sync_position_expired",
+    } satisfies Partial<DomainError>);
   });
 
   it("returns an empty sync when the cursor equals high-water and no sync events remain", async () => {
@@ -2713,9 +2685,8 @@ describe("WorkspaceRepository", () => {
     );
 
     await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
-      statusCode: 410,
-      code: "CURSOR_EXPIRED",
-    } satisfies Partial<ApiError>);
+      kind: "sync_position_expired",
+    } satisfies Partial<DomainError>);
   });
 
   it("searches only messages in conversations the caller can currently access", async () => {
@@ -2796,12 +2767,12 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.searchMessages(owner, "quarterly avalanche", "not-a-cursor", 50),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
     const firstPage = await repository.searchMessages(owner, "quarterly avalanche", undefined, 1);
     expect(firstPage.nextCursor).not.toBeNull();
     await expect(
       repository.searchMessages(owner, "different query", firstPage.nextCursor ?? undefined, 1),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
     await expect(
       repository.searchMessages(
         owner,
@@ -2809,7 +2780,7 @@ describe("WorkspaceRepository", () => {
         searchCursor("quarterly avalanche", { rank: 1e39 }),
         50,
       ),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
     await expect(
       repository.searchMessages(
         owner,
@@ -2817,7 +2788,7 @@ describe("WorkspaceRepository", () => {
         searchCursor("quarterly avalanche", { workspaceSequence: "9223372036854775808" }),
         50,
       ),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
   });
 
   it("grants and revokes member-only channel access across every message boundary", async () => {
@@ -2844,18 +2815,17 @@ describe("WorkspaceRepository", () => {
       ),
     ).toBe(false);
     await expect(repository.history(observer, conversationId, undefined, 50)).rejects.toMatchObject(
-      { statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>,
+      { kind: "not_found" } satisfies Partial<DomainError>,
     );
     await expect(
       repository.sendMessage(observer, conversationId, {
         ...message(randomUUID(), "private"),
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(repository.listChannelMembers(observer, conversationId)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     const added = await repository.upsertChannelMember(owner, conversationId, memberId, {
       role: "member",
@@ -2873,7 +2843,7 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.upsertChannelMember(member, conversationId, observerId, { role: "member" }),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
     const privateMessageInput = message(randomUUID());
     const privateMessage = await repository.sendMessage(
       member,
@@ -2886,14 +2856,13 @@ describe("WorkspaceRepository", () => {
         ...message(randomUUID(), "secret @observer"),
         mentionedUserIds: [observerId],
       }),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
 
     const removed = await repository.removeChannelMember(owner, conversationId, memberId);
     expect(removed.channelMembers.members).toHaveLength(1);
     await expect(repository.history(member, conversationId, undefined, 50)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     expect(
       (await repository.listConversations(member, undefined, 50)).conversations.some(
         (summary) => summary.conversation.id === conversationId,
@@ -2901,7 +2870,7 @@ describe("WorkspaceRepository", () => {
     ).toBe(false);
     await expect(
       repository.sendMessage(member, conversationId, privateMessageInput),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     const memberSync = await repository.sync(member, added.syncCursor, 100);
     expect(memberSync.events).toContainEqual(
@@ -2976,7 +2945,7 @@ describe("WorkspaceRepository", () => {
         topic: "Humans only",
         access: "humans",
       }),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
     repository = new WorkspaceRepository(
       pool,
@@ -3001,7 +2970,7 @@ describe("WorkspaceRepository", () => {
         topic: null,
         access: "humans",
       }),
-    ).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
     const lateHumanId = randomUUID();
     await pool.query(
@@ -3031,7 +3000,7 @@ describe("WorkspaceRepository", () => {
         ...message(randomUUID(), "Hello @restricted-agent"),
         mentionedUserIds: [agentId],
       }),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
     await expect(
       repository.createTask(
         owner,
@@ -3039,7 +3008,7 @@ describe("WorkspaceRepository", () => {
         taskInput("Agent-only assignment", { assigneeId: agentId }),
         randomUUID(),
       ),
-    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
 
     const sent = await repository.sendMessage(owner, conversationId, {
       ...message(randomUUID(), "For human teammates"),
@@ -3081,7 +3050,7 @@ describe("WorkspaceRepository", () => {
         ...message(rejectedClientMessageId, "Forged agent seat"),
         mentionedUserIds: [],
       }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       pool.query(
         `SELECT 1
@@ -3111,13 +3080,11 @@ describe("WorkspaceRepository", () => {
       (await repository.searchMessages(agent, "human teammates", undefined, 50)).results,
     ).toEqual([]);
     await expect(repository.joinPublicChannel(agent, conversationId)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(repository.messageById(agent, sent.message.id)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     await repository.archiveChannel(owner, conversationId);
     const channelEventAccess = (
@@ -3205,10 +3172,10 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.removeChannelMember(owner, conversationId, ownerId),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
     await expect(
       repository.upsertChannelMember(owner, conversationId, ownerId, { role: "member" }),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
 
     await repository.upsertChannelMember(owner, conversationId, memberId, { role: "owner" });
     const removals = await Promise.allSettled([
@@ -3218,9 +3185,8 @@ describe("WorkspaceRepository", () => {
     expect(removals.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"]);
     const rejected = removals.find((result) => result.status === "rejected");
     expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({
-      statusCode: 409,
-      code: "CONFLICT",
-    } satisfies Partial<ApiError>);
+      kind: "conflict",
+    } satisfies Partial<DomainError>);
     const activeOwners = await pool.query(
       `SELECT user_id
          FROM conversation_memberships
@@ -3248,10 +3214,10 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.removeChannelMember(owner, conversationId, ownerId),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
     await expect(
       repository.upsertChannelMember(owner, conversationId, ownerId, { role: "member" }),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "conflict" } satisfies Partial<DomainError>);
   });
 
   it("reports workspace channels as visible to everyone but not individually managed", async () => {
@@ -3268,7 +3234,7 @@ describe("WorkspaceRepository", () => {
     ]);
     await expect(
       repository.upsertChannelMember(owner, generalId, memberId, { role: "owner" }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
   });
 
   it("excludes group conversations from realtime visibility for legacy tickets only", async () => {
@@ -3512,9 +3478,8 @@ describe("WorkspaceRepository", () => {
     );
     const rejected = repository.listConversations(owner, historyShapedCursor, 4);
     await expect(rejected).rejects.toMatchObject({
-      statusCode: 400,
-      code: "BAD_REQUEST",
-    } satisfies Partial<ApiError>);
+      kind: "invalid_input",
+    } satisfies Partial<DomainError>);
   });
 
   it("continues conversation paging after the member loses access to the cursor anchor", async () => {
@@ -3970,7 +3935,7 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     expect(read).not.toHaveBeenCalled();
 
     await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
@@ -3984,7 +3949,9 @@ describe("WorkspaceRepository", () => {
 
     await expect(
       repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({
+      kind: "group_direct_client_upgrade_required",
+    } satisfies Partial<DomainError>);
     expect(read).not.toHaveBeenCalled();
 
     const capable = await repository.readFileContent(owner, staged.attachment.id, true);
@@ -4010,13 +3977,13 @@ describe("WorkspaceRepository", () => {
     const outsider = identity(currentUser(outsiderId, "outsider", "Outsider", "member"));
     await expect(
       repository.readFileContent(outsider, staged.attachment.id, true),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     expect(read).toHaveBeenCalledOnce();
 
     await repository.retractMessage(owner, sent.message.id);
     await expect(
       repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     expect(read).toHaveBeenCalledOnce();
   });
 
@@ -4055,10 +4022,9 @@ describe("WorkspaceRepository", () => {
     });
 
     await expect(repository.readFileContent(owner, attachmentId, false)).rejects.toMatchObject({
-      statusCode: 500,
-      code: "INTERNAL_ERROR",
+      kind: "integrity_failure",
       message: "Stored file failed its integrity check",
-    } satisfies Partial<ApiError>);
+    } satisfies Partial<DomainError>);
   });
 
   it("hides attachment metadata and bytes after the parent message is retracted", async () => {
@@ -4080,19 +4046,16 @@ describe("WorkspaceRepository", () => {
     expect(retracted).not.toHaveProperty("attachments");
 
     await expect(repository.messageById(member, sent.message.id)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(
       repository.listMessageAttachments(member, [sent.message.id]),
     ).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     await expect(repository.readFileContent(member, attachmentId, false)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
 
     const history = await repository.history(member, generalId, undefined, 50);
     expect(history.messages.some((item) => item.id === sent.message.id)).toBe(false);
@@ -4119,9 +4082,9 @@ describe("WorkspaceRepository", () => {
     expect(ownerFiles.files).toHaveLength(1);
     await expect(
       repository.listConversationFiles(observer, conversationId, undefined, 50),
-    ).rejects.toMatchObject({ statusCode: 404 });
+    ).rejects.toMatchObject({ kind: "not_found" });
     await expect(repository.readFileContent(observer, attachmentId, false)).rejects.toMatchObject({
-      statusCode: 404,
+      kind: "not_found",
     });
   });
 
@@ -4138,7 +4101,7 @@ describe("WorkspaceRepository", () => {
         },
         randomUUID(),
       ),
-    ).rejects.toMatchObject({ statusCode: 400, message: "Executable files are not allowed" });
+    ).rejects.toMatchObject({ kind: "invalid_input", message: "Executable files are not allowed" });
 
     const attachmentId = await stageReadyFile(generalId, "once.txt", "one use");
     await repository.sendMessage(owner, generalId, {
@@ -4152,7 +4115,7 @@ describe("WorkspaceRepository", () => {
         mentionedUserIds: [],
         attachmentIds: [attachmentId],
       }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    ).rejects.toMatchObject({ kind: "invalid_input" });
   });
 
   describe("communicationPaths", () => {
