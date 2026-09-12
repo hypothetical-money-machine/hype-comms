@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 
-import {} from "@hype-comms/contracts";
+import { productRealtimeEventSchema } from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
-import { RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
+import { ApiClient, RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
 import { MAX_RETRY_AFTER_MS } from "../src/errors.js";
-import { laterCursor, watchRetryDelayMs } from "../src/watch.js";
+import { laterCursor, watchProductRealtime, watchRetryDelayMs } from "../src/watch.js";
 import {
   bootstrap,
   CLIENT_MESSAGE_ID,
@@ -79,6 +79,103 @@ describe("watch", () => {
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: { code: "INVALID_SERVER_CONTRACT", retryable: false },
     });
+  });
+
+  it("keeps reconnect at the old position until delayed output succeeds", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing server address");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const abort = new AbortController();
+    let release: () => void = () => undefined;
+    const output = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const positions: string[] = [];
+    const delivered: string[] = [];
+    let second: WebSocket | undefined;
+    const envelope = {
+      version: 1,
+      id: crypto.randomUUID(),
+      occurredAt: TIMESTAMP,
+      workspaceId: WORKSPACE_ID,
+      conversationId: null,
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+    };
+    const connected = productRealtimeEventSchema.parse({
+      ...envelope,
+      type: "system.connected",
+      position: testPosition("5"),
+      payload: { connectionId: crypto.randomUUID(), userId: USER_ID },
+    });
+    const member = productRealtimeEventSchema.parse({
+      ...envelope,
+      id: crypto.randomUUID(),
+      type: "member.updated",
+      position: testPosition("6"),
+      payload: { member: bootstrap().currentUser.user },
+    });
+    server.on("connection", (socket, request) => {
+      const url = new URL(request.url!, origin);
+      positions.push((JSON.parse(url.searchParams.get("after")!) as { sequence: string }).sequence);
+      if (positions.length === 1) {
+        socket.send(JSON.stringify(connected));
+        socket.send(JSON.stringify(member), () => socket.close(1011));
+      } else if (positions.length === 2) second = socket;
+      else
+        socket.send(
+          JSON.stringify({
+            ...envelope,
+            type: "system.resync_required",
+            position: testPosition("6"),
+            payload: { reason: "cursor_expired" },
+          }),
+        );
+    });
+    const client = new ApiClient({
+      profile: {
+        name: "test",
+        apiOrigin: origin,
+        credentialFromEnvironment: false,
+        configDirectory: "/unused",
+      },
+      fetch: async () =>
+        jsonResponse({ ticket: "t".repeat(32), position: testPosition("5"), expiresAt: TIMESTAMP }),
+      timeoutMs: 5_000,
+    });
+    const watching = watchProductRealtime({
+      client,
+      origin,
+      after: testPosition("5"),
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+      timeoutMs: 5_000,
+      random: () => 0,
+      signal: abort.signal,
+      async onEvent(event) {
+        if (event.type === "member.updated") await output;
+        delivered.push(event.type);
+      },
+    });
+    const result = expect(watching).rejects.toMatchObject({ code: "RESYNC_REQUIRED" });
+    try {
+      await vi.waitFor(() => expect(positions).toHaveLength(2), { timeout: 2_000 });
+      expect(positions).toEqual(["5", "5"]);
+      expect(delivered).toEqual(["system.connected"]);
+      release();
+      await vi.waitFor(() => expect(delivered).toContain("member.updated"));
+      second!.close(1011);
+      await result;
+      expect(positions).toEqual(["5", "5", "6"]);
+    } finally {
+      release();
+      abort.abort();
+      await watching.catch(() => undefined);
+    }
   });
 
   it("streams wire replay before the handshake, reconnects from its cursor, and exits with resync", async () => {
@@ -209,7 +306,7 @@ describe("watch", () => {
     });
   });
 
-  it("streams a large replay incrementally before the handshake", async () => {
+  it("requires bootstrap when pre-handshake replay exceeds the shared event limit", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -279,7 +376,7 @@ describe("watch", () => {
           conversationSequence: null,
           entityVersion: 1,
           delivery: "at_least_once",
-          payload: { reason: "cursor_expired" },
+          payload: { reason: "client_replay_overflow" },
         }),
       );
     });
@@ -312,16 +409,13 @@ describe("watch", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; payload?: { reason?: string } });
-    expect(records).toHaveLength(1_200 + 3);
-    expect(records[0]).toMatchObject({ type: "message.created" });
-    expect(records[1_200 + 1]).toMatchObject({
-      type: "system.connected",
-    });
+    expect(records).toHaveLength(1);
+
     expect(records.at(-1)).toMatchObject({
       type: "system.resync_required",
-      payload: { reason: "cursor_expired" },
+      payload: { reason: "client_replay_overflow" },
     });
-    expect(runtime.stdoutText()).not.toContain("client_replay_overflow");
+    expect(runtime.stdoutText()).toContain("client_replay_overflow");
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: {
         code: "RESYNC_REQUIRED",
@@ -384,9 +478,10 @@ describe("watch", () => {
       };
       const originalWrite = process.stdout.write.bind(process.stdout);
       let writeCount = 0;
-      process.stdout.write = () => {
+      process.stdout.write = (_chunk, callback) => {
         writeCount += 1;
         if (writeCount === 2) throw new Error("stdout pipe failed");
+        queueMicrotask(() => callback?.());
         return true;
       };
       await import(${JSON.stringify(cliBundleUrl)});

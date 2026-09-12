@@ -650,7 +650,7 @@ describe("WorkspaceRealtime", () => {
     harness.realtime.stop();
   });
 
-  it("skips a structurally valid unsupported event without killing the stream", async () => {
+  it("blocks an unsupported event in the single supported protocol", async () => {
     const harness = createHarness();
 
     harness.realtime.start(testPosition("10"), SCOPE_A);
@@ -671,9 +671,9 @@ describe("WorkspaceRealtime", () => {
     });
     socket?.message(membershipEvent({ workspaceSequence: "12" }));
 
-    expect(socket?.close).not.toHaveBeenCalled();
+    expect(socket?.close).toHaveBeenCalledWith(1002, "Incompatible realtime event");
     expect(harness.onEvent).not.toHaveBeenCalled();
-    expect(harness.states).toEqual(["connecting"]);
+    expect(harness.states).toEqual(["connecting", "incompatible"]);
 
     harness.realtime.stop();
   });

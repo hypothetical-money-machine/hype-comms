@@ -1,3 +1,4 @@
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import { createHash, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
@@ -5,17 +6,10 @@ import {
   AGENT_ENROLLMENT_AUTHORIZATION_SCHEME,
   agentEnrollmentCredentialVerifierSchema,
   agentEnrollmentPolicyModeSchema,
-  agentEnrollmentPolicyResponseSchema,
-  agentEnrollmentResponseSchema,
   agentTokenSecretSchema,
-  currentPrincipalSchema,
   entityIdSchema,
   idempotencyKeySchema,
-  listAgentEnrollmentsResponseSchema,
-  redeemAgentEnrollmentResponseSchema,
   requestAgentEnrollmentSchema,
-  reviewAgentEnrollmentRequestSchema,
-  updateAgentEnrollmentPolicyRequestSchema,
 } from "@hype-comms/contracts";
 
 import {
@@ -209,11 +203,7 @@ async function requestEnrollment(context: CommandContext, args: readonly string[
   const response = await (
     await clientFromContext(context)
   ).request({
-    method: "POST",
-    path: "/v2/agent-enrollments",
-    body,
-    requestSchema: requestAgentEnrollmentSchema,
-    responseSchema: agentEnrollmentResponseSchema,
+    ...endpoints.requestAgentEnrollment(body),
     headers: { "idempotency-key": idempotencyKey.data },
   });
   writeResult(
@@ -258,9 +248,7 @@ async function redeem(context: CommandContext, args: readonly string[]): Promise
     timeoutMs: context.options.timeoutMs,
   });
   const redeemed = await unauthenticated.request({
-    method: "POST",
-    path: `/v2/agent-enrollments/${id}/redeem`,
-    responseSchema: redeemAgentEnrollmentResponseSchema,
+    ...endpoints.redeemAgentEnrollment(id),
     includeCredential: false,
     headers: { authorization: `${AGENT_ENROLLMENT_AUTHORIZATION_SCHEME} ${token}` },
   });
@@ -275,10 +263,7 @@ async function redeem(context: CommandContext, args: readonly string[]): Promise
     fetch: context.runtime.fetch,
     timeoutMs: context.options.timeoutMs,
   });
-  const principal = await activeClient.request({
-    path: "/v2/auth/me",
-    responseSchema: currentPrincipalSchema,
-  });
+  const principal = await activeClient.request({ ...endpoints.currentPrincipal() });
   if (!("type" in principal) || principal.type !== "agent") {
     throw contractError("The redeemed credential did not authenticate an agent");
   }
@@ -332,10 +317,7 @@ export async function agentEnrollmentsCommand(
   if (subcommand === "status") {
     const parsed = parseCommandArguments(args, {});
     const [value] = requirePositionals(parsed, 1);
-    const response = await client.request({
-      path: `/v2/agent-enrollments/${enrollmentId(value!)}`,
-      responseSchema: agentEnrollmentResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.agentEnrollment(enrollmentId(value!)) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -343,19 +325,14 @@ export async function agentEnrollmentsCommand(
     const parsed = parseCommandArguments(args, {});
     const [value] = requirePositionals(parsed, 1);
     const response = await client.request({
-      method: "POST",
-      path: `/v2/agent-enrollments/${enrollmentId(value!)}/cancel`,
-      responseSchema: agentEnrollmentResponseSchema,
+      ...endpoints.cancelAgentEnrollment(enrollmentId(value!)),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
-    const response = await client.request({
-      path: "/v2/agent-enrollments",
-      responseSchema: listAgentEnrollmentsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.agentEnrollments() });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -364,11 +341,7 @@ export async function agentEnrollmentsCommand(
     const [value] = requirePositionals(parsed, 1);
     const body = { decision: subcommand } as const;
     const response = await client.request({
-      method: "POST",
-      path: `/v2/agent-enrollments/${enrollmentId(value!)}/review`,
-      body,
-      requestSchema: reviewAgentEnrollmentRequestSchema,
-      responseSchema: agentEnrollmentResponseSchema,
+      ...endpoints.reviewAgentEnrollment(enrollmentId(value!), body),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -386,10 +359,7 @@ export async function agentEnrollmentPolicyCommand(
   const client = await clientFromContext(context);
   if (subcommand === "show") {
     requirePositionals(parseCommandArguments(args, {}), 0);
-    const response = await client.request({
-      path: "/v2/agent-enrollment-policy",
-      responseSchema: agentEnrollmentPolicyResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.agentEnrollmentPolicy() });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -401,13 +371,7 @@ export async function agentEnrollmentPolicyCommand(
       throw new UsageError("Policy mode must be required or automatic", "INVALID_POLICY_MODE");
     }
     const body = { mode: mode.data };
-    const response = await client.request({
-      method: "PATCH",
-      path: "/v2/agent-enrollment-policy",
-      body,
-      requestSchema: updateAgentEnrollmentPolicyRequestSchema,
-      responseSchema: agentEnrollmentPolicyResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.updateAgentEnrollmentPolicy(body) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }

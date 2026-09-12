@@ -13,12 +13,12 @@
     "README.md"
   ],
   "scripts": {
-    "prebuild": "npm run build --workspace @hype-comms/contracts",
+    "prebuild": "npm run build --workspace @hype-comms/api-client",
     "build": "tsc -p tsconfig.json --noEmit && node build.mjs",
     "prepack": "npm run build",
     "pretest": "npm run build",
     "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
+    "pretypecheck": "npm run build --workspace @hype-comms/api-client",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "engines": {
@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "ws": "8.21.3",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@hype-comms/api-client": "*"
   },
   "devDependencies": {
     "@hype-comms/contracts": "*",

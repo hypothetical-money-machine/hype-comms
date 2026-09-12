@@ -1,0 +1,32 @@
+{
+  "name": "@hype-comms/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "prebuild": "npm run build --workspace @hype-comms/contracts",
+    "build": "tsc -b",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "@hype-comms/contracts": "*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

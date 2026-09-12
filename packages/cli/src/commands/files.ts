@@ -1,9 +1,7 @@
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import {
   ATTACHMENT_MAX_BYTES,
-  conversationFilesResponseSchema,
   entityIdSchema,
-  listMessageAttachmentsRequestSchema,
-  listMessageAttachmentsResponseSchema,
   paginationCursorSchema,
 } from "@hype-comms/contracts";
 import { spawn } from "node:child_process";
@@ -339,12 +337,10 @@ export async function filesCommand(
     }
     const conversationId = await resolveConversationSelector(client, selector!);
     const response = await client.request({
-      path: `/v2/conversations/${conversationId}/files`,
-      query: {
+      ...endpoints.files(conversationId, {
         before: before?.data,
         limit: integerOption(parsed, "limit", 50, 100),
-      },
-      responseSchema: conversationFilesResponseSchema,
+      }),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -355,13 +351,7 @@ export async function filesCommand(
     const [value] = requirePositionals(parsed, 1);
     const messageId = entityId(value!, "The message ID", "INVALID_MESSAGE_ID");
     const body = { messageIds: [messageId] };
-    const response = await client.request({
-      method: "POST",
-      path: "/v2/attachments/query",
-      body,
-      requestSchema: listMessageAttachmentsRequestSchema,
-      responseSchema: listMessageAttachmentsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.attachments(body) });
     writeResult(context.runtime.io, { messageId, ...response }, context.options.json);
     return;
   }
@@ -373,7 +363,7 @@ export async function filesCommand(
     const output = stringOption(parsed, "output");
     if (output === undefined) throw new UsageError("files get requires --output");
     const download = await client.download({
-      path: `/v2/files/${attachmentId}/content`,
+      path: endpoints.attachmentContent(attachmentId),
       maxBytes: ATTACHMENT_MAX_BYTES,
     });
     const path = await savePrivateDownload(context.runtime.cwd, output, download.bytes);
