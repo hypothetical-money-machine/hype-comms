@@ -1,10 +1,3 @@
-import {
-  type RetractReservation,
-  applyRetractReservation,
-  retractReservationMap,
-  upsertRetractReservation,
-} from "./workspace-projection";
-
 import { type SyncPosition } from "@hype-comms/contracts";
 import { testPosition } from "../../shared/test-support/sync-position";
 import { describe, expect, it, vi } from "vitest";
@@ -79,12 +72,7 @@ import type {
   ServerStatus,
 } from "../../shared/desktop-api";
 import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
-import type {
-  CachedWorkspaceState,
-  MembershipRepairMarker,
-  OutboxItem,
-  WorkspaceCache,
-} from "./workspace-cache";
+import type { CachedWorkspaceState, WorkspaceCache } from "./workspace-cache";
 import { MemoryWorkspaceCache } from "./workspace-cache";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
@@ -548,29 +536,15 @@ const resyncRequired: ProductRealtimeEvent = {
 
 type ReplaceSnapshotArgs = Parameters<WorkspaceCache["replaceSnapshot"]>;
 
-/**
- * A hand-written cache that records how often the runtime asks for a full decrypted load, and
- * exposes the sync cursor it has durably accepted.
- */
-class FakeWorkspaceCache implements WorkspaceCache {
-  readonly mode = "memory_only" as const;
+/** Real projection and storage behavior with explicit delay and failure controls. */
+class FakeWorkspaceCache extends MemoryWorkspaceCache {
   loadCount = 0;
   reactionUpsertFailures = 0;
-  /** Ordered record of the calls whose relative order a test needs to pin, oldest first. */
   readonly operations: string[] = [];
   readonly outboxMutations: {
     readonly type: "enqueue" | "remove";
     readonly clientMessageId: string;
   }[] = [];
-  #snapshot: CachedWorkspaceState["bootstrap"] = null;
-  #syncCursor: SyncPosition | null = null;
-  readonly #messages = new Map<string, Message>();
-  readonly #reactions = new Map<string, Reaction>();
-  readonly #tasks = new Map<string, Task>();
-  readonly #outbox = new Map<string, OutboxItem>();
-  readonly #events = new Set<string>();
-  #repairMarker: MembershipRepairMarker | null = null;
-  #retractReservations: RetractReservation[] = [];
   readonly memberReplaceBarriers: Promise<void>[] = [];
   readonly acknowledgedMessageBarriers: Promise<void>[] = [];
   readonly loadBarriers: Promise<void>[] = [];
@@ -579,439 +553,123 @@ class FakeWorkspaceCache implements WorkspaceCache {
   outboxUpdateAttempts = 0;
   acknowledgedMessageAttempts = 0;
   upsertFailure: Error | null = null;
+  #position: SyncPosition | null = null;
 
   get cursor(): string | null {
-    return this.#syncCursor?.sequence ?? null;
+    return this.#position?.sequence ?? null;
   }
 
-  async load(): Promise<CachedWorkspaceState> {
+  override async load(): Promise<CachedWorkspaceState> {
     this.loadCount += 1;
     this.operations.push("load");
-    const barrier = this.loadBarriers.shift();
-    if (barrier !== undefined) await barrier;
-    return {
-      bootstrap: this.#snapshot,
-      messages: [...this.#messages.values()],
-      reactions: [...this.#reactions.values()],
-      tasks: [...this.#tasks.values()],
-      outbox: [...this.#outbox.values()].sort((left, right) =>
-        left.createdAt.localeCompare(right.createdAt),
-      ),
-      syncCursor: this.#syncCursor,
-      lastSyncedAt: null,
-      repairMarker: this.#repairMarker,
-      retractReservations: this.#retractReservations,
-    };
+    await this.loadBarriers.shift();
+    return super.load();
   }
 
-  async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<boolean> {
-    const [snapshot, messages, reactions = [], tasks = [], signal] = args;
-    const authorizedConversationIds = new Set(
-      snapshot.conversations.map((summary) => summary.conversation.id),
-    );
-    signal?.throwIfAborted();
-    if (
-      this.#repairMarker !== null &&
-      BigInt(snapshot.syncCursor.sequence) < BigInt(this.#repairMarker.position.sequence)
-    ) {
-      throw new Error("Authoritative snapshot predates the membership repair marker");
-    }
+  override async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<boolean> {
     this.operations.push("replaceSnapshot");
-    const barrier = this.snapshotReplaceBarriers.shift();
-    if (barrier !== undefined) await barrier;
-    signal?.throwIfAborted();
-    if (
-      this.#syncCursor !== null &&
-      BigInt(snapshot.syncCursor.sequence) < BigInt(this.#syncCursor.sequence)
-    ) {
-      return false;
-    }
-    const reservations = retractReservationMap(this.#retractReservations);
-    this.#snapshot = {
-      ...snapshot,
-      conversations: snapshot.conversations.map((summary) => {
-        if (summary.lastMessage === null) return summary;
-        const lastMessage = applyRetractReservation(summary.lastMessage, reservations);
-        return lastMessage === summary.lastMessage ? summary : { ...summary, lastMessage };
-      }),
-    };
-    this.#messages.clear();
-    for (const item of messages) {
-      const retained = applyRetractReservation(item, reservations);
-      this.#messages.set(retained.id, retained);
-    }
-    this.#reactions.clear();
-    for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
-    this.#tasks.clear();
-    for (const task of tasks) this.#tasks.set(task.id, task);
-    for (const [id, item] of this.#outbox) {
-      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
-    }
-    this.#syncCursor = snapshot.syncCursor;
-    this.#repairMarker = null;
-    return true;
+    await this.snapshotReplaceBarriers.shift();
+    const replaced = await super.replaceSnapshot(...args);
+    if (replaced) this.#position = args[0].syncCursor;
+    return replaced;
   }
 
-  async replaceMembers(members: readonly User[], signal?: AbortSignal): Promise<void> {
+  override async replaceMembers(
+    ...args: Parameters<WorkspaceCache["replaceMembers"]>
+  ): Promise<void> {
     this.operations.push("replaceMembers");
-    const barrier = this.memberReplaceBarriers.shift();
-    if (barrier !== undefined) await barrier;
-    signal?.throwIfAborted();
-    if (this.#snapshot === null) return;
-    this.#snapshot = { ...this.#snapshot, members: [...members] };
+    await this.memberReplaceBarriers.shift();
+    await super.replaceMembers(...args);
   }
 
-  async upsertConversation(summary: ConversationSummary): Promise<void> {
+  override async upsertConversation(summary: ConversationSummary): Promise<void> {
     if (this.upsertFailure !== null) throw this.upsertFailure;
-    if (this.#snapshot === null) return;
-    this.#snapshot = {
-      ...this.#snapshot,
-      conversations: [
-        summary,
-        ...this.#snapshot.conversations.filter(
-          (candidate) => candidate.conversation.id !== summary.conversation.id,
-        ),
-      ],
-    };
+    await super.upsertConversation(summary);
   }
 
-  async stageMembershipRepair(
-    event: Extract<WorkspaceEvent, { type: "channel.membership_changed" }>,
+  override async stageMembershipRepair(
+    ...args: Parameters<WorkspaceCache["stageMembershipRepair"]>
   ): Promise<boolean> {
-    if (this.#repairMarker !== null) return false;
-    if (
-      this.#syncCursor !== null &&
-      BigInt(event.position.sequence) <= BigInt(this.#syncCursor.sequence)
-    ) {
-      return false;
-    }
-    this.#repairMarker = {
-      kind: "membership",
-      eventId: event.id,
-      position: event.position,
-      conversationId: event.conversationId,
-      selfRemoval: event.payload.action === "removed" && event.payload.memberId === USER_ID,
-    };
-    this.operations.push("stageMembershipRepair");
-    return true;
+    const staged = await super.stageMembershipRepair(...args);
+    if (staged) this.operations.push("stageMembershipRepair");
+    return staged;
   }
 
-  async getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined> {
-    void messageId;
-    return undefined;
+  override async applyEvent(
+    ...args: Parameters<WorkspaceCache["applyEvent"]>
+  ): ReturnType<WorkspaceCache["applyEvent"]> {
+    const result = await super.applyEvent(...args);
+    if (result.status === "applied") this.operations.push(`applyEvent:${args[0].type}`);
+    this.#position = result.committedPosition;
+    return result;
   }
 
-  async applyEvent(
-    event: WorkspaceEvent,
-    signal?: AbortSignal,
-    retractSource?: Message,
+  override async advanceCursor(position: SyncPosition): Promise<void> {
+    await super.advanceCursor(position);
+    this.#position = (await super.load()).syncCursor;
+  }
+
+  override async upsertReaction(
+    ...args: Parameters<WorkspaceCache["upsertReaction"]>
   ): Promise<boolean> {
-    void retractSource;
-    signal?.throwIfAborted();
-    if (this.#repairMarker !== null && event.type !== "channel.membership_changed") {
-      throw new Error("Membership repair must complete before applying later events");
-    }
-    if (this.#events.has(event.id)) return false;
-    if (
-      this.#syncCursor !== null &&
-      BigInt(event.position.sequence) <= BigInt(this.#syncCursor.sequence)
-    ) {
-      return false;
-    }
-    if (event.type === "channel.membership_changed" && this.#repairMarker === null) {
-      await this.stageMembershipRepair(event);
-    }
-    this.#events.add(event.id);
-    this.#syncCursor = event.position;
-    this.operations.push(`applyEvent:${event.type}`);
-    if (event.type === "channel.membership_changed") {
-      const marker = this.#repairMarker;
-      if (marker?.selfRemoval) {
-        if (this.#snapshot !== null) {
-          this.#snapshot = {
-            ...this.#snapshot,
-            conversations: this.#snapshot.conversations.filter(
-              (summary) => summary.conversation.id !== marker.conversationId,
-            ),
-          };
-        }
-        const messageIds = new Set(
-          [...this.#messages.values()]
-            .filter((message) => message.conversationId === marker.conversationId)
-            .map((message) => message.id),
-        );
-        for (const [id, message] of this.#messages) {
-          if (message.conversationId === marker.conversationId) this.#messages.delete(id);
-        }
-        for (const [id, reaction] of this.#reactions) {
-          if (messageIds.has(reaction.messageId)) this.#reactions.delete(id);
-        }
-        for (const [id, task] of this.#tasks) {
-          if (task.conversationId === marker.conversationId) this.#tasks.delete(id);
-        }
-        for (const [id, item] of this.#outbox) {
-          if (item.operation.conversationId === marker.conversationId) this.#outbox.delete(id);
-        }
-      }
-    } else if (event.type === "message.created") {
-      const created = applyRetractReservation(
-        event.payload.message,
-        retractReservationMap(this.#retractReservations),
-      );
-      this.#messages.set(created.id, created);
-      this.#outbox.delete(created.clientMessageId);
-    } else if (event.type === "message.retracted") {
-      this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
-        messageId: event.payload.messageId,
-        deletedAt: event.payload.deletedAt,
-        entityVersion: event.entityVersion,
-      });
-      for (const [id, reaction] of this.#reactions) {
-        if (reaction.messageId === event.payload.messageId) this.#reactions.delete(id);
-      }
-      const current = this.#messages.get(event.payload.messageId);
-      if (current !== undefined) {
-        this.#messages.set(event.payload.messageId, {
-          ...current,
-          deletedAt: event.payload.deletedAt,
-          version: event.entityVersion,
-          updatedAt: event.payload.deletedAt,
-        });
-      }
-    } else if (event.type === "reaction.added") {
-      this.#reactions.set(event.payload.reaction.id, event.payload.reaction);
-    } else if (event.type === "reaction.removed") {
-      this.#reactions.delete(event.payload.reaction.id);
-    } else if (event.type === "task.created" || event.type === "task.updated") {
-      const current = this.#tasks.get(event.payload.task.id);
-      if (current === undefined || event.payload.task.version >= current.version) {
-        this.#tasks.set(event.payload.task.id, event.payload.task);
-      }
-    }
-    signal?.throwIfAborted();
-    return true;
-  }
-
-  async advanceCursor(syncCursor: SyncPosition): Promise<void> {
-    if (this.#repairMarker !== null) {
-      throw new Error("Membership repair must complete before advancing the cursor");
-    }
-    if (
-      this.#syncCursor === null ||
-      BigInt(syncCursor.sequence) > BigInt(this.#syncCursor.sequence)
-    ) {
-      this.#syncCursor = syncCursor;
-    }
-  }
-
-  async upsertHistory(
-    conversationId: string,
-    messages: readonly Message[],
-    reactions?: readonly Reaction[],
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    if (signal?.aborted) return false;
-    if (
-      !this.#snapshot?.conversations.some((summary) => summary.conversation.id === conversationId)
-    ) {
-      return false;
-    }
-    if (messages.some((message) => message.conversationId !== conversationId)) {
-      throw new Error("The workspace history crossed conversation scope");
-    }
-    const reservations = retractReservationMap(this.#retractReservations);
-    for (const item of messages) {
-      const retained = applyRetractReservation(item, reservations);
-      this.#messages.set(retained.id, retained);
-    }
-    if (reactions !== undefined) {
-      const messageIds = new Set(messages.map((message) => message.id));
-      for (const [id, reaction] of this.#reactions) {
-        if (messageIds.has(reaction.messageId)) this.#reactions.delete(id);
-      }
-      for (const reaction of reactions) this.#reactions.set(reaction.id, reaction);
-    }
-    signal?.throwIfAborted();
-    return true;
-  }
-
-  async upsertReaction(
-    reaction: Reaction,
-    conversationId: string,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    if (
-      signal?.aborted ||
-      !this.#snapshot?.conversations.some((summary) => summary.conversation.id === conversationId)
-    )
-      return false;
     if (this.reactionUpsertFailures > 0) {
       this.reactionUpsertFailures -= 1;
       throw new Error("The encrypted reaction cache is unavailable");
     }
-    this.#reactions.set(reaction.id, reaction);
-    signal?.throwIfAborted();
-    return true;
+    return super.upsertReaction(...args);
   }
 
-  async removeReaction(reactionId: string): Promise<void> {
-    this.#reactions.delete(reactionId);
-  }
-
-  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
-    if (signal?.aborted) return [];
-    const authorizedIds = new Set(
-      this.#snapshot?.conversations.map((summary) => summary.conversation.id) ?? [],
-    );
-    const accepted = tasks.filter((task) => authorizedIds.has(task.conversationId));
-    for (const task of accepted) this.#tasks.set(task.id, task);
-    signal?.throwIfAborted();
-    return accepted;
-  }
-
-  async upsertAcknowledgedMessage(
-    item: Message,
-    expectedClientMessageId: string,
-    syncCursor: SyncPosition,
-    signal?: AbortSignal,
+  override async upsertAcknowledgedMessage(
+    ...args: Parameters<WorkspaceCache["upsertAcknowledgedMessage"]>
   ): Promise<boolean> {
     this.acknowledgedMessageAttempts += 1;
     await this.acknowledgedMessageBarriers.shift();
-    if (signal?.aborted) return false;
-    const pending = this.#outbox.get(expectedClientMessageId);
-    const authorized = this.#snapshot?.conversations.some(
-      (summary) => summary.conversation.id === item.conversationId,
-    );
-    if (
-      this.#repairMarker !== null ||
-      pending?.operation.conversationId !== item.conversationId ||
-      authorized !== true
-    ) {
-      return false;
-    }
-    const retained = applyRetractReservation(
-      item,
-      retractReservationMap(this.#retractReservations),
-    );
-    this.#messages.set(retained.id, retained);
-    this.#outbox.delete(expectedClientMessageId);
-    this.#outbox.delete(item.clientMessageId);
-    await this.advanceCursor(syncCursor);
-    signal?.throwIfAborted();
-    return true;
+    return super.upsertAcknowledgedMessage(...args);
   }
 
-  async enqueue(
+  override async enqueue(
     operation: SendMessageOperation,
     createdAt = NOW,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    if (signal?.aborted) return false;
-    if (this.#repairMarker !== null) {
-      throw new Error("Membership repair must complete before queueing a send");
-    }
-    if (
-      !this.#snapshot?.conversations.some(
-        (summary) => summary.conversation.id === operation.conversationId,
-      )
-    ) {
-      return false;
-    }
-    const id = operation.message.clientMessageId;
-    if (this.#outbox.has(id)) return true;
-    this.outboxMutations.push({ type: "enqueue", clientMessageId: id });
-    this.#outbox.set(id, {
-      operation,
-      createdAt,
-      status: "pending",
-      attemptCount: 0,
-      nextAttemptAt: null,
-      failureReason: null,
-    });
-    signal?.throwIfAborted();
-    return true;
+    const accepted = await super.enqueue(operation, createdAt, signal);
+    if (accepted)
+      this.outboxMutations.push({
+        type: "enqueue",
+        clientMessageId: operation.message.clientMessageId,
+      });
+    return accepted;
   }
 
-  async replaceOutbox(
-    clientMessageId: string,
-    operation: SendMessageOperation,
-    createdAt: string,
-    signal?: AbortSignal,
+  override async replaceOutbox(
+    ...args: Parameters<WorkspaceCache["replaceOutbox"]>
   ): Promise<boolean> {
-    if (signal?.aborted || this.#repairMarker !== null) return false;
-    const predecessor = this.#outbox.get(clientMessageId);
-    if (
-      predecessor?.operation.conversationId !== operation.conversationId ||
-      !this.#snapshot?.conversations.some(
-        (summary) => summary.conversation.id === operation.conversationId,
-      )
-    ) {
-      return false;
-    }
-    this.outboxMutations.push({
-      type: "enqueue",
-      clientMessageId: operation.message.clientMessageId,
-    });
-    this.#outbox.set(operation.message.clientMessageId, {
-      operation,
-      createdAt,
-      status: "pending",
-      attemptCount: 0,
-      nextAttemptAt: null,
-      failureReason: null,
-    });
-    this.outboxMutations.push({ type: "remove", clientMessageId });
-    this.#outbox.delete(clientMessageId);
-    signal?.throwIfAborted();
-    return true;
+    const replaced = await super.replaceOutbox(...args);
+    if (replaced)
+      this.outboxMutations.push(
+        { type: "enqueue", clientMessageId: args[1].message.clientMessageId },
+        { type: "remove", clientMessageId: args[0] },
+      );
+    return replaced;
   }
 
-  async updateOutbox(...args: Parameters<WorkspaceCache["updateOutbox"]>): Promise<boolean> {
-    const [clientMessageId, update, signal, expected] = args;
-    if (signal?.aborted) return false;
+  override async updateOutbox(
+    ...args: Parameters<WorkspaceCache["updateOutbox"]>
+  ): Promise<boolean> {
+    if (args[2]?.aborted) return false;
     this.outboxUpdateAttempts += 1;
-    const barrier = this.outboxUpdateBarriers.shift();
-    if (barrier !== undefined) await barrier;
-    if (signal?.aborted) return false;
-    const current = this.#outbox.get(clientMessageId);
-    if (current === undefined) return false;
-    const expectedStatusMatches =
-      expected === undefined ||
-      current.status === expected.status ||
-      (current.status === "sending" && expected.status === "pending");
-    if (
-      !expectedStatusMatches ||
-      (expected !== undefined && current.attemptCount !== expected.attemptCount)
-    ) {
-      return false;
-    }
-    this.#outbox.set(clientMessageId, { ...current, ...update });
-    return true;
+    await this.outboxUpdateBarriers.shift();
+    return super.updateOutbox(...args);
   }
 
-  async removeOutbox(clientMessageId: string): Promise<void> {
+  override async removeOutbox(clientMessageId: string): Promise<void> {
     this.outboxMutations.push({ type: "remove", clientMessageId });
-    this.#outbox.delete(clientMessageId);
+    await super.removeOutbox(clientMessageId);
   }
 
-  async clearServerStatePreservingOutbox(): Promise<void> {
-    this.#snapshot = null;
-    this.#messages.clear();
-    this.#reactions.clear();
-    this.#tasks.clear();
-    this.#events.clear();
-    this.#syncCursor = null;
-    this.#repairMarker = null;
-  }
-
-  async resetProtocolReplica(): Promise<void> {
-    await this.clearServerStatePreservingOutbox();
-    this.#retractReservations = [];
-  }
-
-  async clearAll(): Promise<void> {
-    await this.clearServerStatePreservingOutbox();
-    this.#outbox.clear();
+  override async clearServerStatePreservingOutbox(): Promise<void> {
+    await super.clearServerStatePreservingOutbox();
+    this.#position = null;
   }
 }
 
@@ -1883,11 +1541,41 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("publishes the cache's committed summaries without repeating event accounting", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const authoritative = bootstrapAt("10", {
+      conversations: [{ ...channel(CONVERSATION_ID, "general"), unreadCount: 7, mentionCount: 2 }],
+    });
+    await cache.replaceSnapshot(authoritative, []);
+    const loads = cache.loadCount;
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(() => api.acknowledged.includes("11"), "committed cache event");
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === peerMessage.id),
+      "committed message publication",
+    );
+    expect(
+      runtime.state.bootstrap?.conversations.find(
+        (summary) => summary.conversation.id === CONVERSATION_ID,
+      ),
+    ).toMatchObject({
+      unreadCount: 8,
+      mentionCount: 2,
+      lastMessage: peerMessage,
+    });
+    expect(cache.loadCount).toBe(loads);
+    await runtime.stop();
+  });
+
   it("names a group conversation for all other participants", async () => {
     const direct = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID, AGENT_ID]);
     const group: ConversationSummary = {
       ...direct,
       conversation: { ...direct.conversation, kind: "group_direct_message" },
+      membershipRole: "member",
     };
     const snapshot = bootstrapAt("10", {
       members: [user, peer, agent],
@@ -5912,10 +5600,16 @@ describe("WorkspaceRuntime", () => {
     await drain();
     expect(api.sent).toHaveLength(2);
     expect(
-      (await cache.load()).outbox.find(
+      runtime.state.outbox.find(
         (item) => item.operation.message.clientMessageId === retiredClientMessageId,
       ),
     ).toMatchObject({ status: "sending", attemptCount: 2 });
+    // Loading a real cache exposes in-flight sends as restartable pending work.
+    expect(
+      (await cache.load()).outbox.find(
+        (item) => item.operation.message.clientMessageId === retiredClientMessageId,
+      ),
+    ).toMatchObject({ status: "pending", attemptCount: 2, failureReason: null });
 
     replacementSend.resolve({
       status: "accepted",
@@ -7568,7 +7262,7 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
-    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+    expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([AGENT_ID, USER_ID]);
 
     // The disable event carries the agent's own `User`, which has no field that can say "removed".
     // Upserting it re-asserts the agent; only the server's active-only directory can drop it.
@@ -7653,7 +7347,7 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
       await settle(() => api.memberRequests === 1, "failed member directory read");
       expect(runtime.state.stale).toBe(true);
-      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([AGENT_ID, USER_ID]);
 
       // `retryDelay(1)` is bounded above by 2s.
       await vi.advanceTimersByTimeAsync(2_000);
@@ -7685,7 +7379,7 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
       await settle(() => api.memberRequests === 1, "failed member directory read");
       expect(runtime.state.stale).toBe(true);
-      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([USER_ID, AGENT_ID]);
+      expect(runtime.state.bootstrap?.members.map((item) => item.id)).toEqual([AGENT_ID, USER_ID]);
 
       await vi.advanceTimersByTimeAsync(2_000);
       await settle(() => api.memberRequests === 2, "retried member directory read");
@@ -8203,7 +7897,7 @@ describe("WorkspaceRuntime", () => {
       expect(currentMember?.title).toBe("Captain");
       expect(
         runtime.state.bootstrap?.members.find((member) => member.id === PEER_ID)?.title,
-      ).toBeUndefined();
+      ).toBeNull();
     });
 
     it("clears the title when null is supplied", async () => {
@@ -8235,7 +7929,7 @@ describe("WorkspaceRuntime", () => {
       await runtime.start(session);
 
       await expect(runtime.updateProfileTitle("Captain")).rejects.toThrow("Profile update failed");
-      expect(runtime.state.bootstrap?.currentUser.user.title).toBeUndefined();
+      expect(runtime.state.bootstrap?.currentUser.user.title).toBeNull();
     });
   });
 });
