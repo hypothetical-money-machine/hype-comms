@@ -2,12 +2,7 @@ import path from "node:path";
 
 import type { CompactModePreference } from "@hype-comms/contracts";
 
-import {
-  atomicWrite,
-  readBoundedUtf8File,
-  syncDirectoryBestEffort,
-  type SyncDirectory,
-} from "./preference-file";
+import { JsonPreferenceFile, type PreferenceStoreOptions } from "./preference-file";
 
 export const MAX_COMPACT_MODE_FILE_BYTES = 512;
 const STORED_COMPACT_MODE_PREFERENCE_VERSION = 1;
@@ -35,43 +30,17 @@ function parseStoredCompactModePreference(value: unknown): CompactModePreference
   return candidate.enabled;
 }
 
-async function readStoredCompactModePreference(
-  filePath: string,
-): Promise<CompactModePreference | null> {
-  const source = await readBoundedUtf8File(filePath, MAX_COMPACT_MODE_FILE_BYTES);
-  if (source === null) {
-    return null;
-  }
-  try {
-    return parseStoredCompactModePreference(JSON.parse(source));
-  } catch {
-    return null;
-  }
-}
-
-export class CompactModePreferenceStore {
-  readonly #filePath: string;
-  readonly #syncDirectory: SyncDirectory;
-  #saveTail: Promise<void> = Promise.resolve();
-
-  constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "compact-mode.json");
-    this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
-  }
-
-  async load(): Promise<CompactModePreference> {
-    return (
-      (await readStoredCompactModePreference(this.#filePath)) ?? DEFAULT_COMPACT_MODE_PREFERENCE
-    );
-  }
-
-  save(enabled: CompactModePreference): Promise<void> {
-    const stored: StoredCompactModePreference = { version: 1, enabled };
-    const source = `${JSON.stringify(stored)}\n`;
-    const request = this.#saveTail.then(() =>
-      atomicWrite(this.#filePath, source, this.#syncDirectory),
-    );
-    this.#saveTail = request.catch(() => undefined);
-    return request;
+export class CompactModePreferenceStore extends JsonPreferenceFile<CompactModePreference> {
+  constructor(options: PreferenceStoreOptions) {
+    super({
+      filePath: path.join(options.userDataPath, "hype-comms-settings", "compact-mode.json"),
+      syncDirectory: options.syncDirectory,
+      maxBytes: MAX_COMPACT_MODE_FILE_BYTES,
+      defaultValue: DEFAULT_COMPACT_MODE_PREFERENCE,
+      codec: {
+        decode: parseStoredCompactModePreference,
+        encode: (enabled): StoredCompactModePreference => ({ version: 1, enabled }),
+      },
+    });
   }
 }

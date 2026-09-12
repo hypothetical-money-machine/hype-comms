@@ -3,12 +3,7 @@ import path from "node:path";
 import { themeDesignSchema, themePreferenceSchema, type ThemeDesign } from "@hype-comms/contracts";
 
 import { isBuiltInThemeId } from "../shared/theme";
-import {
-  atomicWrite,
-  readBoundedUtf8File,
-  syncDirectoryBestEffort,
-  type SyncDirectory,
-} from "./preference-file";
+import { JsonPreferenceFile, type PreferenceStoreOptions } from "./preference-file";
 
 export const MAX_THEME_PREFERENCE_FILE_BYTES = 4_096;
 const STORED_THEME_DESIGN_VERSION = 2;
@@ -69,47 +64,28 @@ function parseStoredThemeDesign(value: unknown): ThemeDesign | null {
   });
 }
 
-async function readStoredThemeDesign(filePath: string): Promise<ThemeDesign | null> {
-  const source = await readBoundedUtf8File(filePath, MAX_THEME_PREFERENCE_FILE_BYTES);
-  if (source === null) {
-    return null;
-  }
-  try {
-    return parseStoredThemeDesign(JSON.parse(source) as unknown);
-  } catch {
-    return null;
-  }
-}
-
-export class ThemePreferenceStore {
-  readonly #filePath: string;
-  readonly #syncDirectory: SyncDirectory;
-  #saveTail: Promise<void> = Promise.resolve();
-
-  constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "theme.json");
-    this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
+export class ThemePreferenceStore extends JsonPreferenceFile<ThemeDesign> {
+  constructor(options: PreferenceStoreOptions) {
+    super({
+      filePath: path.join(options.userDataPath, "hype-comms-settings", "theme.json"),
+      syncDirectory: options.syncDirectory,
+      maxBytes: MAX_THEME_PREFERENCE_FILE_BYTES,
+      defaultValue: DEFAULT_THEME_DESIGN,
+      codec: {
+        decode: parseStoredThemeDesign,
+        encode: (design): StoredThemeDesign => ({
+          version: STORED_THEME_DESIGN_VERSION,
+          ...design,
+        }),
+      },
+    });
   }
 
-  async load(): Promise<ThemeDesign> {
-    return (await readStoredThemeDesign(this.#filePath)) ?? DEFAULT_THEME_DESIGN;
-  }
-
-  save(design: ThemeDesign): Promise<void> {
-    const parsedDesign = themeDesignSchema.parse(design);
-    if (parsedDesign.preference !== "system" && !isBuiltInThemeId(parsedDesign.preference)) {
-      return Promise.reject(new Error(`Unknown built-in theme: ${parsedDesign.preference}`));
+  override save(design: ThemeDesign): Promise<void> {
+    const parsed = themeDesignSchema.parse(design);
+    if (parsed.preference !== "system" && !isBuiltInThemeId(parsed.preference)) {
+      return Promise.reject(new Error(`Unknown built-in theme: ${parsed.preference}`));
     }
-    const stored: StoredThemeDesign = {
-      version: STORED_THEME_DESIGN_VERSION,
-      preference: parsedDesign.preference,
-      accentColor: parsedDesign.accentColor,
-    };
-    const source = `${JSON.stringify(stored)}\n`;
-    const request = this.#saveTail.then(() =>
-      atomicWrite(this.#filePath, source, this.#syncDirectory),
-    );
-    this.#saveTail = request.catch(() => undefined);
-    return request;
+    return super.save(parsed);
   }
 }
