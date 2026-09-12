@@ -94,6 +94,12 @@ const MAX_CACHED_MEMBERS = 25;
 export type OutboxStatus =
   "pending" | "sending" | "retry_wait" | "paused_auth" | "permanent_failure";
 
+const ACCESS_REMOVED_OUTBOX_UPDATE = Object.freeze({
+  status: "permanent_failure" as const,
+  nextAttemptAt: null,
+  failureReason: "Conversation access was removed. Your unsent message is retained on this device.",
+});
+
 export interface OutboxItem {
   readonly operation: SendMessageOperation;
   readonly createdAt: string;
@@ -1157,16 +1163,15 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             signal?.throwIfAborted();
             return "stale";
           }
-          const revokedOutboxIds = (await this.#database.outbox.toArray())
-            .filter((row) => !authorizedConversationIds.has(row.conversationId))
-            .map((row) => row.clientMessageId);
           await Promise.all([
             this.#database.workspaces.clear(),
             this.#database.conversations.clear(),
             this.#database.messages.clear(),
             this.#database.reactions.clear(),
             this.#database.tasks.clear(),
-            this.#database.outbox.bulkDelete(revokedOutboxIds),
+            this.#database.outbox
+              .filter((row) => !authorizedConversationIds.has(row.conversationId))
+              .modify(ACCESS_REMOVED_OUTBOX_UPDATE),
             this.#database.events.clear(),
           ]);
           await this.#database.workspaces.put({
@@ -1307,7 +1312,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               this.#database.messages.filter((row) => !visible.has(row.conversationId)).delete(),
               this.#database.reactions.filter((row) => !visible.has(row.conversationId)).delete(),
               this.#database.tasks.filter((row) => !visible.has(row.conversationId)).delete(),
-              this.#database.outbox.filter((row) => !visible.has(row.conversationId)).delete(),
+              this.#database.outbox
+                .filter((row) => !visible.has(row.conversationId))
+                .modify(ACCESS_REMOVED_OUTBOX_UPDATE),
             ]);
           await this.#database.workspaces.put({
             id: parsed.workspace.id,
@@ -2428,7 +2435,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               .anyOf(marker.conversationId, UNKNOWN_REACTION_CONVERSATION_ID)
               .delete(),
             this.#database.tasks.where("conversationId").equals(marker.conversationId).delete(),
-            this.#database.outbox.where("conversationId").equals(marker.conversationId).delete(),
+            this.#database.outbox
+              .where("conversationId")
+              .equals(marker.conversationId)
+              .modify(ACCESS_REMOVED_OUTBOX_UPDATE),
           ]);
         }
 
@@ -2771,7 +2781,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#tasks.clear();
     for (const task of parsedTasks) this.#tasks.set(task.id, task);
     for (const [id, item] of this.#outbox) {
-      if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
+      if (!authorizedConversationIds.has(item.operation.conversationId))
+        this.#outbox.set(id, { ...item, ...ACCESS_REMOVED_OUTBOX_UPDATE });
     }
     this.#syncCursor = parsed.syncCursor;
     this.#collections = parseCollectionStates(collections?.states);
@@ -2844,7 +2855,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       for (const [id, task] of this.#tasks)
         if (!visible.has(task.conversationId)) this.#tasks.delete(id);
       for (const [id, item] of this.#outbox)
-        if (!visible.has(item.operation.conversationId)) this.#outbox.delete(id);
+        if (!visible.has(item.operation.conversationId))
+          this.#outbox.set(id, { ...item, ...ACCESS_REMOVED_OUTBOX_UPDATE });
     }
     this.#collections = metadataCollections(this.#collections, visible, parsed.syncCursor, mode);
     if (mode === "bootstrap") {
@@ -3470,7 +3482,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         if (task.conversationId === marker.conversationId) this.#tasks.delete(id);
       }
       for (const [id, item] of this.#outbox) {
-        if (item.operation.conversationId === marker.conversationId) this.#outbox.delete(id);
+        if (item.operation.conversationId === marker.conversationId)
+          this.#outbox.set(id, { ...item, ...ACCESS_REMOVED_OUTBOX_UPDATE });
       }
     }
     this.#events.add(marker.eventId);
