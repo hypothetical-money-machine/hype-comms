@@ -13,6 +13,9 @@
     "apps/*",
     "packages/*"
   ],
+  "overrides": {
+    "zod": "4.4.3"
+  },
   "allowScripts": {
     "electron-winstaller@5.4.0": true,
     "esbuild@0.25.12": true,
