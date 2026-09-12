@@ -1,3 +1,4 @@
+import { CollectionRetry, type CollectionCommit } from "./workspace-collections";
 import { MAX_RETRACT_RESERVATIONS, upsertRetractReservation } from "./workspace-projection";
 
 import { testPosition } from "../../shared/test-support/sync-position";
@@ -560,6 +561,190 @@ afterEach(async () => {
 });
 
 describe.each(implementations)("$name conformance", ({ create }) => {
+  function historyCommit(sequence = "10", nextCursor: string | null = null): CollectionCommit {
+    return {
+      state: {
+        identity: { kind: "timeline", conversationId: ALPHA_ID },
+        loaded: true,
+        snapshotPosition: testPosition(sequence),
+        nextCursor,
+        invalidatedAt: null,
+      },
+      expectedPosition: testPosition("0"),
+      requestCursor: null,
+    };
+  }
+
+  it("distinguishes an unloaded collection from a committed empty page without acknowledging the page", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    expect(await cache.readCollections()).toEqual([]);
+    await cache.upsertHistory(ALPHA_ID, [], [], undefined, historyCommit());
+    expect((await cache.load()).collections).toEqual([historyCommit().state]);
+    expect((await cache.load()).syncCursor).toEqual(testPosition("0"));
+    await cache.applyEvent(taskEvent(task, "11"));
+    expect(await cache.readCollections()).toContainEqual({
+      identity: { kind: "tasks", conversationId: ALPHA_ID },
+      loaded: false,
+      snapshotPosition: null,
+      nextCursor: null,
+      invalidatedAt: testPosition("11"),
+    });
+  });
+
+  it("rejects the whole collection commit if a newer event has committed", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(taskEvent(task, "11"));
+    const before = await cache.load();
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, historyCommit()),
+    ).rejects.toBeInstanceOf(CollectionRetry);
+    expect(withoutTimestamps(await cache.load())).toEqual(withoutTimestamps(before));
+  });
+
+  it("keeps reaction snapshots current when earlier events arrive after the page", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, historyCommit());
+    await cache.applyEvent({ ...messageCreatedEvent, position: testPosition("8") });
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: { reactions: [] },
+    });
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: { removedReactionIds: [] },
+    });
+    expect((await cache.load()).reactions).toEqual([]);
+    expect((await cache.load()).syncCursor).toEqual(testPosition("10"));
+    await cache.applyEvent({
+      ...reactionAddedEvent,
+      id: "10000000-0000-4000-8000-000000000099",
+      position: testPosition("11"),
+    });
+    expect((await cache.load()).reactions).toEqual([reactionAddedEvent.payload.reaction]);
+  });
+
+  it("rejects a superseded pagination cursor without writing its messages", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(ALPHA_ID, [], [], undefined, historyCommit("10", "page-two"));
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, {
+        ...historyCommit("11"),
+        requestCursor: "wrong-page",
+      }),
+    ).rejects.toBeInstanceOf(CollectionRetry);
+    expect((await cache.load()).messages).toEqual([]);
+    expect((await cache.readCollections())[0]?.nextCursor).toBe("page-two");
+  });
+
+  it("rejects an older thread snapshot for a root already covered by a newer timeline read", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(
+      ALPHA_ID,
+      [messageSequence2],
+      [reactionAddedEvent.payload.reaction],
+      undefined,
+      historyCommit("10"),
+    );
+    const olderThread: CollectionCommit = {
+      ...historyCommit("9"),
+      state: {
+        ...historyCommit("9").state,
+        identity: { kind: "thread", conversationId: ALPHA_ID, rootId: messageSequence2.id },
+      },
+    };
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, olderThread),
+    ).rejects.toBeInstanceOf(CollectionRetry);
+    expect((await cache.load()).reactions).toEqual([reactionAddedEvent.payload.reaction]);
+    expect(await cache.readCollections()).toEqual([historyCommit("10").state]);
+  });
+
+  it("does not let an older-history page certify freshness of the first page", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(ALPHA_ID, [], [], undefined, historyCommit("10", "older"));
+    await cache.applyEvent({ ...messageCreatedEvent, position: testPosition("11") });
+    await cache.upsertHistory(ALPHA_ID, [], [], undefined, {
+      ...historyCommit("12"),
+      expectedPosition: testPosition("11"),
+      requestCursor: "older",
+    });
+    expect(
+      (await cache.readCollections()).find((state) => state.identity.kind === "timeline"),
+    ).toMatchObject({
+      snapshotPosition: testPosition("10"),
+      nextCursor: null,
+      invalidatedAt: testPosition("11"),
+    });
+  });
+
+  it("does not recreate a missing collection from a non-first page", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, {
+        ...historyCommit("10"),
+        requestCursor: "older",
+      }),
+    ).rejects.toBeInstanceOf(CollectionRetry);
+    expect((await cache.load()).messages).toEqual([]);
+    expect(await cache.readCollections()).toEqual([]);
+  });
+
+  it("retains collection freshness and reaction anchors through metadata refresh", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(
+      ALPHA_ID,
+      [messageSequence2],
+      [],
+      undefined,
+      historyCommit("10", "older"),
+    );
+    const before = await cache.load();
+    expect(await cache.replaceMetadata(snapshot)).toBe(true);
+    expect(withoutTimestamps(await cache.load())).toEqual(withoutTimestamps(before));
+    await cache.applyEvent(reactionAddedEvent);
+    expect((await cache.load()).reactions).toEqual([]);
+    expect((await cache.load()).syncCursor).toEqual(reactionAddedEvent.position);
+  });
+
+  it("rejects metadata at a superseded position without discarding newer records", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.applyEvent(messageCreatedEvent);
+    const before = await cache.load();
+    expect(await cache.replaceMetadata(snapshot)).toBe(false);
+    expect(withoutTimestamps(await cache.load())).toEqual(withoutTimestamps(before));
+  });
+
+  it("commits task collection metadata even when its page is empty", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    const commit: CollectionCommit = {
+      ...historyCommit(),
+      state: { ...historyCommit().state, identity: { kind: "tasks", conversationId: ALPHA_ID } },
+    };
+    expect(await cache.upsertTasks([], undefined, commit)).toEqual([]);
+    expect((await cache.load()).collections).toEqual([commit.state]);
+    expect((await cache.load()).syncCursor).toEqual(testPosition("0"));
+  });
+
+  it("does not mark a cancelled page loaded", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(
+      cache.upsertHistory(ALPHA_ID, [messageSequence2], [], AbortSignal.abort(), historyCommit()),
+    ).resolves.toBe(false);
+    expect((await cache.load()).messages).toEqual([]);
+    expect(await cache.readCollections()).toEqual([]);
+  });
+
   it("returns committed records and removals without publishing rejected task versions", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
@@ -1885,6 +2070,34 @@ describe("retract reservation retention", () => {
 });
 
 describe("PersistentWorkspaceCache retraction write races", () => {
+  it("retains a page committed while catalog metadata is encrypting", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto, scope });
+    const concurrent = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, []);
+    const gate = crypto.pauseNextEncryption();
+    const pending = writer.replaceMetadata(snapshot);
+    await gate.started;
+    const state = {
+      identity: { kind: "timeline" as const, conversationId: ALPHA_ID },
+      loaded: true,
+      snapshotPosition: testPosition("10"),
+      nextCursor: "older",
+      invalidatedAt: null,
+    };
+    await concurrent.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, {
+      state,
+      expectedPosition: snapshot.syncCursor,
+      requestCursor: null,
+    });
+    gate.release();
+    await expect(pending).resolves.toBe(true);
+    expect((await writer.load()).messages).toEqual([messageSequence2]);
+    expect(await writer.readCollections()).toEqual([state]);
+    await writer.applyEvent(reactionAddedEvent);
+    expect((await writer.load()).reactions).toEqual([]);
+  });
+
   it("rolls back an event overtaken while its records are encrypting", async () => {
     const crypto = new DeferredFakeCrypto();
     const writer = new PersistentWorkspaceCache({ crypto, scope });

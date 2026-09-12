@@ -263,6 +263,9 @@ function createClient(
     },
     createDirectConversation,
     getConversationMessages: async ({ conversationId }: { conversationId: string }) => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: workspaceBootstrap.syncCursor,
       messages: conversationId === HUMANS_CHANNEL_ID ? humansMessages : [],
       threadSummaries: [],
       threadsSupported: true,
@@ -272,14 +275,27 @@ function createClient(
       throw new Error("unused");
     },
     getMessageThread: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: workspaceBootstrap.syncCursor,
       root: humansThreadRoot,
       replies: [],
       nextCursor: null,
     }),
     listMessageReactions: async () => ({ reactions: [] }),
     searchMessages: async () => ({ results: [], nextCursor: null }),
-    listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
+    listConversationTasks: async () => ({
+      snapshotPosition: workspaceBootstrap.syncCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
+    listMyTasks: async () => ({
+      snapshotPosition: workspaceBootstrap.syncCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     advanceReadCursor: async () => undefined,
     syncWorkspace: async (after: string) =>
       ({

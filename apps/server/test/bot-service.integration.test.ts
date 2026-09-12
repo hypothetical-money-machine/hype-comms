@@ -136,7 +136,11 @@ describe("BotService", () => {
 
     await expect(
       workspaceRepository.listConversationTasks(authenticated, generalId, undefined, 100),
-    ).resolves.toEqual({ tasks: [], nextCursor: null, hasMore: false });
+    ).resolves.toMatchObject({
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    });
     await expect(
       workspaceRepository.listConversationTasks(authenticated, otherId, undefined, 100),
     ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
@@ -147,7 +151,11 @@ describe("BotService", () => {
     expect(await service.grantChannels(ownerId, "release-bot", ["private"])).toBe(1);
     await expect(
       workspaceRepository.listConversationTasks(authenticated, privateId, undefined, 100),
-    ).resolves.toEqual({ tasks: [], nextCursor: null, hasMore: false });
+    ).resolves.toMatchObject({
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    });
     await expect(
       workspaceRepository.createDirectConversation(owner, { memberId: issued.bot.id }),
     ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
