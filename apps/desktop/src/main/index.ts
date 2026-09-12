@@ -3,143 +3,91 @@ import { realpath, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseBoundedIpcPayload } from "../shared/ipc-invoke";
+import type { DesktopInvokeHandlers } from "../shared/ipc-invoke-contract";
+import { registerDesktopInitialValues } from "./ipc-initial-values";
+import { registerDesktopInvokes } from "./ipc-registrar";
+import { createWorkspaceInvokeHandlers } from "./workspace-ipc-handlers";
 
 import {
-  AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-  AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
   DEVICE_PREFERENCES_IPC_MAX_BYTES,
-  DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
-  NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
-  NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-  NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
-  NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
-  NOTIFICATION_STATE_IPC_MAX_BYTES,
+  aiChannelStateSchema,
   authAppVersionSchema,
   authDevicePlatformSchema,
-  aiChannelGenerationRequestSchema,
-  aiChannelPermissionResponseSchema,
-  aiChannelPromptRequestSchema,
-  aiChannelStateSchema,
-  cacheDecryptBatchRequestSchema,
-  cacheEncryptBatchRequestSchema,
-  channelMemberTargetSchema,
-  compactModePreferenceSchema,
-  createChannelOperationSchema,
-  createTaskOperationSchema,
-  devicePreferencesPatchSchema,
   devicePreferencesSchema,
-  directConversationRequestSchema,
-  entityIdSchema,
-  listConversationsQuerySchema,
-  conversationFilesQuerySchema,
-  listMessageAttachmentsRequestSchema,
-  listMessageReactionsRequestSchema,
-  memberTitleSchema,
-  messageThreadRequestSchema,
-  messageReactionTargetSchema,
-  messageSearchQuerySchema,
-  moveTaskOperationSchema,
-  notificationActionDrainRequestSchema,
-  notificationActionDrainResponseSchema,
-  notificationActionAcknowledgementSchema,
-  notificationActivityUpdateSchema,
-  notificationCaptureActivationRequestSchema,
-  notificationCaptureActivationResponseSchema,
   notificationContextSchema,
-  notificationPreferenceSchema,
-  notificationStateSchema,
-  realtimeAcknowledgementSchema,
-  realtimeSessionScopeSchema,
-  reviewAgentEnrollmentRequestSchema,
-  scopedTypingActivityUpdateSchema,
-  requestMagicLinkSchema,
-  sendMessageOperationSchema,
-  sequenceSchema,
-  taskListQuerySchema,
-  themeDesignSchema,
-  themePreferenceSchema,
-  updateTaskOperationSchema,
-  upsertChannelMemberOperationSchema,
   type AiChannelState,
   type ChatSessionState,
   type DevicePreferences,
-  type DevicePreferencesPatch,
   type HumanWorkspaceBootstrapResponse,
   type NotificationContext,
   type NotificationState,
   type ProductRealtimeEvent,
   type ProtocolHandlerState,
-  type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
+  type ScopedProductRealtimeEvent,
   type ThemeState,
   type UpdateState,
 } from "@hype-comms/contracts";
+import type { Event, IpcMainInvokeEvent, OpenDialogOptions, Session, WebContents } from "electron";
 import {
-  app,
   BrowserWindow,
+  Menu,
+  Notification,
+  app,
   dialog,
   ipcMain,
-  Menu,
   nativeTheme,
   net,
-  Notification,
-  protocol,
   powerMonitor,
+  protocol,
   safeStorage,
   screen,
   session,
   shell,
 } from "electron";
-import type { Event, IpcMainInvokeEvent, OpenDialogOptions, Session, WebContents } from "electron";
 import { autoUpdater } from "electron-updater";
 
 import { createServerHealthUrl } from "../shared/api-origin";
-import {
-  assertCurrentUploadScope,
-  attachmentUploadRequestSchema,
-} from "../shared/attachment-upload";
+import { assertCurrentUploadScope } from "../shared/attachment-upload";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
-import { createInitialDevicePreferencesArgument } from "../shared/device-preferences";
 import {
   AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE,
   type RealtimeConnectionState,
   type ServerStatus,
 } from "../shared/desktop-api";
+import { createInitialDevicePreferencesArgument } from "../shared/device-preferences";
+import { normalizeExternalMailtoUrl } from "../shared/external-mailto";
 import { createInitialThemeStateArgument, getThemeDefinition } from "../shared/theme";
+import { AiChannelController } from "./ai-channel-controller";
+import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import { resolveApplicationIconPath } from "./application-icon";
+import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
+import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
+import {
+  attachmentUploadDialogOptions,
+  uploadSelectedConversationFiles,
+} from "./attachment-upload";
 import { parseAuthCallback } from "./auth-callback";
+import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
 import { AuthKitFlow } from "./authkit-flow";
 import {
   AuthKitProtectedStoreCorruptError,
   AuthKitProtectedStoreUnavailableError,
   SafeStorageAuthKitPendingStore,
 } from "./authkit-pending-store";
-import { configureApplicationIdentity, shouldMigrateLegacyProfile } from "./application-identity";
-import { resolveApplicationIconPath } from "./application-icon";
+import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
+import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
+import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
+import { CompactModeController } from "./compact-mode-controller";
+import { CompactModePreferenceStore } from "./compact-mode-preference-store";
 import {
   DeepLinkSignInQueue,
   routeOpenUrlMagicLink,
   routeSecondInstanceMagicLink,
 } from "./deep-link-sign-in";
-import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./application-menu";
-import { AiChannelController } from "./ai-channel-controller";
-import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
-import {
-  attachmentUploadDialogOptions,
-  uploadSelectedConversationFiles,
-} from "./attachment-upload";
-import { AuthenticatedSessionContextStore } from "./authenticated-session-context-store";
-import { ChatSession, ChatSessionError, INVALID_MAGIC_LINK_MESSAGE } from "./chat-session";
-import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
-import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
-import { CompactModeController } from "./compact-mode-controller";
-import { CompactModePreferenceStore } from "./compact-mode-preference-store";
-import { DevicePreferencesController } from "./device-preferences-controller";
-import { DevicePreferencesStore } from "./device-preferences-store";
 import {
   callbackForSignedOutSession,
   consumeDevelopmentAuthCallbackFile,
@@ -147,6 +95,8 @@ import {
   resolveDevelopmentProfile,
   resolveDevelopmentUserDataPath,
 } from "./development-profile";
+import { DevicePreferencesController } from "./device-preferences-controller";
+import { DevicePreferencesStore } from "./device-preferences-store";
 import {
   HEADLESS_DESKTOP_CDP_ADDRESS,
   assertHeadlessDesktopCommandLine,
@@ -161,15 +111,14 @@ import {
   type HeadlessNotificationCaptureArtifact,
 } from "./headless-notification-capture";
 import {
-  protectMainProcessLogStreams,
-  reportMainProcessError,
-  reportMainProcessEvent,
-} from "./main-process-log";
-import {
   createLinuxProtocolRegistrationTarget,
   installAndQueryLinuxProtocolHandler,
 } from "./linux-protocol-registration";
-import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
+import {
+  resolveMacosNativeNotificationEvidenceConfiguration,
+  startMacosNativeNotificationEvidence,
+  type MacosNativeNotificationEvidenceSession,
+} from "./macos-native-notification-evidence";
 import {
   createMacosNotificationAuthorization,
   requestAuthorizationForPersistedEnabledPreference,
@@ -177,16 +126,13 @@ import {
   type MacosNotificationAuthorization,
 } from "./macos-notification-authorization";
 import {
-  resolveMacosNativeNotificationEvidenceConfiguration,
-  startMacosNativeNotificationEvidence,
-  type MacosNativeNotificationEvidenceSession,
-} from "./macos-native-notification-evidence";
+  protectMainProcessLogStreams,
+  reportMainProcessError,
+  reportMainProcessEvent,
+} from "./main-process-log";
+import { MainWindowLifecycle, MainWindowRecreationCoordinator } from "./main-window-recreation";
 import { NotificationController } from "./notification-controller";
 import { NotificationPreferenceStore } from "./notification-preference-store";
-import {
-  NotificationProjectionRepairCoordinator,
-  type NotificationProjectionRepairFailure,
-} from "./notification-projection-repair";
 import {
   CaptureNotificationPresenter,
   ElectronNotificationCapabilitySource,
@@ -195,6 +141,10 @@ import {
   type NotificationPresenter,
 } from "./notification-presenter";
 import {
+  NotificationProjectionRepairCoordinator,
+  type NotificationProjectionRepairFailure,
+} from "./notification-projection-repair";
+import {
   NotificationSettingsController,
   type NotificationCapabilitySource,
 } from "./notification-settings-controller";
@@ -202,16 +152,7 @@ import {
   PendingNotificationAuthorizationBarrier,
   settlePendingNotificationAuthorization,
 } from "./pending-notification-authorization-barrier";
-import { authCapabilitiesForSession } from "./session-auth-lifecycle";
-import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
-import { WorkspaceRealtime } from "./workspace-realtime";
-import { WorkspaceTransport } from "./workspace-transport";
 import { PresenceController } from "./presence-controller";
-import {
-  BeforeQuitCoordinator,
-  FinalQuitCoordinator,
-  handleLastWindowClosed,
-} from "./window-lifecycle";
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -222,10 +163,11 @@ import {
   normalizeExternalHttpsUrl,
   resolveRendererAssetPath,
 } from "./security";
-import { normalizeExternalMailtoUrl } from "../shared/external-mailto";
-import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
+import { authCapabilitiesForSession } from "./session-auth-lifecycle";
 import { ThemeController } from "./theme-controller";
 import { ThemePreferenceStore } from "./theme-preference-store";
+import { UpdateController, type UpdateSource, type UpdateSourceConfiguration } from "./updater";
+import { LEGACY_PRODUCT_NAME, migrateLegacyUserData } from "./user-data-migration";
 import {
   dialogForWindowRestoreFailure,
   isCheckForUpdatesEnabled,
@@ -233,6 +175,13 @@ import {
   shouldParentUpdateCheckDialog,
   type UpdateCheckDialog,
 } from "./user-update-check";
+import {
+  BeforeQuitCoordinator,
+  FinalQuitCoordinator,
+  handleLastWindowClosed,
+} from "./window-lifecycle";
+import { WorkspaceRealtime } from "./workspace-realtime";
+import { WorkspaceTransport } from "./workspace-transport";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 const WINDOW_MIN_HEIGHT = 640;
 const WINDOW_MIN_WIDTH = 960;
@@ -560,27 +509,6 @@ function sendToRenderer(channel: string, payload: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-interface IpcPayloadSchema<T> {
-  readonly parse: (value: unknown) => T;
-}
-
-function parseBoundedIpcPayload<T>(
-  schema: IpcPayloadSchema<T>,
-  value: unknown,
-  maximumBytes: number,
-): T {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new Error("IPC payload is not JSON-serializable");
-  }
-  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > maximumBytes) {
-    throw new Error("IPC payload exceeds its byte limit");
-  }
-  return schema.parse(value);
 }
 
 function boundedAiChannelState(value: unknown): AiChannelState {
@@ -1012,7 +940,11 @@ async function installBundledRendererProtocol(rendererRoot: string): Promise<voi
   });
 }
 
+let disposeIpcInitialValues: (() => void) | null = null;
+let disposeIpcInvokes: (() => void) | null = null;
+
 function registerIpcHandlers(): void {
+  disposeIpcInvokes?.();
   const isTrustedIpcSender = (event: IpcMainInvokeEvent): boolean => {
     const senderFrame = event.senderFrame;
     return (
@@ -1027,1114 +959,545 @@ function registerIpcHandlers(): void {
   // This one synchronous, read-only capability is queried by preload before the renderer can
   // schedule read tracking. Unlike a renderer command-line marker, it stays authoritative when a
   // packaged client is launched with arbitrary application arguments.
-  ipcMain.removeAllListeners(DESKTOP_CHANNELS.automationHeadless);
-  ipcMain.on(DESKTOP_CHANNELS.automationHeadless, (event) => {
-    event.returnValue = headlessDesktopConfiguration !== null;
-  });
+  disposeIpcInitialValues = registerDesktopInitialValues(ipcMain, () => ({
+    automationHeadless: headlessDesktopConfiguration !== null,
+  }));
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.appVersion);
-  ipcMain.handle(DESKTOP_CHANNELS.appVersion, (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted app-version IPC sender");
-    }
-
-    return app.getVersion();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.serverStatus);
-  ipcMain.handle(DESKTOP_CHANNELS.serverStatus, async (event): Promise<ServerStatus> => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted server-status IPC sender");
-    }
-
-    if (serverStatusRequest !== null) {
-      return serverStatusRequest;
-    }
-
-    const request = net
-      .fetch(createServerHealthUrl(__HYPE_COMMS_API_ORIGIN__), {
-        method: "GET",
-        cache: "no-store",
-        credentials: "omit",
-        redirect: "error",
-        signal: AbortSignal.timeout(2_500),
-      })
-      .then((response): ServerStatus => (response.ok ? "reachable" : "unreachable"))
-      .catch((): ServerStatus => "unreachable")
-      .finally(() => {
-        serverStatusRequest = null;
-      });
-
-    serverStatusRequest = request;
-    return request;
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.protocolHandlerState);
-  ipcMain.handle(DESKTOP_CHANNELS.protocolHandlerState, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted protocol-handler-state IPC sender");
-    }
-    if (protocolHandlerProbe === null) {
-      return protocolHandlerState;
-    }
-    // A failed probe keeps the stored "unknown" state: never warn on a probe that could not run.
-    return protocolHandlerProbe.catch(() => protocolHandlerState);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.updateState);
-  ipcMain.handle(DESKTOP_CHANNELS.updateState, (event): UpdateState => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted update-state IPC sender");
-    }
-    return updateController?.state ?? { status: "unsupported" };
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.updateCheck);
-  ipcMain.handle(DESKTOP_CHANNELS.updateCheck, async (event): Promise<void> => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted update-check IPC sender");
-    }
-    await updateController?.checkNow();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.updateInstall);
-  ipcMain.handle(DESKTOP_CHANNELS.updateInstall, (event): void => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted update-install IPC sender");
-    }
-    updateController?.quitAndInstall();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.themeState);
-  ipcMain.handle(DESKTOP_CHANNELS.themeState, (event): ThemeState => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted theme-state IPC sender");
-    }
-    if (themeController === null) {
-      throw new Error("Appearance is unavailable");
-    }
-    return themeController.state;
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.themeSystemState);
-  ipcMain.handle(DESKTOP_CHANNELS.themeSystemState, async (event): Promise<ThemeState> => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted theme-system-state IPC sender");
-    }
-    if (themeController === null) {
-      throw new Error("Appearance is unavailable");
-    }
-    try {
-      return await themeController.resolveSystemState();
-    } catch (error) {
-      throw new Error("Could not resolve the system appearance", { cause: error });
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.themeSet);
-  ipcMain.handle(DESKTOP_CHANNELS.themeSet, async (event, preference: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted theme-set IPC sender");
-    }
-    if (themeController === null) {
-      throw new Error("Appearance is unavailable");
-    }
-    const parsed = themePreferenceSchema.safeParse(preference);
-    if (!parsed.success) {
-      throw new Error("Invalid appearance preference");
-    }
-    try {
-      return await themeController.setPreference(parsed.data);
-    } catch (error) {
-      throw new Error("Could not save the appearance preference", { cause: error });
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.themeDesignSet);
-  ipcMain.handle(DESKTOP_CHANNELS.themeDesignSet, async (event, design: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted theme-design-set IPC sender");
-    }
-    if (themeController === null) {
-      throw new Error("Appearance is unavailable");
-    }
-    const parsed = themeDesignSchema.safeParse(design);
-    if (!parsed.success) {
-      throw new Error("Invalid theme design");
-    }
-    try {
-      return await themeController.setDesign(parsed.data);
-    } catch (error) {
-      throw new Error("Could not save the theme design", { cause: error });
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.compactModeState);
-  ipcMain.handle(DESKTOP_CHANNELS.compactModeState, (event): boolean => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted compact-mode-state IPC sender");
-    }
-    if (compactModeController === null) {
-      throw new Error("Compact mode is unavailable");
-    }
-    return compactModeController.enabled;
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.compactModeSet);
-  ipcMain.handle(DESKTOP_CHANNELS.compactModeSet, async (event, preference: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted compact-mode-set IPC sender");
-    }
-    if (compactModeController === null) {
-      throw new Error("Compact mode is unavailable");
-    }
-    const parsed = compactModePreferenceSchema.safeParse(preference);
-    if (!parsed.success) {
-      throw new Error("Invalid compact mode preference");
-    }
-    try {
-      return await compactModeController.setEnabled(parsed.data);
-    } catch (error) {
-      throw new Error("Could not save the compact mode preference", { cause: error });
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesState);
-  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesState, (event): DevicePreferences => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted device-preferences-state IPC sender");
-    }
-    if (devicePreferencesController === null) {
-      throw new Error("Device preferences are unavailable");
-    }
-    return parseBoundedIpcPayload(
-      devicePreferencesSchema,
-      devicePreferencesController.state,
-      DEVICE_PREFERENCES_IPC_MAX_BYTES,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesUpdate);
-  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesUpdate, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted device-preferences-update IPC sender");
-    }
-    if (devicePreferencesController === null) {
-      throw new Error("Device preferences are unavailable");
-    }
-    let patch: DevicePreferencesPatch;
-    try {
-      patch = parseBoundedIpcPayload(
-        devicePreferencesPatchSchema,
-        value,
-        DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
-      );
-    } catch (error) {
-      throw new Error("Invalid device preference update", { cause: error });
-    }
-    try {
-      return parseBoundedIpcPayload(
-        devicePreferencesSchema,
-        await devicePreferencesController.update(patch),
-        DEVICE_PREFERENCES_IPC_MAX_BYTES,
-      );
-    } catch (error) {
-      throw new Error("Could not save the device preferences", { cause: error });
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelState);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelState, (event): AiChannelState => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel state sender");
-    }
-    if (aiChannelController === null) {
-      throw new Error("AI Channel is unavailable");
-    }
-    return boundedAiChannelState(aiChannelController.state);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelStart);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelStart, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel start sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedIpcPayload(
-      aiChannelGenerationRequestSchema,
-      value,
-      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-    );
-    return boundedAiChannelState(await controller.start(request));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelWorkspaceChoose);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelWorkspaceChoose, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel workspace sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const window = mainWindow;
-    const options: OpenDialogOptions = {
-      title: "Choose a folder for AI Channel",
-      buttonLabel: "Use this folder",
-      properties: ["openDirectory"],
-    };
-    const selection =
-      window === null || window.isDestroyed()
-        ? await dialog.showOpenDialog(options)
-        : await dialog.showOpenDialog(window, options);
-    const selectedPath = selection.filePaths[0];
-    if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
-      return boundedAiChannelState(controller.state);
-    }
-    try {
-      const workspacePath = await realpath(selectedPath);
-      if (!(await stat(workspacePath)).isDirectory()) {
-        throw new Error("Not a directory");
+  const handlers: DesktopInvokeHandlers = {
+    ...createWorkspaceInvokeHandlers(() => workspaceTransport),
+    appVersion: () => {
+      return app.getVersion();
+    },
+    serverStatus: async (): Promise<ServerStatus> => {
+      if (serverStatusRequest !== null) {
+        return serverStatusRequest;
       }
-      return boundedAiChannelState(await controller.chooseWorkspace(workspacePath));
-    } catch {
-      throw new Error("The selected AI Channel folder is unavailable");
-    }
-  });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelSessionNew);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelSessionNew, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel session sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedIpcPayload(
-      aiChannelGenerationRequestSchema,
-      value,
-      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-    );
-    return boundedAiChannelState(await controller.newSession(request));
-  });
+      const request = net
+        .fetch(createServerHealthUrl(__HYPE_COMMS_API_ORIGIN__), {
+          method: "GET",
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+          signal: AbortSignal.timeout(2_500),
+        })
+        .then((response): ServerStatus => (response.ok ? "reachable" : "unreachable"))
+        .catch((): ServerStatus => "unreachable")
+        .finally(() => {
+          serverStatusRequest = null;
+        });
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPromptSend);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPromptSend, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel prompt sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedIpcPayload(
-      aiChannelPromptRequestSchema,
-      value,
-      AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
-    );
-    return boundedAiChannelState(await controller.sendPrompt(request));
-  });
+      serverStatusRequest = request;
+      return request;
+    },
+    protocolHandlerState: async () => {
+      if (protocolHandlerProbe === null) {
+        return protocolHandlerState;
+      }
+      // A failed probe keeps the stored "unknown" state: never warn on a probe that could not run.
+      return protocolHandlerProbe.catch(() => protocolHandlerState);
+    },
+    updateState: (): UpdateState => {
+      return updateController?.state ?? { status: "unsupported" };
+    },
+    updateCheck: async (): Promise<void> => {
+      await updateController?.checkNow();
+    },
+    updateInstall: (): void => {
+      updateController?.quitAndInstall();
+    },
+    themeState: (): ThemeState => {
+      if (themeController === null) {
+        throw new Error("Appearance is unavailable");
+      }
+      return themeController.state;
+    },
+    themeSystemState: async (): Promise<ThemeState> => {
+      if (themeController === null) {
+        throw new Error("Appearance is unavailable");
+      }
+      try {
+        return await themeController.resolveSystemState();
+      } catch (error) {
+        throw new Error("Could not resolve the system appearance", { cause: error });
+      }
+    },
+    themeSet: async (_context, preference) => {
+      if (themeController === null) {
+        throw new Error("Appearance is unavailable");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPromptCancel);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPromptCancel, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel cancellation sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedIpcPayload(
-      aiChannelGenerationRequestSchema,
-      value,
-      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-    );
-    return boundedAiChannelState(await controller.cancelPrompt(request));
-  });
+      try {
+        return await themeController.setPreference(preference);
+      } catch (error) {
+        throw new Error("Could not save the appearance preference", { cause: error });
+      }
+    },
+    themeDesignSet: async (_context, design) => {
+      if (themeController === null) {
+        throw new Error("Appearance is unavailable");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelPermissionRespond);
-  ipcMain.handle(DESKTOP_CHANNELS.aiChannelPermissionRespond, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AI Channel permission sender");
-    }
-    const controller = aiChannelController;
-    if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedIpcPayload(
-      aiChannelPermissionResponseSchema,
-      value,
-      AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-    );
-    return boundedAiChannelState(await controller.respondPermission(request));
-  });
+      try {
+        return await themeController.setDesign(design);
+      } catch (error) {
+        throw new Error("Could not save the theme design", { cause: error });
+      }
+    },
+    compactModeState: (): boolean => {
+      if (compactModeController === null) {
+        throw new Error("Compact mode is unavailable");
+      }
+      return compactModeController.enabled;
+    },
+    compactModeSet: async (_context, preference) => {
+      if (compactModeController === null) {
+        throw new Error("Compact mode is unavailable");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionState);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionState, (event): ChatSessionState => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted session-state IPC sender");
-    }
-    return chatSession?.state ?? { status: "signed-out" };
-  });
+      try {
+        return await compactModeController.setEnabled(preference);
+      } catch (error) {
+        throw new Error("Could not save the compact mode preference", { cause: error });
+      }
+    },
+    devicePreferencesState: (): DevicePreferences => {
+      if (devicePreferencesController === null) {
+        throw new Error("Device preferences are unavailable");
+      }
+      return devicePreferencesController.state;
+    },
+    devicePreferencesUpdate: async (_context, value) => {
+      if (devicePreferencesController === null) {
+        throw new Error("Device preferences are unavailable");
+      }
+      const patch = value;
+      try {
+        return await devicePreferencesController.update(patch);
+      } catch (error) {
+        throw new Error("Could not save the device preferences", { cause: error });
+      }
+    },
+    aiChannelState: (): AiChannelState => {
+      if (aiChannelController === null) {
+        throw new Error("AI Channel is unavailable");
+      }
+      return aiChannelController.state;
+    },
+    aiChannelStart: async (_context, value) => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const request = value;
+      return await controller.start(request);
+    },
+    aiChannelWorkspaceChoose: async () => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const window = mainWindow;
+      const options: OpenDialogOptions = {
+        title: "Choose a folder for AI Channel",
+        buttonLabel: "Use this folder",
+        properties: ["openDirectory"],
+      };
+      const selection =
+        window === null || window.isDestroyed()
+          ? await dialog.showOpenDialog(options)
+          : await dialog.showOpenDialog(window, options);
+      const selectedPath = selection.filePaths[0];
+      if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
+        return controller.state;
+      }
+      try {
+        const workspacePath = await realpath(selectedPath);
+        if (!(await stat(workspacePath)).isDirectory()) {
+          throw new Error("Not a directory");
+        }
+        return await controller.chooseWorkspace(workspacePath);
+      } catch {
+        throw new Error("The selected AI Channel folder is unavailable");
+      }
+    },
+    aiChannelSessionNew: async (_context, value) => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const request = value;
+      return await controller.newSession(request);
+    },
+    aiChannelPromptSend: async (_context, value) => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const request = value;
+      return await controller.sendPrompt(request);
+    },
+    aiChannelPromptCancel: async (_context, value) => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const request = value;
+      return await controller.cancelPrompt(request);
+    },
+    aiChannelPermissionRespond: async (_context, value) => {
+      const controller = aiChannelController;
+      if (controller === null) throw new Error("AI Channel is unavailable");
+      const request = value;
+      return await controller.respondPermission(request);
+    },
+    sessionState: (): ChatSessionState => {
+      return chatSession?.state ?? { status: "signed-out" };
+    },
+    sessionRetry: async (): Promise<ChatSessionState> => {
+      if (chatSession === null) throw new Error("Chat is not configured");
+      return chatSession.restore();
+    },
+    sessionAuthCapabilities: async () => {
+      if (chatSession === null) {
+        throw new Error("Chat is not configured");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRetry);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionRetry, async (event): Promise<ChatSessionState> => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted session-retry IPC sender");
-    }
-    if (chatSession === null) throw new Error("Chat is not configured");
-    return chatSession.restore();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionAuthCapabilities);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionAuthCapabilities, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted authentication-capabilities IPC sender");
-    }
-    if (chatSession === null) {
-      throw new Error("Chat is not configured");
-    }
-
-    const capabilities = authCapabilitiesForSession(
-      await chatSession.getAuthCapabilities(),
-      { chatSession, authKitFlow, authKitPendingStore },
-      authKitCancellationFenced,
-    );
-    const pendingStore = authKitPendingStore;
-    if (!capabilities.authKit || pendingStore === null) return capabilities;
-    try {
-      await pendingStore.assertAvailable();
-      // A final quit teardown can run while protected storage is being checked. If a later
-      // will-quit listener cancels that quit, never publish a capability captured before teardown.
-      return authCapabilitiesForSession(
-        capabilities,
+      const capabilities = authCapabilitiesForSession(
+        await chatSession.getAuthCapabilities(),
         { chatSession, authKitFlow, authKitPendingStore },
         authKitCancellationFenced,
       );
-    } catch {
-      return { ...capabilities, authKit: false };
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionStartAuthKit);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionStartAuthKit, async (event): Promise<void> => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted AuthKit IPC sender");
-    }
-    if (chatSession === null || authKitFlow === null || authKitPendingStore === null) {
-      throw new Error(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE);
-    }
-    if (chatSession.state.status !== "signed-out") {
-      throw new Error("Sign out before starting a different authentication attempt");
-    }
-
-    // Coalesce duplicate trusted IPC while the first start is persisting state and opening the
-    // browser. Advancing a second intent here could make the first continuation cancel the shared
-    // AuthKitFlow operation after it had already opened a usable authorization URL.
-    if (authKitStartPromise !== null) return authKitStartPromise;
-
-    const startIntent = advanceAuthIntent();
-    const start = (async (): Promise<void> => {
+      const pendingStore = authKitPendingStore;
+      if (!capabilities.authKit || pendingStore === null) return capabilities;
       try {
-        // Retire any older attempt through the durable fence before replacing it. This also keeps
-        // a failed protected-store deletion from resurrecting the superseded attempt on restart.
-        await cancelPendingAuthKit();
-        // Preflight stable device metadata before opening the system browser. A credential-store
-        // failure after the callback would otherwise consume an otherwise usable handoff.
-        await authKitPendingStore.loadOrCreateInstallationId();
-        if (startIntent !== authIntentGeneration) {
-          throw new Error("AuthKit authorization was superseded");
-        }
-        // Bind the intent before awaiting the browser open. A very fast provider callback queues
-        // behind AuthKitFlow.start(), but may snapshot this generation before start() resolves.
-        authKitPendingIntentGeneration = startIntent;
-        await authKitFlow.start();
-        if (startIntent !== authIntentGeneration) {
-          await cancelPendingAuthKit();
-          throw new Error("AuthKit authorization was superseded");
-        }
-      } catch (error) {
-        if (authKitPendingIntentGeneration === startIntent) {
-          authKitPendingIntentGeneration = null;
-        }
-        reportMainProcessError("AuthKit authorization could not be started", error);
-        // Only .message survives IPC serialization, so surface curated ChatSessionError text (it
-        // carries the net::ERR_* diagnostic); internal errors keep the generic message.
-        throw new Error(
-          error instanceof ChatSessionError ? error.message : "Could not start WorkOS sign-in",
-          { cause: error },
+        await pendingStore.assertAvailable();
+        // A final quit teardown can run while protected storage is being checked. If a later
+        // will-quit listener cancels that quit, never publish a capability captured before teardown.
+        return authCapabilitiesForSession(
+          capabilities,
+          { chatSession, authKitFlow, authKitPendingStore },
+          authKitCancellationFenced,
         );
+      } catch {
+        return { ...capabilities, authKit: false };
       }
-    })();
-    authKitStartPromise = start;
-    try {
-      await start;
-    } finally {
-      if (authKitStartPromise === start) authKitStartPromise = null;
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionSignOut);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionSignOut, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted sign-out IPC sender");
-    }
-    advanceAuthIntent();
-    let cancellationFailed = false;
-    try {
-      await cancelPendingAuthKit();
-    } catch {
-      cancellationFailed = true;
-      reportMainProcessError("Pending AuthKit authorization cancellation will be retried");
-    }
-
-    beginSessionReplacement();
-    const state = (await chatSession?.signOut()) ?? { status: "signed-out" as const };
-    const logoutUrl = chatSession?.consumeLogoutUrl() ?? null;
-    if (logoutUrl !== null) {
-      void shell.openExternal(logoutUrl).catch(() => {
-        reportMainProcessError("WorkOS logout page could not be opened");
-      });
-    }
-    if (cancellationFailed && headlessDesktopConfiguration === null) {
-      const content = {
-        type: "warning" as const,
-        message: "Signed out, but secure sign-in cancellation is still pending",
-        detail:
-          "Close any WorkOS sign-in window. Hype Comms will keep retrying the protected cancellation.",
-      };
-      const window = mainWindow;
-      if (window === null || window.isDestroyed()) {
-        await dialog.showMessageBox(content);
-      } else {
-        await dialog.showMessageBox(window, content);
+    },
+    sessionStartAuthKit: async (): Promise<void> => {
+      if (chatSession === null || authKitFlow === null || authKitPendingStore === null) {
+        throw new Error(AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE);
       }
-    }
-    return state;
-  });
+      if (chatSession.state.status !== "signed-out") {
+        throw new Error("Sign out before starting a different authentication attempt");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationContext);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationContext, (event): NotificationContext => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-context IPC sender");
-    }
-    const controller = notificationController;
-    const scope = notificationScope;
-    if (
-      controller === null ||
-      scope === null ||
-      notificationActiveGeneration !== scope.sessionGeneration
-    ) {
-      return parseBoundedIpcPayload(
-        notificationContextSchema,
-        inactiveNotificationContext(),
-        NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
-      );
-    }
-    return parseBoundedIpcPayload(
-      notificationContextSchema,
-      controller.bindRenderer(event.sender.id, rendererSessionGeneration),
-      NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
-    );
-  });
+      // Coalesce duplicate trusted IPC while the first start is persisting state and opening the
+      // browser. Advancing a second intent here could make the first continuation cancel the shared
+      // AuthKitFlow operation after it had already opened a usable authorization URL.
+      if (authKitStartPromise !== null) return authKitStartPromise;
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActivityUpdate);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationActivityUpdate, (event, input: unknown): void => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-activity IPC sender");
-    }
-    const controller = notificationController;
-    if (controller === null) throw new Error("Native notifications are unavailable");
-    const activity = parseBoundedIpcPayload(
-      notificationActivityUpdateSchema,
-      input,
-      NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
-    );
-    if (!controller.updateActivity(event.sender.id, activity)) {
-      throw new Error("Notification activity does not match the active renderer");
-    }
-  });
+      const startIntent = advanceAuthIntent();
+      const start = (async (): Promise<void> => {
+        try {
+          // Retire any older attempt through the durable fence before replacing it. This also keeps
+          // a failed protected-store deletion from resurrecting the superseded attempt on restart.
+          await cancelPendingAuthKit();
+          // Preflight stable device metadata before opening the system browser. A credential-store
+          // failure after the callback would otherwise consume an otherwise usable handoff.
+          await authKitPendingStore.loadOrCreateInstallationId();
+          if (startIntent !== authIntentGeneration) {
+            throw new Error("AuthKit authorization was superseded");
+          }
+          // Bind the intent before awaiting the browser open. A very fast provider callback queues
+          // behind AuthKitFlow.start(), but may snapshot this generation before start() resolves.
+          authKitPendingIntentGeneration = startIntent;
+          await authKitFlow.start();
+          if (startIntent !== authIntentGeneration) {
+            await cancelPendingAuthKit();
+            throw new Error("AuthKit authorization was superseded");
+          }
+        } catch (error) {
+          if (authKitPendingIntentGeneration === startIntent) {
+            authKitPendingIntentGeneration = null;
+          }
+          reportMainProcessError("AuthKit authorization could not be started", error);
+          // Only .message survives IPC serialization, so surface curated ChatSessionError text (it
+          // carries the net::ERR_* diagnostic); internal errors keep the generic message.
+          throw new Error(
+            error instanceof ChatSessionError ? error.message : "Could not start WorkOS sign-in",
+            { cause: error },
+          );
+        }
+      })();
+      authKitStartPromise = start;
+      try {
+        await start;
+      } finally {
+        if (authKitStartPromise === start) authKitStartPromise = null;
+      }
+    },
+    sessionSignOut: async () => {
+      advanceAuthIntent();
+      let cancellationFailed = false;
+      try {
+        await cancelPendingAuthKit();
+      } catch {
+        cancellationFailed = true;
+        reportMainProcessError("Pending AuthKit authorization cancellation will be retried");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActionsDrain);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationActionsDrain, (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-action IPC sender");
-    }
-    const controller = notificationController;
-    if (controller === null) throw new Error("Native notifications are unavailable");
-    const request = parseBoundedIpcPayload(
-      notificationActionDrainRequestSchema,
-      input,
-      NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
-    );
-    return parseBoundedIpcPayload(
-      notificationActionDrainResponseSchema,
-      controller.rendererReadyAndDrain(event.sender.id, request),
-      NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationActionAcknowledge);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationActionAcknowledge, (event, input: unknown): void => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-action acknowledgement IPC sender");
-    }
-    const controller = notificationController;
-    if (controller === null) throw new Error("Native notifications are unavailable");
-    const acknowledgement = parseBoundedIpcPayload(
-      notificationActionAcknowledgementSchema,
-      input,
-      NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
-    );
-    controller.acknowledgeAction(event.sender.id, acknowledgement);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationState);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationState, (event): NotificationState => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted notification-state IPC sender");
-    if (notificationSettingsController === null) {
-      throw new Error("Notification settings are unavailable");
-    }
-    return parseBoundedIpcPayload(
-      notificationStateSchema,
-      notificationSettingsController.state,
-      NOTIFICATION_STATE_IPC_MAX_BYTES,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationPreferenceSet);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationPreferenceSet, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-preference IPC sender");
-    }
-    if (notificationSettingsController === null) {
-      throw new Error("Notification settings are unavailable");
-    }
-    const controller = notificationSettingsController;
-    const preference = parseBoundedIpcPayload(
-      notificationPreferenceSchema,
-      input,
-      NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
-    );
-    return parseBoundedIpcPayload(
-      notificationStateSchema,
-      await setNotificationPreferenceWithAuthorization({
+      beginSessionReplacement();
+      const state = (await chatSession?.signOut()) ?? { status: "signed-out" as const };
+      const logoutUrl = chatSession?.consumeLogoutUrl() ?? null;
+      if (logoutUrl !== null) {
+        void shell.openExternal(logoutUrl).catch(() => {
+          reportMainProcessError("WorkOS logout page could not be opened");
+        });
+      }
+      if (cancellationFailed && headlessDesktopConfiguration === null) {
+        const content = {
+          type: "warning" as const,
+          message: "Signed out, but secure sign-in cancellation is still pending",
+          detail:
+            "Close any WorkOS sign-in window. Hype Comms will keep retrying the protected cancellation.",
+        };
+        const window = mainWindow;
+        if (window === null || window.isDestroyed()) {
+          await dialog.showMessageBox(content);
+        } else {
+          await dialog.showMessageBox(window, content);
+        }
+      }
+      return state;
+    },
+    notificationContext: (context): NotificationContext => {
+      const controller = notificationController;
+      const scope = notificationScope;
+      if (
+        controller === null ||
+        scope === null ||
+        notificationActiveGeneration !== scope.sessionGeneration
+      ) {
+        return inactiveNotificationContext();
+      }
+      return controller.bindRenderer(context.senderId, rendererSessionGeneration);
+    },
+    notificationActivityUpdate: (context, input): void => {
+      const controller = notificationController;
+      if (controller === null) throw new Error("Native notifications are unavailable");
+      const activity = input;
+      if (!controller.updateActivity(context.senderId, activity)) {
+        throw new Error("Notification activity does not match the active renderer");
+      }
+    },
+    notificationActionsDrain: (context, input) => {
+      const controller = notificationController;
+      if (controller === null) throw new Error("Native notifications are unavailable");
+      const request = input;
+      return controller.rendererReadyAndDrain(context.senderId, request);
+    },
+    notificationActionAcknowledge: (context, input): void => {
+      const controller = notificationController;
+      if (controller === null) throw new Error("Native notifications are unavailable");
+      const acknowledgement = input;
+      controller.acknowledgeAction(context.senderId, acknowledgement);
+    },
+    notificationState: (): NotificationState => {
+      if (notificationSettingsController === null) {
+        throw new Error("Notification settings are unavailable");
+      }
+      return notificationSettingsController.state;
+    },
+    notificationPreferenceSet: async (_context, input) => {
+      if (notificationSettingsController === null) {
+        throw new Error("Notification settings are unavailable");
+      }
+      const controller = notificationSettingsController;
+      const preference = input;
+      return await setNotificationPreferenceWithAuthorization({
         authorization: macosNotificationAuthorization,
         current: controller.state,
         preference,
         refreshCapability: () => controller.refreshCapability(),
         setPreference: (next) => controller.setPreference(next),
-      }),
-      NOTIFICATION_STATE_IPC_MAX_BYTES,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationCapabilityRefresh);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationCapabilityRefresh, async (event) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-capability IPC sender");
-    }
-    if (notificationSettingsController === null) {
-      throw new Error("Notification settings are unavailable");
-    }
-    return parseBoundedIpcPayload(
-      notificationStateSchema,
-      await notificationSettingsController.refreshCapability(),
-      NOTIFICATION_STATE_IPC_MAX_BYTES,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.notificationCaptureActivate);
-  ipcMain.handle(DESKTOP_CHANNELS.notificationCaptureActivate, (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted notification-capture IPC sender");
-    }
-    if (headlessDesktopConfiguration === null || captureNotificationPresenter === null) {
-      throw new Error("Notification capture activation is unavailable");
-    }
-    const request = parseBoundedIpcPayload(
-      notificationCaptureActivationRequestSchema,
-      input,
-      NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-    );
-    return parseBoundedIpcPayload(
-      notificationCaptureActivationResponseSchema,
-      {
+      });
+    },
+    notificationCapabilityRefresh: async () => {
+      if (notificationSettingsController === null) {
+        throw new Error("Notification settings are unavailable");
+      }
+      return await notificationSettingsController.refreshCapability();
+    },
+    notificationCaptureActivate: (_context, input) => {
+      if (headlessDesktopConfiguration === null || captureNotificationPresenter === null) {
+        throw new Error("Notification capture activation is unavailable");
+      }
+      const request = input;
+      return {
         version: 1,
         activated: captureNotificationPresenter.activate(request.captureId),
-      },
-      NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-    );
-  });
+      };
+    },
+    sessionRequestMagicLink: async (_context, request) => {
+      if (chatSession === null) {
+        throw new Error("Chat is not configured");
+      }
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.sessionRequestMagicLink);
-  ipcMain.handle(DESKTOP_CHANNELS.sessionRequestMagicLink, async (event, request: unknown) => {
-    if (!isTrustedIpcSender(event)) {
-      throw new Error("Untrusted magic-link IPC sender");
-    }
-    if (chatSession === null) {
-      throw new Error("Chat is not configured");
-    }
+      try {
+        return await chatSession.requestMagicLink(request);
+      } catch (error) {
+        throw new Error(
+          error instanceof ChatSessionError ? error.message : "Could not request a sign-in link",
+          { cause: error },
+        );
+      }
+    },
+    cacheCryptoInitialize: async () => {
+      if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+      const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+      if (scope === null) throw new Error("Cache access requires a credential-bound session");
+      return cacheCrypto.initialize(scope);
+    },
+    cacheCryptoEncrypt: (_context, input) => {
+      if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+      const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+      const activeScope = cacheCrypto.activeScope;
+      if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+        throw new Error("Cache access requires a credential-bound session");
+      }
+      return cacheCrypto.encrypt(input);
+    },
+    cacheCryptoDecrypt: (_context, input) => {
+      if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
+      const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+      const activeScope = cacheCrypto.activeScope;
+      if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+        throw new Error("Cache access requires a credential-bound session");
+      }
+      return cacheCrypto.decrypt(input);
+    },
+    cacheCryptoReset: async () => {
+      if (cacheCrypto === null) return;
+      const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
+      const activeScope = cacheCrypto.activeScope;
+      if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
+        throw new Error("Cache access requires a credential-bound session");
+      }
+      await cacheCrypto.clear();
+    },
+    workspaceBootstrap: async () => {
+      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+      const scope = notificationScope;
+      const response = await workspaceTransport.bootstrap();
+      if (scope !== null) projectNotificationBootstrap(scope, response);
+      return response;
+    },
 
-    const parsed = requestMagicLinkSchema.safeParse(request);
-    if (!parsed.success) {
-      throw new Error("Enter a valid email address");
-    }
-
-    try {
-      return await chatSession.requestMagicLink(parsed.data);
-    } catch (error) {
-      throw new Error(
-        error instanceof ChatSessionError ? error.message : "Could not request a sign-in link",
-        { cause: error },
+    workspaceFileUpload: async (_context, input) => {
+      const transport = workspaceTransport;
+      if (transport === null) throw new Error("Workspace transport is unavailable");
+      const session = chatSession;
+      if (session === null || session.state.status !== "signed-in") {
+        throw new Error("A signed-in workspace session is required to attach files");
+      }
+      const sessionState = session.state;
+      const uploadScope = attachmentUploadScopeKey(sessionState);
+      const uploadAuthIntentGeneration = authIntentGeneration;
+      const isCurrentUploadScope = (): boolean =>
+        chatSession === session &&
+        workspaceTransport === transport &&
+        authIntentGeneration === uploadAuthIntentGeneration &&
+        attachmentUploadScopeKey(session.state) === uploadScope;
+      const request = input;
+      const window = mainWindow;
+      const selection =
+        window === null || window.isDestroyed()
+          ? await dialog.showOpenDialog(attachmentUploadDialogOptions)
+          : await dialog.showOpenDialog(window, attachmentUploadDialogOptions);
+      return uploadSelectedConversationFiles(
+        selection,
+        request,
+        (conversationId, filePath) =>
+          transport.uploadLocalFile(conversationId, filePath, () =>
+            assertCurrentUploadScope(isCurrentUploadScope),
+          ),
+        isCurrentUploadScope,
       );
-    }
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoInitialize);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoInitialize, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache initialization sender");
-    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
-    if (scope === null) throw new Error("Cache access requires a credential-bound session");
-    return cacheCrypto.initialize(scope);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoEncrypt);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoEncrypt, (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache encryption sender");
-    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
-    const activeScope = cacheCrypto.activeScope;
-    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
-      throw new Error("Cache access requires a credential-bound session");
-    }
-    return cacheCrypto.encrypt(cacheEncryptBatchRequestSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoDecrypt);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoDecrypt, (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache decryption sender");
-    if (cacheCrypto === null) throw new Error("Cache encryption is unavailable");
-    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
-    const activeScope = cacheCrypto.activeScope;
-    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
-      throw new Error("Cache access requires a credential-bound session");
-    }
-    return cacheCrypto.decrypt(cacheDecryptBatchRequestSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.cacheCryptoReset);
-  ipcMain.handle(DESKTOP_CHANNELS.cacheCryptoReset, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted cache reset sender");
-    if (cacheCrypto === null) return;
-    const scope = cacheScopeForSession(chatSession?.cacheAuthorizationState ?? null);
-    const activeScope = cacheCrypto.activeScope;
-    if (scope === null || activeScope === null || !scopesEqual(scope, activeScope)) {
-      throw new Error("Cache access requires a credential-bound session");
-    }
-    await cacheCrypto.clear();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceBootstrap);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceBootstrap, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace bootstrap sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const scope = notificationScope;
-    const response = await workspaceTransport.bootstrap();
-    if (scope !== null) projectNotificationBootstrap(scope, response);
-    return response;
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMembersList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMembersList, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace members sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.members();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceProfileUpdate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceProfileUpdate, async (event, title: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace profile update sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.updateProfile(memberTitleSchema.nullable().parse(title));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted communication paths sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.communicationPaths();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList, async (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollments sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.listAgentEnrollments();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentReview);
-  ipcMain.handle(
-    DESKTOP_CHANNELS.workspaceAgentEnrollmentReview,
-    async (event, enrollmentId: unknown, decision: unknown) => {
-      if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollment review sender");
-      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-      const parsedId = entityIdSchema.parse(enrollmentId);
-      const parsedDecision = reviewAgentEnrollmentRequestSchema.parse({ decision }).decision;
-      return workspaceTransport.reviewAgentEnrollment(parsedId, parsedDecision);
     },
-  );
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel);
-  ipcMain.handle(
-    DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
-    async (event, enrollmentId: unknown) => {
-      if (!isTrustedIpcSender(event)) throw new Error("Untrusted agent enrollment cancel sender");
+    workspaceFileOpen: async (_context, attachmentId) => {
       if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-      return workspaceTransport.cancelAgentEnrollment(entityIdSchema.parse(enrollmentId));
+      const id = attachmentId;
+      const file = await workspaceTransport.downloadFile(id);
+      const safeName = file.fileName.replace(/[\\/]/g, "_");
+      const destination = path.join(tmpdir(), `hype-comms-${id}-${safeName}`);
+      await writeFile(destination, file.bytes);
+      const openError = await shell.openPath(destination);
+      if (openError !== "") {
+        throw new Error(openError);
+      }
+      return { opened: true };
     },
-  );
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationsList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationsList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace conversations sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.conversations(listConversationsQuerySchema.parse(input));
-  });
+    workspaceReadAdvance: async (_context, input) => {
+      if (!shouldAdvanceReadCursor(headlessDesktopConfiguration)) {
+        throw new Error("Read cursors are disabled for headless automation clients");
+      }
+      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+      if (
+        typeof input !== "object" ||
+        input === null ||
+        !("conversationId" in input) ||
+        !("lastReadMessageId" in input)
+      ) {
+        throw new Error("Invalid read-cursor request");
+      }
+      return workspaceTransport.advanceRead(input.conversationId, input.lastReadMessageId);
+    },
 
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessagesList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessagesList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace history sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    if (typeof input !== "object" || input === null || !("conversationId" in input)) {
-      throw new Error("Invalid workspace history request");
-    }
-    const request = input as {
-      readonly conversationId: unknown;
-      readonly before?: unknown;
-      readonly limit?: unknown;
-    };
-    return workspaceTransport.history({
-      conversationId: entityIdSchema.parse(request.conversationId),
-      ...(typeof request.before === "string" ? { before: request.before } : {}),
-      ...(typeof request.limit === "number" ? { limit: request.limit } : {}),
-    });
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageGet);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageGet, async (event, id: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace message sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.messageById(entityIdSchema.parse(id));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageRetract);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageRetract, async (event, id: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace retract sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.retractMessage(entityIdSchema.parse(id));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSearch);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSearch, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace search sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.searchMessages(messageSearchQuerySchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceAttachmentsList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceAttachmentsList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace attachments sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const request = listMessageAttachmentsRequestSchema.parse(input);
-    return workspaceTransport.attachments(request.messageIds);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceConversationFilesList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceConversationFilesList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted conversation files sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    if (
-      typeof input !== "object" ||
-      input === null ||
-      !("conversationId" in input) ||
-      !("query" in input)
-    ) {
-      throw new Error("Invalid conversation files request");
-    }
-    return workspaceTransport.conversationFiles(
-      entityIdSchema.parse(input.conversationId),
-      conversationFilesQuerySchema.parse(input.query),
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileUpload);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileUpload, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file upload sender");
-    const transport = workspaceTransport;
-    if (transport === null) throw new Error("Workspace transport is unavailable");
-    const session = chatSession;
-    if (session === null || session.state.status !== "signed-in") {
-      throw new Error("A signed-in workspace session is required to attach files");
-    }
-    const sessionState = session.state;
-    const uploadScope = attachmentUploadScopeKey(sessionState);
-    const uploadAuthIntentGeneration = authIntentGeneration;
-    const isCurrentUploadScope = (): boolean =>
-      chatSession === session &&
-      workspaceTransport === transport &&
-      authIntentGeneration === uploadAuthIntentGeneration &&
-      attachmentUploadScopeKey(session.state) === uploadScope;
-    const request = attachmentUploadRequestSchema.parse(input);
-    const window = mainWindow;
-    const selection =
-      window === null || window.isDestroyed()
-        ? await dialog.showOpenDialog(attachmentUploadDialogOptions)
-        : await dialog.showOpenDialog(window, attachmentUploadDialogOptions);
-    return uploadSelectedConversationFiles(
-      selection,
-      request,
-      (conversationId, filePath) =>
-        transport.uploadLocalFile(conversationId, filePath, () =>
-          assertCurrentUploadScope(isCurrentUploadScope),
-        ),
-      isCurrentUploadScope,
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceFileOpen);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceFileOpen, async (event, attachmentId: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted file open sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const id = entityIdSchema.parse(attachmentId);
-    const file = await workspaceTransport.downloadFile(id);
-    const safeName = file.fileName.replace(/[\\/]/g, "_");
-    const destination = path.join(tmpdir(), `hype-comms-${id}-${safeName}`);
-    await writeFile(destination, file.bytes);
-    const openError = await shell.openPath(destination);
-    if (openError !== "") {
-      throw new Error(openError);
-    }
-    return { opened: true };
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTasksList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceTasksList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace tasks sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    if (
-      typeof input !== "object" ||
-      input === null ||
-      !("conversationId" in input) ||
-      !("query" in input)
-    ) {
-      throw new Error("Invalid workspace task request");
-    }
-    return workspaceTransport.tasks(
-      entityIdSchema.parse(input.conversationId),
-      taskListQuerySchema.parse(input.query),
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMyTasksList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMyTasksList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted personal tasks sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.myTasks(taskListQuerySchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskCreate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskCreate, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task creation sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.createTask(createTaskOperationSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskUpdate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskUpdate, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task update sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.updateTask(updateTaskOperationSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceTaskMove);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceTaskMove, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted task move sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.moveTask(moveTaskOperationSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageThread);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageThread, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace thread sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.thread(messageThreadRequestSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionsList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionsList, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace reactions sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const request = listMessageReactionsRequestSchema.parse(input);
-    return workspaceTransport.reactions(request.messageIds);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionAdd);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionAdd, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted reaction add sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const target = messageReactionTargetSchema.parse(input);
-    return workspaceTransport.addReaction(target.messageId, target.emoji);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReactionRemove);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceReactionRemove, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted reaction remove sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const target = messageReactionTargetSchema.parse(input);
-    return workspaceTransport.removeReaction(target.messageId, target.emoji);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceMessageSend);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceMessageSend, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace send sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.send(sendMessageOperationSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelCreate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelCreate, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel creation sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.createChannel(createChannelOperationSchema.parse(input));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelArchive);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelArchive, async (event, id: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel archive sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.archiveChannel(entityIdSchema.parse(id), { isArchived: true });
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMembersList);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMembersList, async (event, id: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel members sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.channelMembers(entityIdSchema.parse(id));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMemberUpsert);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMemberUpsert, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel member sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const operation = upsertChannelMemberOperationSchema.parse(value);
-    return workspaceTransport.upsertChannelMember(operation.conversationId, operation.userId, {
-      role: operation.role,
-    });
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceChannelMemberRemove);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceChannelMemberRemove, async (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted channel member sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    const target = channelMemberTargetSchema.parse(value);
-    return workspaceTransport.removeChannelMember(target.conversationId, target.userId);
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceDirectCreate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceDirectCreate, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted direct conversation sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.createDirectConversation(
-      directConversationRequestSchema.parse(input),
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceReadAdvance);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceReadAdvance, async (event, input: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted read-cursor sender");
-    if (!shouldAdvanceReadCursor(headlessDesktopConfiguration)) {
-      throw new Error("Read cursors are disabled for headless automation clients");
-    }
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    if (
-      typeof input !== "object" ||
-      input === null ||
-      !("conversationId" in input) ||
-      !("lastReadMessageId" in input)
-    ) {
-      throw new Error("Invalid read-cursor request");
-    }
-    return workspaceTransport.advanceRead(
-      entityIdSchema.parse(input.conversationId),
-      entityIdSchema.parse(input.lastReadMessageId),
-    );
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceSync);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceSync, async (event, after: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace sync sender");
-    if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-    return workspaceTransport.sync(sequenceSchema.parse(after));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStart);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStart, (event, after: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime start sender");
-    const state = chatSession?.state;
-    if (state?.status !== "signed-in" || state.method !== "email") {
-      throw new Error("A signed-in member session is required for realtime");
-    }
-    if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
-    return workspaceRealtime.prepare({
-      after: sequenceSchema.parse(after),
-      userId: state.userId,
-      workspaceId: state.workspaceId,
-    });
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeActivate);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeActivate, (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime activation sender");
-    if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
-    const scope = realtimeSessionScopeSchema.parse(value);
-    if (!workspaceRealtime.activate(scope)) {
-      throw new Error("The realtime scope was superseded before activation");
-    }
-    macWindowlessRealtimeActive = false;
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeStop);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeStop, (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime stop sender");
-    if (value !== undefined) {
-      workspaceRealtime?.stop(realtimeSessionScopeSchema.parse(value));
-      return;
-    }
-    if (macWindowlessRealtimeActive) {
+    workspaceRealtimeStart: (_context, after) => {
       const state = chatSession?.state;
-      if (state?.status === "signed-in" && state.method === "email") {
-        workspaceRealtime?.enterWindowless({
-          userId: state.userId,
-          workspaceId: state.workspaceId,
-        });
-        return;
+      if (state?.status !== "signed-in" || state.method !== "email") {
+        throw new Error("A signed-in member session is required for realtime");
+      }
+      if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
+      return workspaceRealtime.prepare({
+        after: after,
+        userId: state.userId,
+        workspaceId: state.workspaceId,
+      });
+    },
+    workspaceRealtimeActivate: (_context, value) => {
+      if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
+      const scope = value;
+      if (!workspaceRealtime.activate(scope)) {
+        throw new Error("The realtime scope was superseded before activation");
       }
       macWindowlessRealtimeActive = false;
-    }
-    workspaceRealtime?.stop();
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceRealtimeAcknowledge, (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime acknowledgement sender");
-    workspaceRealtime?.acknowledge(realtimeAcknowledgementSchema.parse(value));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.workspaceActivityTypingSet);
-  ipcMain.handle(DESKTOP_CHANNELS.workspaceActivityTypingSet, (event, value: unknown) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted workspace activity sender");
-    workspaceRealtime?.setTyping(scopedTypingActivityUpdateSchema.parse(value));
-  });
-
-  ipcMain.removeHandler(DESKTOP_CHANNELS.realtimeStateGet);
-  ipcMain.handle(DESKTOP_CHANNELS.realtimeStateGet, (event) => {
-    if (!isTrustedIpcSender(event)) throw new Error("Untrusted realtime state sender");
-    return realtimeState;
-  });
+    },
+    workspaceRealtimeStop: (_context, value) => {
+      if (value !== undefined) {
+        workspaceRealtime?.stop(value);
+        return;
+      }
+      if (macWindowlessRealtimeActive) {
+        const state = chatSession?.state;
+        if (state?.status === "signed-in" && state.method === "email") {
+          workspaceRealtime?.enterWindowless({
+            userId: state.userId,
+            workspaceId: state.workspaceId,
+          });
+          return;
+        }
+        macWindowlessRealtimeActive = false;
+      }
+      workspaceRealtime?.stop();
+    },
+    workspaceRealtimeAcknowledge: (_context, value) => {
+      workspaceRealtime?.acknowledge(value);
+    },
+    workspaceActivityTypingSet: (_context, value) => {
+      workspaceRealtime?.setTyping(value);
+    },
+    realtimeStateGet: () => {
+      return realtimeState;
+    },
+  };
+  disposeIpcInvokes = registerDesktopInvokes(
+    ipcMain,
+    (event: IpcMainInvokeEvent) =>
+      isTrustedIpcSender(event) ? { senderId: event.sender.id } : null,
+    handlers,
+  );
 }
 
 const DEVELOPMENT_RENDERER_LOAD_RETRIES = 30;
@@ -3005,6 +2368,10 @@ if (!hasSingleInstanceLock) {
       authKitStartPromise = null;
     },
     cleanup: () => {
+      disposeIpcInvokes?.();
+      disposeIpcInvokes = null;
+      disposeIpcInitialValues?.();
+      disposeIpcInitialValues = null;
       macWindowlessRealtimeActive = false;
       stopPowerMonitorPresence?.();
       stopPowerMonitorPresence = null;
