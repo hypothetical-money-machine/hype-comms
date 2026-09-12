@@ -350,8 +350,8 @@ describe("PersistentWorkspaceCache", () => {
       delivery: "at_least_once",
       payload: { message, mentionedUserIds: [] },
     };
-    await expect(cache.applyEvent(event)).resolves.toBe(true);
-    await expect(cache.applyEvent(event)).resolves.toBe(false);
+    await expect(cache.applyEvent(event)).resolves.toMatchObject({ status: "applied" });
+    await expect(cache.applyEvent(event)).resolves.toMatchObject({ status: "ignored" });
 
     await cache.enqueue({ ...operation, idempotencyKey: operation.message.clientMessageId });
     await cache.clearServerStatePreservingOutbox();
