@@ -42,7 +42,7 @@ import {
 } from "@hype-comms/contracts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { attachmentsForMessages } from "./attachment-queries.js";
 import { mapAttachment, type AttachmentRow } from "./attachment-records.js";
@@ -189,7 +189,7 @@ function decodeHistoryCursor(cursor: string | undefined): string | null {
     }
     return parsed.sequence;
   } catch {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid history cursor");
+    throw new DomainError("invalid_input", "Invalid history cursor");
   }
 }
 
@@ -248,7 +248,7 @@ function decodeSearchCursor(cursor: string | undefined, queryHash: string): Sear
       id: parsed.id,
     };
   } catch {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid search cursor");
+    throw new DomainError("invalid_input", "Invalid search cursor");
   }
 }
 
@@ -368,7 +368,7 @@ export class WorkspaceMessageOperations {
           throughSequence = through.rows[0]?.conversation_sequence ?? null;
           if (throughSequence === null) {
             // Missing, unauthorized, wrong-conversation, and retracted anchors share one response.
-            throw new ApiError(404, "NOT_FOUND", "Message not found");
+            throw new DomainError("not_found", "Message not found");
           }
         }
 
@@ -493,7 +493,7 @@ export class WorkspaceMessageOperations {
       const root = rootResult.rows[0];
       if (root === undefined) {
         // Missing, unauthorized, and reply-less retracted roots deliberately share one response.
-        throw new ApiError(404, "NOT_FOUND", "Thread not found");
+        throw new DomainError("not_found", "Thread not found");
       }
 
       const beforeSequence = decodeHistoryCursor(before);
@@ -549,7 +549,7 @@ export class WorkspaceMessageOperations {
     const message = result.rows[0];
     if (message === undefined || message.deleted_at !== null) {
       // Missing, unauthorized, and retracted targets deliberately share one response.
-      throw new ApiError(404, "NOT_FOUND", "Message not found");
+      throw new DomainError("not_found", "Message not found");
     }
     const attachments = await this.pool.query<AttachmentRow>(
       `SELECT attachment.*
@@ -577,7 +577,7 @@ export class WorkspaceMessageOperations {
       ids.length !== messageIds.length ||
       ids.length > MESSAGE_HISTORY_MAX_LIMIT
     ) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid reaction message IDs");
+      throw new DomainError("invalid_input", "Invalid reaction message IDs");
     }
     const client = await this.pool.connect();
     try {
@@ -593,7 +593,7 @@ export class WorkspaceMessageOperations {
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       if (visible.rows.length !== ids.length) {
-        throw new ApiError(404, "NOT_FOUND", "One or more messages were not found");
+        throw new DomainError("not_found", "One or more messages were not found");
       }
       const reactions = await client.query<ReactionRow>(
         `SELECT *
@@ -644,16 +644,14 @@ export class WorkspaceMessageOperations {
       );
       const count = counts.rows[0];
       if (Number(count?.member_total ?? "0") >= REACTIONS_PER_MEMBER_PER_MESSAGE_MAX) {
-        throw new ApiError(
-          409,
-          "CONFLICT",
+        throw new DomainError(
+          "conflict",
           `A member can add at most ${REACTIONS_PER_MEMBER_PER_MESSAGE_MAX} reactions to one message`,
         );
       }
       if (Number(count?.total ?? "0") >= REACTIONS_PER_MESSAGE_MAX) {
-        throw new ApiError(
-          409,
-          "CONFLICT",
+        throw new DomainError(
+          "conflict",
           `A message can have at most ${REACTIONS_PER_MESSAGE_MAX} reactions`,
         );
       }
@@ -795,10 +793,10 @@ export class WorkspaceMessageOperations {
     announcementCapability = false,
   ): Promise<SendMessageResponse> {
     if (input.attachmentIds.length !== new Set(input.attachmentIds).size) {
-      throw new ApiError(400, "BAD_REQUEST", "Attachment IDs must be unique");
+      throw new DomainError("invalid_input", "Attachment IDs must be unique");
     }
     if (input.attachmentIds.length > ATTACHMENTS_PER_MESSAGE_MAX) {
-      throw new ApiError(400, "BAD_REQUEST", "A message may include at most 10 files");
+      throw new DomainError("invalid_input", "A message may include at most 10 files");
     }
     const fingerprint = fingerprintMessage(conversationId, input);
     let bulletinAccepted = false;
@@ -821,7 +819,7 @@ export class WorkspaceMessageOperations {
       );
       const conversation = locked.rows[0];
       if (conversation === undefined) {
-        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+        throw new DomainError("not_found", "Conversation not found");
       }
       await this.hooks.afterConversationLocked?.();
 
@@ -842,12 +840,12 @@ export class WorkspaceMessageOperations {
       );
       const principal = workspaceAuthorization.rows[0];
       if (!principal?.workspace_active) {
-        throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
+        throw new DomainError("authentication_required", "Authentication required");
       }
 
       if (principal.kind === "bot") {
         if (identity.principalKind !== "bot") {
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
+          throw new DomainError("authentication_required", "Authentication required");
         }
         const credential = await client.query(
           `SELECT 1
@@ -873,7 +871,7 @@ export class WorkspaceMessageOperations {
           ],
         );
         if (credential.rowCount !== 1) {
-          throw new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled");
+          throw new DomainError("authentication_required", "Webhook URL is invalid or disabled");
         }
       }
 
@@ -929,10 +927,10 @@ export class WorkspaceMessageOperations {
       );
       const access = authorized.rows[0];
       if (access === undefined) {
-        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+        throw new DomainError("not_found", "Conversation not found");
       }
       if (!access.conversation_visible) {
-        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+        throw new DomainError("not_found", "Conversation not found");
       }
       await this.hooks.afterMessageAuthorizationLocked?.();
 
@@ -948,12 +946,11 @@ export class WorkspaceMessageOperations {
       if (replay !== undefined) {
         if (replay.deleted_at !== null) {
           // Retraction wins over delivery idempotency: a retry must not rehydrate retained content.
-          throw new ApiError(404, "NOT_FOUND", "Message not found");
+          throw new DomainError("not_found", "Message not found");
         }
         if (!sameBuffer(replay.request_fingerprint, fingerprint)) {
-          throw new ApiError(
-            409,
-            "CONFLICT",
+          throw new DomainError(
+            "conflict",
             "The client message ID was already used for different content",
           );
         }
@@ -964,7 +961,7 @@ export class WorkspaceMessageOperations {
         });
       }
       if (access.is_archived) {
-        throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+        throw new DomainError("not_found", "Conversation not found");
       }
       if (conversation.channel_mode === "announcement" && input.threadRootId === null) {
         // A built-in channel is published by the server alone. No API principal may write a root
@@ -980,7 +977,7 @@ export class WorkspaceMessageOperations {
             correlationId,
             reason: "built_in_channel",
           });
-          throw new ApiError(403, "FORBIDDEN", "Only Hype Comms posts in this channel");
+          throw new DomainError("access_denied", "Only Hype Comms posts in this channel");
         }
         if (principal.kind !== "human" || principal.role !== "owner") {
           auditAnnouncement(this.hooks, {
@@ -992,7 +989,7 @@ export class WorkspaceMessageOperations {
             correlationId,
             reason: "not_authorized",
           });
-          throw new ApiError(403, "FORBIDDEN", "Only workspace owners can post bulletins");
+          throw new DomainError("access_denied", "Only workspace owners can post bulletins");
         }
         if (!announcementCapability) {
           auditAnnouncement(this.hooks, {
@@ -1004,7 +1001,10 @@ export class WorkspaceMessageOperations {
             correlationId,
             reason: "capability_required",
           });
-          throw new ApiError(403, "FORBIDDEN", "A compatible client is required to post bulletins");
+          throw new DomainError(
+            "access_denied",
+            "A compatible client is required to post bulletins",
+          );
         }
       }
       if (input.threadRootId !== null) {
@@ -1017,7 +1017,7 @@ export class WorkspaceMessageOperations {
           [input.threadRootId, conversationId],
         );
         if (root.rows[0] === undefined) {
-          throw new ApiError(404, "NOT_FOUND", "Thread root not found");
+          throw new DomainError("not_found", "Thread root not found");
         }
       }
       await this.#validateMentions(client, identity, conversation, input);
@@ -1194,7 +1194,7 @@ export class WorkspaceMessageOperations {
         [messageId, identity.currentUser.workspaceId],
       );
       const conversationId = located.rows[0]?.conversation_id;
-      if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+      if (conversationId === undefined) throw new DomainError("not_found", "Message not found");
 
       const conversation = await requireVisibleConversation(
         client,
@@ -1216,9 +1216,9 @@ export class WorkspaceMessageOperations {
         [messageId, conversationId],
       );
       const message = locked.rows[0];
-      if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+      if (message === undefined) throw new DomainError("not_found", "Message not found");
       if (message.author_id !== identity.currentUser.user.id) {
-        throw new ApiError(403, "FORBIDDEN", "Only the author can retract this message");
+        throw new DomainError("access_denied", "Only the author can retract this message");
       }
       if (message.deleted_at !== null) {
         return retractMessageResponseSchema.parse({
@@ -1227,7 +1227,7 @@ export class WorkspaceMessageOperations {
         });
       }
       if (message.retract_window_elapsed) {
-        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+        throw new DomainError("conflict", "This message can no longer be retracted");
       }
 
       const workspaceSequence = await nextWorkspaceSequence(
@@ -1251,7 +1251,7 @@ export class WorkspaceMessageOperations {
       );
       const retracted = updated.rows[0];
       if (retracted === undefined || retracted.deleted_at === null) {
-        throw new ApiError(409, "CONFLICT", "This message can no longer be retracted");
+        throw new DomainError("conflict", "This message can no longer be retracted");
       }
       const tombstone = mapMessage(retracted);
       if (tombstone.deletedAt === null) {
@@ -1294,7 +1294,7 @@ export class WorkspaceMessageOperations {
         [messageId, conversationId],
       );
       const message = target.rows[0];
-      if (message === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+      if (message === undefined) throw new DomainError("not_found", "Message not found");
       const updated = await client.query<ReadCursorRow>(
         `INSERT INTO conversation_read_cursors (
            conversation_id, workspace_id, user_id, last_read_message_id,
@@ -1467,7 +1467,7 @@ export class WorkspaceMessageOperations {
       [attachmentIds, identity.currentUser.workspaceId],
     );
     if (locked.rows.length !== attachmentIds.length) {
-      throw new ApiError(400, "BAD_REQUEST", "One or more attachments were not found");
+      throw new DomainError("invalid_input", "One or more attachments were not found");
     }
     const byId = new Map(locked.rows.map((row) => [row.id, row]));
     const claimed: Attachment[] = [];
@@ -1480,7 +1480,7 @@ export class WorkspaceMessageOperations {
         row.status !== "ready" ||
         row.message_id !== null
       ) {
-        throw new ApiError(400, "BAD_REQUEST", "One or more attachments cannot be attached");
+        throw new DomainError("invalid_input", "One or more attachments cannot be attached");
       }
       claimed.push(mapAttachment(row));
     }
@@ -1489,7 +1489,7 @@ export class WorkspaceMessageOperations {
 
   #reactionEmoji(input: string): ReactionEmoji {
     const parsed = reactionEmojiSchema.safeParse(input);
-    if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction emoji");
+    if (!parsed.success) throw new DomainError("invalid_input", "Invalid reaction emoji");
     return parsed.data;
   }
 
@@ -1506,7 +1506,7 @@ export class WorkspaceMessageOperations {
       [messageId, identity.currentUser.workspaceId],
     );
     const conversationId = target.rows[0]?.conversation_id;
-    if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Message not found");
+    if (conversationId === undefined) throw new DomainError("not_found", "Message not found");
 
     // Locking the conversation serializes reaction capacity checks and prevents an archive or
     // membership removal from committing between authorization and the reaction event audience.
@@ -1526,7 +1526,7 @@ export class WorkspaceMessageOperations {
     );
     const message = messageResult.rows[0];
     if (message === undefined || message.deleted_at !== null) {
-      throw new ApiError(404, "NOT_FOUND", "Message not found");
+      throw new DomainError("not_found", "Message not found");
     }
     return { conversation, message };
   }
@@ -1539,12 +1539,12 @@ export class WorkspaceMessageOperations {
   ): Promise<void> {
     const ids = [...new Set(input.mentionedUserIds)];
     if (ids.length !== input.mentionedUserIds.length) {
-      throw new ApiError(400, "BAD_REQUEST", "Mentioned members must be unique");
+      throw new DomainError("invalid_input", "Mentioned members must be unique");
     }
     if (ids.length === 0) return;
     const audience = new Set(await conversationAudience(client, conversation));
     if (ids.some((id) => !audience.has(id))) {
-      throw new ApiError(400, "BAD_REQUEST", "A mentioned member cannot access this conversation");
+      throw new DomainError("invalid_input", "A mentioned member cannot access this conversation");
     }
     const result = await client.query<UserRow>(
       `SELECT user_account.id, user_account.kind, user_account.username, user_account.display_name,
@@ -1559,11 +1559,11 @@ export class WorkspaceMessageOperations {
       [identity.currentUser.workspaceId, ids],
     );
     if (result.rows.length !== ids.length) {
-      throw new ApiError(400, "BAD_REQUEST", "A mentioned member is unavailable");
+      throw new DomainError("invalid_input", "A mentioned member is unavailable");
     }
     for (const user of result.rows) {
       if (!mentionPattern(user.username).test(input.body)) {
-        throw new ApiError(400, "BAD_REQUEST", `The message does not contain @${user.username}`);
+        throw new DomainError("invalid_input", `The message does not contain @${user.username}`);
       }
     }
   }

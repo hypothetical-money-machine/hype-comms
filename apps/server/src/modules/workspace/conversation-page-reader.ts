@@ -1,6 +1,6 @@
 import { CONVERSATION_PAGE_MAX_LIMIT, type ConversationSummary } from "@hype-comms/contracts";
 import type { PoolClient } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { conversationVisibilitySql } from "./conversation-access.js";
 import { readConversationSummaries } from "./conversation-summary-reader.js";
@@ -38,7 +38,7 @@ export function decodeConversationCursor(cursor: string | undefined): string | n
     }
     return parsed.id;
   } catch {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid conversation cursor");
+    throw new DomainError("invalid_input", "Invalid conversation cursor");
   }
 }
 

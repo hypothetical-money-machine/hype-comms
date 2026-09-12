@@ -10,7 +10,7 @@ import type {
 } from "@hype-comms/contracts";
 
 import { createPool } from "../src/db/pool.js";
-import type { ApiError } from "../src/errors.js";
+import type { DomainError } from "../src/domain-errors.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -409,9 +409,8 @@ describe("message-delivery authorization", () => {
       expect(await sending).toMatchObject({
         status: "rejected",
         reason: {
-          statusCode: 404,
-          code: "NOT_FOUND",
-        } satisfies Partial<ApiError>,
+          kind: "not_found",
+        } satisfies Partial<DomainError>,
       });
       await expectNoSendArtifacts({
         actorUserId: memberId,
@@ -451,9 +450,8 @@ describe("message-delivery authorization", () => {
       expect(await sending).toMatchObject({
         status: "rejected",
         reason: {
-          statusCode: 401,
-          code: "UNAUTHORIZED",
-        } satisfies Partial<ApiError>,
+          kind: "authentication_required",
+        } satisfies Partial<DomainError>,
       });
       await expectNoSendArtifacts({
         actorUserId: memberId,
@@ -614,7 +612,7 @@ describe("message-delivery authorization", () => {
         await revoker.query("COMMIT");
         expect(await revocationFirstSend).toMatchObject({
           status: "rejected",
-          reason: { statusCode: 401, code: "UNAUTHORIZED" } satisfies Partial<ApiError>,
+          reason: { kind: "authentication_required" } satisfies Partial<DomainError>,
         });
       } finally {
         await revoker.query("ROLLBACK");
@@ -657,9 +655,8 @@ describe("message-delivery authorization", () => {
       expect(await sending).toMatchObject({
         status: "rejected",
         reason: {
-          statusCode: 404,
-          code: "NOT_FOUND",
-        } satisfies Partial<ApiError>,
+          kind: "not_found",
+        } satisfies Partial<DomainError>,
       });
       await expectNoSendArtifacts({
         actorUserId: ownerId,
@@ -708,7 +705,7 @@ describe("message-delivery authorization", () => {
           ...input,
           clientMessageId: randomUUID(),
         }),
-      ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+      ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     } finally {
       continueSend.resolve();
       await Promise.allSettled([sending, archiving].filter((promise) => promise !== undefined));
@@ -729,9 +726,8 @@ describe("message-delivery authorization", () => {
     await repository.removeChannelMember(owner, conversationId, memberId);
 
     await expect(repository.sendMessage(member, conversationId, input)).rejects.toMatchObject({
-      statusCode: 404,
-      code: "NOT_FOUND",
-    } satisfies Partial<ApiError>);
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
   });
 
   it("does not replay a committed message after workspace membership revocation", async () => {
@@ -747,9 +743,8 @@ describe("message-delivery authorization", () => {
 
     for (const attempt of [input, { ...input, clientMessageId: randomUUID() }]) {
       await expect(repository.sendMessage(member, generalId, attempt)).rejects.toMatchObject({
-        statusCode: 401,
-        code: "UNAUTHORIZED",
-      } satisfies Partial<ApiError>);
+        kind: "authentication_required",
+      } satisfies Partial<DomainError>);
     }
   });
 

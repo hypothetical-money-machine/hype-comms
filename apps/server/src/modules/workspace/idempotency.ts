@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { PoolClient, QueryResultRow } from "pg";
 
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 
 interface IdempotencyRecordRow extends QueryResultRow {
   readonly request_fingerprint: Buffer;
@@ -86,11 +86,7 @@ export async function runIdempotentMutation<Response>(
   const replay = existing.rows[0];
   if (replay !== undefined) {
     if (!sameFingerprint(replay.request_fingerprint, options.requestFingerprint)) {
-      throw new ApiError(
-        409,
-        "CONFLICT",
-        "The idempotency key was already used for another request",
-      );
+      throw new DomainError("conflict", "The idempotency key was already used for another request");
     }
     if (replay.response_status !== options.responseStatus) {
       throw new Error("Stored idempotency response status does not match the route");
