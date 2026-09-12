@@ -133,7 +133,7 @@ export class WorkspaceRealtime {
   readonly #createSocket: SocketFactory;
   #cursor = "0";
   #scope: RealtimeSessionScope | null = null;
-  #sessionEpoch = 0;
+  readonly #nextSessionEpoch: () => number;
   #connection: ActiveConnection | null = null;
   #ticketEpoch: number | null = null;
   #timer: ReconnectTimer | null = null;
@@ -161,7 +161,9 @@ export class WorkspaceRealtime {
     readonly onDrop?: (reason: RealtimeDropReason) => void;
     /** Test seam. Production always uses the `ws` implementation. */
     readonly createSocket?: SocketFactory;
+    readonly nextSessionEpoch?: () => number;
   }) {
+    this.#nextSessionEpoch = options.nextSessionEpoch ?? createRealtimeEpochAllocator();
     this.#apiOrigin = options.apiOrigin;
     this.#rendererOrigin = options.rendererOrigin;
     this.#transport = options.transport;
@@ -192,13 +194,10 @@ export class WorkspaceRealtime {
       recovery.scope.workspaceId === input.workspaceId &&
       BigInt(input.after) <= BigInt(recovery.cursor);
     this.#retireTransport(!preserveRecovery, false);
-    if (this.#sessionEpoch >= Number.MAX_SAFE_INTEGER) {
-      throw new Error("Realtime session epoch is exhausted");
-    }
     const scope = Object.freeze({
       userId: input.userId,
       workspaceId: input.workspaceId,
-      epoch: ++this.#sessionEpoch,
+      epoch: this.#nextSessionEpoch(),
     });
     this.#scope = scope;
     this.#cursor = input.after;
@@ -950,4 +949,13 @@ function sameRealtimeScope(left: RealtimeSessionScope, right: RealtimeSessionSco
     left.userId === right.userId &&
     left.workspaceId === right.workspaceId
   );
+}
+
+/** Keep one allocator in the application so recreated sessions cannot reuse an IPC epoch. */
+export function createRealtimeEpochAllocator(): () => number {
+  let epoch = 0;
+  return () => {
+    if (epoch >= Number.MAX_SAFE_INTEGER) throw new Error("Realtime session epoch is exhausted");
+    return ++epoch;
+  };
 }

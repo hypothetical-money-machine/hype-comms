@@ -66,106 +66,107 @@ export type WorkspaceInvokeName =
   | "workspaceDirectCreate"
   | "workspaceSync";
 
+export type RunWorkspaceOperation = <T>(
+  operation: (transport: WorkspaceIpcTransport) => Promise<T>,
+) => Promise<T>;
+
 export function createWorkspaceInvokeHandlers(
-  getTransport: () => WorkspaceIpcTransport | null,
+  run: RunWorkspaceOperation,
 ): Pick<DesktopInvokeHandlers, WorkspaceInvokeName> {
-  const transport = (): WorkspaceIpcTransport => {
-    const current = getTransport();
-    if (current === null) throw new Error("Workspace transport is unavailable");
-    return current;
-  };
   return {
     workspaceMembersList: async () => {
-      return transport().members();
+      return run((transport) => transport.members());
     },
     workspaceProfileUpdate: async (_context, title) => {
-      return { user: await transport().updateProfile(title) };
+      return run(async (transport) => ({ user: await transport.updateProfile(title) }));
     },
     workspaceAdminCommunicationPaths: async () => {
-      return transport().communicationPaths();
+      return run((transport) => transport.communicationPaths());
     },
     workspaceAgentEnrollmentsList: async () => {
-      return transport().listAgentEnrollments();
+      return run((transport) => transport.listAgentEnrollments());
     },
     workspaceAgentEnrollmentReview: async (_context, enrollmentId, decision) => {
-      return transport().reviewAgentEnrollment(enrollmentId, decision);
+      return run((transport) => transport.reviewAgentEnrollment(enrollmentId, decision));
     },
     workspaceAgentEnrollmentCancel: async (_context, enrollmentId) => {
-      return transport().cancelAgentEnrollment(enrollmentId);
+      return run((transport) => transport.cancelAgentEnrollment(enrollmentId));
     },
     workspaceConversationsList: async (_context, input) => {
-      return transport().conversations(input);
+      return run((transport) => transport.conversations(input));
     },
     workspaceMessagesList: async (_context, input) => {
-      return transport().history(input);
+      return run((transport) => transport.history(input));
     },
     workspaceMessageGet: async (_context, id) => {
-      return transport().messageById(id);
+      return run((transport) => transport.messageById(id));
     },
     workspaceMessageRetract: async (_context, id) => {
-      return transport().retractMessage(id);
+      return run((transport) => transport.retractMessage(id));
     },
     workspaceMessageSearch: async (_context, input) => {
-      return transport().searchMessages(input);
+      return run((transport) => transport.searchMessages(input));
     },
     workspaceAttachmentsList: async (_context, input) => {
-      return transport().attachments(input.messageIds);
+      return run((transport) => transport.attachments(input.messageIds));
     },
     workspaceConversationFilesList: async (_context, input) => {
-      return transport().conversationFiles(input.conversationId, input.query);
+      return run((transport) => transport.conversationFiles(input.conversationId, input.query));
     },
     workspaceTasksList: async (_context, input) => {
-      return transport().tasks(input.conversationId, input.query);
+      return run((transport) => transport.tasks(input.conversationId, input.query));
     },
     workspaceMyTasksList: async (_context, input) => {
-      return transport().myTasks(input);
+      return run((transport) => transport.myTasks(input));
     },
     workspaceTaskCreate: async (_context, input) => {
-      return transport().createTask(input);
+      return run((transport) => transport.createTask(input));
     },
     workspaceTaskUpdate: async (_context, input) => {
-      return transport().updateTask(input);
+      return run((transport) => transport.updateTask(input));
     },
     workspaceTaskMove: async (_context, input) => {
-      return transport().moveTask(input);
+      return run((transport) => transport.moveTask(input));
     },
     workspaceMessageThread: async (_context, input) => {
-      return transport().thread(input);
+      return run((transport) => transport.thread(input));
     },
     workspaceReactionsList: async (_context, input) => {
-      return transport().reactions(input.messageIds);
+      return run((transport) => transport.reactions(input.messageIds));
     },
     workspaceReactionAdd: async (_context, input) => {
-      return transport().addReaction(input.messageId, input.emoji);
+      return run((transport) => transport.addReaction(input.messageId, input.emoji));
     },
     workspaceReactionRemove: async (_context, input) => {
-      return transport().removeReaction(input.messageId, input.emoji);
+      return run((transport) => transport.removeReaction(input.messageId, input.emoji));
     },
     workspaceMessageSend: async (_context, input) => {
-      return transport().send(input);
+      return run((transport) => transport.send(input));
     },
     workspaceChannelCreate: async (_context, input) => {
-      return transport().createChannel(input);
+      return run((transport) => transport.createChannel(input));
     },
     workspaceChannelArchive: async (_context, id) => {
-      return transport().archiveChannel(id, { isArchived: true });
+      return run((transport) => transport.archiveChannel(id, { isArchived: true }));
     },
     workspaceChannelMembersList: async (_context, id) => {
-      return transport().channelMembers(id);
+      return run((transport) => transport.channelMembers(id));
     },
     workspaceChannelMemberUpsert: async (_context, value) => {
-      return transport().upsertChannelMember(value.conversationId, value.userId, {
-        role: value.role,
-      });
+      return run((transport) =>
+        transport.upsertChannelMember(value.conversationId, value.userId, {
+          role: value.role,
+        }),
+      );
     },
     workspaceChannelMemberRemove: async (_context, value) => {
-      return transport().removeChannelMember(value.conversationId, value.userId);
+      return run((transport) => transport.removeChannelMember(value.conversationId, value.userId));
     },
     workspaceDirectCreate: async (_context, input) => {
-      return transport().createDirectConversation(input);
+      return run((transport) => transport.createDirectConversation(input));
     },
     workspaceSync: async (_context, after) => {
-      return transport().sync(after);
+      return run((transport) => transport.sync(after));
     },
   };
 }
