@@ -1,3 +1,4 @@
+import { readWorkspacePosition } from "./workspace-sequence.js";
 import {
   ATTACHMENT_MAX_BYTES,
   completeFileUploadResponseSchema,
@@ -279,15 +280,16 @@ export class WorkspaceAttachmentOperations {
     before: string | undefined,
     limit: number,
   ): Promise<ConversationFilesResponse> {
-    const client = await this.pool.connect();
-    try {
-      await requireVisibleConversation(client, identity, conversationId, false);
-      const cursor = decodeFilesCursor(before);
-      if (before !== undefined && cursor === null) {
-        throw new DomainError("invalid_input", "Invalid files cursor");
-      }
-      const result = await client.query<AttachmentRow>(
-        `SELECT attachment.*
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        await requireVisibleConversation(client, identity, conversationId, false);
+        const cursor = decodeFilesCursor(before);
+        if (before !== undefined && cursor === null) {
+          throw new DomainError("invalid_input", "Invalid files cursor");
+        }
+        const result = await client.query<AttachmentRow>(
+          `SELECT attachment.*
            FROM attachments AS attachment
            JOIN messages AS message ON message.id = attachment.message_id
           WHERE attachment.conversation_id = $1
@@ -302,28 +304,29 @@ export class WorkspaceAttachmentOperations {
             )
           ORDER BY attachment.created_at DESC, attachment.id DESC
           LIMIT $5`,
-        [
-          conversationId,
-          identity.currentUser.workspaceId,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          Math.min(limit, CONVERSATION_FILES_MAX_LIMIT) + 1,
-        ],
-      );
-      const hasMore = result.rows.length > limit;
-      const selected = result.rows.slice(0, limit);
-      const oldest = selected.at(-1);
-      return conversationFilesResponseSchema.parse({
-        files: selected.map(mapAttachment),
-        nextCursor:
-          hasMore && oldest !== undefined
-            ? encodeFilesCursor(iso(oldest.created_at), oldest.id)
-            : null,
-        hasMore,
-      });
-    } finally {
-      client.release();
-    }
+          [
+            conversationId,
+            identity.currentUser.workspaceId,
+            cursor?.createdAt ?? null,
+            cursor?.id ?? null,
+            Math.min(limit, CONVERSATION_FILES_MAX_LIMIT) + 1,
+          ],
+        );
+        const hasMore = result.rows.length > limit;
+        const selected = result.rows.slice(0, limit);
+        const oldest = selected.at(-1);
+        return conversationFilesResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          files: selected.map(mapAttachment),
+          nextCursor:
+            hasMore && oldest !== undefined
+              ? encodeFilesCursor(iso(oldest.created_at), oldest.id)
+              : null,
+          hasMore,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listMessageAttachments(
