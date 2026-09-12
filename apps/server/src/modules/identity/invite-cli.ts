@@ -1,3 +1,4 @@
+import { parseAdminArguments } from "../../cli/arguments.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -36,27 +37,16 @@ class CapturingEmailSender implements EmailSender {
 }
 
 export function parseInviteArguments(argv: readonly string[]): InviteArguments {
-  let email: string | undefined;
-  let role: string | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index];
-    if (flag !== "--email" && flag !== "--role") {
-      throw new Error(`Unknown argument: ${flag ?? ""}\n${USAGE}`);
-    }
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error(`Missing value for ${flag}\n${USAGE}`);
-    }
-    if (flag === "--email") {
-      if (email !== undefined) throw new Error(`--email may only be specified once\n${USAGE}`);
-      email = value;
-    } else if (flag === "--role") {
-      if (role !== undefined) throw new Error(`--role may only be specified once\n${USAGE}`);
-      role = value;
-    }
-    index += 1;
-  }
+  const {
+    values: { email, role },
+  } = parseAdminArguments(
+    argv,
+    {
+      email: { type: "string" },
+      role: { type: "string" },
+    },
+    USAGE,
+  );
 
   if (email === undefined) throw new Error(`--email is required\n${USAGE}`);
   const emailResult = emailSchema.safeParse(email);

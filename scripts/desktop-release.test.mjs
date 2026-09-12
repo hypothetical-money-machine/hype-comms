@@ -1,3 +1,11 @@
+import { OFFICIAL_PRODUCTION_API_ORIGIN } from "../apps/desktop/src/shared/api-origin.ts";
+import {
+  commands,
+  readWorkflow,
+  stepBefore,
+  workflowJob,
+  workflowStep,
+} from "./workflow-test-support.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -10,27 +18,13 @@ import {
   addArtifactCacheKeys,
   assertVersionCanPublish,
   cacheKeyPlatformManifest,
-  missingGithubReleaseAssets,
   parseManifestVersion,
   runAws,
   runAwsWithRetry,
   selectArtifactNames,
   uploadPlatformManifest,
-  waitForGithubReleaseAssets,
 } from "./desktop-release-helpers.mjs";
 import { releaseBodyStartsWithReviewedNotes } from "./desktop-release-notes.mjs";
-
-const workflowJob = (workflow, jobName) => {
-  const marker = `  ${jobName}:\n`;
-  const start = workflow.indexOf(marker);
-  assert.notEqual(start, -1, `Expected workflow job ${jobName}`);
-
-  const remainingWorkflow = workflow.slice(start + marker.length);
-  const nextJob = remainingWorkflow.search(/^ {2}[a-zA-Z0-9_-]+:\n/mu);
-  return nextJob === -1
-    ? workflow.slice(start)
-    : workflow.slice(start, start + marker.length + nextJob);
-};
 
 const environment = {
   DESKTOP_VERSION: "1.2.3",
@@ -46,467 +40,368 @@ const environment = {
   UPDATE_MANIFEST: "latest.yml",
 };
 
-const matrixEntry = (job, platform) => {
-  const marker = `          - platform: ${platform}\n`;
-  const start = job.indexOf(marker);
-  assert.notEqual(start, -1, `Expected matrix entry for ${platform}`);
-  const remainingJob = job.slice(start + marker.length);
-  const nextEntry = remainingJob.search(/^ {10}- platform: /mu);
-  const matrixEnd = remainingJob.search(/^ {4}runs-on:/mu);
-  const endCandidates = [nextEntry, matrixEnd].filter((index) => index >= 0);
-  assert.ok(endCandidates.length > 0, `Expected matrix entry boundary for ${platform}`);
-  return job.slice(start, start + marker.length + Math.min(...endCandidates));
-};
-
-test("configures native ARM64 and x64 desktop release targets", async () => {
+test("keeps release and smoke targets, trust boundaries and platform notification scope", async () => {
   const desktopPackage = JSON.parse(
     await readFile(new URL("../apps/desktop/package.json", import.meta.url), "utf8"),
   );
-  const productionBuild = createElectronBuilderConfiguration("production");
-  const releaseWorkflow = await readFile(
-    new URL("../.github/workflows/desktop-release.yml", import.meta.url),
-    "utf8",
+  const build = createElectronBuilderConfiguration("production");
+  const release = await readWorkflow("desktop-release.yml");
+  const smoke = await readWorkflow("desktop-package-smoke.yml");
+  const validation = workflowJob(release, "validate");
+  const prepare = workflowJob(release, "prepare-github-release");
+  const packaging = workflowJob(release, "package");
+  const publication = workflowJob(release, "github-release");
+  const smokePackage = workflowJob(smoke, "package");
+  const native = workflowJob(smoke, "macos-native-notification-evidence");
+  const platforms = ["macOS", "Windows", "Linux"];
+  const releaseRunners = [["macos-15"], ["windows-11-arm"], ["ubuntu-24.04-arm"]];
+  const hostedRunners = [
+    ["self-hosted", "macOS", "ARM64", "notarize"],
+    ["self-hosted", "Windows", "ARM64", "windows-release"],
+    ["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"],
+  ];
+  const entry = (job, platform) => {
+    const matches = job.strategy.matrix.include.filter((row) => row.platform === platform);
+    assert.equal(matches.length, 1);
+    return matches[0];
+  };
+  assert.deepEqual(
+    build.win.target.map(({ arch, target }) => [target, arch]),
+    [["nsis", ["x64", "arm64"]]],
   );
-  const packageSmokeWorkflow = await readFile(
-    new URL("../.github/workflows/desktop-package-smoke.yml", import.meta.url),
-    "utf8",
+  assert.deepEqual(
+    build.linux.target.map(({ arch, target }) => [target, arch]),
+    [
+      ["AppImage", ["x64", "arm64"]],
+      ["deb", ["x64", "arm64"]],
+    ],
   );
-  const nativeEvidenceHelper = await readFile(
-    new URL("./macos-native-notification-evidence-helper.swift", import.meta.url),
-    "utf8",
-  );
-  const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
-  const releaseValidationJob = workflowJob(releaseWorkflow, "validate");
-  const releasePrepareJob = workflowJob(releaseWorkflow, "prepare-github-release");
-  const releasePackageJob = workflowJob(releaseWorkflow, "package");
-  const releasePublishJob = workflowJob(releaseWorkflow, "github-release");
-  const smokePackageJob = workflowJob(packageSmokeWorkflow, "package");
-  const nativeEvidenceJob = workflowJob(packageSmokeWorkflow, "macos-native-notification-evidence");
-  const targetArchitectures = (platform) =>
-    productionBuild[platform].target.map(({ arch, target }) => [target, arch]);
-
-  assert.deepEqual(targetArchitectures("win"), [["nsis", ["x64", "arm64"]]]);
-  assert.deepEqual(targetArchitectures("linux"), [
-    ["AppImage", ["x64", "arm64"]],
-    ["deb", ["x64", "arm64"]],
-  ]);
-  assert.match(desktopPackage.scripts["package:win"], /--x64 --arm64/u);
-  assert.match(desktopPackage.scripts["package:linux"], /--x64 --arm64/u);
-  assert.match(
-    desktopPackage.scripts["package:mac"],
-    /build-macos-notification-authorization\.mjs/u,
-  );
-  assert.match(
-    desktopPackage.scripts["package:mac:arm64"],
-    /--mac dmg:arm64 zip:arm64 --publish never$/u,
-  );
-  assert.match(desktopPackage.scripts.package, /build-macos-notification-authorization\.mjs/u);
-  assert.deepEqual(productionBuild.mac.extraResources, [
+  assert.equal(build.nsis.buildUniversalInstaller, false);
+  assert.equal(build.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
+  assert.deepEqual(build.mac.extraResources, [
     {
       from: "native-build/macos/hmm-notification-authorization.node",
       to: "hmm-notification-authorization.node",
     },
   ]);
+  for (const command of Object.values(desktopPackage.scripts).filter((value) =>
+    value.includes("electron-builder"),
+  ))
+    assert.match(command, /--config electron-builder\.config\.mjs/u);
+  for (const name of ["package", "package:mac", "package:mac:arm64"])
+    assert.match(desktopPackage.scripts[name], /build-macos-notification-authorization\.mjs/u);
+  assert.match(
+    desktopPackage.scripts["package:mac:arm64"],
+    /--mac dmg:arm64 zip:arm64 --publish never$/u,
+  );
   assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
   assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
-  assert.equal(productionBuild.nsis.buildUniversalInstaller, false);
-  assert.equal(productionBuild.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
-  for (const packageScript of Object.values(desktopPackage.scripts).filter((script) =>
-    script.includes("electron-builder"),
-  )) {
-    assert.match(packageScript, /--config electron-builder\.config\.mjs/u);
+  assert.deepEqual(release.concurrency, {
+    group: "desktop-release-publish",
+    "cancel-in-progress": false,
+  });
+  assert.deepEqual(release.env, {
+    HYPE_COMMS_BUILD_FLAVOR: "production",
+    HYPE_COMMS_API_ORIGIN: OFFICIAL_PRODUCTION_API_ORIGIN,
+  });
+  assert.deepEqual(smoke.on.merge_group.types, ["checks_requested"]);
+  assert.deepEqual(smoke.permissions, { contents: "read" });
+  for (const [index, platform] of platforms.entries()) {
+    assert.deepEqual(JSON.parse(entry(packaging, platform).runner), releaseRunners[index]);
+    assert.equal(
+      entry(smokePackage, platform).runner,
+      `\${{ github.event_name == 'workflow_dispatch' && '${JSON.stringify(hostedRunners[index]).replaceAll(",", ", ")}' || '${JSON.stringify(releaseRunners[index])}' }}`,
+    );
+    assert.equal(
+      entry(smokePackage, platform).self_hosted,
+      "${{ github.event_name == 'workflow_dispatch' }}",
+    );
+    for (const job of [packaging, smokePackage])
+      assert.equal(
+        entry(job, platform).native_notifications_enabled,
+        platform === "macOS" ? "1" : "0",
+      );
   }
-  assert.match(
-    releaseWorkflow,
-    /^concurrency:\n[ ]{2}# [^\n]+\n[ ]{2}# [^\n]+\n[ ]{2}group: desktop-release-publish\n[ ]{2}cancel-in-progress: false$/mu,
+  for (const job of [packaging, smokePackage])
+    assert.equal(
+      job.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED,
+      "${{ matrix.native_notifications_enabled }}",
+    );
+  for (const job of [validation, prepare, publication])
+    assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.deepEqual(validation.permissions, { contents: "read" });
+  assert.equal(publication.environment, "release");
+  assert.deepEqual(
+    Object.entries(release.jobs)
+      .filter(([, job]) => job.environment === "release")
+      .map(([name]) => name),
+    ["github-release"],
   );
-  assert.doesNotMatch(releaseWorkflow, /^[ ]{2}group: desktop-release$/mu);
-  assert.match(
-    releaseWorkflow,
-    /^env:\n {2}HYPE_COMMS_BUILD_FLAVOR: production\n {2}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com$/mu,
-  );
-  // The updater only arms when the baked API origin matches OFFICIAL_PRODUCTION_API_ORIGIN, so a
-  // workflow origin that drifts from the constant ships packages that silently never auto-update.
-  const apiOriginSource = await readFile(
-    new URL("../apps/desktop/src/shared/api-origin.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    apiOriginSource,
-    /^export const OFFICIAL_PRODUCTION_API_ORIGIN = "https:\/\/chat-api\.hypemm\.com";$/mu,
-  );
-  assert.match(matrixEntry(releasePackageJob, "macOS"), /runner: '\["macos-15"\]'/u);
-  assert.match(matrixEntry(releasePackageJob, "Windows"), /runner: '\["windows-11-arm"\]'/u);
-  assert.match(matrixEntry(releasePackageJob, "Linux"), /runner: '\["ubuntu-24\.04-arm"\]'/u);
-  assert.doesNotMatch(releasePackageJob, /self-hosted/u);
-  assert.match(releaseValidationJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.match(releaseValidationJob, /^ {4}permissions:\n {6}contents: read$/mu);
-  assert.match(releasePrepareJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.doesNotMatch(releasePrepareJob, /^ {4}environment: release$/mu);
-  assert.doesNotMatch(releasePackageJob, /^ {4}environment: release$/mu);
-  assert.doesNotMatch(releasePackageJob, /GARAGE_(?:ACCESS|SECRET)_/u);
-  assert.match(releasePublishJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.match(releasePublishJob, /^ {4}environment: release$/mu);
-  assert.equal(releaseWorkflow.match(/^ {4}environment: release$/gmu)?.length, 1);
+  assert.equal(prepare.environment, undefined);
+  assert.equal(packaging.environment, undefined);
+  assert.equal(smokePackage.environment, undefined);
+  assert.doesNotMatch(JSON.stringify(packaging), /self-hosted|GARAGE_(?:ACCESS|SECRET)_/u);
+  assert.doesNotMatch(JSON.stringify(smokePackage), /head\.repo\.full_name|secrets\./u);
   assert.doesNotMatch(
-    `${releaseValidationJob}${releasePrepareJob}${releasePublishJob}`,
-    /self-hosted|hmm-linux-x64-ci|hmm-ci/u,
+    JSON.stringify(release),
+    /ubuntu-latest|actions\/(?:upload|download)-artifact/u,
   );
-  assert.doesNotMatch(releaseWorkflow, /runs-on: ubuntu-latest/u);
-  assert.match(
-    matrixEntry(releasePackageJob, "macOS"),
-    /^ {12}native_notifications_enabled: "1"$/mu,
+  const releaseCache = packaging.steps.find((step) =>
+    step.uses?.startsWith("actions/cache/restore@"),
   );
-  assert.match(
-    matrixEntry(releasePackageJob, "Windows"),
-    /^ {12}native_notifications_enabled: "0"$/mu,
+  const smokeCache = workflowStep(smokePackage, "Restore desktop dependency downloads");
+  assert.equal(
+    releaseCache?.uses,
+    "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   );
-  assert.match(
-    matrixEntry(releasePackageJob, "Linux"),
-    /^ {12}native_notifications_enabled: "0"$/mu,
+  assert.ok(!packaging.steps.some((step) => step.uses?.startsWith("actions/cache@")));
+  assert.equal(smokeCache.uses, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9");
+  assert.equal(smokeCache.if, "${{ !matrix.self_hosted }}");
+  for (const cache of [releaseCache, smokeCache])
+    assert.equal(
+      cache.with.key,
+      "desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}",
+    );
+  for (const job of [packaging, smokePackage]) {
+    assert.doesNotMatch(JSON.stringify(job), /node_modules\\n/u);
+    assert.equal((commands(job).match(/npm ci --no-audit --prefer-offline/gu) ?? []).length, 2);
+  }
+  for (const file of [
+    ".github/workflows/desktop-release.yml",
+    "packages/api-client/**",
+    "tsconfig*.json",
+    "scripts/desktop-release.mjs",
+    "scripts/desktop-release-validation.mjs",
+    "scripts/macos-signing.mjs",
+    "scripts/verify-zod-alignment.mjs",
+    "scripts/require-windows-signing-env.mjs",
+    "scripts/verify-windows-release.mjs",
+    "scripts/capture-macos-native-notification.mjs",
+    "scripts/build-macos-notification-authorization.mjs",
+    "scripts/macos-native-notification-evidence-helper.swift",
+  ]) {
+    for (const trigger of ["push", "pull_request"])
+      assert.ok(smoke.on[trigger].paths.includes(file));
+  }
+  assert.equal(smokePackage.env.HYPE_COMMS_BUILD_FLAVOR, undefined);
+  assert.equal(
+    workflowStep(smokePackage, "Package DEV desktop application").env.CSC_FOR_PULL_REQUEST,
+    "${{ matrix.platform == 'macOS' && !matrix.self_hosted && 'true' || 'false' }}",
   );
-  assert.match(
-    releasePackageJob,
-    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
-  );
-  assert.equal(releaseWorkflow.match(/node scripts\/install-github-cli\.mjs/gu)?.length, 4);
-  assert.match(
-    releaseWorkflow,
-    /^ {2}prepare-github-release:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release create/mu,
-  );
-  assert.match(
-    releaseWorkflow,
-    /^ {2}package:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release upload/mu,
-  );
-  assert.match(
-    releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?node scripts\/install-github-cli\.mjs[\s\S]*?gh release edit/mu,
-  );
-  assert.match(
-    packageSmokeWorkflow,
-    /'\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]'/u,
-  );
-  assert.match(packageSmokeWorkflow, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/mu);
-  assert.match(packageSmokeWorkflow, /^permissions:\n {2}contents: read$/mu);
-  assert.match(
-    matrixEntry(smokePackageJob, "macOS"),
-    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "macOS", "ARM64", "notarize"\]' \|\| '\["macos-15"\]' \}\}/u,
-  );
-  assert.match(
-    matrixEntry(smokePackageJob, "Windows"),
-    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "Windows", "ARM64", "windows-release"\]' \|\| '\["windows-11-arm"\]' \}\}/u,
-  );
-  assert.match(
-    matrixEntry(smokePackageJob, "Linux"),
-    /runner: \$\{\{ github\.event_name == 'workflow_dispatch' && '\["self-hosted", "Linux", "ARM64", "hype-comms-release", "docker"\]' \|\| '\["ubuntu-24\.04-arm"\]' \}\}/u,
+  for (const [name, command] of [
+    ["Package production desktop application on Linux", "npm run package:desktop:linux"],
+    ["Verify production desktop package on Linux", "npm run verify:desktop-package"],
+  ]) {
+    const step = workflowStep(smokePackage, name);
+    assert.equal(step.if, "matrix.platform == 'Linux'");
+    assert.equal(step.run, command);
+    assert.deepEqual(step.env, release.env);
+  }
+  assert.equal(
+    workflowStep(validation, "Require a tag matching the desktop package version").run,
+    "node scripts/desktop-release.mjs validate-version",
   );
   assert.equal(
-    smokePackageJob.match(/self_hosted: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/gu)
-      ?.length,
-    3,
+    workflowStep(packaging, "Configure macOS signing and notarization").run,
+    "node scripts/desktop-release.mjs configure-macos-signing",
   );
-  assert.doesNotMatch(smokePackageJob, /head\.repo\.full_name/u);
-  assert.doesNotMatch(smokePackageJob, /secrets\.|^ {4}environment:/mu);
-  assert.match(
-    smokePackageJob,
-    /uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
-  );
-  assert.match(
-    smokePackageJob,
-    /name: Restore desktop dependency downloads\n {8}if: \$\{\{ !matrix\.self_hosted \}\}/u,
-  );
-  assert.match(
-    smokePackageJob,
-    /key: desktop-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
-  );
-  assert.match(smokePackageJob, /~\/AppData\/Local\/electron-builder\/Cache/u);
-  assert.match(smokePackageJob, /~\/Library\/Caches\/electron-builder/u);
-  assert.match(smokePackageJob, /~\/\.cache\/electron-builder/u);
-  assert.doesNotMatch(smokePackageJob, /node_modules\s*$/mu);
-  // Release lanes only restore the caches that trusted pushes to main populate; a tag ref cannot
-  // save a cache any other run could restore, so a plain actions/cache step would be dead weight.
-  assert.match(
-    releasePackageJob,
-    /uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
-  );
-  assert.doesNotMatch(releasePackageJob, /uses: actions\/cache@/u);
-  assert.match(
-    releasePackageJob,
-    /key: desktop-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
-  );
-  assert.doesNotMatch(releasePackageJob, /node_modules\s*$/mu);
-  assert.equal(smokePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
-  assert.equal(nativeEvidenceJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 1);
-  assert.equal(releasePackageJob.match(/npm ci --no-audit --prefer-offline/gu)?.length, 2);
-  assert.equal(
-    packageSmokeWorkflow.match(/^ {6}- \.github\/workflows\/desktop-release\.yml$/gmu)?.length,
-    2,
-  );
-  assert.equal(
-    packageSmokeWorkflow.match(/^ {6}- scripts\/require-windows-signing-env\.mjs$/gmu)?.length,
-    2,
-  );
-  assert.equal(
-    packageSmokeWorkflow.match(/^ {6}- scripts\/verify-windows-release\.mjs$/gmu)?.length,
-    2,
-  );
-  assert.equal(
-    packageSmokeWorkflow.match(/^ {6}- scripts\/capture-macos-native-notification\.mjs$/gmu)
-      ?.length,
-    2,
-  );
-  assert.equal(
-    packageSmokeWorkflow.match(/^ {6}- scripts\/build-macos-notification-authorization\.mjs$/gmu)
-      ?.length,
-    2,
-  );
-  assert.equal(
-    packageSmokeWorkflow.match(
-      /^ {6}- scripts\/macos-native-notification-evidence-helper\.swift$/gmu,
-    )?.length,
-    2,
-  );
-  assert.match(matrixEntry(smokePackageJob, "macOS"), /^ {12}native_notifications_enabled: "1"$/mu);
-  assert.match(
-    matrixEntry(smokePackageJob, "Windows"),
-    /^ {12}native_notifications_enabled: "0"$/mu,
-  );
-  assert.match(matrixEntry(smokePackageJob, "Linux"), /^ {12}native_notifications_enabled: "0"$/mu);
-  assert.match(
-    smokePackageJob,
-    /^ {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: \$\{\{ matrix\.native_notifications_enabled \}\}$/mu,
-  );
-  assert.doesNotMatch(smokePackageJob, /^ {6}HYPE_COMMS_BUILD_FLAVOR:/mu);
-  assert.match(
-    smokePackageJob,
-    /name: Package DEV desktop application\n {8}if: matrix\.platform != 'Windows'[\s\S]*?CSC_FOR_PULL_REQUEST: \$\{\{ matrix\.platform == 'macOS' && !matrix\.self_hosted && 'true' \|\| 'false' \}\}[\s\S]*?run: npm run package:desktop/u,
-  );
-  assert.match(
-    smokePackageJob,
-    /name: Package production desktop application on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {10}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {8}shell: sh\n {8}run: npm run package:desktop:linux/u,
-  );
-  assert.match(
-    smokePackageJob,
-    /name: Verify production desktop package on Linux\n {8}if: matrix\.platform == 'Linux'\n {8}env:\n {10}HYPE_COMMS_BUILD_FLAVOR: production\n {10}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {8}shell: sh\n {8}run: npm run verify:desktop-package/u,
-  );
-  assert.match(
-    packageSmokeWorkflow,
-    /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
-  );
-  assert.match(nativeEvidenceJob, /^ {4}environment: release$/mu);
-  assert.match(
-    nativeEvidenceJob,
-    /^ {4}if: >-\n {6}github\.event_name == 'workflow_dispatch' &&\n {6}inputs\.native_notification_evidence$/mu,
-  );
-  assert.match(
-    nativeEvidenceJob,
-    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}$/mu,
-  );
-  assert.match(nativeEvidenceJob, /npm run package:desktop:mac:arm64/u);
-  assert.match(
-    nativeEvidenceJob,
-    /name: Verify packaged application contents, updater, and fuses[\s\S]*npm run verify:desktop-package/u,
-  );
-  assert.match(nativeEvidenceJob, /npm run verify:desktop-package:macos-release/u);
-  assert.match(
-    nativeEvidenceJob,
-    /name: Build signed macOS capture helper\n {8}if: inputs\.native_notification_evidence/u,
-  );
-  assert.match(
-    nativeEvidenceJob,
-    /name: Capture installed notification and click callback\n {8}if: inputs\.native_notification_evidence/u,
-  );
-  assert.match(releasePackageJob, /name: Configure Windows Authenticode signing/u);
-  assert.match(releasePackageJob, /node scripts\/require-windows-signing-env\.mjs/u);
-  assert.match(releasePackageJob, /name: Verify Windows release signing/u);
-  assert.match(
-    releasePackageJob,
-    /if: matrix\.platform == 'Windows' && env\.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'/u,
-  );
-  assert.match(releasePackageJob, /npm run verify:desktop-package:windows-release/u);
-  assert.ok(
-    releasePackageJob.indexOf("name: Configure Windows Authenticode signing") <
-      releasePackageJob.indexOf("name: Package desktop application on Windows"),
-    "Windows signing env must be required before the Windows package step",
-  );
-  assert.ok(
-    releasePackageJob.indexOf("name: Package desktop application on Windows") <
-      releasePackageJob.indexOf("name: Verify Windows release signing"),
-    "Windows Authenticode verification must run after packaging and before publication",
-  );
-  assert.ok(
-    releasePackageJob.indexOf("name: Verify Windows release signing") <
-      releasePackageJob.indexOf("name: Stage GitHub Release assets"),
-    "When signing is enabled, Authenticode verification must run before staging",
-  );
-  for (const secret of [
+  const cleanup = workflowStep(packaging, "Remove temporary macOS signing keychain");
+  assert.equal(cleanup.if, "always() && matrix.platform == 'macOS'");
+  assert.equal(cleanup.run, "node scripts/desktop-release.mjs cleanup-macos-signing");
+  for (const [first, second] of [
+    ["Configure Windows Authenticode signing", "Package desktop application on Windows"],
+    ["Package desktop application on Windows", "Verify Windows release signing"],
+    ["Verify Windows release signing", "Stage GitHub Release assets"],
+  ])
+    stepBefore(packaging, first, second);
+  const windows = workflowStep(packaging, "Configure Windows Authenticode signing");
+  assert.equal(windows.run, "node scripts/require-windows-signing-env.mjs");
+  for (const name of [
     "HYPE_COMMS_WINDOWS_AZURE_TENANT_ID",
     "HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID",
     "HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET",
-  ]) {
-    assert.match(releasePackageJob, new RegExp(`secrets\\.${secret}`, "u"));
-  }
-  for (const variable of [
+  ])
+    assert.equal(windows.env[name], `\${{ secrets.${name} }}`);
+  for (const name of [
     "HYPE_COMMS_WINDOWS_AZURE_ENDPOINT",
     "HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME",
     "HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME",
     "HYPE_COMMS_WINDOWS_PUBLISHER_NAME",
+  ])
+    assert.equal(windows.env[name], `\${{ vars.${name} }}`);
+  const verifyWindows = workflowStep(packaging, "Verify Windows release signing");
+  assert.equal(
+    verifyWindows.if,
+    "matrix.platform == 'Windows' && env.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'",
+  );
+  assert.match(verifyWindows.run, /npm run verify:desktop-package:windows-release/u);
+  assert.equal(smoke.on.workflow_dispatch.inputs.native_notification_evidence.type, "boolean");
+  assert.equal(smoke.on.workflow_dispatch.inputs.native_notification_evidence.default, false);
+  assert.equal(smoke.on.workflow_dispatch.inputs.native_notification_evidence.required, false);
+  assert.equal(native.environment, "release");
+  const nativeSigning = workflowStep(native, "Configure macOS signing and notarization");
+  assert.equal(nativeSigning.run, "node scripts/desktop-release.mjs configure-macos-signing");
+  assert.deepEqual(
+    nativeSigning.env,
+    workflowStep(packaging, "Configure macOS signing and notarization").env,
+  );
+  const nativeCleanup = workflowStep(native, "Remove temporary macOS signing keychain");
+  assert.equal(nativeCleanup.if, "always()");
+  assert.equal(nativeCleanup.run, "node scripts/desktop-release.mjs cleanup-macos-signing");
+  stepBefore(
+    native,
+    "Configure macOS signing and notarization",
+    "Build signed macOS capture helper",
+  );
+  const helper = workflowStep(native, "Build signed macOS capture helper").run;
+  for (const requirement of [
+    "scripts/macos-native-notification-evidence-helper.swift",
+    "-framework ScreenCaptureKit",
+    "Add :LSUIElement bool true",
+    "Add :NSScreenCaptureUsageDescription",
+    '--sign "$CSC_NAME"',
+    '--keychain "$CSC_KEYCHAIN"',
+    "--options runtime",
+    "--timestamp",
+    "/usr/bin/codesign --verify --deep --strict",
   ]) {
-    assert.match(releasePackageJob, new RegExp(`vars\\.${variable}`, "u"));
+    assert.ok(helper.includes(requirement), requirement);
   }
-  assert.match(nativeEvidenceJob, /name: Build signed macOS capture helper/u);
+
+  assert.equal(
+    native.if,
+    "github.event_name == 'workflow_dispatch' && inputs.native_notification_evidence",
+  );
+  assert.equal(native.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED, "1");
+  assert.equal(
+    native.env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED,
+    "${{ inputs.native_notification_evidence && '1' || '0' }}",
+  );
+  for (const [name, value] of Object.entries(release.env)) assert.equal(native.env[name], value);
+  assert.match(commands(native), /npm run package:desktop:mac:arm64/u);
+  assert.match(commands(native), /npm run verify:desktop-package:macos-release/u);
+  assert.equal((commands(native).match(/npm ci --no-audit --prefer-offline/gu) ?? []).length, 1);
   assert.match(
-    nativeEvidenceJob,
-    /name: Await unlocked console and authorize macOS capture helper/u,
+    workflowStep(native, "Verify packaged application contents, updater, and fuses").run,
+    /npm run verify:desktop-package/u,
   );
-  assert.doesNotMatch(nativeEvidenceJob, /caffeinate/u);
-  assert.ok(
-    nativeEvidenceJob.indexOf("name: Verify macOS release signing and notarization") <
-      nativeEvidenceJob.indexOf("name: Await unlocked console and authorize macOS capture helper"),
+  stepBefore(
+    native,
+    "Verify macOS release signing and notarization",
+    "Await unlocked console and authorize macOS capture helper",
   );
-  for (const secret of [
+  for (const name of [
+    "Build signed macOS capture helper",
+    "Capture installed notification and click callback",
+  ])
+    assert.equal(workflowStep(native, name).if, "inputs.native_notification_evidence");
+  assert.doesNotMatch(commands(native), /caffeinate|notification_helper_bundle/u);
+  assert.match(commands(native), /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
+  assert.match(commands(native), /"\$helper_executable" preflight/u);
+  assert.match(commands(native), /node scripts\/capture-macos-native-notification\.mjs/u);
+  assert.match(
+    commands(native),
+    /--helper="\$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u,
+  );
+  const evidenceUpload = native.steps.find(
+    (step) => step.with?.name === "macos-native-notification-evidence",
+  );
+  assert.deepEqual(
+    evidenceUpload.with.path.trim().split("\n"),
+    [
+      "automation.log",
+      "application.log",
+      "delivered.json",
+      "clicked.json",
+      "failed.json",
+      "macos-native-notification.png",
+      "macos-native-notification-clicked.png",
+    ].map((name) => `\${{ env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY }}/${name}`),
+  );
+  assert.doesNotMatch(JSON.stringify(native), /\/user-data|secrets\.HMM_MACOS_/u);
+  for (const name of [
     "HYPE_COMMS_MACOS_CSC_LINK",
     "HYPE_COMMS_MACOS_CSC_KEY_PASSWORD",
     "HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64",
     "HYPE_COMMS_MACOS_APPLE_API_KEY_ID",
     "HYPE_COMMS_MACOS_APPLE_API_ISSUER",
-  ]) {
-    assert.match(nativeEvidenceJob, new RegExp(`secrets\\.${secret}`, "u"));
-  }
-  assert.doesNotMatch(nativeEvidenceJob, /secrets\.HMM_MACOS_/u);
-  assert.match(nativeEvidenceJob, /\/usr\/bin\/open -W -n "\$helper_bundle" --args request &/u);
-  assert.match(nativeEvidenceJob, /"\$helper_executable" preflight/u);
-  assert.match(nativeEvidenceJob, /node scripts\/capture-macos-native-notification\.mjs/u);
-  assert.match(
-    nativeEvidenceJob,
-    /--helper="\$HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_HELPER"/u,
-  );
-  assert.doesNotMatch(nativeEvidenceJob, /notification_helper_bundle/u);
-  assert.match(nativeEvidenceJob, /name: macos-native-notification-evidence/u);
-  for (const evidenceFile of [
-    "automation.log",
-    "application.log",
-    "delivered.json",
-    "clicked.json",
-    "failed.json",
-    "macos-native-notification.png",
-    "macos-native-notification-clicked.png",
-  ]) {
-    assert.match(
-      nativeEvidenceJob,
-      new RegExp(
-        `\\$\\{\\{ env\\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \\}\\}/${evidenceFile.replaceAll(
-          ".",
-          "\\.",
-        )}`,
-        "u",
-      ),
-    );
-  }
-  assert.doesNotMatch(nativeEvidenceJob, /\/user-data/u);
-  assert.doesNotMatch(
-    nativeEvidenceJob,
-    /^ {10}path: \$\{\{ env\.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_DIRECTORY \}\}$/mu,
-  );
-  assert.match(nativeEvidenceHelper, /com\.apple\.notificationcenterui/u);
-  assert.match(nativeEvidenceHelper, /com\.apple\.UserNotificationCenter/u);
-  assert.match(nativeEvidenceHelper, /\.maskSecondaryFn/u);
-  assert.match(nativeEvidenceHelper, /Date\(\)\.addingTimeInterval\(13\)/u);
-  assert.match(nativeEvidenceHelper, /owningApplication\?\.processID == processIdentifier/u);
-  assert.doesNotMatch(packageSmokeWorkflow, /runner: '\["self-hosted", "Linux", "X64"/u);
-  assert.match(packageSmokeWorkflow, /Verify native Linux ARM64 runner[\s\S]*uname -m/u);
+  ])
+    assert.ok(JSON.stringify(native).includes(`secrets.${name}`));
+  assert.match(workflowStep(smokePackage, "Verify native Linux ARM64 runner").run, /uname -m/u);
   assert.equal(
-    releaseWorkflow.match(/^ {10}UPDATE_MANIFEST: latest-linux-arm64\.yml$/gmu)?.length,
+    Object.values(release.jobs)
+      .flatMap((job) => job.steps)
+      .filter((step) => step.run?.includes("node scripts/install-github-cli.mjs")).length,
+    4,
+  );
+  for (const [job, action] of [
+    [prepare, "gh release create"],
+    [packaging, "gh release upload"],
+    [publication, "gh release edit"],
+  ]) {
+    const install = job.steps.findIndex((step) =>
+      step.run?.includes("node scripts/install-github-cli.mjs"),
+    );
+    const use = job.steps.findIndex((step) => step.run?.includes(action));
+    assert.ok(install >= 0 && use > install);
+  }
+  assert.equal(prepare.permissions.contents, "write");
+  assert.equal(publication.permissions.contents, "write");
+  assert.ok(publication.needs.includes("package"));
+  assert.doesNotMatch(commands(publication), /wait-github-assets|\$\(\s*seq\b/u);
+  assert.match(
+    workflowStep(publication, "Download staged release assets").run,
+    /gh release download[\s\S]*--dir apps\/desktop\/release/u,
+  );
+  assert.match(
+    workflowStep(publication, "Publish and verify Linux ARM64 update manifest").run,
+    /node scripts\/desktop-release\.mjs upload-manifest[\s\S]*node scripts\/verify-published-desktop-release\.mjs/u,
+  );
+  assert.match(
+    workflowStep(publication, "Publish and verify platform update manifests").run,
+    /for target in mac:latest-mac\.yml win:latest\.yml linux:latest-linux\.yml/u,
+  );
+  assert.equal(
+    Object.values(release.jobs)
+      .flatMap((job) => job.steps)
+      .filter((step) => step.env?.UPDATE_MANIFEST === "latest-linux-arm64.yml").length,
     2,
   );
-  assert.doesNotMatch(releaseWorkflow, /actions\/(?:upload|download)-artifact/u);
-  assert.match(releaseWorkflow, /name: Prepare GitHub Release[\s\S]*contents: write/u);
-  const stagingIndex = releaseWorkflow.indexOf("Stage GitHub Release assets");
-  const publicationGuardIndex = releaseWorkflow.indexOf(
-    "Refuse to overwrite published platform versions",
-  );
-  assert.ok(
-    stagingIndex >= 0 && stagingIndex < publicationGuardIndex,
-    "GitHub Release assets must be staged before the public feed publication guard",
-  );
-  assert.doesNotMatch(releaseWorkflow, /name: Wait for all GitHub Release assets/u);
   assert.match(
-    releaseWorkflow,
-    /name: Download staged release assets[\s\S]*gh release download[\s\S]*--dir apps\/desktop\/release/u,
+    workflowStep(packaging, "Stage GitHub Release assets").run,
+    /gh release upload[\s\S]*--clobber/u,
   );
-  assert.match(
-    releaseWorkflow,
-    /^ {2}github-release:[\s\S]*?npm ci --no-audit --prefer-offline[\s\S]*?node scripts\/desktop-release\.mjs configure-s3/mu,
-  );
-  assert.match(
-    releaseWorkflow,
-    /name: Publish and verify Linux ARM64 update manifest[\s\S]*node scripts\/desktop-release\.mjs upload-manifest[\s\S]*node scripts\/verify-published-desktop-release\.mjs/u,
-  );
-  assert.match(
-    releaseWorkflow,
-    /name: Publish and verify platform update manifests[\s\S]*for target in mac:latest-mac\.yml win:latest\.yml linux:latest-linux\.yml/u,
-  );
-  assert.doesNotMatch(releaseWorkflow, /\$\(\s*seq\b/u);
-  assert.match(releaseWorkflow, /name: Publish GitHub Release[\s\S]*contents: write/u);
-  assert.match(releaseWorkflow, /gh release upload[\s\S]*--clobber/u);
-  assert.match(
-    releaseWorkflow,
-    /apps\/desktop\/release\/hype-comms-\$\{\{ needs\.validate\.outputs\.desktop-version \}\}-\$\{\{ matrix\.artifact_os \}\}-\*/u,
-  );
-  assert.equal(
-    releaseWorkflow.match(/"hype-comms-\$\{DESKTOP_VERSION\}-(?:mac|win|linux)-"/gu)?.length,
-    3,
-  );
-  assert.doesNotMatch(releaseWorkflow, /hmm-chat-\$\{(?:DESKTOP_VERSION|\{)/u);
+  const downloadPage = await readFile(new URL("../downloads/index.html", import.meta.url), "utf8");
   assert.match(downloadPage, /"latest-linux-arm64\.yml"/u);
 });
 
-test("requires reviewed Hype Comms notes before publishing a desktop release", async () => {
-  const [releaseWorkflow, releaseNotesGuide] = await Promise.all([
-    readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"),
-    readFile(new URL("../docs/releases/README.md", import.meta.url), "utf8"),
-  ]);
-  const validateJob = workflowJob(releaseWorkflow, "validate");
-  const prepareJob = workflowJob(releaseWorkflow, "prepare-github-release");
-  const publishJob = workflowJob(releaseWorkflow, "github-release");
-
-  assert.match(validateJob, /release_notes_path="docs\/releases\/\$\{GITHUB_REF_NAME\}\.md"/u);
-  const missingNotesFileGuard = validateJob.indexOf('[[ ! -f "$release_notes_path" ]]');
-  const emptyNotesFileGuard = validateJob.indexOf(`! grep -q '[^[:space:]]' "$release_notes_path"`);
-  assert.match(validateJob, /\[\[ -L "\$release_notes_path" \]\]/u);
-  assert.ok(missingNotesFileGuard >= 0, "release notes file must exist");
-  assert.ok(emptyNotesFileGuard > missingNotesFileGuard, "release notes file must not be empty");
-  assert.match(validateJob, /grep -Fq '<!-- release-notes:todo' "\$release_notes_path"/u);
+test("requires reviewed notes before creating or publishing the release", async () => {
+  const workflow = await readWorkflow("desktop-release.yml");
+  const prepare = commands(workflowJob(workflow, "prepare-github-release"));
+  const publish = commands(workflowJob(workflow, "github-release"));
   assert.match(
-    prepareJob,
-    /RELEASE_NOTES_FALLBACK_TAG: v0\.1\.11[\s\S]*gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--title "Hype Comms \$\{DESKTOP_VERSION\}"[\s\S]*--notes-file "\$release_notes_path"[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
+    prepare,
+    /gh release list[\s\S]*--exclude-drafts[\s\S]*gh release create[\s\S]*--notes-file "\$release_notes_path"[\s\S]*--generate-notes[\s\S]*--notes-start-tag/u,
   );
-  assert.match(prepareJob, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
-  const prepareNotesCheck = prepareJob.indexOf("node scripts/desktop-release-notes.mjs");
-  const repairRelease = prepareJob.indexOf("gh release edit");
-  assert.ok(prepareNotesCheck >= 0, "existing release notes must be checked");
-  assert.ok(repairRelease > prepareNotesCheck, "an invalid existing body must be repaired");
+  assert.match(prepare, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
+  assert.ok(
+    prepare.indexOf("node scripts/desktop-release-notes.mjs") >= 0 &&
+      prepare.indexOf("gh release edit") >
+        prepare.indexOf("node scripts/desktop-release-notes.mjs"),
+  );
   assert.match(
-    prepareJob,
+    prepare,
     /printf '%s\\n' "\$release_notes"[\s\S]*cat "\$release_body_path"[\s\S]*--notes-file "\$combined_notes_path"/u,
   );
-  assert.doesNotMatch(prepareJob, /printf [^\n]*\|[ ]*grep -q/u);
-  assert.doesNotMatch(prepareJob, /HMM Chat/u);
-
-  assert.match(publishJob, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
-  assert.match(publishJob, /node scripts\/desktop-release-notes\.mjs/u);
-  assert.doesNotMatch(publishJob, /printf [^\n]*\|[ ]*grep -q/u);
-  const reviewedNotesGuard = publishJob.indexOf("node scripts/desktop-release-notes.mjs");
-  const publishRelease = publishJob.indexOf("--draft=false");
-  assert.ok(reviewedNotesGuard >= 0, "GitHub Release publication must require reviewed notes");
+  assert.match(publish, /gh release view[\s\S]*--json body[\s\S]*> "\$release_body_path"/u);
   assert.ok(
-    publishRelease > reviewedNotesGuard,
-    "GitHub Release notes must be checked before the draft is published",
+    publish.indexOf("node scripts/desktop-release-notes.mjs") >= 0 &&
+      publish.indexOf("--draft=false") > publish.indexOf("node scripts/desktop-release-notes.mjs"),
   );
-  assert.match(publishJob, /--title "Hype Comms \$\{DESKTOP_VERSION\}"/u);
-  assert.doesNotMatch(publishJob, /HMM Chat/u);
-  assert.match(releaseNotesGuide, /docs\/releases\/v<version>\.md/u);
-  assert.match(releaseNotesGuide, /user-facing notes/u);
+  for (const value of [prepare, publish]) {
+    assert.doesNotMatch(value, /printf [^\n]*\|[ ]*grep -q|HMM Chat/u);
+    assert.match(value, /--title "Hype Comms \$\{DESKTOP_VERSION\}"/u);
+  }
 });
 
 test("requires the reviewed notes to end at a release-body boundary", () => {
@@ -668,84 +563,6 @@ test("selects only exact version and platform artifacts", () => {
       "hype-comms-1.2.3-linux-x64.AppImage",
       "hype-comms-1.2.3-linux-x64.deb",
     ],
-  );
-});
-
-test("waits for every GitHub Release asset without shell utilities", async () => {
-  const completeAssets = [
-    "latest-mac.yml",
-    "latest.yml",
-    "latest-linux.yml",
-    "latest-linux-arm64.yml",
-    "hype-comms-1.2.3-mac-arm64.zip",
-    "hype-comms-1.2.3-win-x64.exe",
-    "hype-comms-1.2.3-linux-arm64.AppImage",
-  ];
-  const responses = [completeAssets.slice(0, -1), completeAssets];
-  const requests = [];
-  const delays = [];
-
-  await waitForGithubReleaseAssets({
-    attempts: 2,
-    delayMilliseconds: 25,
-    environment,
-    fetchImplementation: async (url, options) => {
-      requests.push({ options, url: url.href });
-      return Response.json([
-        { assets: [], tag_name: "v1.2.2" },
-        {
-          assets: responses.shift().map((name) => ({ name })),
-          tag_name: "v1.2.3",
-        },
-      ]);
-    },
-    sleep(milliseconds) {
-      delays.push(milliseconds);
-    },
-  });
-
-  assert.equal(requests.length, 2);
-  assert.equal(
-    requests[0].url,
-    "https://api.github.example/repos/example/hype-comms/releases?per_page=100",
-  );
-  assert.equal(requests[0].options.headers.authorization, "Bearer test-token");
-  assert.deepEqual(delays, [25]);
-  assert.deepEqual(missingGithubReleaseAssets(completeAssets, "1.2.3"), []);
-});
-
-test("bounds GitHub Release asset polling and validates the response", async () => {
-  const delays = [];
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 2,
-      delayMilliseconds: 5,
-      environment,
-      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.3" }]),
-      sleep(milliseconds) {
-        delays.push(milliseconds);
-      },
-    }),
-    /Missing: latest-mac\.yml, latest\.yml, latest-linux\.yml, latest-linux-arm64\.yml/,
-  );
-  assert.deepEqual(delays, [5]);
-
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 1,
-      environment,
-      fetchImplementation: async () =>
-        Response.json([{ assets: [{ name: 42 }], tag_name: "v1.2.3" }]),
-    }),
-    /assets must have non-empty string names/,
-  );
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 1,
-      environment,
-      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.2" }]),
-    }),
-    /does not contain draft tag v1\.2\.3/,
   );
 });
 

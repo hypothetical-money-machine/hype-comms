@@ -1,3 +1,4 @@
+import { parseArgs } from "node:util";
 import { UsageError } from "./errors.js";
 import type { GlobalOptions } from "./types.js";
 
@@ -13,60 +14,76 @@ interface OptionDefinition {
 
 export type OptionDefinitions = Readonly<Record<string, OptionDefinition>>;
 
-function valueAfterEquals(argument: string): string | undefined {
-  const index = argument.indexOf("=");
-  return index === -1 ? undefined : argument.slice(index + 1);
+function tokenize(args: readonly string[], definitions: OptionDefinitions) {
+  try {
+    return parseArgs({
+      args: [...args],
+      allowPositionals: true,
+      strict: false,
+      tokens: true,
+      options: Object.fromEntries(
+        Object.entries(definitions).map(([name, definition]) => [
+          name,
+          {
+            type: definition.kind,
+            ...(definition.multiple === undefined ? {} : { multiple: definition.multiple }),
+          },
+        ]),
+      ),
+    });
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : "Invalid command arguments");
+  }
 }
 
-function optionName(argument: string): string {
-  const index = argument.indexOf("=");
-  return argument.slice(2, index === -1 ? undefined : index);
+function validateOptionValue(
+  name: string,
+  definition: OptionDefinition,
+  value: string | undefined,
+  inlineValue: boolean | undefined,
+): void {
+  if (definition.kind === "boolean") {
+    if (value !== undefined) throw new UsageError(`Option --${name} does not accept a value`);
+  } else if (value === undefined || (inlineValue !== true && value.startsWith("--"))) {
+    throw new UsageError(`Option --${name} requires a value`);
+  }
 }
 
 export function parseCommandArguments(
   args: readonly string[],
   definitions: OptionDefinitions,
 ): ParsedArguments {
-  const positionals: string[] = [];
+  const parsed = tokenize(args, definitions);
   const options: Record<string, string | boolean | string[]> = {};
-  let positionalOnly = false;
-
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === undefined) continue;
-    if (positionalOnly || !argument.startsWith("--") || argument === "-") {
-      positionals.push(argument);
+  const positionals: string[] = [];
+  const singleDashArguments = new Set<number>();
+  for (const token of parsed.tokens) {
+    if (token.kind === "positional") {
+      positionals.push(token.value);
       continue;
     }
-    if (argument === "--") {
-      positionalOnly = true;
+    if (token.kind !== "option") continue;
+    // The CLI has only long options; keep the established single-dash positional syntax.
+    if (!token.rawName.startsWith("--")) {
+      if (!singleDashArguments.has(token.index)) positionals.push(args[token.index]!);
+      singleDashArguments.add(token.index);
       continue;
     }
-
-    const name = optionName(argument);
-    const definition = definitions[name];
-    if (definition === undefined) throw new UsageError(`Unknown option --${name}`);
-    const inlineValue = valueAfterEquals(argument);
+    const definition = definitions[token.name];
+    if (definition === undefined) throw new UsageError(`Unknown option --${token.name}`);
+    validateOptionValue(token.name, definition, token.value, token.inlineValue);
     if (definition.kind === "boolean") {
-      if (inlineValue !== undefined) {
-        throw new UsageError(`Option --${name} does not accept a value`);
-      }
-      options[name] = true;
+      options[token.name] = true;
       continue;
     }
-
-    const nextValue = inlineValue ?? args[index + 1];
-    if (nextValue === undefined || (inlineValue === undefined && nextValue.startsWith("--"))) {
-      throw new UsageError(`Option --${name} requires a value`);
-    }
-    if (inlineValue === undefined) index += 1;
+    const value = token.value!;
     if (definition.multiple === true) {
-      const existing = options[name];
-      options[name] = [...(Array.isArray(existing) ? existing : []), nextValue];
+      const existing = options[token.name];
+      options[token.name] = [...(Array.isArray(existing) ? existing : []), value];
     } else {
-      if (options[name] !== undefined)
-        throw new UsageError(`Option --${name} may only be used once`);
-      options[name] = nextValue;
+      if (options[token.name] !== undefined)
+        throw new UsageError(`Option --${token.name} may only be used once`);
+      options[token.name] = value;
     }
   }
   return { positionals, options };
@@ -109,65 +126,42 @@ export function extractGlobalOptions(argv: readonly string[]): {
   readonly args: readonly string[];
   readonly options: GlobalOptions;
 } {
-  const args: string[] = [];
-  let json = false;
-  let adapterProtocol: 1 | undefined;
-  let profile: string | undefined;
-  let apiOrigin: string | undefined;
-  let timeoutMs = 30_000;
-  let positionalOnly = false;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === undefined) continue;
-    if (positionalOnly) {
-      args.push(argument);
-      continue;
-    }
-    if (argument === "--") {
-      positionalOnly = true;
-      args.push(argument);
-      continue;
-    }
-    const inline = valueAfterEquals(argument);
-    const takeValue = (name: string): string => {
-      const value = inline ?? argv[index + 1];
-      if (value === undefined || (inline === undefined && value.startsWith("--"))) {
-        throw new UsageError(`${name} requires a value`);
-      }
-      if (inline === undefined) index += 1;
-      return value;
-    };
-    if (argument === "--adapter-protocol" || argument.startsWith("--adapter-protocol=")) {
-      if (adapterProtocol !== undefined)
-        throw new UsageError("--adapter-protocol may only be used once");
-      if (takeValue("--adapter-protocol") !== "1")
-        throw new UsageError("This CLI supports adapter protocol 1", "ADAPTER_UPGRADE_REQUIRED");
-      adapterProtocol = 1;
-      json = true;
-    } else if (argument === "--json") {
-      json = true;
-    } else if (argument === "--profile" || argument.startsWith("--profile=")) {
-      if (profile !== undefined) throw new UsageError("--profile may only be used once");
-      profile = takeValue("--profile");
-    } else if (argument === "--api-origin" || argument.startsWith("--api-origin=")) {
-      if (apiOrigin !== undefined) throw new UsageError("--api-origin may only be used once");
-      apiOrigin = takeValue("--api-origin");
-    } else if (argument === "--timeout-ms" || argument.startsWith("--timeout-ms=")) {
-      timeoutMs = positiveInteger(takeValue("--timeout-ms"), "timeout-ms", 300_000);
-    } else {
-      args.push(argument);
-    }
+  const definitions: OptionDefinitions = {
+    json: { kind: "boolean" },
+    "adapter-protocol": { kind: "string" },
+    profile: { kind: "string" },
+    "api-origin": { kind: "string" },
+    "timeout-ms": { kind: "string" },
+  };
+  const parsed = tokenize(argv, definitions);
+  const removed = new Set<number>();
+  const values = new Map<string, string | true>();
+  for (const token of parsed.tokens) {
+    if (token.kind !== "option" || !token.rawName.startsWith("--")) continue;
+    const definition = definitions[token.name];
+    if (definition === undefined) continue;
+    validateOptionValue(token.name, definition, token.value, token.inlineValue);
+    if (values.has(token.name) && token.name !== "json" && token.name !== "timeout-ms")
+      throw new UsageError(`--${token.name} may only be used once`);
+    values.set(token.name, token.value ?? true);
+    removed.add(token.index);
+    if (definition.kind === "string" && token.inlineValue !== true) removed.add(token.index + 1);
   }
-
+  const adapterProtocol = values.get("adapter-protocol");
+  if (adapterProtocol !== undefined && adapterProtocol !== "1")
+    throw new UsageError("This CLI supports adapter protocol 1", "ADAPTER_UPGRADE_REQUIRED");
+  const profile = values.get("profile");
+  const apiOrigin = values.get("api-origin");
+  const timeout = values.get("timeout-ms");
   return {
-    args,
+    args: argv.filter((_, index) => !removed.has(index)),
     options: {
-      json,
-      ...(adapterProtocol === undefined ? {} : { adapterProtocol }),
-      ...(profile === undefined ? {} : { profile }),
-      ...(apiOrigin === undefined ? {} : { apiOrigin }),
-      timeoutMs,
+      json: values.has("json") || adapterProtocol !== undefined,
+      ...(adapterProtocol === undefined ? {} : { adapterProtocol: 1 as const }),
+      ...(typeof profile === "string" ? { profile } : {}),
+      ...(typeof apiOrigin === "string" ? { apiOrigin } : {}),
+      timeoutMs:
+        typeof timeout === "string" ? positiveInteger(timeout, "timeout-ms", 300_000) : 30_000,
     },
   };
 }
