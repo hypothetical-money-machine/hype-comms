@@ -119,27 +119,26 @@ function renderTasks(overrides: Partial<ComponentProps<typeof TasksView>> = {}) 
   );
   const onMove = vi.fn<NonNullable<ComponentProps<typeof TasksView>["onMove"]>>(async () => todo);
   const onOpenSource = vi.fn<NonNullable<ComponentProps<typeof TasksView>["onOpenSource"]>>();
-  const rendered = render(
-    createElement(TasksView, {
-      conversationId: CONVERSATION_ID,
-      personal: false,
-      archived: false,
-      currentUserId: USER_ID,
-      members,
-      assignableMembers: () => members,
-      tasks: [todo, doing],
-      busy: false,
-      error: null,
-      conversationName: () => "#general",
-      isConversationArchived: () => false,
-      onCreate,
-      onUpdate,
-      onMove,
-      onOpenSource,
-      ...overrides,
-    }),
-  );
-  return { onCreate, onUpdate, onMove, onOpenSource, ...rendered };
+  const props: ComponentProps<typeof TasksView> = {
+    conversationId: CONVERSATION_ID,
+    personal: false,
+    archived: false,
+    currentUserId: USER_ID,
+    members,
+    assignableMembers: () => members,
+    tasks: [todo, doing],
+    busy: false,
+    error: null,
+    conversationName: () => "#general",
+    isConversationArchived: () => false,
+    onCreate,
+    onUpdate,
+    onMove,
+    onOpenSource,
+    ...overrides,
+  };
+  const rendered = render(createElement(TasksView, props));
+  return { onCreate, onUpdate, onMove, onOpenSource, props, ...rendered };
 }
 
 afterEach(() => {
@@ -330,7 +329,7 @@ describe("TasksView", () => {
     expect(screen.getByRole("button", { name: "Save task" })).toHaveProperty("disabled", true);
   });
 
-  it("focuses the detail title, closes on Escape, and restores focus", () => {
+  it("focuses the detail title, closes on Escape, and restores focus", async () => {
     renderTasks();
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     const row = screen.getByRole("button", { name: /Write launch brief/ });
@@ -342,7 +341,19 @@ describe("TasksView", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
 
     expect(screen.queryByRole("dialog", { name: "Task details" })).toBeNull();
-    expect(document.activeElement).toBe(row);
+    await waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("moves focus when an open task becomes read-only and editable again", () => {
+    const { rerender, props } = renderTasks();
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    fireEvent.click(screen.getByRole("button", { name: /Write launch brief/ }));
+    const title = screen.getByRole("textbox", { name: "Title" });
+    expect(document.activeElement).toBe(title);
+    rerender(createElement(TasksView, { ...props, archived: true }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close task details" }));
+    rerender(createElement(TasksView, props));
+    expect(document.activeElement).toBe(title);
   });
 
   it("prevents duplicate detail saves and announces saving progress", async () => {

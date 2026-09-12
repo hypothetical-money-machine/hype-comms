@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useOwnedOverlay } from "./overlay-ownership";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface ChannelCreatePopoverProps {
@@ -61,7 +62,7 @@ export function ChannelCreatePopover({
   const popover = useRef<HTMLFormElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const creatingRef = useRef(false);
-  const restoreFocus = useRef(false);
+
   const slug = channelSlugFromName(name);
 
   const dismiss = useCallback(() => {
@@ -73,15 +74,15 @@ export function ChannelCreatePopover({
     setChannelMode("chat");
     setError("");
     setPosition(null);
-    restoreFocus.current = true;
   }, []);
 
-  useEffect(() => {
-    if (!open && restoreFocus.current) {
-      restoreFocus.current = false;
-      trigger.current?.focus();
-    }
-  }, [open]);
+  useOwnedOverlay(open, {
+    container: popover,
+    initialFocus: () => input.current,
+    returnFocus: () => trigger.current,
+    onEscape: dismiss,
+    trapFocus: false,
+  });
 
   useOpenChangeNotifier(open, onOpenChange);
 
@@ -114,7 +115,6 @@ export function ChannelCreatePopover({
 
   useLayoutEffect(() => {
     if (!open) return;
-    input.current?.focus();
     updatePosition();
   }, [open, updatePosition]);
 
@@ -131,16 +131,11 @@ export function ChannelCreatePopover({
       }
       dismiss();
     };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") dismiss();
-    };
     document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", updatePosition);
     document.addEventListener("scroll", updatePosition, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };

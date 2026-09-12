@@ -79,7 +79,7 @@ describe("ConversationSwitcher", () => {
     await waitFor(() => expect(document.activeElement).toBe(searchbox));
     fireEvent.keyDown(searchbox, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(document.activeElement).toBe(trigger);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it("uses Control+K off macOS and ignores the macOS shortcut", () => {

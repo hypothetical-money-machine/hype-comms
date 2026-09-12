@@ -1,8 +1,9 @@
 import type { MessageSearchResponse, MessageSearchResult, User } from "@hype-comms/contracts";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 
 import { missingAuthorName } from "./built-in-channels";
+import { useOwnedOverlay } from "./overlay-ownership";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface WorkspaceSearchProps {
@@ -43,6 +44,7 @@ export function WorkspaceSearch({
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLElement>(null);
   const openState = useRef(false);
   const requestGeneration = useRef(0);
 
@@ -51,28 +53,27 @@ export function WorkspaceSearch({
     setOpen(true);
   }, []);
 
-  const closeSearch = useCallback((restoreFocus: boolean) => {
-    openState.current = false;
-    requestGeneration.current += 1;
-    setOpen(false);
-    setQuery("");
-    setSubmittedQuery("");
-    setResults([]);
-    setNextCursor(null);
-    setLoading(false);
-    setError("");
-    if (restoreFocus) trigger.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    input.current?.focus();
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") closeSearch(true);
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [closeSearch, open]);
+  const leaveForNavigation = useOwnedOverlay(open, {
+    container: dialog,
+    initialFocus: () => input.current,
+    returnFocus: () => trigger.current,
+    onEscape: () => closeSearch(true),
+  });
+  const closeSearch = useCallback(
+    (restoreFocus: boolean) => {
+      if (!restoreFocus) leaveForNavigation();
+      openState.current = false;
+      requestGeneration.current += 1;
+      setOpen(false);
+      setQuery("");
+      setSubmittedQuery("");
+      setResults([]);
+      setNextCursor(null);
+      setLoading(false);
+      setError("");
+    },
+    [leaveForNavigation],
+  );
 
   useOpenChangeNotifier(open, onOpenChange);
 
@@ -124,6 +125,7 @@ export function WorkspaceSearch({
         createPortal(
           <div className="dialog-backdrop" onMouseDown={() => closeSearch(true)}>
             <section
+              ref={dialog}
               className="workspace-search-dialog"
               role="dialog"
               aria-modal="true"

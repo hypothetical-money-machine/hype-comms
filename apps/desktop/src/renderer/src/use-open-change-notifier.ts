@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 /**
  * Reports open/closed transitions to an optional listener, including an open report when the
@@ -11,17 +11,15 @@ export function useOpenChangeNotifier(
   open: boolean,
   onOpenChange: ((open: boolean) => void) | undefined,
 ): void {
-  const previousOpen = useRef(false);
+  const latest = useRef(onOpenChange);
+  useLayoutEffect(() => {
+    latest.current = onOpenChange;
+  });
   useEffect(() => {
-    if (previousOpen.current !== open) {
-      previousOpen.current = open;
-      onOpenChange?.(open);
-    }
-    return () => {
-      if (previousOpen.current) {
-        previousOpen.current = false;
-        onOpenChange?.(false);
-      }
-    };
-  }, [open, onOpenChange]);
+    if (!open) return;
+    // Close the same owner's pin that was opened, even if the next render changes the callback.
+    const listener = latest.current;
+    listener?.(true);
+    return () => listener?.(false);
+  }, [open]);
 }

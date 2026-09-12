@@ -5,19 +5,12 @@ import type {
   PresenceState,
   User,
 } from "@hype-comms/contracts";
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type RefObject,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Avatar } from "./avatar";
 import { PresenceIndicator } from "./activity-indicators";
+import { useOwnedOverlay } from "./overlay-ownership";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 interface PeopleDirectorySharedProps {
@@ -57,9 +50,6 @@ interface DirectoryEntry {
   readonly user: User;
   readonly role: "owner" | "member" | null;
 }
-
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message !== ""
@@ -146,46 +136,13 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     };
   }, [conversationId, load]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && busyUserId === null) onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [busyUserId, onClose]);
-
-  useLayoutEffect(() => {
-    const dialog = dialogRef.current;
-    const firstFocusable = dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-    firstFocusable?.focus();
-    if (firstFocusable === null) dialog?.focus();
-    return () => {
-      triggerRef.current?.focus();
-    };
-  }, [triggerRef]);
-
-  const trapFocus = (event: ReactKeyboardEvent<HTMLElement>): void => {
-    if (event.key !== "Tab") return;
-    const dialog = dialogRef.current;
-    if (dialog === null) return;
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-    const firstFocusable = focusable[0];
-    const lastFocusable = focusable.at(-1);
-    if (firstFocusable === undefined || lastFocusable === undefined) {
-      event.preventDefault();
-      dialog.focus();
-      return;
-    }
-
-    const activeElement = document.activeElement;
-    if (event.shiftKey && (activeElement === firstFocusable || activeElement === dialog)) {
-      event.preventDefault();
-      lastFocusable.focus();
-    } else if (!event.shiftKey && activeElement === lastFocusable) {
-      event.preventDefault();
-      firstFocusable.focus();
-    }
-  };
+  useOwnedOverlay(true, {
+    container: dialogRef,
+    returnFocus: () => triggerRef.current,
+    onEscape: () => {
+      if (busyUserId === null) onClose();
+    },
+  });
 
   const availableMembers = useMemo(() => {
     const current = new Set(details?.members.map((member) => member.user.id) ?? []);
@@ -231,7 +188,6 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
         aria-labelledby={titleId}
         aria-busy={busyUserId !== null}
         tabIndex={-1}
-        onKeyDown={trapFocus}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
