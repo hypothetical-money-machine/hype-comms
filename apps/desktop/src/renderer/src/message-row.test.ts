@@ -1,3 +1,4 @@
+import { visibleTimelineMessages } from "./App";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -12,8 +13,7 @@ import {
   MessageRow,
   participantColorIndex,
   PendingMessageRow,
-  visibleTimelineMessages,
-} from "./App";
+} from "./message-row";
 
 describe("message time formatting", () => {
   const localAfternoon = new Date(2026, 0, 2, 17, 5).toISOString();
