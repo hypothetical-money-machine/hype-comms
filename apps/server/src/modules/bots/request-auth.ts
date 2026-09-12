@@ -2,16 +2,12 @@ import { botAccessTokenSchema, type BotScope } from "@hype-comms/contracts";
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import { parseBearerAuthorization } from "../../http/bearer-authorization.js";
 import { requireAuthenticatedIdentity } from "../identity/request-auth.js";
 import type { AuthenticatedIdentity, IdentityService } from "../identity/service.js";
 import type { AuthenticatedBotIdentity, BotService } from "./service.js";
 
 export type AuthenticatedTaskIdentity = AuthenticatedIdentity | AuthenticatedBotIdentity;
-
-function bearerToken(value: string): string | null {
-  const match = /^Bearer ([^\s]+)$/.exec(value);
-  return match?.[1] ?? null;
-}
 
 /**
  * Task routes are the sole service-token entrypoint. Human cookies retain their existing behavior;
@@ -27,7 +23,7 @@ export async function requireTaskIdentity(
   if (authorization === undefined) {
     return requireAuthenticatedIdentity(request, identityService);
   }
-  const parsed = botAccessTokenSchema.safeParse(bearerToken(authorization));
+  const parsed = botAccessTokenSchema.safeParse(parseBearerAuthorization(authorization).token);
   if (!parsed.success || botService === undefined) {
     throw new ApiError(401, "UNAUTHORIZED", "Bot credential is invalid or expired");
   }
