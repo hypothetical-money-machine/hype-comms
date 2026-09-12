@@ -1,0 +1,20 @@
+{
+  "candidateImage": "sha256:49cdc3f4da524432ff4ed7c786ccbcf85f9fb29abbe749e6d5b0305bc87961bd",
+  "rollbackImage": "sha256:d52ef1b5257d66962627cbe7d45d5eed5a067518fe8a576a2069145ffbb748a6",
+  "completedAt": "2026-09-12T13:52:50.751Z",
+  "comparedTables": 35,
+  "passed": [
+    "all restored table fingerprints",
+    "stopped writer",
+    "repeat epoch activation",
+    "accepted send identity",
+    "wrong epoch rejection",
+    "attachment backup and authenticated download",
+    "post-cutover message across compatible rollback",
+    "human session and agent credential",
+    "task mutation after rollback",
+    "two realtime connections",
+    "old endpoint rejection"
+  ],
+  "limits": "Disposable synthetic PostgreSQL and Docker volumes. This does not prove the production backup destination, Kubernetes orchestration, installed desktop update, or Hermes framework lifecycle."
+}
