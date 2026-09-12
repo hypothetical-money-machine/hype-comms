@@ -9,6 +9,7 @@
     "composite": true,
     "rewriteRelativeImportExtensions": true
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test"]
 }

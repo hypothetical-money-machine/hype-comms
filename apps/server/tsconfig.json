@@ -8,6 +8,7 @@
     "composite": true,
     "types": ["node"]
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

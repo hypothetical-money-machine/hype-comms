@@ -15,5 +15,6 @@
     // Deferred: exactOptionalPropertyTypes is scheduled after a renderer refactor, not this slice.
     "exactOptionalPropertyTypes": false
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
 }
