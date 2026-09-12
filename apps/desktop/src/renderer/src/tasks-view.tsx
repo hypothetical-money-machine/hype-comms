@@ -1,3 +1,4 @@
+import { useOwnedOverlay } from "./overlay-ownership";
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 
 import type { Task, TaskPriority, TaskStatus, User } from "@hype-comms/contracts";
@@ -691,17 +692,16 @@ function TaskDetail({
   const savingRef = useRef(false);
   const titleInput = useRef<HTMLInputElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const previouslyFocused = useRef(
-    document.activeElement instanceof HTMLElement ? document.activeElement : null,
-  );
+  const dialog = useRef<HTMLElement>(null);
   const titleId = `task-detail-title-${task.id}`;
-
-  useEffect(() => {
-    const focusTarget = disabled ? closeButton.current : titleInput.current;
-    focusTarget?.focus();
-    const restoreTarget = previouslyFocused.current;
-    return () => restoreTarget?.focus();
-  }, [disabled]);
+  useOwnedOverlay(true, {
+    container: dialog,
+    initialFocus: () => (disabled ? closeButton.current : titleInput.current),
+    focusKey: disabled,
+    onEscape: () => {
+      if (!savingRef.current) onClose();
+    },
+  });
 
   useEffect(() => {
     if (savingRef.current) return;
@@ -740,17 +740,12 @@ function TaskDetail({
 
   return (
     <aside
+      ref={dialog}
       className="task-detail"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
       aria-busy={saving}
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && !saving) {
-          event.preventDefault();
-          onClose();
-        }
-      }}
     >
       <header>
         <div>

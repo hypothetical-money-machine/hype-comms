@@ -648,28 +648,15 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("leaves focus inside an open modal when the selection changes underneath it", async () => {
-    // WorkspaceSearch commits the selection before its dialog closes while the composer stays
-    // mounted behind it, so a detached node is a faithful stand-in.
     const harness = await renderWorkspace();
-    const dialog = document.createElement("section");
-    dialog.setAttribute("role", "dialog");
-    dialog.setAttribute("aria-modal", "true");
-    const control = document.createElement("button");
-    control.type = "button";
-    dialog.append(control);
-    document.body.append(dialog);
-    try {
-      control.focus();
-      expect(document.activeElement).toBe(control);
-
-      act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
-
-      await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
-      await waitFor(() => expect(document.activeElement).toBe(control), { timeout: 5_000 });
-      expect(dialog.contains(document.activeElement)).toBe(true);
-    } finally {
-      dialog.remove();
-    }
+    fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+    const dialog = await screen.findByRole("dialog", { name: "Find a message" });
+    const control = screen.getByRole("button", { name: "Close search" });
+    control.focus();
+    act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
+    await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
+    expect(document.activeElement).toBe(control);
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 
   it("focuses the channel composer when the focused close button dismisses the thread", async () => {
