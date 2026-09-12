@@ -364,8 +364,12 @@ task versions, conversation summaries, unread/mention accounting, and thread-sum
 The persistent cache, memory cache, and runtime use those functions. They take records and
 return projections without I/O or mutations to their inputs. The caches retain encryption,
 transaction, cancellation, event deduplication, and cursor ownership. The runtime still applies
-the shared rules to its view after cache commit; returning committed changes from the cache
-is the next remediation step.
+thread-summary rules to committed messages because those aggregates are fetched separately.
+For cached records, event application returns the committed position, changed records, removals,
+and required authoritative refreshes. Ignored events return their durable position without changes.
+The runtime publishes these results without repeating unread, mention, task, or conversation
+projection. It acknowledges only the cache's committed position. An event superseded during
+encryption rolls back before it can return changes.
 
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message

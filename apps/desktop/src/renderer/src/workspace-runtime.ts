@@ -45,11 +45,6 @@ import {
   mergeReactions,
   mergeTasks,
   mergeThreadSummaries,
-  preferRetainedMessage,
-  projectConversationMembershipChange,
-  projectConversationSummary,
-  projectCreatedMessageSummary,
-  projectReadCursorSummary,
   projectReplySummary,
   reconcileRetractedConversationSummary,
   replaceConversation,
@@ -57,10 +52,11 @@ import {
   retractReplySummary,
   retractReservationMap,
   retractedMessageIds,
-  tombstoneMessage,
   type RetractReservation,
   upsertRetractReservation,
 } from "./workspace-projection";
+import type { CacheEventResult } from "./workspace-cache-changes";
+
 import { mentionedMemberIds } from "./mentions";
 import {
   clearPersistentWorkspaceCache,
@@ -2933,7 +2929,7 @@ export class WorkspaceRuntime {
           event.type === "message.retracted"
             ? this.#retractedMessageSource(event.payload.messageId, event.conversationId)
             : undefined;
-        let applied: boolean;
+        let applied: CacheEventResult;
         try {
           applied = await cache.applyEvent(event, projection.signal, retractSource);
         } catch (error) {
@@ -2941,7 +2937,11 @@ export class WorkspaceRuntime {
           throw error;
         }
         if (!this.#isProjectionCurrent(projection)) return;
-        if (event.type === "message.retracted" && retractSource === undefined && applied) {
+        if (
+          event.type === "message.retracted" &&
+          retractSource === undefined &&
+          applied.status === "applied"
+        ) {
           sourceLessRetractApplied = true;
           this.#setState({
             threadSummaries: this.#invalidateConversationThreadSummaries(event.conversationId),
@@ -3827,12 +3827,8 @@ export class WorkspaceRuntime {
       event.type === "message.retracted"
         ? this.#retractedMessageSource(event.payload.messageId, event.conversationId)
         : undefined;
-    const cachedMentionedUserIds =
-      event.type === "message.retracted"
-        ? await cache.getCreatedMessageMentions(event.payload.messageId)
-        : undefined;
     if (!this.#isProjectionCurrent(projection)) return;
-    let applied: boolean;
+    let applied: CacheEventResult;
     try {
       applied = await cache.applyEvent(event, projection.signal, retractSource);
     } catch (error) {
@@ -3840,31 +3836,21 @@ export class WorkspaceRuntime {
       throw error;
     }
     if (!this.#isProjectionCurrent(projection)) return;
-    await this.#client.acknowledgeWorkspaceEvent({
-      scope: realtimeScope,
-      cursor: event.position,
-    });
+    if (applied.committedPosition !== null) {
+      await this.#client.acknowledgeWorkspaceEvent({
+        scope: realtimeScope,
+        cursor: applied.committedPosition,
+      });
+    }
     if (!this.#isProjectionCurrent(projection)) return;
-    if (!applied) return;
-    this.#syncCursor = event.position;
-    if (event.type === "member.updated") {
-      // Announces THAT the directory changed, never what it now is. Re-read it instead of
-      // projecting the payload, or disabling a member would re-assert it as a mention target.
+    if (applied.status === "ignored") return;
+    this.#syncCursor = applied.committedPosition;
+    this.#publishCommittedEvent(event, applied);
+    if (applied.changes.invalidated.some((entry) => entry.kind === "members")) {
       this.#membersDirty = true;
       await this.#refreshMembers(generation);
-      return;
     }
-    if (event.type === "message.retracted" && cachedMentionedUserIds !== undefined) {
-      rememberCreatedMessageMentions(
-        this.#createdMessageMentions,
-        event.payload.messageId,
-        cachedMentionedUserIds,
-      );
-    }
-    // The event payload already carries everything the view needs, so the whole encrypted cache
-    // does not have to be decrypted again for every message.
-    this.#projectEvent(event);
-    if (event.type === "message.retracted" && retractSource === undefined) {
+    if (applied.changes.invalidated.some((entry) => entry.kind === "conversation_metadata")) {
       await this.#refreshSourceLessRetractMetadata(generation);
     }
   }
@@ -3879,15 +3865,6 @@ export class WorkspaceRuntime {
     for (const message of messages) {
       if (message.deletedAt !== null) this.#retractedMessageIds.add(message.id);
     }
-  }
-
-  #reserveRetractedMessage(event: Extract<WorkspaceEvent, { type: "message.retracted" }>): void {
-    this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
-      messageId: event.payload.messageId,
-      deletedAt: event.payload.deletedAt,
-      entityVersion: event.entityVersion,
-    });
-    this.#retractedMessageIds.add(event.payload.messageId);
   }
 
   #retractEffectKey(messageId: string, entityVersion: number): string {
@@ -4011,136 +3988,127 @@ export class WorkspaceRuntime {
     });
   }
 
-  #projectEvent(event: WorkspaceEvent): void {
-    const snapshot = this.#state.bootstrap;
+  #publishCommittedEvent(
+    event: WorkspaceEvent,
+    result: Extract<CacheEventResult, { status: "applied" }>,
+  ): void {
+    const changes = result.changes;
+    const revoked = new Set(changes.removedConversationIds);
+    const removedReactions = new Set(changes.removedReactionIds);
+    const removedMessageReactions = new Set(changes.removedMessageReactionIds);
+    let snapshot = this.#state.bootstrap;
+    if (snapshot !== null) {
+      for (const summary of changes.conversations) {
+        snapshot = replaceConversation(snapshot, summary.conversation.id, () => summary);
+      }
+      snapshot = {
+        ...snapshot,
+        syncCursor: result.committedPosition,
+        conversations: snapshot.conversations.filter(
+          (summary) => !revoked.has(summary.conversation.id),
+        ),
+      };
+    }
+    const messages = mergeMessages(this.#state.messages, changes.messages).filter(
+      (message) => !revoked.has(message.conversationId),
+    );
+    const revokedMessageIds = new Set(
+      this.#state.messages
+        .filter((message) => revoked.has(message.conversationId))
+        .map((message) => message.id),
+    );
+    const removedOutboxIds = new Set(changes.removedOutboxIds);
+    const outbox = this.#state.outbox.filter(
+      (item) =>
+        !removedOutboxIds.has(item.operation.message.clientMessageId) &&
+        !revoked.has(item.operation.conversationId),
+    );
+    for (const reservation of changes.retractReservations) {
+      this.#retractReservations = upsertRetractReservation(this.#retractReservations, reservation);
+      this.#retractedMessageIds.add(reservation.messageId);
+    }
+
+    // Thread aggregates and attachments are fetched separately from the current cache stores.
+    // Their view state follows committed messages; it does not recalculate cached summaries.
+    let threadSummaries: readonly MessageThreadSummary[] = this.#state.threadSummaries.filter(
+      (summary) => !revoked.has(summary.latestReply.conversationId),
+    );
+    let retractedId: string | null = null;
+    let closesSelectedThread = false;
+    let created: Message | undefined;
     if (event.type === "message.created") {
-      const incoming = this.#retainMessages([event.payload.message])[0] ?? event.payload.message;
-      const message = preferRetainedMessage(
-        this.#state.messages.find((existing) => existing.id === incoming.id),
-        incoming,
-      );
-      if (message.deletedAt === null) {
+      created = changes.messages.find((message) => message.id === event.payload.message.id);
+      if (created !== undefined && created.deletedAt === null) {
         rememberCreatedMessageMentions(
           this.#createdMessageMentions,
-          message.id,
+          created.id,
           event.payload.mentionedUserIds,
         );
-      } else {
-        this.#createdMessageMentions.delete(message.id);
+        const newlyObserved = !this.#state.messages.some((message) => message.id === created?.id);
+        if (!this.#invalidatedThreadSummaryConversationIds.has(created.conversationId)) {
+          threadSummaries = projectReplySummary(threadSummaries, created, newlyObserved);
+        }
+      } else if (created !== undefined) {
+        this.#createdMessageMentions.delete(created.id);
       }
-      const newlyObserved = !this.#state.messages.some((existing) => existing.id === message.id);
-      this.#setState({
-        messages: mergeMessages(this.#state.messages, [message]),
-        threadSummaries:
-          message.deletedAt === null &&
-          !this.#invalidatedThreadSummaryConversationIds.has(message.conversationId)
-            ? projectReplySummary(this.#state.threadSummaries, message, newlyObserved)
-            : this.#state.threadSummaries,
-        outbox: this.#withoutOutbox([message.clientMessageId]),
-        bootstrap:
-          snapshot === null || message.deletedAt !== null
-            ? snapshot
-            : replaceConversation(snapshot, event.conversationId, (current) =>
-                current === undefined
-                  ? null
-                  : projectCreatedMessageSummary(
-                      current,
-                      message,
-                      snapshot.currentUser.user.id,
-                      event.payload.mentionedUserIds,
-                    ),
-              ),
-      });
-      if (message.deletedAt === null) void this.#hydrateCreatedMessageAttachments(message);
-      return;
-    }
-    if (event.type === "message.retracted") {
-      this.#reserveRetractedMessage(event);
-      const source = this.#retractedMessageSource(event.payload.messageId, event.conversationId);
-      if (source === undefined) {
-        const closesSelectedThread = this.#state.selectedThreadRootId === event.payload.messageId;
-        this.#createdMessageMentions.delete(event.payload.messageId);
-        this.#threadCursors.delete(event.payload.messageId);
-        this.#setState({
-          // A source-less retract does not identify a reply's root. Clear this conversation's
-          // summaries instead of leaving an aggregate count that still includes the deleted reply.
-          threadSummaries: this.#invalidateConversationThreadSummaries(event.conversationId),
-          reactions: this.#state.reactions.filter(
-            (reaction) => reaction.messageId !== event.payload.messageId,
-          ),
-          attachments: replaceMessageAttachments(
-            this.#state.attachments,
-            [event.payload.messageId],
-            [],
-          ),
-          conversationFiles: this.#state.conversationFiles.filter(
-            (attachment) => attachment.messageId !== event.payload.messageId,
-          ),
-          focusedMessageId:
-            this.#state.focusedMessageId === event.payload.messageId
-              ? null
-              : this.#state.focusedMessageId,
-          selectedThreadRootId: closesSelectedThread ? null : this.#state.selectedThreadRootId,
-          focusedThreadMessageId:
-            closesSelectedThread || this.#state.focusedThreadMessageId === event.payload.messageId
-              ? null
-              : this.#state.focusedThreadMessageId,
-          ...(closesSelectedThread ? { threadLoading: false, threadError: null } : {}),
-        });
-        return;
+    } else if (event.type === "message.retracted") {
+      retractedId = event.payload.messageId;
+      const tombstone = changes.messages.find((message) => message.id === retractedId);
+      this.#createdMessageMentions.delete(retractedId);
+      closesSelectedThread = this.#state.selectedThreadRootId === retractedId;
+      if (tombstone === undefined || tombstone.threadRootId === null)
+        this.#threadCursors.delete(retractedId);
+      if (
+        tombstone !== undefined &&
+        !this.#consumeLocallyProjectedRetract(event) &&
+        !this.#invalidatedThreadSummaryConversationIds.has(tombstone.conversationId)
+      ) {
+        threadSummaries = retractReplySummary(threadSummaries, messages, tombstone);
       }
-      this.#applyRetractedMessage(
-        tombstoneMessage(source, event),
-        !this.#consumeLocallyProjectedRetract(event),
-      );
-      return;
     }
-    if (event.type === "reaction.added") {
-      this.#setState({
-        reactions: mergeReactions(this.#state.reactions, [event.payload.reaction]),
-      });
-      return;
-    }
-    if (event.type === "reaction.removed") {
-      this.#setState({
-        reactions: this.#state.reactions.filter(
-          (reaction) => reaction.id !== event.payload.reaction.id,
-        ),
-      });
-      return;
-    }
-    if (event.type === "task.created" || event.type === "task.updated") {
-      this.#setState({ tasks: mergeTasks(this.#state.tasks, [event.payload.task]) });
-      return;
-    }
-    if (snapshot === null) return;
-    if (event.type === "read_cursor.updated") {
-      this.#setState({
-        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
-          current === undefined ? null : projectReadCursorSummary(current, event),
-        ),
-      });
-      return;
-    }
-    if (event.type === "channel.membership_changed") {
-      this.#setState({
-        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
-          current === undefined ? null : projectConversationMembershipChange(current, event),
-        ),
-      });
-      return;
-    }
-    // `member.updated` is an invalidation signal rather than a delta: `#applyWorkspaceEvent`
-    // answers it with a server re-read and never reaches this projection. It must have no upsert
-    // path here because the payload cannot say that a member was disabled.
-    if (event.type === "member.updated") {
-      return;
+    for (const invalidation of changes.invalidated) {
+      if (invalidation.kind === "conversation_metadata") {
+        this.#invalidateConversationThreadSummaries(invalidation.conversationId);
+        threadSummaries = threadSummaries.filter(
+          (summary) => summary.latestReply.conversationId !== invalidation.conversationId,
+        );
+      }
     }
     this.#setState({
-      bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
-        projectConversationSummary(current, event, snapshot.currentUser.user.id),
+      bootstrap: snapshot,
+      messages,
+      outbox,
+      tasks: mergeTasks(this.#state.tasks, changes.tasks).filter(
+        (task) => !revoked.has(task.conversationId),
       ),
+      reactions: mergeReactions(this.#state.reactions, changes.reactions).filter(
+        (reaction) =>
+          !removedReactions.has(reaction.id) &&
+          !removedMessageReactions.has(reaction.messageId) &&
+          !revokedMessageIds.has(reaction.messageId),
+      ),
+      threadSummaries,
+      attachments: this.#state.attachments.filter(
+        (attachment) =>
+          (retractedId === null || attachment.messageId !== retractedId) &&
+          (attachment.messageId === null || !revokedMessageIds.has(attachment.messageId)),
+      ),
+      conversationFiles: this.#state.conversationFiles.filter(
+        (attachment) =>
+          (retractedId === null || attachment.messageId !== retractedId) &&
+          (attachment.messageId === null || !revokedMessageIds.has(attachment.messageId)),
+      ),
+      focusedMessageId:
+        this.#state.focusedMessageId === retractedId ? null : this.#state.focusedMessageId,
+      selectedThreadRootId: closesSelectedThread ? null : this.#state.selectedThreadRootId,
+      focusedThreadMessageId:
+        closesSelectedThread || this.#state.focusedThreadMessageId === retractedId
+          ? null
+          : this.#state.focusedThreadMessageId,
+      ...(closesSelectedThread ? { threadLoading: false, threadError: null } : {}),
     });
+    if (created !== undefined && created.deletedAt === null)
+      void this.#hydrateCreatedMessageAttachments(created);
   }
 
   #requireProtocolUpgrade(): void {

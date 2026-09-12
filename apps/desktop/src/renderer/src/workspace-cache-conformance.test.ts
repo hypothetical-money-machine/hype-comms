@@ -560,6 +560,86 @@ afterEach(async () => {
 });
 
 describe.each(implementations)("$name conformance", ({ create }) => {
+  it("returns committed records and removals without publishing rejected task versions", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    const created = await cache.applyEvent(messageCreatedEvent);
+    const state = await cache.load();
+    expect(created).toMatchObject({
+      status: "applied",
+      committedPosition: messageCreatedEvent.position,
+      changes: {
+        messages: state.messages,
+        conversations: state.bootstrap?.conversations.filter(
+          (summary) => summary.conversation.id === ALPHA_ID,
+        ),
+        removedOutboxIds: [messageSequence2.clientMessageId],
+      },
+    });
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toEqual({
+      status: "ignored",
+      committedPosition: messageCreatedEvent.position,
+    });
+    await expect(cache.applyEvent(readCursorEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: {
+        conversations: [
+          expect.objectContaining({ readCursor: readCursorEvent.payload.readCursor }),
+        ],
+      },
+    });
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: { reactions: [reactionAddedEvent.payload.reaction] },
+    });
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: { reactions: [], removedReactionIds: [reactionAddedEvent.payload.reaction.id] },
+    });
+    const currentTask = { ...task, version: 2, title: "Current task" };
+    await cache.upsertTasks([currentTask]);
+    await expect(cache.applyEvent(taskEvent(task, "20"))).resolves.toMatchObject({
+      status: "applied",
+      committedPosition: testPosition("20"),
+      changes: { tasks: [] },
+    });
+    expect((await cache.load()).tasks).toEqual([currentTask]);
+    const retracted = await cache.applyEvent({
+      ...messageRetractedEvent,
+      position: testPosition("21"),
+    });
+    const after = await cache.load();
+    expect(retracted).toMatchObject({
+      status: "applied",
+      changes: {
+        messages: after.messages,
+        conversations: after.bootstrap?.conversations.filter(
+          (summary) => summary.conversation.id === ALPHA_ID,
+        ),
+        removedMessageReactionIds: [messageSequence2.id],
+        retractReservations: after.retractReservations,
+      },
+    });
+  });
+
+  it("reports authoritative refreshes for records an event cannot reconstruct", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+      changes: {
+        messages: [],
+        invalidated: [{ kind: "conversation_metadata", conversationId: ALPHA_ID }],
+      },
+    });
+    await expect(
+      cache.applyEvent({ ...memberUpdatedEvent, id: "10000000-0000-4000-8000-000000000099" }),
+    ).resolves.toMatchObject({
+      status: "applied",
+      changes: { invalidated: [{ kind: "members" }] },
+    });
+  });
+
   it("upserts a conversation without advancing the cursor or losing newer counters", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
@@ -637,7 +717,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.replaceSnapshot(snapshot, []);
     await cache.clearServerStatePreservingOutbox();
 
-    await expect(cache.applyEvent(readCursorEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(readCursorEvent)).resolves.toMatchObject({ status: "applied" });
     const state = await cache.load();
     expect(state.bootstrap).toBeNull();
     expect(state.syncCursor).toEqual(testPosition("8"));
@@ -648,7 +728,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.replaceSnapshot(snapshot, []);
     await cache.clearServerStatePreservingOutbox();
 
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     const state = await cache.load();
     expect(state.bootstrap).toBeNull();
     expect(state.messages.map((message) => message.id)).toEqual([MESSAGE_SEQUENCE_2_ID]);
@@ -659,9 +741,15 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, [messageSequence2]);
     await cache.upsertReaction(reactionAddedEvent.payload.reaction, ALPHA_ID);
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
 
     const retracted = await cache.load();
     expect(retracted.messages).toEqual([
@@ -805,7 +893,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [messageSequence1],
     );
 
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     await cache.replaceSnapshot(
       {
         ...snapshot,
@@ -823,7 +913,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       },
       [messageSequence1, messageSequence2],
     );
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     const alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
@@ -874,7 +966,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [messageSequence1, laterMainMessage],
     );
 
-    await expect(cache.applyEvent(retract, undefined, closedThreadReply)).resolves.toBe(true);
+    await expect(cache.applyEvent(retract, undefined, closedThreadReply)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     const state = await cache.load();
     const alpha = state.bootstrap?.conversations.find(
@@ -901,7 +995,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 
     await expect(
       cache.applyEvent(messageRetractedEvent, undefined, messageSequence2),
-    ).resolves.toBe(true);
+    ).resolves.toMatchObject({ status: "applied" });
     const state = await cache.load();
     expect(state.syncCursor).toEqual(testPosition("9"));
     expect(state.messages).toContainEqual(
@@ -912,7 +1006,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("does not let stale history resurrect a source-less message.retracted event", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     const reserved = await cache.load();
     expect(reserved.messages).toEqual([]);
@@ -940,7 +1036,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("does not restore a reaction from stale history after a source-less retract", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     await expect(
       cache.upsertHistory(ALPHA_ID, [messageSequence2], [reactionAddedEvent.payload.reaction]),
@@ -1008,13 +1106,17 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     );
     expect(alpha).toMatchObject({ unreadCount: 1, mentionCount: 1 });
 
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
     expect(alpha).toMatchObject({ unreadCount: 0, mentionCount: 0, lastMessage: null });
 
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
     alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
@@ -1058,7 +1160,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [messageSequence2],
       [reactionAddedEvent.payload.reaction],
     );
-    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     await cache.replaceSnapshot(
       staleSnapshot,
@@ -1078,8 +1182,12 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
 
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
 
     const state = await cache.load();
     const conversations = state.bootstrap?.conversations ?? [];
@@ -1103,7 +1211,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [],
     );
 
-    await expect(cache.applyEvent(readCursorEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(readCursorEvent)).resolves.toMatchObject({ status: "applied" });
     const alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
@@ -1133,7 +1241,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
         ...readCursorEvent,
         payload: { readCursor: readCursorEvent.payload.readCursor },
       }),
-    ).resolves.toBe(true);
+    ).resolves.toMatchObject({ status: "applied" });
     const alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
@@ -1164,7 +1272,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [],
     );
 
-    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(messageCreatedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
     const alpha = (await cache.load()).bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
@@ -1179,8 +1289,12 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, [messageSequence2]);
 
-    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
 
     const added = await cache.load();
     expect(added.syncCursor).toEqual(testPosition("9"));
@@ -1188,8 +1302,12 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(added.messages).toEqual([messageSequence2]);
     expect(added.bootstrap?.conversations).toHaveLength(snapshot.conversations.length);
 
-    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(true);
-    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
     const removed = await cache.load();
     expect(removed.syncCursor).toEqual(testPosition("10"));
     expect(removed.reactions).toEqual([]);
@@ -1200,7 +1318,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.replaceSnapshot(snapshot, []);
     const before = await cache.load();
 
-    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     const after = await cache.load();
     // The guard the design rests on. `member.updated` announces THAT the directory changed, never
@@ -1210,7 +1330,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(after.bootstrap?.members).toEqual(before.bootstrap?.members);
     expect(after.bootstrap?.members.map((member) => member.id)).not.toContain(disabledAgent.id);
     expect(after.syncCursor).toEqual(testPosition("11"));
-    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
   });
 
   it("purges every conversation-scoped row when the current user is removed", async () => {
@@ -1223,7 +1345,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     );
     await cache.enqueue(queuedAlphaMessage, NOW);
 
-    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toMatchObject({ status: "applied" });
 
     const state = await cache.load();
     expect(
@@ -1245,10 +1367,12 @@ describe.each(implementations)("$name conformance", ({ create }) => {
   it("purges a reaction even when its message row is absent", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
-    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(reactionAddedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     expect((await cache.load()).reactions).toEqual([reactionAddedEvent.payload.reaction]);
 
-    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(selfRemovedEvent)).resolves.toMatchObject({ status: "applied" });
 
     expect((await cache.load()).reactions).toEqual([]);
   });
@@ -1270,7 +1394,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     );
     await cache.enqueue(queuedAlphaMessage, NOW);
 
-    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(true);
+    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
 
     const state = await cache.load();
     expect(
@@ -1286,7 +1412,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     ).toEqual([MORGAN_ID]);
     expect(state.syncCursor).toEqual(otherMemberRemovedEvent.position);
     expect(state.repairMarker).toBeNull();
-    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(false);
+    await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toMatchObject({
+      status: "ignored",
+    });
   });
 
   it("prunes only outbox rows outside an authoritative conversation catalog", async () => {
@@ -1506,7 +1634,9 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       title: "Stale title",
       updatedAt: "2026-07-24T12:02:00.000Z",
     };
-    await expect(cache.applyEvent(taskEvent(olderEventTask, "11"))).resolves.toBe(true);
+    await expect(cache.applyEvent(taskEvent(olderEventTask, "11"))).resolves.toMatchObject({
+      status: "applied",
+    });
     expect(await cache.load()).toMatchObject({
       syncCursor: testPosition("11"),
       tasks: [mutationProjection],
@@ -1519,8 +1649,12 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       rank: "2048",
       updatedAt: "2026-07-24T12:04:00.000Z",
     };
-    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(true);
-    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(false);
+    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toMatchObject({
+      status: "ignored",
+    });
     expect(await cache.load()).toMatchObject({
       syncCursor: testPosition("12"),
       tasks: [newerEventTask],
@@ -1751,6 +1885,55 @@ describe("retract reservation retention", () => {
 });
 
 describe("PersistentWorkspaceCache retraction write races", () => {
+  it("rolls back an event overtaken while its records are encrypting", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const writer = new PersistentWorkspaceCache({ crypto, scope });
+    const concurrent = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
+    await writer.replaceSnapshot(snapshot, [messageSequence2]);
+    const gate = crypto.pauseNextEncryption();
+    const delayed = writer.applyEvent(readCursorEvent);
+    await gate.started;
+    await concurrent.applyEvent(taskEvent(task, "20"));
+    gate.release();
+    await expect(delayed).resolves.toEqual({
+      status: "ignored",
+      committedPosition: testPosition("20"),
+    });
+    const state = await writer.load();
+    expect(state.syncCursor).toEqual(testPosition("20"));
+    expect(
+      state.bootstrap?.conversations.find((summary) => summary.conversation.id === ALPHA_ID)
+        ?.readCursor,
+    ).toBeNull();
+    expect(state.tasks).toEqual([task]);
+  });
+
+  it("publishes no changes or position when a pending write is cancelled", async () => {
+    const crypto = new DeferredFakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    const controller = new AbortController();
+    const gate = crypto.pauseNextEncryption();
+    const pending = cache.applyEvent(reactionAddedEvent, controller.signal);
+    let published = false;
+    void pending.then(
+      () => {
+        published = true;
+      },
+      () => undefined,
+    );
+    await gate.started;
+    expect(published).toBe(false);
+    expect((await cache.load()).syncCursor).toEqual(snapshot.syncCursor);
+    controller.abort();
+    gate.release();
+    await expect(pending).rejects.toThrow(/abort/i);
+    expect(published).toBe(false);
+    const state = await cache.load();
+    expect(state.syncCursor).toEqual(snapshot.syncCursor);
+    expect(state.reactions).toEqual([]);
+  });
+
   it("retries a snapshot write when a source-less retract arrives during encryption", async () => {
     const writerCrypto = new DeferredFakeCrypto();
     const writer = new PersistentWorkspaceCache({ crypto: writerCrypto, scope });
@@ -1764,7 +1947,9 @@ describe("PersistentWorkspaceCache retraction write races", () => {
       [reactionAddedEvent.payload.reaction],
     );
     await gate.started;
-    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     gate.release();
     await expect(replacing).resolves.toBe(true);
 
@@ -1792,7 +1977,9 @@ describe("PersistentWorkspaceCache retraction write races", () => {
       [reactionAddedEvent.payload.reaction],
     );
     await gate.started;
-    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toBe(true);
+    await expect(retracting.applyEvent(messageRetractedEvent)).resolves.toMatchObject({
+      status: "applied",
+    });
     gate.release();
     await expect(writingHistory).resolves.toBe(true);
 
@@ -1824,7 +2011,7 @@ describe("PersistentWorkspaceCache retraction write races", () => {
     await gate.started;
     await expect(retracting.upsertHistory(ALPHA_ID, [tombstone])).resolves.toBe(true);
     gate.release();
-    await expect(creating).resolves.toBe(true);
+    await expect(creating).resolves.toMatchObject({ status: "applied" });
 
     const raw = await readRawCacheMessagesAndReactionCount();
     expect(raw.messages).toEqual([
@@ -1854,7 +2041,7 @@ describe("PersistentWorkspaceCache retraction write races", () => {
     await gate.started;
     await expect(history.upsertHistory(ALPHA_ID, [firstTombstone])).resolves.toBe(true);
     gate.release();
-    await expect(retracting).resolves.toBe(true);
+    await expect(retracting).resolves.toMatchObject({ status: "applied" });
 
     expect((await writer.load()).retractReservations).toEqual(
       expect.arrayContaining([
@@ -1901,7 +2088,7 @@ describe("PersistentWorkspaceCache retraction write races", () => {
     const gate = writerCrypto.pauseNextDecryption();
     const writingHistory = writer.upsertHistory(ALPHA_ID, [olderHistoryMessage]);
     await gate.started;
-    await expect(live.applyEvent(liveEvent)).resolves.toBe(true);
+    await expect(live.applyEvent(liveEvent)).resolves.toMatchObject({ status: "applied" });
     gate.release();
     await expect(writingHistory).resolves.toBe(true);
 
