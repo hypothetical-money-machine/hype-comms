@@ -54,16 +54,13 @@ import type {
   User,
   WorkspaceBootstrapResponse,
 } from "@hype-comms/contracts";
-import type { FastifyPluginAsync } from "fastify";
+import { z } from "zod";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
+import { taskPolicy, workspacePolicy } from "../../http/authentication-policies.js";
 
 import { ApiError } from "../../errors.js";
-import { requireTaskIdentity } from "../bots/request-auth.js";
 import type { BotService } from "../bots/service.js";
-import {
-  requireAgentScope,
-  requireAnyAgentScope,
-  requireAuthenticatedIdentity,
-} from "../identity/request-auth.js";
+import { requireAgentScope, type AuthenticatedRequestIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import type { WorkspaceClientCapabilities, WorkspaceRepository } from "./repository.js";
@@ -88,56 +85,44 @@ function requiredIdempotencyKey(value: string | string[] | undefined): string {
   return parsed;
 }
 
-function parameters(value: unknown): { readonly id: string } {
-  const result = entityIdSchema.safeParse(
-    typeof value === "object" && value !== null && "id" in value ? value.id : undefined,
+const resourceParams = validateRequest(
+  z.object({ id: entityIdSchema }).strict(),
+  "Invalid resource id",
+);
+const memberParams = validateRequest(
+  z.object({ id: entityIdSchema, userId: entityIdSchema }).strict(),
+  "Invalid resource ids",
+);
+const channelParams = validateRequest(
+  z.object({ slug: channelSlugSchema }).strict(),
+  "Invalid channel slug",
+);
+const channelTaskParams = validateRequest(
+  z.object({ slug: channelSlugSchema, number: taskNumberSchema }).strict(),
+  "Invalid channel task reference",
+);
+const reactionParams = validateRequest(
+  z.object({ id: entityIdSchema, emoji: reactionEmojiSchema }).strict(),
+  "Invalid reaction",
+);
+
+const historyQuery = validateRequest(
+  z.union([
+    agentContextHistoryQuerySchema.transform((value) => ({ kind: "context" as const, value })),
+    messageHistoryQuerySchema.transform((value) => ({ kind: "history" as const, value })),
+  ]),
+  (value) =>
+    typeof value === "object" && value !== null && Object.hasOwn(value, "contextPack")
+      ? "Invalid context history query"
+      : "Invalid history query",
+);
+
+function canCreateDirectConversation(identity: AuthenticatedRequestIdentity): boolean {
+  return (
+    identity.credentialType === "session" ||
+    identity.currentUser.scopes.includes("direct-conversations:write") ||
+    identity.currentUser.scopes.includes("conversations:write")
   );
-  if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid resource id");
-  return { id: result.data };
-}
-
-function memberParameters(value: unknown): { readonly id: string; readonly userId: string } {
-  if (typeof value !== "object" || value === null) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
-  }
-  const id = entityIdSchema.safeParse("id" in value ? value.id : undefined);
-  const userId = entityIdSchema.safeParse("userId" in value ? value.userId : undefined);
-  if (!id.success || !userId.success) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid resource ids");
-  }
-  return { id: id.data, userId: userId.data };
-}
-
-function channelParameters(value: unknown): { readonly slug: string } {
-  const result = channelSlugSchema.safeParse(
-    typeof value === "object" && value !== null && "slug" in value ? value.slug : undefined,
-  );
-  if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel slug");
-  return { slug: result.data };
-}
-
-function channelTaskParameters(value: unknown): { readonly slug: string; readonly number: string } {
-  if (typeof value !== "object" || value === null) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid channel task reference");
-  }
-  const slug = channelSlugSchema.safeParse("slug" in value ? value.slug : undefined);
-  const number = taskNumberSchema.safeParse("number" in value ? value.number : undefined);
-  if (!slug.success || !number.success) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid channel task reference");
-  }
-  return { slug: slug.data, number: number.data };
-}
-
-function reactionParameters(value: unknown): { readonly id: string; readonly emoji: string } {
-  if (typeof value !== "object" || value === null) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid reaction");
-  }
-  const id = entityIdSchema.safeParse("id" in value ? value.id : undefined);
-  const emoji = reactionEmojiSchema.safeParse("emoji" in value ? value.emoji : undefined);
-  if (!id.success || !emoji.success) {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid reaction");
-  }
-  return { id: id.data, emoji: emoji.data };
 }
 
 function capabilities(value: string | string[] | undefined): readonly string[] {
@@ -342,7 +327,7 @@ function withoutAttachments<T extends { readonly attachments?: unknown }>(
   >;
 }
 
-export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async (app, options) => {
+export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes, options) => {
   const { identityService, botService, repository, defaultAgentAgencyEnabled = true } = options;
   const requireDefaultAgentAgencyEnabled = (): void => {
     if (!defaultAgentAgencyEnabled) {
@@ -353,693 +338,1028 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRoutesOptions> = async
       );
     }
   };
-  app.get("/bootstrap", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectBootstrap(
-      await repository.bootstrap(
-        identity,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-      ),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      identity.credentialType === "agent" && supported.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY)
-        ? identity.authorizationScopes
-        : null,
-    );
-  });
-
-  app.get("/members", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectMembers(
-      await repository.listMembers(identity),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-    );
-  });
-
-  app.get("/admin/communication-paths", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    if (identity.currentUser.role !== "owner") {
-      throw new ApiError(403, "FORBIDDEN", "Only workspace owners can view communication paths");
-    }
-    // This endpoint exposes per-pair activity for conversations the owner may not be party to,
-    // so every read is recorded even though it is a query.
-    request.log.info(
-      {
-        event: "admin.communication_paths_viewed",
-        actorUserId: identity.currentUser.user.id,
-        workspaceId: identity.currentUser.workspaceId,
-      },
-      "Workspace owner viewed member communication paths",
-    );
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectMembers(
-      await repository.communicationPaths(identity),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-    );
-  });
-
-  app.get("/conversations", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const query = listConversationsQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid conversation query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectConversationList(
-      await repository.listConversations(
-        identity,
-        query.data.after,
-        query.data.limit,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-      ),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.get("/channels", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireDefaultAgentAgencyEnabled();
-    requireAgentScope(identity, "workspace:read");
-    requireAnyAgentScope(identity, ["channels:join", "conversations:write"]);
-    const query = listConversationsQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel query");
-    return repository.listPublicChannels(identity, query.data.after, query.data.limit);
-  });
-
-  app.post("/channels", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "conversations:write");
-    const result = createChannelRequestSchema.safeParse(request.body);
-    if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const supportsAnnouncements = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
-    const supportsHumansOnlyChannels = supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY);
-    if (result.data.access === "humans" && !supportsHumansOnlyChannels) {
-      throw new ApiError(400, "BAD_REQUEST", "Client does not support humans-only channels");
-    }
-    const created = await repository.createChannel(
-      identity,
-      result.data,
-      optionalIdempotencyKey(request.headers["idempotency-key"]),
-      supportsAnnouncements,
-      request.id,
-      defaultAgentAgencyEnabled,
-    );
-    return reply
-      .code(201)
-      .send(
-        projectConversationMutation(created, supportsAnnouncements, supportsHumansOnlyChannels),
-      );
-  });
-
-  app.patch("/channels/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "conversations:write");
-    const { id } = parameters(request.params);
-    const result = archiveChannelRequestSchema.safeParse(request.body);
-    if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel update");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectConversationMutation(
-      await repository.archiveChannel(identity, id),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.get("/channels/:id/members", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectChannelMembers(
-      await repository.listChannelMembers(identity, id),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.put("/channels/:id/members/:userId", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "conversations:write");
-    const { id, userId } = memberParameters(request.params);
-    const body = upsertChannelMemberRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel member");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectChannelMembershipMutation(
-      await repository.upsertChannelMember(identity, id, userId, body.data),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.delete("/channels/:id/members/:userId", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "conversations:write");
-    const { id, userId } = memberParameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectChannelMembershipMutation(
-      await repository.removeChannelMember(identity, id, userId),
-      supported.includes(MEMBER_PROFILES_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.put("/channels/:id/membership", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireDefaultAgentAgencyEnabled();
-    requireAnyAgentScope(identity, ["channels:join", "conversations:write"]);
-    requireAgentScope(identity, "workspace:read");
-    if (!joinPublicChannelRequestSchema.safeParse(request.body).success) {
-      throw new ApiError(400, "BAD_REQUEST", "Channel join does not accept a request body");
-    }
-    const { id } = parameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectConversationMutation(
-      await repository.joinPublicChannel(identity, id),
-      supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-      supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.post("/direct-conversations", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    // Keep broad legacy credentials working while newly enrolled agents receive only the narrow
-    // permission needed to open a 1:1 conversation. A read-only agent token may still look one up,
-    // so `workspace:read` alone reaches the read path below.
-    const canCreate =
-      identity.credentialType === "session" ||
-      identity.currentUser.scopes.includes("direct-conversations:write") ||
-      identity.currentUser.scopes.includes("conversations:write");
-    if (!canCreate && !identity.currentUser.scopes.includes("workspace:read")) {
-      throw missingDirectConversationWriteScope();
-    }
-    const result = directConversationRequestSchema.safeParse(request.body);
-    if (!result.success) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid direct-conversation request");
-    }
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const opened = canCreate
-      ? await repository.createDirectConversation(identity, result.data)
-      : await repository.findDirectConversation(identity, result.data);
-    if (opened === null) {
-      // Read-only lookup found nothing; opening it would need the write scope.
-      throw missingDirectConversationWriteScope();
-    }
-    return reply
-      .code(201)
-      .send(
-        projectConversationMutation(
-          opened,
-          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-          supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-        ),
-      );
-  });
-
-  app.post("/group-direct-conversations", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireDefaultAgentAgencyEnabled();
-    requireAnyAgentScope(identity, ["direct-conversations:write", "conversations:write"]);
-    const result = groupDirectConversationRequestSchema.safeParse(request.body);
-    if (!result.success) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid group direct-conversation request");
-    }
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    if (!supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)) {
-      throw new GroupDirectClientUpgradeRequiredError();
-    }
-    return reply
-      .code(201)
-      .send(
-        projectConversationMutation(
-          await repository.createGroupDirectConversation(
-            identity,
-            result.data,
-            requiredIdempotencyKey(request.headers["idempotency-key"]),
-          ),
-          supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-          supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-        ),
-      );
-  });
-
-  app.get("/conversations/:id/messages", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    if (
-      typeof request.query === "object" &&
-      request.query !== null &&
-      Object.hasOwn(request.query, "contextPack")
-    ) {
-      const query = agentContextHistoryQuerySchema.safeParse(request.query);
-      if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid context history query");
+  const workspace = workspacePolicy(identityService);
+  const agency = workspacePolicy(identityService, requireDefaultAgentAgencyEnabled);
+  const tasks = taskPolicy(identityService, botService);
+  routes.register({
+    method: "GET",
+    url: "/bootstrap",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {},
+    handler: async ({ identity, request }) => {
       const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
-        throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
-      }
-      return repository.contextHistory(
-        identity,
-        id,
-        query.data.before,
-        query.data.throughMessageId,
-        query.data.limit,
+      return projectBootstrap(
+        await repository.bootstrap(
+          identity,
+          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+          supported.includes(SYSTEM_CHANNELS_CAPABILITY),
+        ),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+        identity.credentialType === "agent" && supported.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY)
+          ? identity.authorizationScopes
+          : null,
       );
-    }
-    const query = messageHistoryQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid history query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const supportsThreads = supported.includes(THREADS_CAPABILITY);
-    const supportsAttachments = supported.includes(ATTACHMENTS_CAPABILITY);
-    await repository.requireGroupDirectMessagesForConversations(
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/members",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {},
+    handler: async ({ identity, request }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectMembers(
+        await repository.listMembers(identity),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/admin/communication-paths",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {},
+    handler: async ({ identity, request }) => {
+      if (identity.currentUser.role !== "owner") {
+        throw new ApiError(403, "FORBIDDEN", "Only workspace owners can view communication paths");
+      }
+      // This endpoint exposes per-pair activity for conversations the owner may not be party to,
+      // so every read is recorded even though it is a query.
+      request.log.info(
+        {
+          event: "admin.communication_paths_viewed",
+          actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
+        },
+        "Workspace owner viewed member communication paths",
+      );
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectMembers(
+        await repository.communicationPaths(identity),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/conversations",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { query: validateRequest(listConversationsQuerySchema, "Invalid conversation query") },
+    handler: async ({ identity, request, input: { query: query } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectConversationList(
+        await repository.listConversations(
+          identity,
+          query.after,
+          query.limit,
+          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+          supported.includes(SYSTEM_CHANNELS_CAPABILITY),
+        ),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/channels",
+    policy: agency,
+    scopes: ["workspace:read", { any: ["channels:join", "conversations:write"] }],
+    request: { query: validateRequest(listConversationsQuerySchema, "Invalid channel query") },
+    handler: async ({ identity, input: { query: query } }) => {
+      return repository.listPublicChannels(identity, query.after, query.limit);
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/channels",
+    policy: workspace,
+    scopes: ["conversations:write"],
+    request: { body: validateRequest(createChannelRequestSchema, "Invalid channel") },
+    handler: async ({ identity, request, reply, input: { body: result } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const supportsAnnouncements = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
+      const supportsHumansOnlyChannels = supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY);
+      if (result.access === "humans" && !supportsHumansOnlyChannels) {
+        throw new ApiError(400, "BAD_REQUEST", "Client does not support humans-only channels");
+      }
+      const created = await repository.createChannel(
+        identity,
+        result,
+        optionalIdempotencyKey(request.headers["idempotency-key"]),
+        supportsAnnouncements,
+        request.id,
+        defaultAgentAgencyEnabled,
+      );
+      return reply
+        .code(201)
+        .send(
+          projectConversationMutation(created, supportsAnnouncements, supportsHumansOnlyChannels),
+        );
+    },
+  });
+
+  routes.register({
+    method: "PATCH",
+    url: "/channels/:id",
+    policy: workspace,
+    scopes: ["conversations:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(archiveChannelRequestSchema, "Invalid channel update"),
+    },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    const history = await repository.history(
+      request,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectConversationMutation(
+        await repository.archiveChannel(identity, id),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/channels/:id/members",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { params: resourceParams },
+    handler: async ({
       identity,
-      id,
-      query.data.before,
-      query.data.limit,
-      !supportsThreads,
-    );
-    if (supportsThreads) return withoutAttachments(history, supportsAttachments);
-    return {
-      messages: history.messages,
-      nextCursor: history.nextCursor,
-      ...(supportsAttachments ? { attachments: history.attachments } : {}),
-    };
+      request,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectChannelMembers(
+        await repository.listChannelMembers(identity, id),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
   });
 
-  app.get("/messages/:id/thread", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    const query = messageHistoryQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid thread query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const thread = await repository.thread(identity, id, query.data.before, query.data.limit);
-    await repository.requireGroupDirectMessagesForMessages(
+  routes.register({
+    method: "PUT",
+    url: "/channels/:id/members/:userId",
+    policy: workspace,
+    scopes: ["conversations:write"],
+    request: {
+      params: memberParams,
+      body: validateRequest(upsertChannelMemberRequestSchema, "Invalid channel member"),
+    },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return withoutAttachments(thread, supported.includes(ATTACHMENTS_CAPABILITY));
+      request,
+      input: {
+        params: { id, userId },
+        body,
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectChannelMembershipMutation(
+        await repository.upsertChannelMember(identity, id, userId, body),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
   });
 
-  app.get("/messages/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const message = await repository.messageById(identity, id);
-    await repository.requireGroupDirectMessagesForMessages(
+  routes.register({
+    method: "DELETE",
+    url: "/channels/:id/members/:userId",
+    policy: workspace,
+    scopes: ["conversations:write"],
+    request: { params: memberParams },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return withoutAttachments(message, supported.includes(ATTACHMENTS_CAPABILITY));
+      request,
+      input: {
+        params: { id, userId },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectChannelMembershipMutation(
+        await repository.removeChannelMember(identity, id, userId),
+        supported.includes(MEMBER_PROFILES_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
   });
 
-  app.delete("/messages/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
-    const { id } = parameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForMessages(
+  routes.register({
+    method: "PUT",
+    url: "/channels/:id/membership",
+    policy: agency,
+    scopes: [{ any: ["channels:join", "conversations:write"] }, "workspace:read"],
+    request: {
+      body: validateRequest(
+        joinPublicChannelRequestSchema,
+        "Channel join does not accept a request body",
+      ),
+      params: resourceParams,
+    },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      "retractable",
-    );
-    return repository.retractMessage(identity, id);
+      request,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectConversationMutation(
+        await repository.joinPublicChannel(identity, id),
+        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+      );
+    },
   });
 
-  app.get("/search", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const query = messageSearchQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid search query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    return repository.searchMessages(
+  routes.register({
+    method: "POST",
+    url: "/direct-conversations",
+    policy: workspace,
+    scopes: [],
+    request: {
+      body: validateRequest(directConversationRequestSchema, "Invalid direct-conversation request"),
+    },
+    beforeValidation: ({ identity }) => {
+      // Keep broad legacy credentials working while newly enrolled agents receive only the narrow
+      // permission needed to open a 1:1 conversation. A read-only agent token may still look one up,
+      // so `workspace:read` alone reaches the read path below.
+      const canCreate = canCreateDirectConversation(identity);
+      if (
+        identity.credentialType === "agent" &&
+        !canCreate &&
+        !identity.currentUser.scopes.includes("workspace:read")
+      ) {
+        throw missingDirectConversationWriteScope();
+      }
+    },
+    handler: async ({ identity, request, reply, input: { body: result } }) => {
+      const canCreate = canCreateDirectConversation(identity);
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const opened = canCreate
+        ? await repository.createDirectConversation(identity, result)
+        : await repository.findDirectConversation(identity, result);
+      if (opened === null) {
+        // Read-only lookup found nothing; opening it would need the write scope.
+        throw missingDirectConversationWriteScope();
+      }
+      return reply
+        .code(201)
+        .send(
+          projectConversationMutation(
+            opened,
+            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+            supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+          ),
+        );
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/group-direct-conversations",
+    policy: agency,
+    scopes: [{ any: ["direct-conversations:write", "conversations:write"] }],
+    request: {
+      body: validateRequest(
+        groupDirectConversationRequestSchema,
+        "Invalid group direct-conversation request",
+      ),
+    },
+    handler: async ({ identity, request, reply, input: { body: result } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      if (!supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)) {
+        throw new GroupDirectClientUpgradeRequiredError();
+      }
+      return reply
+        .code(201)
+        .send(
+          projectConversationMutation(
+            await repository.createGroupDirectConversation(
+              identity,
+              result,
+              requiredIdempotencyKey(request.headers["idempotency-key"]),
+            ),
+            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+            supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+          ),
+        );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/conversations/:id/messages",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { params: resourceParams, query: historyQuery },
+    handler: async ({
       identity,
-      query.data.query,
-      query.data.after,
-      query.data.limit,
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-    );
-  });
-
-  app.get("/conversations/:id/tasks", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
-    const { id } = parameters(request.params);
-    const query = taskListQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
-    const { after, limit, ...filters } = query.data;
-    return repository.listConversationTasks(identity, id, after, limit, filters);
-  });
-
-  app.get("/channels/:slug/tasks", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
-    const { slug } = channelParameters(request.params);
-    const query = taskListQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
-    const { after, limit, ...filters } = query.data;
-    return repository.listChannelTasks(identity, slug, after, limit, filters);
-  });
-
-  app.get("/channels/:slug/tasks/:number", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
-    const { slug, number } = channelTaskParameters(request.params);
-    return repository.getChannelTaskByNumber(identity, slug, number);
-  });
-
-  app.get("/tasks/mine", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
-    const query = taskListQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task query");
-    const { after, limit, ...filters } = query.data;
-    return repository.listMyTasks(identity, after, limit, filters);
-  });
-
-  app.get("/tasks/:id", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:read");
-    const { id } = parameters(request.params);
-    return repository.getTask(identity, id);
-  });
-
-  app.post("/conversations/:id/tasks", async (request, reply) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
-    const { id } = parameters(request.params);
-    const body = createTaskRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task");
-    return reply
-      .code(201)
-      .send(
-        await repository.createTask(
+      request,
+      input: {
+        params: { id },
+        query,
+      },
+    }) => {
+      if (query.kind === "context") {
+        const contextQuery = query.value;
+        const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+        if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
+          throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
+        }
+        return repository.contextHistory(
           identity,
           id,
-          body.data,
-          requiredIdempotencyKey(request.headers["idempotency-key"]),
-        ),
+          contextQuery.before,
+          contextQuery.throughMessageId,
+          contextQuery.limit,
+        );
+      }
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const supportsThreads = supported.includes(THREADS_CAPABILITY);
+      const supportsAttachments = supported.includes(ATTACHMENTS_CAPABILITY);
+      await repository.requireGroupDirectMessagesForConversations(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
       );
-  });
-
-  app.post("/channels/:slug/tasks", async (request, reply) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
-    const { slug } = channelParameters(request.params);
-    const body = createTaskRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task");
-    return reply
-      .code(201)
-      .send(
-        await repository.createChannelTask(
-          identity,
-          slug,
-          body.data,
-          requiredIdempotencyKey(request.headers["idempotency-key"]),
-        ),
+      const history = await repository.history(
+        identity,
+        id,
+        query.value.before,
+        query.value.limit,
+        !supportsThreads,
       );
+      if (supportsThreads) return withoutAttachments(history, supportsAttachments);
+      return {
+        messages: history.messages,
+        nextCursor: history.nextCursor,
+        ...(supportsAttachments ? { attachments: history.attachments } : {}),
+      };
+    },
   });
 
-  app.patch("/tasks/:id", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
-    const { id } = parameters(request.params);
-    const body = updateTaskRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task update");
-    return repository.updateTask(
+  routes.register({
+    method: "GET",
+    url: "/messages/:id/thread",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {
+      params: resourceParams,
+      query: validateRequest(messageHistoryQuerySchema, "Invalid thread query"),
+    },
+    handler: async ({
       identity,
-      id,
-      body.data,
-      requiredIdempotencyKey(request.headers["idempotency-key"]),
-    );
+      request,
+      input: {
+        params: { id },
+        query,
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const thread = await repository.thread(identity, id, query.before, query.limit);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return withoutAttachments(thread, supported.includes(ATTACHMENTS_CAPABILITY));
+    },
   });
 
-  app.post("/tasks/:id/move", async (request) => {
-    const identity = await requireTaskIdentity(request, identityService, botService, "tasks:write");
-    const { id } = parameters(request.params);
-    const body = moveTaskRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid task move");
-    return repository.moveTask(
+  routes.register({
+    method: "GET",
+    url: "/messages/:id",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { params: resourceParams },
+    handler: async ({
       identity,
-      id,
-      body.data,
-      requiredIdempotencyKey(request.headers["idempotency-key"]),
-    );
+      request,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const message = await repository.messageById(identity, id);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return withoutAttachments(message, supported.includes(ATTACHMENTS_CAPABILITY));
+    },
   });
 
-  app.post("/conversations/:id/messages", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
-    const { id } = parameters(request.params);
-    const body = sendConversationMessageRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid message");
-    if (body.data.attachmentIds.length > 0) {
-      requireAgentScope(identity, "attachments:write");
-    }
-    const idempotencyKey = request.headers["idempotency-key"];
-    if (typeof idempotencyKey !== "string" || idempotencyKey !== body.data.clientMessageId) {
-      throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
-    }
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForConversations(
+  routes.register({
+    method: "DELETE",
+    url: "/messages/:id",
+    policy: workspace,
+    scopes: ["messages:write"],
+    request: { params: resourceParams },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return reply
-      .code(201)
-      .send(
-        withoutAttachments(
-          await repository.sendMessage(
+      request,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        "retractable",
+      );
+      return repository.retractMessage(identity, id);
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/search",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { query: validateRequest(messageSearchQuerySchema, "Invalid search query") },
+    handler: async ({ identity, request, input: { query: query } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      return repository.searchMessages(
+        identity,
+        query.query,
+        query.after,
+        query.limit,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/conversations/:id/tasks",
+    policy: tasks,
+    scopes: ["tasks:read"],
+    request: {
+      params: resourceParams,
+      query: validateRequest(taskListQuerySchema, "Invalid task query"),
+    },
+    handler: async ({
+      identity,
+      input: {
+        params: { id },
+        query,
+      },
+    }) => {
+      const { after, limit, ...filters } = query;
+      return repository.listConversationTasks(identity, id, after, limit, filters);
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/channels/:slug/tasks",
+    policy: tasks,
+    scopes: ["tasks:read"],
+    request: {
+      params: channelParams,
+      query: validateRequest(taskListQuerySchema, "Invalid task query"),
+    },
+    handler: async ({
+      identity,
+      input: {
+        params: { slug },
+        query,
+      },
+    }) => {
+      const { after, limit, ...filters } = query;
+      return repository.listChannelTasks(identity, slug, after, limit, filters);
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/channels/:slug/tasks/:number",
+    policy: tasks,
+    scopes: ["tasks:read"],
+    request: { params: channelTaskParams },
+    handler: async ({
+      identity,
+      input: {
+        params: { slug, number },
+      },
+    }) => {
+      return repository.getChannelTaskByNumber(identity, slug, number);
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/tasks/mine",
+    policy: tasks,
+    scopes: ["tasks:read"],
+    request: { query: validateRequest(taskListQuerySchema, "Invalid task query") },
+    handler: async ({ identity, input: { query: query } }) => {
+      const { after, limit, ...filters } = query;
+      return repository.listMyTasks(identity, after, limit, filters);
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/tasks/:id",
+    policy: tasks,
+    scopes: ["tasks:read"],
+    request: { params: resourceParams },
+    handler: async ({
+      identity,
+      input: {
+        params: { id },
+      },
+    }) => {
+      return repository.getTask(identity, id);
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/conversations/:id/tasks",
+    policy: tasks,
+    scopes: ["tasks:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(createTaskRequestSchema, "Invalid task"),
+    },
+    handler: async ({
+      identity,
+      request,
+      reply,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
+      return reply
+        .code(201)
+        .send(
+          await repository.createTask(
             identity,
             id,
-            body.data,
-            request.id,
-            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+            body,
+            requiredIdempotencyKey(request.headers["idempotency-key"]),
           ),
-          supported.includes(ATTACHMENTS_CAPABILITY),
-        ),
-      );
+        );
+    },
   });
 
-  app.get("/conversations/:id/files", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    const query = conversationFilesQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid files query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForConversations(
+  routes.register({
+    method: "POST",
+    url: "/channels/:slug/tasks",
+    policy: tasks,
+    scopes: ["tasks:write"],
+    request: {
+      params: channelParams,
+      body: validateRequest(createTaskRequestSchema, "Invalid task"),
+    },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return repository.listConversationFiles(identity, id, query.data.before, query.data.limit);
-  });
-
-  app.post("/attachments/query", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const body = listMessageAttachmentsRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid attachment query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const attachments = await repository.listMessageAttachments(identity, body.data.messageIds);
-    await repository.requireGroupDirectMessagesForMessages(
-      identity,
-      body.data.messageIds,
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return attachments;
-  });
-
-  app.post("/files/uploads", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "attachments:write");
-    const body = createFileUploadRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file upload");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForConversations(
-      identity,
-      [body.data.conversationId],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return reply
-      .code(201)
-      .send(
-        await repository.createFileUpload(
-          identity,
-          body.data,
-          requiredIdempotencyKey(request.headers["idempotency-key"]),
-        ),
-      );
-  });
-
-  app.post("/files/:id/complete", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "attachments:write");
-    const { id } = parameters(request.params);
-    const body = completeFileUploadRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid file completion");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForAttachments(
-      identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      "complete",
-    );
-    return repository.completeFileUpload(
-      identity,
-      id,
-      body.data,
-      requiredIdempotencyKey(request.headers["idempotency-key"]),
-    );
-  });
-
-  app.get("/files/:id/content", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const { id } = parameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const file = await repository.readFileContent(
-      identity,
-      id,
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return reply
-      .header("content-type", file.attachment.contentType)
-      .header("content-length", file.attachment.sizeBytes.toString())
-      .header(ATTACHMENT_CONTENT_SHA256_HEADER, file.contentSha256)
-      .header(
-        "content-disposition",
-        `attachment; filename*=UTF-8''${encodeURIComponent(file.attachment.fileName)}`,
-      )
-      .header("x-content-type-options", "nosniff")
-      .send(file.bytes);
-  });
-
-  await app.register(async (files) => {
-    // This encapsulated raw-byte lane must also override Fastify's built-in text/plain and JSON
-    // parsers. A wildcard alone loses to those exact parsers and turns valid text attachments
-    // into strings before the handler can verify their byte length and digest.
-    files.removeAllContentTypeParsers();
-    files.addContentTypeParser(
-      "*",
-      { parseAs: "buffer", bodyLimit: 25 * 1024 * 1024 },
-      (_request, body, done) => {
-        done(null, body);
+      request,
+      reply,
+      input: {
+        params: { slug },
+        body,
       },
-    );
-    files.put("/files/:id/content", { bodyLimit: 25 * 1024 * 1024 }, async (request, reply) => {
-      const identity = await requireAuthenticatedIdentity(request, identityService);
-      requireAgentScope(identity, "attachments:write");
-      const { id } = parameters(request.params);
-      const contentType = request.headers["content-type"];
-      if (typeof contentType !== "string" || contentType.trim() === "") {
-        throw new ApiError(400, "BAD_REQUEST", "Content-Type is required");
+    }) => {
+      return reply
+        .code(201)
+        .send(
+          await repository.createChannelTask(
+            identity,
+            slug,
+            body,
+            requiredIdempotencyKey(request.headers["idempotency-key"]),
+          ),
+        );
+    },
+  });
+
+  routes.register({
+    method: "PATCH",
+    url: "/tasks/:id",
+    policy: tasks,
+    scopes: ["tasks:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(updateTaskRequestSchema, "Invalid task update"),
+    },
+    handler: async ({
+      identity,
+      request,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
+      return repository.updateTask(
+        identity,
+        id,
+        body,
+        requiredIdempotencyKey(request.headers["idempotency-key"]),
+      );
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/tasks/:id/move",
+    policy: tasks,
+    scopes: ["tasks:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(moveTaskRequestSchema, "Invalid task move"),
+    },
+    handler: async ({
+      identity,
+      request,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
+      return repository.moveTask(
+        identity,
+        id,
+        body,
+        requiredIdempotencyKey(request.headers["idempotency-key"]),
+      );
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/conversations/:id/messages",
+    policy: workspace,
+    scopes: ["messages:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(sendConversationMessageRequestSchema, "Invalid message"),
+    },
+    handler: async ({
+      identity,
+      request,
+      reply,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
+      if (body.attachmentIds.length > 0) {
+        requireAgentScope(identity, "attachments:write");
       }
-      if (!Buffer.isBuffer(request.body)) {
-        throw new ApiError(400, "BAD_REQUEST", "Expected raw file bytes");
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || idempotencyKey !== body.clientMessageId) {
+        throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
       }
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForConversations(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return reply
+        .code(201)
+        .send(
+          withoutAttachments(
+            await repository.sendMessage(
+              identity,
+              id,
+              body,
+              request.id,
+              supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
+            ),
+            supported.includes(ATTACHMENTS_CAPABILITY),
+          ),
+        );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/conversations/:id/files",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {
+      params: resourceParams,
+      query: validateRequest(conversationFilesQuerySchema, "Invalid files query"),
+    },
+    handler: async ({
+      identity,
+      request,
+      input: {
+        params: { id },
+        query,
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForConversations(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return repository.listConversationFiles(identity, id, query.before, query.limit);
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/attachments/query",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {
+      body: validateRequest(listMessageAttachmentsRequestSchema, "Invalid attachment query"),
+    },
+    handler: async ({ identity, request, input: { body: body } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const attachments = await repository.listMessageAttachments(identity, body.messageIds);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        body.messageIds,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return attachments;
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/files/uploads",
+    policy: workspace,
+    scopes: ["attachments:write"],
+    request: { body: validateRequest(createFileUploadRequestSchema, "Invalid file upload") },
+    handler: async ({ identity, request, reply, input: { body: body } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForConversations(
+        identity,
+        [body.conversationId],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return reply
+        .code(201)
+        .send(
+          await repository.createFileUpload(
+            identity,
+            body,
+            requiredIdempotencyKey(request.headers["idempotency-key"]),
+          ),
+        );
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/files/:id/complete",
+    policy: workspace,
+    scopes: ["attachments:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(completeFileUploadRequestSchema, "Invalid file completion"),
+    },
+    handler: async ({
+      identity,
+      request,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
       const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
       await repository.requireGroupDirectMessagesForAttachments(
         identity,
         [id],
         supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        "content-write",
+        "complete",
       );
-      await repository.putFileContent(identity, id, contentType, request.body);
-      return reply.code(204).send();
+      return repository.completeFileUpload(
+        identity,
+        id,
+        body,
+        requiredIdempotencyKey(request.headers["idempotency-key"]),
+      );
+    },
+  });
+
+  routes.register({
+    method: "GET",
+    url: "/files/:id/content",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { params: resourceParams },
+    handler: async ({
+      identity,
+      request,
+      reply,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const file = await repository.readFileContent(
+        identity,
+        id,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return reply
+        .header("content-type", file.attachment.contentType)
+        .header("content-length", file.attachment.sizeBytes.toString())
+        .header(ATTACHMENT_CONTENT_SHA256_HEADER, file.contentSha256)
+        .header(
+          "content-disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(file.attachment.fileName)}`,
+        )
+        .header("x-content-type-options", "nosniff")
+        .send(file.bytes);
+    },
+  });
+
+  await routes.rawBytes(25 * 1024 * 1024, (files) => {
+    files.register({
+      method: "PUT",
+      url: "/files/:id/content",
+      policy: workspace,
+      scopes: ["attachments:write"],
+      request: {
+        params: resourceParams,
+        headers: validateRequest(
+          z.object({ "content-type": z.string().refine((value) => value.trim() !== "") }),
+          "Content-Type is required",
+        ),
+        body: validateRequest(z.instanceof(Buffer), "Expected raw file bytes"),
+      },
+      bodyLimit: 25 * 1024 * 1024,
+      handler: async ({
+        identity,
+        request,
+        reply,
+        input: {
+          params: { id },
+          headers: { "content-type": contentType },
+          body,
+        },
+      }) => {
+        const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+        await repository.requireGroupDirectMessagesForAttachments(
+          identity,
+          [id],
+          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+          "content-write",
+        );
+        await repository.putFileContent(identity, id, contentType, body);
+        return reply.code(204).send();
+      },
     });
   });
 
-  app.post("/reactions/query", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const body = listMessageReactionsRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid reaction query");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    const reactions = await repository.listMessageReactions(identity, body.data.messageIds);
-    await repository.requireGroupDirectMessagesForMessages(
-      identity,
-      body.data.messageIds,
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return reactions;
+  routes.register({
+    method: "POST",
+    url: "/reactions/query",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { body: validateRequest(listMessageReactionsRequestSchema, "Invalid reaction query") },
+    handler: async ({ identity, request, input: { body: body } }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      const reactions = await repository.listMessageReactions(identity, body.messageIds);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        body.messageIds,
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return reactions;
+    },
   });
 
-  app.put("/messages/:id/reactions/:emoji", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
-    const { id, emoji } = reactionParameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForMessages(
+  routes.register({
+    method: "PUT",
+    url: "/messages/:id/reactions/:emoji",
+    policy: workspace,
+    scopes: ["messages:write"],
+    request: { params: reactionParams },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      "active",
-    );
-    return repository.addReaction(identity, id, emoji);
+      request,
+      input: {
+        params: { id, emoji },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        "active",
+      );
+      return repository.addReaction(identity, id, emoji);
+    },
   });
 
-  app.delete("/messages/:id/reactions/:emoji", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "messages:write");
-    const { id, emoji } = reactionParameters(request.params);
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForMessages(
+  routes.register({
+    method: "DELETE",
+    url: "/messages/:id/reactions/:emoji",
+    policy: workspace,
+    scopes: ["messages:write"],
+    request: { params: reactionParams },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      "active",
-    );
-    return repository.removeReaction(identity, id, emoji);
+      request,
+      input: {
+        params: { id, emoji },
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForMessages(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+        "active",
+      );
+      return repository.removeReaction(identity, id, emoji);
+    },
   });
 
-  app.put("/conversations/:id/read-cursor", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "read-cursors:write");
-    const { id } = parameters(request.params);
-    const body = advanceReadCursorRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid read cursor");
-    const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-    await repository.requireGroupDirectMessagesForConversations(
+  routes.register({
+    method: "PUT",
+    url: "/conversations/:id/read-cursor",
+    policy: workspace,
+    scopes: ["read-cursors:write"],
+    request: {
+      params: resourceParams,
+      body: validateRequest(advanceReadCursorRequestSchema, "Invalid read cursor"),
+    },
+    handler: async ({
       identity,
-      [id],
-      supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    );
-    return repository.advanceReadCursor(identity, id, body.data.lastReadMessageId);
+      request,
+      input: {
+        params: { id },
+        body,
+      },
+    }) => {
+      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+      await repository.requireGroupDirectMessagesForConversations(
+        identity,
+        [id],
+        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
+      );
+      return repository.advanceReadCursor(identity, id, body.lastReadMessageId);
+    },
   });
 
-  app.get("/sync", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    const query = syncQuerySchema.safeParse(request.query);
-    if (!query.success) throw new ApiError(400, "BAD_REQUEST", "Invalid sync cursor");
-    const supported = workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]);
-    return projectSyncMemberTitles(
-      await repository.sync(identity, query.data.after, query.data.limit, supported),
-      supported.memberProfiles === true,
-    );
+  routes.register({
+    method: "GET",
+    url: "/sync",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: { query: validateRequest(syncQuerySchema, "Invalid sync cursor") },
+    handler: async ({ identity, request, input: { query: query } }) => {
+      const supported = workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]);
+      return projectSyncMemberTitles(
+        await repository.sync(identity, query.after, query.limit, supported),
+        supported.memberProfiles === true,
+      );
+    },
   });
 
-  app.post("/realtime/tickets", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, identityService);
-    requireAgentScope(identity, "workspace:read");
-    return repository.issueRealtimeTicket(
-      identity,
-      workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]),
-    );
+  routes.register({
+    method: "POST",
+    url: "/realtime/tickets",
+    policy: workspace,
+    scopes: ["workspace:read"],
+    request: {},
+    handler: async ({ identity, request }) => {
+      return repository.issueRealtimeTicket(
+        identity,
+        workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]),
+      );
+    },
   });
-};
+});
