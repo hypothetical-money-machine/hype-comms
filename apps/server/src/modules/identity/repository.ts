@@ -228,6 +228,13 @@ export interface InsertDeviceSessionInput {
   readonly createdAt: IsoDateTime;
   readonly lastSeenAt: IsoDateTime;
   readonly expiresAt: IsoDateTime;
+  /**
+   * Set when the session is created through the AuthKit handoff exchange, so that a WorkOS
+   * `session.revoked` webhook can find and revoke the matching local row. Magic-link sessions
+   * leave this unset and the column stays NULL, exactly as it did before AuthKit and magic-link
+   * sessions shared this single insert path.
+   */
+  readonly workosSessionId?: AuthKitProviderSessionId | null;
 }
 
 export interface InsertAgentInput {
@@ -513,6 +520,35 @@ function mapDeviceSession(row: DeviceSessionRow): DeviceSession {
     expiresAt: timestamp(row.expires_at),
     revokedAt: nullableTimestamp(row.revoked_at),
   });
+}
+
+/**
+ * The single owner of `INSERT INTO device_sessions`. Both magic-link session creation (via the
+ * `IdentityRepository` instance method, which forwards its own `#database`) and the AuthKit
+ * handoff exchange (which passes its own transaction's `PoolClient` directly) call this function,
+ * so the column list and session-lineage semantics only exist in one place.
+ */
+export async function insertDeviceSession(
+  database: Pool | PoolClient,
+  input: InsertDeviceSessionInput,
+): Promise<DeviceSession> {
+  const result = await database.query<DeviceSessionRow>(
+    `INSERT INTO device_sessions
+       (id, user_id, token_hash, label, created_at, last_seen_at, expires_at, workos_session_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
+    [
+      input.id,
+      input.userId,
+      input.tokenHash,
+      input.label,
+      input.createdAt,
+      input.lastSeenAt,
+      input.expiresAt,
+      input.workosSessionId ?? null,
+    ],
+  );
+  return mapDeviceSession(result.rows[0] as DeviceSessionRow);
 }
 
 function firstOrNull<Row extends QueryResultRow, Output>(
@@ -968,22 +1004,7 @@ export class IdentityRepository {
   }
 
   async insertDeviceSession(input: InsertDeviceSessionInput): Promise<DeviceSession> {
-    const result = await this.#database.query<DeviceSessionRow>(
-      `INSERT INTO device_sessions
-         (id, user_id, token_hash, label, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
-      [
-        input.id,
-        input.userId,
-        input.tokenHash,
-        input.label,
-        input.createdAt,
-        input.lastSeenAt,
-        input.expiresAt,
-      ],
-    );
-    return mapDeviceSession(result.rows[0] as DeviceSessionRow);
+    return insertDeviceSession(this.#database, input);
   }
 
   async findDeviceSessionByTokenHash(tokenHash: Buffer): Promise<DeviceSession | null> {
