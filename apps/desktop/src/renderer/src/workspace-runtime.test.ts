@@ -1,3 +1,10 @@
+import {
+  type RetractReservation,
+  applyRetractReservation,
+  retractReservationMap,
+  upsertRetractReservation,
+} from "./workspace-projection";
+
 import { type SyncPosition } from "@hype-comms/contracts";
 import { testPosition } from "../../shared/test-support/sync-position";
 import { describe, expect, it, vi } from "vitest";
@@ -76,15 +83,9 @@ import type {
   CachedWorkspaceState,
   MembershipRepairMarker,
   OutboxItem,
-  RetractReservation,
   WorkspaceCache,
 } from "./workspace-cache";
-import {
-  applyRetractReservation,
-  MemoryWorkspaceCache,
-  retractReservationMap,
-  upsertRetractReservation,
-} from "./workspace-cache";
+import { MemoryWorkspaceCache } from "./workspace-cache";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
 const USER_ID = "20000000-0000-4000-8000-000000000001";

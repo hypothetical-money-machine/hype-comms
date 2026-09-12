@@ -38,31 +38,40 @@ import {
 
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
-import { mentionedMemberIds } from "./mentions";
 import {
   applyRetractReservation,
-  clearPersistentWorkspaceCache,
-  compareConversations,
   compareMembers,
-  compareTasks,
-  isUnreadMessage,
-  membershipRoleForConversationEvent,
-  MemoryWorkspaceCache,
-  newestLiveMessage,
-  PersistentWorkspaceCache,
+  mergeMessages,
+  mergeReactions,
+  mergeTasks,
+  mergeThreadSummaries,
   preferRetainedMessage,
   projectConversationMembershipChange,
-  rememberCreatedMessageMentions,
-  retractedMessageIds,
+  projectConversationSummary,
+  projectCreatedMessageSummary,
+  projectReadCursorSummary,
+  projectReplySummary,
+  reconcileRetractedConversationSummary,
+  replaceConversation,
+  replaceMessageReactions,
+  retractReplySummary,
   retractReservationMap,
+  retractedMessageIds,
   tombstoneMessage,
+  type RetractReservation,
   upsertRetractReservation,
+} from "./workspace-projection";
+import { mentionedMemberIds } from "./mentions";
+import {
+  clearPersistentWorkspaceCache,
+  MemoryWorkspaceCache,
+  PersistentWorkspaceCache,
+  rememberCreatedMessageMentions,
   type CachedWorkspaceState,
   type MembershipRepairMarker,
   type OutboxItem,
   type OutboxStatus,
   type OutboxUpdateExpectation,
-  type RetractReservation,
   type WorkspaceCache,
 } from "./workspace-cache";
 
@@ -236,12 +245,6 @@ function retryDelay(attempt: number): number {
   return Math.max(1_000, Math.floor(Math.random() * maximum));
 }
 
-function compareSequence(left: string, right: string): number {
-  const leftValue = BigInt(left);
-  const rightValue = BigInt(right);
-  return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
-}
-
 function isSelfMembershipChange(
   event: ProductRealtimeEvent,
   userId: string | null,
@@ -249,105 +252,6 @@ function isSelfMembershipChange(
   return (
     event.type === "channel.membership_changed" &&
     (userId === null || event.payload.memberId === userId)
-  );
-}
-
-/**
- * Merges server-derived messages into the in-memory projection using the same ordering the cache
- * uses, so incremental application and a cold `load()` agree.
- */
-function mergeMessages(
-  messages: readonly Message[],
-  incoming: readonly Message[],
-): readonly Message[] {
-  if (incoming.length === 0) return messages;
-  const byId = new Map(messages.map((message) => [message.id, message]));
-  for (const message of incoming) {
-    byId.set(message.id, preferRetainedMessage(byId.get(message.id), message));
-  }
-  return [...byId.values()].sort((left, right) =>
-    compareSequence(left.conversationSequence, right.conversationSequence),
-  );
-}
-
-function mergeThreadSummaries(
-  summaries: readonly MessageThreadSummary[],
-  incoming: readonly MessageThreadSummary[],
-): readonly MessageThreadSummary[] {
-  if (incoming.length === 0) return summaries;
-  const byRootId = new Map(summaries.map((summary) => [summary.threadRootId, summary]));
-  for (const summary of incoming) {
-    const existing = byRootId.get(summary.threadRootId);
-    if (
-      existing === undefined ||
-      compareSequence(
-        summary.latestReply.conversationSequence,
-        existing.latestReply.conversationSequence,
-      ) >= 0
-    ) {
-      byRootId.set(summary.threadRootId, summary);
-    }
-  }
-  return [...byRootId.values()];
-}
-
-function projectReplySummary(
-  summaries: readonly MessageThreadSummary[],
-  message: Message,
-  newlyObserved: boolean,
-): readonly MessageThreadSummary[] {
-  const threadRootId = message.threadRootId;
-  if (threadRootId === null) return summaries;
-  const existing = summaries.find((summary) => summary.threadRootId === threadRootId);
-  if (existing === undefined) {
-    return [...summaries, { threadRootId, replyCount: 1, latestReply: message }];
-  }
-  // HTTP responses, realtime, and sync can expose distinct replies out of conversation order.
-  // Identity decides whether the total grows; sequence decides only which reply is latest.
-  const replacesLatest =
-    compareSequence(message.conversationSequence, existing.latestReply.conversationSequence) > 0;
-  const incrementsCount = newlyObserved && message.id !== existing.latestReply.id;
-  if (!replacesLatest && !incrementsCount) return summaries;
-  return summaries.map((summary) =>
-    summary.threadRootId === threadRootId
-      ? {
-          ...summary,
-          replyCount: summary.replyCount + (incrementsCount ? 1 : 0),
-          latestReply: replacesLatest ? message : summary.latestReply,
-        }
-      : summary,
-  );
-}
-
-function mergeReactions(
-  reactions: readonly Reaction[],
-  incoming: readonly Reaction[],
-): readonly Reaction[] {
-  if (incoming.length === 0) return reactions;
-  const byId = new Map(reactions.map((reaction) => [reaction.id, reaction]));
-  for (const reaction of incoming) byId.set(reaction.id, reaction);
-  return [...byId.values()];
-}
-
-function mergeTasks(tasks: readonly Task[], incoming: readonly Task[]): readonly Task[] {
-  if (incoming.length === 0) return tasks;
-  const byId = new Map(tasks.map((task) => [task.id, task]));
-  for (const task of incoming) {
-    const current = byId.get(task.id);
-    if (current === undefined || task.version >= current.version) byId.set(task.id, task);
-  }
-  return [...byId.values()].sort(compareTasks);
-}
-
-function replaceMessageReactions(
-  reactions: readonly Reaction[],
-  messageIds: readonly string[],
-  incoming: readonly Reaction[],
-): readonly Reaction[] {
-  const replaced = new Set(messageIds);
-  return mergeReactions(
-    reactions.filter((reaction) => !replaced.has(reaction.messageId)),
-    incoming,
   );
 }
 
@@ -402,103 +306,6 @@ function retainAttachmentsForLiveMessages(
   const liveIds = liveMessageIds(messages);
   return attachments.filter(
     (attachment) => attachment.messageId === null || liveIds.has(attachment.messageId),
-  );
-}
-
-function replaceConversation(
-  snapshot: WorkspaceSnapshot,
-  conversationId: string,
-  update: (current: ConversationSummary | undefined) => ConversationSummary | null,
-): WorkspaceSnapshot {
-  const index = snapshot.conversations.findIndex(
-    (summary) => summary.conversation.id === conversationId,
-  );
-  const next = update(snapshot.conversations[index]);
-  if (next === null) return snapshot;
-  const conversations = [...snapshot.conversations];
-  if (index === -1) conversations.push(next);
-  else conversations[index] = next;
-  // A created conversation appends and a rename moves one, so re-sort instead of trusting the
-  // previous positions: the sidebar renders this order directly and must agree with a cold load().
-  return { ...snapshot, conversations: conversations.sort(compareConversations) };
-}
-
-/** Mirrors the cache's own unread and mention accounting for one applied message event. */
-function countMessage(
-  snapshot: WorkspaceSnapshot,
-  event: Extract<WorkspaceEvent, { type: "message.created" }>,
-  message: Message,
-): WorkspaceSnapshot {
-  const currentUserId = snapshot.currentUser.user.id;
-  const fromAnotherMember = message.authorId !== currentUserId;
-  const mentioned = fromAnotherMember && event.payload.mentionedUserIds.includes(currentUserId);
-  return replaceConversation(snapshot, event.conversationId, (current) => {
-    if (current === undefined) return null;
-    return {
-      ...current,
-      lastMessage: message,
-      unreadCount: current.unreadCount + (fromAnotherMember ? 1 : 0),
-      mentionCount: current.mentionCount + (mentioned ? 1 : 0),
-    };
-  });
-}
-
-function newestLiveReply(messages: readonly Message[], threadRootId: string): Message | null {
-  let newest: Message | null = null;
-  for (const message of messages) {
-    if (message.threadRootId !== threadRootId || message.deletedAt !== null) continue;
-    if (
-      newest === null ||
-      compareSequence(message.conversationSequence, newest.conversationSequence) > 0
-    ) {
-      newest = message;
-    }
-  }
-  return newest;
-}
-
-function retractReplySummary(
-  summaries: readonly MessageThreadSummary[],
-  messages: readonly Message[],
-  tombstone: Message,
-): readonly MessageThreadSummary[] {
-  // Deleted roots are omitted from fresh history, so their summaries must disappear with them.
-  if (tombstone.threadRootId === null) {
-    return summaries.filter((summary) => summary.threadRootId !== tombstone.id);
-  }
-  const summary = summaries.find((candidate) => candidate.threadRootId === tombstone.threadRootId);
-  if (summary === undefined) return summaries;
-  if (summary.latestReply.id !== tombstone.id) {
-    return summaries.map((candidate) =>
-      candidate.threadRootId === tombstone.threadRootId
-        ? { ...candidate, replyCount: Math.max(1, candidate.replyCount - 1) }
-        : candidate,
-    );
-  }
-  const remainingReplyCount = summary.replyCount - 1;
-  if (remainingReplyCount === 0) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
-  }
-  const retainedLiveReplyCount = messages.filter(
-    (message) => message.threadRootId === tombstone.threadRootId && message.deletedAt === null,
-  ).length;
-  // A partial page cannot prove which surviving server reply is latest. Drop its summary until a
-  // refresh can replace it instead of promoting a reply that is known to be incomplete.
-  if (retainedLiveReplyCount !== remainingReplyCount) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
-  }
-  const latestReply = newestLiveReply(messages, tombstone.threadRootId);
-  if (latestReply === null) {
-    return summaries.filter((candidate) => candidate.threadRootId !== tombstone.threadRootId);
-  }
-  return summaries.map((candidate) =>
-    candidate.threadRootId === tombstone.threadRootId
-      ? {
-          ...candidate,
-          replyCount: remainingReplyCount,
-          latestReply,
-        }
-      : candidate,
   );
 }
 
@@ -4193,16 +4000,13 @@ export class WorkspaceRuntime {
             ? snapshot
             : replaceConversation(snapshot, tombstone.conversationId, (summary) => {
                 if (summary === undefined) return null;
-                const unread = isUnreadMessage(summary, snapshot.currentUser.user.id, tombstone);
-                const mentioned = unread && mentionedUserIds.includes(snapshot.currentUser.user.id);
-                return {
-                  ...summary,
-                  unreadCount: Math.max(0, summary.unreadCount - (unread ? 1 : 0)),
-                  mentionCount: Math.max(0, summary.mentionCount - (mentioned ? 1 : 0)),
-                  ...(summary.lastMessage?.id === tombstone.id
-                    ? { lastMessage: newestLiveMessage(messages, tombstone.conversationId) }
-                    : {}),
-                };
+                return reconcileRetractedConversationSummary(
+                  summary,
+                  tombstone,
+                  messages,
+                  snapshot.currentUser.user,
+                  mentionedUserIds,
+                );
               }),
     });
   }
@@ -4236,7 +4040,16 @@ export class WorkspaceRuntime {
         bootstrap:
           snapshot === null || message.deletedAt !== null
             ? snapshot
-            : countMessage(snapshot, event, message),
+            : replaceConversation(snapshot, event.conversationId, (current) =>
+                current === undefined
+                  ? null
+                  : projectCreatedMessageSummary(
+                      current,
+                      message,
+                      snapshot.currentUser.user.id,
+                      event.payload.mentionedUserIds,
+                    ),
+              ),
       });
       if (message.deletedAt === null) void this.#hydrateCreatedMessageAttachments(message);
       return;
@@ -4302,17 +4115,10 @@ export class WorkspaceRuntime {
     }
     if (snapshot === null) return;
     if (event.type === "read_cursor.updated") {
-      const { readCursor, unreadCount, mentionCount } = event.payload;
       this.#setState({
-        bootstrap: replaceConversation(snapshot, event.conversationId, (current) => {
-          if (current === undefined) return null;
-          return {
-            ...current,
-            readCursor,
-            unreadCount: unreadCount ?? current.unreadCount,
-            mentionCount: mentionCount ?? current.mentionCount,
-          };
-        }),
+        bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
+          current === undefined ? null : projectReadCursorSummary(current, event),
+        ),
       });
       return;
     }
@@ -4331,19 +4137,9 @@ export class WorkspaceRuntime {
       return;
     }
     this.#setState({
-      bootstrap: replaceConversation(snapshot, event.conversationId, (current) => ({
-        conversation: event.payload.conversation,
-        participantIds: [...event.payload.participantIds],
-        membershipRole: membershipRoleForConversationEvent(
-          event.payload.conversation,
-          current?.membershipRole,
-          snapshot.currentUser.user.id,
-        ),
-        lastMessage: current?.lastMessage ?? null,
-        unreadCount: current?.unreadCount ?? 0,
-        mentionCount: current?.mentionCount ?? 0,
-        readCursor: current?.readCursor ?? null,
-      })),
+      bootstrap: replaceConversation(snapshot, event.conversationId, (current) =>
+        projectConversationSummary(current, event, snapshot.currentUser.user.id),
+      ),
     });
   }
 
