@@ -14,10 +14,10 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "test": "tsc -b && vitest run",
+    "typecheck": "tsc -b"
   },
   "engines": {
     "node": ">=24"

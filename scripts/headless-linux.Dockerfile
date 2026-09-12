@@ -45,9 +45,10 @@ WORKDIR /workspace
 RUN chown node:node /workspace \
   && install -d -o node -g node /home/node/.cache/electron /home/node/.cache/ms-playwright
 
-COPY --chown=node:node .npmrc package.json package-lock.json tsconfig.base.json ./
+COPY --chown=node:node .npmrc package.json package-lock.json tsconfig.base.json tsconfig.node.json ./
 COPY --chown=node:node apps/desktop/package.json ./apps/desktop/package.json
 COPY --chown=node:node apps/server/package.json ./apps/server/package.json
+COPY --chown=node:node packages/api-client/package.json ./packages/api-client/package.json
 COPY --chown=node:node packages/cli/package.json ./packages/cli/package.json
 COPY --chown=node:node packages/contracts/package.json ./packages/contracts/package.json
 
