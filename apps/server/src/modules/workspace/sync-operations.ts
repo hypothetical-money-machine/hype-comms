@@ -12,7 +12,7 @@ import {
 } from "@hype-comms/contracts";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
@@ -163,7 +163,8 @@ export class WorkspaceSyncOperations {
           [identity.currentUser.workspaceId],
         );
         const workspace = workspaceResult.rows[0];
-        if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+        if (workspace === undefined)
+          throw new DomainError("access_denied", "Workspace unavailable");
         await this.hooks.afterBootstrapCursorRead?.();
         const members = await readWorkspaceMembers(client, workspace.id);
         // Bootstrap only ever carries the first page; the client pages the rest through
@@ -225,7 +226,7 @@ export class WorkspaceSyncOperations {
       const afterSequence = BigInt(after);
       const highWaterSequence = BigInt(highWaterCursor);
       if (afterSequence > highWaterSequence) {
-        throw new ApiError(410, "CURSOR_EXPIRED", "The sync cursor is no longer valid");
+        throw new DomainError("sync_position_expired", "The sync cursor is no longer valid");
       }
       const earliest = await client.query<{ sequence: string | null } & QueryResultRow>(
         `SELECT min(workspace_sequence)::text AS sequence
@@ -237,7 +238,7 @@ export class WorkspaceSyncOperations {
       const retainedCursorFloor =
         earliestSequence === null ? highWaterSequence : BigInt(earliestSequence) - 1n;
       if (afterSequence !== 0n && afterSequence < retainedCursorFloor) {
-        throw new ApiError(410, "CURSOR_EXPIRED", "The sync cursor has expired");
+        throw new DomainError("sync_position_expired", "The sync cursor has expired");
       }
       const rows = await client.query<EventRow>(
         `SELECT event.*,

@@ -1,5 +1,5 @@
 import type { PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import { participants, type ConversationRow } from "./records.js";
 import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 
@@ -99,7 +99,7 @@ export async function requireVisibleConversation(
     ],
   );
   const row = result.rows[0];
-  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+  if (row === undefined) throw new DomainError("not_found", "Conversation not found");
   return row;
 }
 
@@ -120,7 +120,7 @@ export async function requireVisibleChannelBySlug(
     [identity.currentUser.workspaceId, channelSlug, identity.currentUser.user.id, requireWritable],
   );
   const row = result.rows[0];
-  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
+  if (row === undefined) throw new DomainError("not_found", "Channel not found");
   return row;
 }
 

@@ -1,5 +1,5 @@
 import type { PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 
 export async function readWorkspaceSequence(
   client: PoolClient,
@@ -12,6 +12,6 @@ export async function readWorkspaceSequence(
     [workspaceId],
   );
   const value = result.rows[0]?.last_event_sequence;
-  if (value === undefined) throw new ApiError(404, "NOT_FOUND", "Workspace not found");
+  if (value === undefined) throw new DomainError("not_found", "Workspace not found");
   return value;
 }
