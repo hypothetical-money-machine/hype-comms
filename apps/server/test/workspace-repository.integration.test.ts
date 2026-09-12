@@ -3341,6 +3341,38 @@ describe("WorkspaceRepository", () => {
     });
   });
 
+  it("retries failed ticket consumption and grants one of eight concurrent consumers", async () => {
+    const issued = await repository.issueRealtimeTicket(owner);
+    await pool.query(`CREATE FUNCTION reject_test_ticket_commit() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'Injected ticket commit failure';
+      END;
+      $$`);
+    try {
+      await pool.query(`CREATE CONSTRAINT TRIGGER reject_test_ticket_commit
+        AFTER UPDATE ON realtime_tickets DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION reject_test_ticket_commit()`);
+      await expect(repository.consumeRealtimeTicket(issued.ticket)).rejects.toThrow(
+        "Injected ticket commit failure",
+      );
+      expect((await pool.query("SELECT consumed_at FROM realtime_tickets")).rows).toEqual([
+        { consumed_at: null },
+      ]);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_test_ticket_commit ON realtime_tickets");
+      await pool.query("DROP FUNCTION reject_test_ticket_commit()");
+    }
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => repository.consumeRealtimeTicket(issued.ticket)),
+    );
+    expect(results.filter((principal) => principal !== null)).toEqual([
+      expect.objectContaining(ownerPrincipal),
+    ]);
+    expect(results.filter((principal) => principal === null)).toHaveLength(7);
+    await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+  });
+
   it("consumes but refuses a ticket when its workspace membership was revoked", async () => {
     const issued = await repository.issueRealtimeTicket(owner);
     await pool.query(
