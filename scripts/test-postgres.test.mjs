@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { parse } from "yaml";
 
 import { requireTestDatabaseUrl, waitForPostgres } from "./test-postgres.mjs";
 
@@ -73,39 +74,48 @@ test("gates every published server image through the guarded PostgreSQL entrypoi
 
   assert.equal(JSON.parse(packageJson).scripts["test:postgres"], "node scripts/test-postgres.mjs");
   assert.match(localDatabase, /npm run test:postgres/);
-  assert.match(github, /run: npm run check/);
-  assert.match(woodpecker, /image: postgres:16-alpine/);
-  assert.doesNotMatch(woodpecker, /^concurrency:/mu);
-  assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run check/);
-  assert.match(woodpecker, /name: build-push[\s\S]*?depends_on:\n\s+- check/);
-  assert.match(woodpecker, /registry: &registry registry\.fastnfree\.dev/);
-  assert.match(woodpecker, /project: &project homelab/);
-  assert.match(
-    woodpecker,
-    /image: gcr\.io\/kaniko-project\/executor:v1\.23\.2-debug@sha256:[a-f0-9]{64}/,
+  const githubWorkflow = parse(github);
+  const pipeline = parse(woodpecker);
+  assert.deepEqual(githubWorkflow.permissions, { contents: "read" });
+  assert.ok(githubWorkflow.jobs.check.steps.some((step) => step.run === "npm run check"));
+  assert.equal(
+    pipeline.services.find((service) => service.name === "postgres").image,
+    "postgres:16-alpine",
   );
-  assert.match(
-    woodpecker,
-    /--destination=\$\$\{REGISTRY\}\/\$\$\{PROJECT\}\/\$\$\{APP\}:\$\$\{CI_COMMIT_SHA\}/,
+  assert.equal(pipeline.concurrency, undefined);
+  const check = pipeline.steps.find((step) => step.name === "check");
+  assert.ok(
+    check.commands.some((command) =>
+      /^HYPE_COMMS_TEST_DATABASE_URL=.*npm run check$/u.test(command),
+    ),
   );
-  assert.match(woodpecker, /--custom-platform=linux\/amd64/);
-  assert.match(woodpecker, /--label=org\.opencontainers\.image\.revision=\$\$\{CI_COMMIT_SHA\}/);
+  const buildPush = pipeline.steps.find((step) => step.name === "build-push");
+  assert.deepEqual(buildPush.depends_on, ["check"]);
+  assert.equal(buildPush.environment.REGISTRY, "registry.fastnfree.dev");
+  assert.equal(buildPush.environment.PROJECT, "homelab");
+  assert.equal(buildPush.environment.APP, "hype-comms");
   assert.match(
-    woodpecker,
-    /--label=org\.opencontainers\.image\.source=https:\/\/github\.com\/hypothetical-money-machine\/hype-comms/,
+    buildPush.image,
+    /^gcr\.io\/kaniko-project\/executor:v1\.23\.2-debug@sha256:[a-f0-9]{64}$/u,
   );
-  assert.match(woodpecker, /--image-name-tag-with-digest-file=\/tmp\/image-reference/);
-  assert.match(woodpecker, /--reproducible/);
-  assert.match(woodpecker, /cat \/tmp\/image-reference/);
+  const publish = buildPush.commands.join("\n");
+  for (const argument of [
+    "--destination=$${REGISTRY}/$${PROJECT}/$${APP}:$${CI_COMMIT_SHA}",
+    "--custom-platform=linux/amd64",
+    "--label=org.opencontainers.image.revision=$${CI_COMMIT_SHA}",
+    "--label=org.opencontainers.image.source=https://github.com/hypothetical-money-machine/hype-comms",
+    "--image-name-tag-with-digest-file=/tmp/image-reference",
+    "--reproducible",
+  ])
+    assert.ok(publish.includes(argument), argument);
+  assert.ok(buildPush.commands.includes("cat /tmp/image-reference"));
   assert.doesNotMatch(
-    woodpecker,
-    /:latest|name: promote-gitops|github_token|GITHUB_TOKEN|git push/,
+    JSON.stringify(pipeline),
+    /:latest|promote-gitops|github_token|GITHUB_TOKEN|git push/u,
   );
+  assert.deepEqual(buildPush.when, [
+    { event: "push", branch: "main" },
+    { event: "manual", branch: "main" },
+  ]);
   assert.match(dockerfile, /FROM node:24\.18\.0-alpine@sha256:[a-f0-9]{64} AS base/);
-
-  const buildPushStart = woodpecker.indexOf("  - name: build-push");
-  assert.notEqual(buildPushStart, -1);
-  const buildPush = woodpecker.slice(buildPushStart);
-  const mainOnly = /when:\n\s+- event: push\n\s+branch: main\n\s+- event: manual\n\s+branch: main/;
-  assert.match(buildPush, mainOnly);
 });

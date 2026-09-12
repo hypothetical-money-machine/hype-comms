@@ -13,6 +13,12 @@ on:
     paths:
       - apps/desktop/**
       - packages/contracts/**
+      - packages/api-client/**
+      - tsconfig*.json
+      - scripts/desktop-release.mjs
+      - scripts/desktop-release-validation.mjs
+      - scripts/macos-signing.mjs
+      - scripts/verify-zod-alignment.mjs
       - package.json
       - package-lock.json
       - .node-version
@@ -33,6 +39,12 @@ on:
     paths:
       - apps/desktop/**
       - packages/contracts/**
+      - packages/api-client/**
+      - tsconfig*.json
+      - scripts/desktop-release.mjs
+      - scripts/desktop-release-validation.mjs
+      - scripts/macos-signing.mjs
+      - scripts/verify-zod-alignment.mjs
       - package.json
       - package-lock.json
       - .node-version
@@ -229,92 +241,7 @@ jobs:
           HYPE_COMMS_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
           HYPE_COMMS_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
           EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
-        run: |
-          if [[ -z "$HYPE_COMMS_MACOS_CSC_LINK" ||
-                -z "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" ||
-                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" ||
-                -z "$HYPE_COMMS_MACOS_APPLE_API_KEY_ID" ||
-                -z "$HYPE_COMMS_MACOS_APPLE_API_ISSUER" ]]; then
-            echo "The macOS evidence build requires signing and all notarization secrets." >&2
-            exit 1
-          fi
-
-          umask 077
-          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
-          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
-          original_keychains_pending_path="${original_keychains_path}.pending"
-          root_certs_keychain="${GITHUB_WORKSPACE}/node_modules/app-builder-lib/certs/root_certs.keychain"
-          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
-
-          printf '%s' "${HYPE_COMMS_MACOS_CSC_LINK#base64:}" | /usr/bin/base64 -D > "$certificate_path"
-          printf '%s' "$HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
-
-          security delete-keychain "$keychain_path" 2>/dev/null || rm -f "$keychain_path"
-          rm -f "$original_keychains_path" "$original_keychains_pending_path"
-          security list-keychains -d user > "$original_keychains_pending_path"
-          mv "$original_keychains_pending_path" "$original_keychains_path"
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" \
-            -k "$keychain_path" \
-            -P "$HYPE_COMMS_MACOS_CSC_KEY_PASSWORD" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/productbuild
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s \
-            -k "$keychain_password" \
-            "$keychain_path"
-
-          additional_keychains=()
-          parsed_keychain_count=0
-          unparsed_keychain_count=0
-          while IFS= read -r item; do
-            if [[ "$item" =~ \"(.*)\" ]]; then
-              keychain="${BASH_REMATCH[1]}"
-              parsed_keychain_count=$((parsed_keychain_count + 1))
-              if [[ "$keychain" != "$keychain_path" &&
-                    "$keychain" != "$root_certs_keychain" ]]; then
-                additional_keychains+=("$keychain")
-              fi
-            elif [[ "$item" == *[![:space:]]* ]]; then
-              unparsed_keychain_count=$((unparsed_keychain_count + 1))
-            fi
-          done < "$original_keychains_path"
-          if [[ "$unparsed_keychain_count" -ne 0 ||
-                ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
-            echo "Could not parse the original macOS keychain search list." >&2
-            exit 1
-          fi
-          security list-keychains -d user -s \
-            "$keychain_path" \
-            "$root_certs_keychain" \
-            "${additional_keychains[@]}"
-
-          signing_identities="$(security find-identity -v -p codesigning "$keychain_path")"
-          identity_regex="^[[:space:]]*[0-9]+\\)[[:space:]]+([[:xdigit:]]{40})[[:space:]]+\"Developer ID Application: .+ \\(${EXPECTED_MACOS_TEAM_ID}\\)\"$"
-          expected_identity_hashes=()
-          while IFS= read -r item; do
-            if [[ "$item" =~ $identity_regex ]]; then
-              expected_identity_hashes+=("${BASH_REMATCH[1]}")
-            fi
-          done <<< "$signing_identities"
-          if [[ "${#expected_identity_hashes[@]}" -ne 1 ]]; then
-            echo "The signing keychain must contain exactly one ${EXPECTED_MACOS_TEAM_ID} Developer ID Application identity." >&2
-            printf '%s\n' "$signing_identities" >&2
-            exit 1
-          fi
-
-          {
-            echo "CSC_KEYCHAIN=${keychain_path}"
-            echo "CSC_NAME=${expected_identity_hashes[0]}"
-            echo "APPLE_API_KEY=${api_key_path}"
-            echo "APPLE_API_KEY_ID=${HYPE_COMMS_MACOS_APPLE_API_KEY_ID}"
-            echo "APPLE_API_ISSUER=${HYPE_COMMS_MACOS_APPLE_API_ISSUER}"
-          } >> "$GITHUB_ENV"
+        run: node scripts/desktop-release.mjs configure-macos-signing
 
       - name: Build signed macOS capture helper
         if: inputs.native_notification_evidence
@@ -457,46 +384,4 @@ jobs:
       - name: Remove temporary macOS signing keychain
         if: always()
         shell: bash
-        run: |
-          certificate_path="${RUNNER_TEMP}/hmm-chat-signing-certificate.p12"
-          keychain_path="${RUNNER_TEMP}/hmm-chat-signing.keychain-db"
-          original_keychains_path="${RUNNER_TEMP}/hmm-chat-original-keychains.txt"
-          original_keychains_pending_path="${original_keychains_path}.pending"
-          api_key_path="${RUNNER_TEMP}/hmm-chat-notary-api-key.p8"
-          cleanup_status=0
-          set +e
-          if [[ -f "$original_keychains_path" ]]; then
-            original_keychains=()
-            parsed_keychain_count=0
-            unparsed_keychain_count=0
-            while IFS= read -r item; do
-              if [[ "$item" =~ \"(.*)\" ]]; then
-                keychain="${BASH_REMATCH[1]}"
-                parsed_keychain_count=$((parsed_keychain_count + 1))
-                if [[ "$keychain" != "$keychain_path" ]]; then
-                  original_keychains+=("$keychain")
-                fi
-              elif [[ "$item" == *[![:space:]]* ]]; then
-                unparsed_keychain_count=$((unparsed_keychain_count + 1))
-              fi
-            done < "$original_keychains_path"
-            if [[ "$unparsed_keychain_count" -ne 0 ||
-                  ( -s "$original_keychains_path" && "$parsed_keychain_count" -eq 0 ) ]]; then
-              echo "Could not parse the original macOS keychain search list." >&2
-              cleanup_status=1
-            elif ! security list-keychains -d user -s "${original_keychains[@]}"; then
-              cleanup_status=1
-            fi
-          fi
-          security delete-keychain "$keychain_path" 2>/dev/null || true
-          rm -f \
-            "$certificate_path" \
-            "$keychain_path" \
-            "$original_keychains_pending_path" \
-            "$api_key_path" || cleanup_status=1
-          if [[ "$cleanup_status" -eq 0 ]]; then
-            rm -f "$original_keychains_path" || cleanup_status=1
-          else
-            echo "Preserving ${original_keychains_path} for manual keychain-list recovery." >&2
-          fi
-          exit "$cleanup_status"
+        run: node scripts/desktop-release.mjs cleanup-macos-signing

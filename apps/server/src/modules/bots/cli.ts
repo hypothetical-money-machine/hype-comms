@@ -1,3 +1,4 @@
+import { parseAdminArguments } from "../../cli/arguments.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -59,45 +60,24 @@ function fail(message: string): never {
 }
 
 function flags(argv: readonly string[]): ParsedFlags {
-  const parsed: {
-    usernames: string[];
-    displayNames: string[];
-    channelSlugs: string[];
-    scopes: string[];
-    expiryDays: string[];
-  } = { usernames: [], displayNames: [], channelSlugs: [], scopes: [], expiryDays: [] };
-  for (let index = 0; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (
-      flag === undefined ||
-      value === undefined ||
-      !flag.startsWith("--") ||
-      value.startsWith("--")
-    ) {
-      fail(`Missing value for ${flag ?? "argument"}`);
-    }
-    switch (flag) {
-      case "--username":
-        parsed.usernames.push(value);
-        break;
-      case "--display-name":
-        parsed.displayNames.push(value);
-        break;
-      case "--channel":
-        parsed.channelSlugs.push(value);
-        break;
-      case "--scope":
-        parsed.scopes.push(value);
-        break;
-      case "--expires-in-days":
-        parsed.expiryDays.push(value);
-        break;
-      default:
-        fail(`Unknown argument: ${flag}`);
-    }
-  }
-  return parsed;
+  const { values } = parseAdminArguments(
+    argv,
+    {
+      username: { type: "string", multiple: true },
+      "display-name": { type: "string", multiple: true },
+      channel: { type: "string", multiple: true },
+      scope: { type: "string", multiple: true },
+      "expires-in-days": { type: "string", multiple: true },
+    },
+    USAGE,
+  );
+  return {
+    usernames: values.username ?? [],
+    displayNames: values["display-name"] ?? [],
+    channelSlugs: values.channel ?? [],
+    scopes: values.scope ?? [],
+    expiryDays: values["expires-in-days"] ?? [],
+  };
 }
 
 function exactlyOne(values: readonly string[], flag: string): string {
