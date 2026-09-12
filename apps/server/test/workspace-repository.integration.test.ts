@@ -1,3 +1,10 @@
+import type { SyncPosition } from "@hype-comms/contracts";
+
+let protocolEpoch: string;
+function testPosition(sequence: string): SyncPosition {
+  return { epoch: protocolEpoch, sequence };
+}
+
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -205,6 +212,12 @@ describe("WorkspaceRepository", () => {
        VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
+    protocolEpoch = (
+      await pool.query<{ protocol_epoch: string }>(
+        "SELECT protocol_epoch FROM workspaces WHERE id = $1",
+        [workspaceId],
+      )
+    ).rows[0]!.protocol_epoch;
     await pool.query(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
        VALUES ($1, $2, 'owner', 'active'),
@@ -261,8 +274,8 @@ describe("WorkspaceRepository", () => {
     return result.rows.map((row) => row.id);
   }
 
-  async function seedMessageEvents(count: number): Promise<string[]> {
-    const cursors: string[] = [];
+  async function seedMessageEvents(count: number): Promise<SyncPosition[]> {
+    const cursors: SyncPosition[] = [];
     for (let index = 0; index < count; index += 1) {
       const sent = await repository.sendMessage(owner, generalId, {
         ...message(randomUUID(), `sync event ${index + 1}`),
@@ -339,7 +352,7 @@ describe("WorkspaceRepository", () => {
     }
     const bootstrap = await bootstrapping;
     expect(bootstrap).toMatchObject({
-      syncCursor: "0",
+      syncCursor: testPosition("0"),
       conversations: [
         {
           lastMessage: null,
@@ -353,7 +366,7 @@ describe("WorkspaceRepository", () => {
     expect(replay.events).toContainEqual(
       expect.objectContaining({
         type: "message.created",
-        workspaceSequence: sent.syncCursor,
+        position: sent.syncCursor,
         payload: expect.objectContaining({
           message: expect.objectContaining({ id: sent.message.id }),
         }),
@@ -381,7 +394,7 @@ describe("WorkspaceRepository", () => {
     const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100);
     const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
     expect(readEvent).toMatchObject({
-      workspaceSequence: advanced.syncCursor,
+      position: advanced.syncCursor,
       payload: {
         readCursor: {
           userId: memberId,
@@ -484,7 +497,7 @@ describe("WorkspaceRepository", () => {
     const afterCreate = channel.syncCursor;
     const legacy = await repository.sync(observer, afterCreate, 100);
     expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(true);
-    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+    expect(legacy.nextCursor).toEqual(legacy.highWaterCursor);
 
     const capable = await repository.sync(observer, afterCreate, 100);
     const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
@@ -612,7 +625,7 @@ describe("WorkspaceRepository", () => {
       message: replayError.message,
     }).toEqual({ kind: "not_found", message: "Message not found" });
 
-    const sync = await repository.sync(observer, "0", 100);
+    const sync = await repository.sync(observer, testPosition("0"), 100);
     expect(sync.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -710,7 +723,7 @@ describe("WorkspaceRepository", () => {
       CONVERSATION_PAGE_DEFAULT_LIMIT,
     );
     expect(summary.conversations[0]).toMatchObject({ unreadCount: 4 });
-    const sync = await repository.sync(member, "0", 100);
+    const sync = await repository.sync(member, testPosition("0"), 100);
     expect(sync.events).toContainEqual(
       expect.objectContaining({
         type: "message.created",
@@ -1164,8 +1177,8 @@ describe("WorkspaceRepository", () => {
     );
     const announcementId = created.conversation.conversation.id;
     expect(created.conversation.conversation.channelMode).toBe("announcement");
-    const legacySync = await repository.sync(member, "0", 100);
-    const capableSync = await repository.sync(member, "0", 100);
+    const legacySync = await repository.sync(member, testPosition("0"), 100);
+    const capableSync = await repository.sync(member, testPosition("0"), 100);
     const legacyCreated = legacySync.events.find(
       (event) => event.type === "channel.created" && event.conversationId === announcementId,
     );
@@ -1851,7 +1864,7 @@ describe("WorkspaceRepository", () => {
       "reaction.added",
       "reaction.removed",
     ]);
-    expect(legacySync.nextCursor).toBe(legacySync.highWaterCursor);
+    expect(legacySync.nextCursor).toEqual(legacySync.highWaterCursor);
 
     const sync = await repository.sync(observer, sent.syncCursor, 100);
     const reactionEvents = sync.events.filter(
@@ -1927,7 +1940,7 @@ describe("WorkspaceRepository", () => {
 
     const legacy = await repository.sync(observer, sent.syncCursor, 100);
     expect(legacy.events.filter((event) => event.type === "message.retracted")).toHaveLength(1);
-    expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
+    expect(legacy.nextCursor).toEqual(legacy.highWaterCursor);
 
     const capable = await repository.sync(observer, sent.syncCursor, 100);
     expect(capable.events).toEqual([
@@ -2141,13 +2154,13 @@ describe("WorkspaceRepository", () => {
     const conversationId = direct.conversation.conversation.id;
     await repository.sendMessage(owner, conversationId, message(randomUUID()));
 
-    const memberSync = await repository.sync(member, "0", 100);
+    const memberSync = await repository.sync(member, testPosition("0"), 100);
     expect(memberSync.events.some((event) => event.conversationId === conversationId)).toBe(true);
-    const observerSync = await repository.sync(observer, "0", 100);
+    const observerSync = await repository.sync(observer, testPosition("0"), 100);
     expect(observerSync.events.some((event) => event.conversationId === conversationId)).toBe(
       false,
     );
-    expect(observerSync.nextCursor).toBe(observerSync.highWaterCursor);
+    expect(observerSync.nextCursor).toEqual(observerSync.highWaterCursor);
     await expect(repository.history(observer, conversationId, undefined, 50)).rejects.toMatchObject(
       {
         kind: "not_found",
@@ -2229,12 +2242,12 @@ describe("WorkspaceRepository", () => {
 
       const created = await repository.createTask(owner, generalId, input, key);
       expect(created.task.number).toBe("1");
-      expect(created.syncCursor).toBe("1");
-      const sync = await repository.sync(owner, "0", 100);
+      expect(created.syncCursor).toEqual(testPosition("1"));
+      const sync = await repository.sync(owner, testPosition("0"), 100);
       expect(sync.events).toEqual([
         expect.objectContaining({
           type: "task.created",
-          workspaceSequence: "1",
+          position: testPosition("1"),
           payload: { task: created.task },
         }),
       ]);
@@ -2389,9 +2402,9 @@ describe("WorkspaceRepository", () => {
     expect(assigned.tasks).toContainEqual(
       expect.objectContaining({ id: createdA.task.id, assigneeId: memberId }),
     );
-    const legacySync = await repository.sync(owner, "0", 100);
+    const legacySync = await repository.sync(owner, testPosition("0"), 100);
     expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(true);
-    const taskSync = await repository.sync(owner, "0", 100);
+    const taskSync = await repository.sync(owner, testPosition("0"), 100);
     expect(taskSync.events).toContainEqual(
       expect.objectContaining({
         type: "task.updated",
@@ -2519,7 +2532,7 @@ describe("WorkspaceRepository", () => {
         undefined,
         10,
       );
-      const beforeSync = await repository.sync(owner, "0", 100);
+      const beforeSync = await repository.sync(owner, testPosition("0"), 100);
       await pool.query(`CREATE FUNCTION reject_test_membership_write() RETURNS trigger
       LANGUAGE plpgsql AS $$
       BEGIN
@@ -2548,7 +2561,7 @@ describe("WorkspaceRepository", () => {
         await expect(
           repository.listConversationTasks(member, conversationId, undefined, 10),
         ).resolves.toEqual(beforeTasks);
-        await expect(repository.sync(owner, "0", 100)).resolves.toEqual(beforeSync);
+        await expect(repository.sync(owner, testPosition("0"), 100)).resolves.toEqual(beforeSync);
       } finally {
         await pool.query("DROP TRIGGER IF EXISTS reject_test_membership_write ON sync_events");
         await pool.query("DROP FUNCTION reject_test_membership_write()");
@@ -2593,16 +2606,13 @@ describe("WorkspaceRepository", () => {
     });
   });
 
-  it("preserves bootstrap from zero when no sync events remain", async () => {
+  it("expires zero behind high-water when no sync events remain", async () => {
     const highWaterCursor = (await seedMessageEvents(2)).at(-1);
     if (highWaterCursor === undefined) throw new Error("Expected a high-water sync cursor");
     await pool.query(`DELETE FROM sync_events WHERE workspace_id = $1`, [workspaceId]);
 
-    await expect(repository.sync(owner, "0", 100)).resolves.toEqual({
-      events: [],
-      nextCursor: "0",
-      highWaterCursor,
-      hasMore: false,
+    await expect(repository.sync(owner, testPosition("0"), 100)).rejects.toMatchObject({
+      kind: "sync_position_expired",
     });
   });
 
@@ -2618,7 +2628,7 @@ describe("WorkspaceRepository", () => {
     await pool.query(
       `DELETE FROM sync_events
         WHERE workspace_id = $1 AND workspace_sequence <= $2::bigint`,
-      [workspaceId, retainedPredecessor],
+      [workspaceId, retainedPredecessor.sequence],
     );
 
     await expect(repository.sync(owner, staleCursor, 100)).rejects.toMatchObject({
@@ -2817,7 +2827,7 @@ describe("WorkspaceRepository", () => {
         payload: { memberId, action: "removed" },
       }),
     );
-    const replayedSync = await repository.sync(member, "0", 100);
+    const replayedSync = await repository.sync(member, testPosition("0"), 100);
     expect(
       replayedSync.events.some(
         (event) => event.type === "message.created" && event.conversationId === conversationId,
@@ -3241,6 +3251,13 @@ describe("WorkspaceRepository", () => {
   it("refuses a ticket when its workspace membership row is absent", async () => {
     const client = await pool.connect();
     try {
+      await client.query(
+        `INSERT INTO device_sessions
+           (id, user_id, token_hash, created_at, last_seen_at, expires_at)
+         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 day')`,
+        [member.sessionId, memberId, Buffer.alloc(32, 8), now],
+      );
+      const issued = await repository.issueRealtimeTicket(member);
       await client.query("BEGIN");
       await client.query(
         `ALTER TABLE realtime_tickets
@@ -3249,18 +3266,11 @@ describe("WorkspaceRepository", () => {
       );
       await client.query(`SET CONSTRAINTS realtime_tickets_workspace_id_user_id_fkey DEFERRED`);
       await client.query(
-        `INSERT INTO device_sessions
-           (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-         VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 day')`,
-        [member.sessionId, memberId, Buffer.alloc(32, 8), now],
-      );
-      await client.query(
         `DELETE FROM workspace_memberships
           WHERE workspace_id = $1 AND user_id = $2`,
         [workspaceId, memberId],
       );
       const transactionRepository = new WorkspaceRepository(client as unknown as Pool);
-      const issued = await transactionRepository.issueRealtimeTicket(member);
 
       expect(
         (
@@ -3535,7 +3545,7 @@ describe("WorkspaceRepository", () => {
 
       const sent = await repository.sendMessage(owner, generalId, input);
       expect(sent.message.conversationSequence).toBe("2");
-      expect(sent.syncCursor).toBe("2");
+      expect(sent.syncCursor).toEqual(testPosition("2"));
       expect(sent.attachments).toEqual([
         expect.objectContaining({ id: attachmentId, messageId: sent.message.id, status: "ready" }),
       ]);

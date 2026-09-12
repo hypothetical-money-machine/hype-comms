@@ -1,3 +1,4 @@
+import type { SyncPosition } from "@hype-comms/contracts";
 import {
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
@@ -56,7 +57,7 @@ import { mapUser, type UserRow } from "./user-records.js";
 import { requireActivePrincipal } from "./workspace-access.js";
 import { auditAnnouncement, type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import { readWorkspaceMembers } from "./workspace-member-reader.js";
-import { readWorkspaceSequence } from "./workspace-sequence.js";
+import { readWorkspacePosition } from "./workspace-sequence.js";
 
 interface PublicChannelRow extends ConversationRow {
   joined: boolean;
@@ -440,7 +441,7 @@ export class WorkspaceConversationOperations {
       if (principal.kind === "human") {
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, conversation),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       const existing = await client.query<ConversationMembershipRow>(
@@ -454,7 +455,7 @@ export class WorkspaceConversationOperations {
       if (existing.rows[0]?.left_at === null) {
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, conversation),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       const audienceBefore = await conversationAudience(client, conversation);
@@ -478,7 +479,7 @@ export class WorkspaceConversationOperations {
       });
       return conversationMutationResponseSchema.parse({
         conversation: await this.#conversationSummary(client, identity, conversation),
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -585,7 +586,7 @@ export class WorkspaceConversationOperations {
         }
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, row),
-          syncCursor: event.workspaceSequence,
+          syncCursor: event.position,
         });
       };
       if (idempotencyKey === undefined) return create();
@@ -593,6 +594,7 @@ export class WorkspaceConversationOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: "/v1/channels",
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),
@@ -670,7 +672,7 @@ export class WorkspaceConversationOperations {
       if (current?.left_at === null && current.role === input.role) {
         return channelMembershipMutationResponseSchema.parse({
           channelMembers: await this.#channelMembers(client, identity, conversation),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       if (current?.left_at === null && current.role === "owner" && input.role === "member") {
@@ -702,7 +704,7 @@ export class WorkspaceConversationOperations {
       });
       return channelMembershipMutationResponseSchema.parse({
         channelMembers: await this.#channelMembers(client, identity, conversation),
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -729,7 +731,7 @@ export class WorkspaceConversationOperations {
       if (current === undefined) {
         return channelMembershipMutationResponseSchema.parse({
           channelMembers: await this.#channelMembers(client, identity, conversation),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       if (current.role === "owner") {
@@ -773,7 +775,7 @@ export class WorkspaceConversationOperations {
       });
       return channelMembershipMutationResponseSchema.parse({
         channelMembers: await this.#channelMembers(client, identity, conversation),
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -807,7 +809,7 @@ export class WorkspaceConversationOperations {
       if (current.is_archived) {
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, current),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       const updated = await client.query<ConversationRow>(
@@ -831,7 +833,7 @@ export class WorkspaceConversationOperations {
       });
       return conversationMutationResponseSchema.parse({
         conversation: await this.#conversationSummary(client, identity, row),
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -852,7 +854,7 @@ export class WorkspaceConversationOperations {
         [randomUUID(), identity.currentUser.workspaceId, low, high, identity.currentUser.user.id],
       );
       let row = inserted.rows[0];
-      let syncCursor: string;
+      let syncCursor: SyncPosition;
       if (row === undefined) {
         const existing = await client.query<ConversationRow>(
           `SELECT *
@@ -864,7 +866,7 @@ export class WorkspaceConversationOperations {
         );
         row = existing.rows[0];
         if (row === undefined) throw new Error("Direct conversation conflict returned no row");
-        syncCursor = await readWorkspaceSequence(client, identity.currentUser.workspaceId);
+        syncCursor = await readWorkspacePosition(client, identity.currentUser.workspaceId);
       } else {
         const participantIds = participants(row);
         const event = await this.events.insert(client, identity, {
@@ -876,7 +878,7 @@ export class WorkspaceConversationOperations {
           },
           audienceUserIds: participantIds,
         });
-        syncCursor = event.workspaceSequence;
+        syncCursor = event.position;
       }
       return conversationMutationResponseSchema.parse({
         conversation: await this.#conversationSummary(client, identity, row),
@@ -899,6 +901,7 @@ export class WorkspaceConversationOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: "/v1/group-direct-conversations",
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest({ memberIds }),
@@ -950,7 +953,7 @@ export class WorkspaceConversationOperations {
           });
           return conversationMutationResponseSchema.parse({
             conversation: await this.#conversationSummary(client, identity, conversation),
-            syncCursor: event.workspaceSequence,
+            syncCursor: event.position,
           });
         },
       );
@@ -1002,7 +1005,7 @@ export class WorkspaceConversationOperations {
         if (row === undefined) return null;
         return conversationMutationResponseSchema.parse({
           conversation: await this.#conversationSummary(client, identity, row),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       },
       { isolationLevel: "repeatable_read", readOnly: true },

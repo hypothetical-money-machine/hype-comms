@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import "fake-indexeddb/auto";
@@ -72,7 +73,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   conversations: [],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,

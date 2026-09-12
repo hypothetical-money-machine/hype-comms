@@ -27,11 +27,11 @@ operation must reuse its original identity and return the accepted result. Histo
 and historical events remain unchanged. Active tickets no longer read capability columns; those
 columns keep their defaults until the later cleanup migration.
 
-The next remediation layer must add the durable protocol epoch and replay floor, carry positions
-as `{ epoch, sequence }`, and reject wrong-epoch or expired positions with rebootstrap. Clients must
-preserve outbox records, encryption keys, drafts, and preferences while replacing replicated data.
-Stored mutation responses that cannot parse under the new contract need normalization without
-repeating their mutation. These preservation requirements are not yet release-verified.
+Workspace positions now use `{ epoch, sequence }` with a durable replay floor. Wrong-epoch and
+expired positions require bootstrap. Desktop invalidates replicated data while retaining encrypted
+outbox records and key identity; stored mutation receipts normalize their positions without
+repeating accepted work. See [the epoch migration and operator command](remediation/replay-epoch.md).
+The complete local-work preservation matrix and native release rehearsal remain required.
 
 ## Release gate
 

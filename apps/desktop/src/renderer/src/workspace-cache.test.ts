@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
@@ -84,7 +85,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "0",
+  syncCursor: testPosition("0"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -144,7 +145,7 @@ function groupCreatedEvent(
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: id,
-    workspaceSequence: sequence,
+    position: testPosition(sequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -248,12 +249,12 @@ describe("PersistentWorkspaceCache", () => {
 
     const restarted = new PersistentWorkspaceCache({ crypto, scope });
     expect((await restarted.load()).outbox).toHaveLength(1);
-    await restarted.upsertAcknowledgedMessage(message, CLIENT_MESSAGE_ID, "1");
+    await restarted.upsertAcknowledgedMessage(message, CLIENT_MESSAGE_ID, testPosition("1"));
 
     const recovered = await restarted.load();
     expect(recovered.outbox).toEqual([]);
     expect(recovered.messages).toEqual([message]);
-    expect(recovered.syncCursor).toBe("1");
+    expect(recovered.syncCursor).toEqual(testPosition("1"));
   });
 
   it("rejects aborted or stale outbox status transitions atomically", async () => {
@@ -343,7 +344,7 @@ describe("PersistentWorkspaceCache", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "1",
+      position: testPosition("1"),
       conversationSequence: "1",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -410,7 +411,7 @@ describe("PersistentWorkspaceCache", () => {
 
     const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope: upgradeScope });
     const state = await cache.load();
-    expect(state.syncCursor).toBe("12");
+    expect(state.syncCursor).toBeNull();
 
     const upgraded = new Dexie(name);
     await upgraded.open();
@@ -421,7 +422,7 @@ describe("PersistentWorkspaceCache", () => {
     expect(reactionIndexes).toContain("messageId");
   });
 
-  it("upgrades version 4 reactions with ownership without losing related cached data", async () => {
+  it("invalidates version 4 replicated records while retaining the cache database", async () => {
     const upgradeScope = {
       userId: "10000000-0000-4000-8000-000000000011",
       workspaceId: WORKSPACE_ID,
@@ -502,22 +503,16 @@ describe("PersistentWorkspaceCache", () => {
 
     const upgradedCache = new PersistentWorkspaceCache({ crypto, scope: upgradeScope });
     const state = await upgradedCache.load();
-    expect(state.messages).toEqual([message]);
-    expect(state.reactions).toEqual([reaction, orphanedReaction]);
+    expect(state.messages).toEqual([]);
+    expect(state.reactions).toEqual([]);
+    expect(state.syncCursor).toBeNull();
 
     const upgraded = new Dexie(name);
     await upgraded.open();
     expect(upgraded.table("reactions").schema.indexes.map((index) => index.name)).toContain(
       "conversationId",
     );
-    expect(await upgraded.table("reactions").get(reaction.id)).toMatchObject({
-      id: reaction.id,
-      conversationId: CONVERSATION_ID,
-    });
-    expect(await upgraded.table("reactions").get(orphanedReaction.id)).toMatchObject({
-      id: orphanedReaction.id,
-      conversationId: "__unknown__",
-    });
+    expect(await upgraded.table("reactions").count()).toBe(0);
     upgraded.close();
 
     const selfRemovedEvent: WorkspaceEvent = {
@@ -527,7 +522,7 @@ describe("PersistentWorkspaceCache", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "13",
+      position: testPosition("13"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",

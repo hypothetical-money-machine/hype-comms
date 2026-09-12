@@ -22,7 +22,7 @@
     "build": "electron-vite build",
     "pretest": "npm run build --workspace @hype-comms/contracts",
     "pretypecheck": "npm run build --workspace @hype-comms/contracts",
-    "typecheck": "tsc --build --pretty false",
+    "typecheck": "tsc --build --pretty false && tsc --noEmit -p tsconfig.integration.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --publish never",

@@ -129,6 +129,7 @@ describe("runMigrations", () => {
           "0029_humans_only_channels.sql",
           "0030_attachment_retention.sql",
           "0031_system_channels.sql",
+          "0032_workspace_protocol_epoch.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -169,6 +170,7 @@ describe("runMigrations", () => {
         { filename: "0029_humans_only_channels.sql" },
         { filename: "0030_attachment_retention.sql" },
         { filename: "0031_system_channels.sql" },
+        { filename: "0032_workspace_protocol_epoch.sql" },
       ]);
 
       const userId = randomUUID();
@@ -525,7 +527,7 @@ describe("runMigrations", () => {
         occurredAt: legacyEventOccurredAt,
         workspaceId: defaultWorkspaceId,
         conversationId,
-        workspaceSequence: "1",
+        position: { epoch: defaultWorkspaceId, sequence: "1" },
         conversationSequence: "1",
         entityVersion: 1,
         delivery: "at_least_once",
@@ -606,8 +608,8 @@ describe("runMigrations", () => {
           legacyEventOccurredAt,
         ],
       );
-      // Non-vacuity: this is exactly what WorkspaceRepository.#mapEvent feeds the strict schema,
-      // and it throws until 0018 rewrites the retained payload.
+      // The canonical envelope isolates payload validation: the retained body format is rejected
+      // until migration 0018 rewrites it. Protocol cutover separately excludes historical events.
       expect(() =>
         workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: legacyEventPayload }),
       ).toThrow();
@@ -627,7 +629,7 @@ describe("runMigrations", () => {
         throw new Error("The retained sync event disappeared during the migration.");
       }
       expect(retainedRow.body_format).toBe("hype_comms_markdown_v1");
-      // Catch-up sync and realtime reconnection both go through this parse.
+      // The retained payload now satisfies the current body-format constraint.
       expect(() =>
         workspaceEventSchema.parse({ ...legacyEventEnvelope, payload: retainedRow.payload }),
       ).not.toThrow();

@@ -1,13 +1,16 @@
 import {
   WORKSPACE_PROTOCOL_HEADER,
   WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+  compareSyncPositions,
+  encodeSyncPosition,
   ephemeralActivityFrameSchema,
   isWorkspaceProtocolMismatch,
   productRealtimeEventSchema,
   realtimeTicketResponseSchema,
-  sequenceSchema,
+  syncPositionQuerySchema,
   workspaceBootstrapResponseSchema,
   type ProductRealtimeEvent,
+  type SyncPosition,
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -32,7 +35,7 @@ import type { CommandContext } from "./types.js";
 /** Builds the body-free repair signal the client emits when it cannot continue from its cursor. */
 function syntheticResyncEvent(
   workspaceId: string,
-  cursor: string,
+  cursor: SyncPosition,
   reason: "client_replay_overflow" | "cursor_expired",
 ): ProductRealtimeEvent {
   return productRealtimeEventSchema.parse({
@@ -42,7 +45,7 @@ function syntheticResyncEvent(
     occurredAt: new Date().toISOString(),
     workspaceId,
     conversationId: null,
-    workspaceSequence: cursor,
+    position: cursor,
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -62,29 +65,29 @@ class ResyncRequiredError extends CliError {
 }
 
 interface ConnectionResult {
-  readonly cursor: string;
+  readonly cursor: SyncPosition;
   readonly delivered: boolean;
 }
 
-export function laterCursor(current: string, candidate: string): string {
-  return BigInt(candidate) > BigInt(current) ? candidate : current;
+export function laterCursor(current: SyncPosition, candidate: SyncPosition): SyncPosition {
+  return compareSyncPositions(candidate, current) > 0 ? candidate : current;
 }
 
 export interface ProductRealtimeWatchOptions {
   readonly client: ApiClient;
   readonly origin: string;
-  readonly after: string;
+  readonly after: SyncPosition;
   readonly timeoutMs: number;
   readonly workspaceId: string;
   readonly random: () => number;
   readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
 }
 
-function websocketUrl(origin: string, ticket: string, after: string): string {
+function websocketUrl(origin: string, ticket: string, after: SyncPosition): string {
   const url = new URL("/v2/realtime", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("ticket", ticket);
-  url.searchParams.set("after", after);
+  url.searchParams.set("after", encodeSyncPosition(after));
   return url.toString();
 }
 
@@ -132,7 +135,7 @@ export function watchRetryDelayMs(
  * and websocket validation stay centralized here so machine consumers cannot drift from `watch`.
  */
 export async function watchProductRealtime(input: ProductRealtimeWatchOptions): Promise<{
-  readonly cursor: string;
+  readonly cursor: SyncPosition;
 }> {
   let cursor = input.after;
   let stopped = false;
@@ -161,7 +164,7 @@ export async function watchProductRealtime(input: ProductRealtimeWatchOptions): 
           workspaceId: input.workspaceId,
           async write(event) {
             await input.onEvent(event);
-            cursor = laterCursor(cursor, event.workspaceSequence);
+            cursor = laterCursor(cursor, event.position);
           },
           stopped: () => stopped,
           registerSocket(socket) {
@@ -192,7 +195,7 @@ export async function watchProductRealtime(input: ProductRealtimeWatchOptions): 
 async function streamOneConnection(input: {
   readonly origin: string;
   readonly ticket: string;
-  readonly after: string;
+  readonly after: SyncPosition;
   readonly timeoutMs: number;
   readonly workspaceId: string;
   readonly write: (event: ProductRealtimeEvent) => void | Promise<void>;
@@ -236,7 +239,7 @@ async function streamOneConnection(input: {
       try {
         await input.write(event);
         delivered = true;
-        cursor = laterCursor(cursor, event.workspaceSequence);
+        cursor = laterCursor(cursor, event.position);
         return true;
       } catch (error) {
         socket.terminate();
@@ -388,8 +391,11 @@ export async function watchCommand(
     timeoutMs: context.options.timeoutMs,
   });
   const afterOption = stringOption(parsed, "after");
-  if (afterOption !== undefined && !sequenceSchema.safeParse(afterOption).success) {
-    throw new UsageError("--after must be an unsigned decimal cursor", "INVALID_CURSOR");
+  if (afterOption !== undefined && !syncPositionQuerySchema.safeParse(afterOption).success) {
+    throw new UsageError(
+      "--after must be a JSON position with epoch and sequence",
+      "INVALID_CURSOR",
+    );
   }
   const bootstrap = await client.request({
     path: "/v2/bootstrap",
@@ -398,7 +404,8 @@ export async function watchCommand(
   const { cursor } = await watchProductRealtime({
     client,
     origin: profile.apiOrigin,
-    after: afterOption ?? bootstrap.syncCursor,
+    after:
+      afterOption === undefined ? bootstrap.syncCursor : syncPositionQuerySchema.parse(afterOption),
     timeoutMs: context.options.timeoutMs,
     workspaceId: bootstrap.workspace.id,
     random: context.runtime.random,

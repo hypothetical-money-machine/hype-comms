@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -105,7 +106,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -188,7 +189,7 @@ function membershipRemoval(conversationId: string): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId,
-    workspaceSequence: "11",
+    position: testPosition("11"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -392,7 +393,7 @@ function createHarness(): Harness {
         event.payload.memberId === USER_ID
       ) {
         revokedConversationIds.add(event.conversationId);
-        snapshotCursor = event.workspaceSequence;
+        snapshotCursor = event.position;
       }
       for (const listener of workspaceEventListeners) listener({ scope: realtimeScope, event });
     },

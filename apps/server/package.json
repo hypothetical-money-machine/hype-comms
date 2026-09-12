@@ -28,7 +28,9 @@
     "pretest:unit": "npm run build --workspace @hype-comms/contracts",
     "pretest:integration": "npm run build --workspace @hype-comms/contracts",
     "test:unit": "vitest run --project unit",
-    "test:integration": "vitest run --project integration"
+    "test:integration": "vitest run --project integration",
+    "protocol:epoch": "tsx src/modules/workspace/protocol-epoch-cli.ts",
+    "protocol:epoch:dist": "node dist/modules/workspace/protocol-epoch-cli.js"
   },
   "engines": {
     "node": ">=24"

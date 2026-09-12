@@ -137,7 +137,7 @@ For the initial slice, the `system.connected` event is the freshness boundary:
 - events replayed before `system.connected` may repair the replica but do not notify;
 - HTTP sync and authoritative rebuilds never notify;
 - a validated, scope-matching `system.connected` raises the notification watermark to its
-  `workspaceSequence`, then arms only the identified `connectionId`;
+  `position` within the active protocol epoch, then arms only the identified `connectionId`;
 - `offline`, `reconnecting`, and a new socket disarm eligibility without clearing the signed-in
   scope's watermark; only that socket's `system.connected` arms it again;
 - only a strictly validated `message.created` event delivered by that armed connection may be

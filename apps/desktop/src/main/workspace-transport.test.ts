@@ -1,3 +1,4 @@
+import { testPosition } from "../shared/test-support/sync-position";
 import { fileURLToPath } from "node:url";
 import { serverResponse } from "./test-support/server-response";
 
@@ -40,8 +41,8 @@ const CURRENT_USER = {
 
 const SYNC_RESPONSE = {
   events: [],
-  nextCursor: "42",
-  highWaterCursor: "42",
+  nextCursor: testPosition("42"),
+  highWaterCursor: testPosition("42"),
   hasMore: false,
 } as const;
 
@@ -82,7 +83,7 @@ const BOOTSTRAP_RESPONSE = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "42",
+  syncCursor: testPosition("42"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -261,7 +262,9 @@ describe("WorkspaceTransport bootstrap compatibility", () => {
       const request = vi.fn(async () => new Response(null, { status }));
       const { transport } = createTransport(request);
       await expect(transport.send(SEND_OPERATION)).resolves.toEqual({ status: "upgrade_required" });
-      await expect(transport.sync("0")).resolves.toEqual({ status: "upgrade_required" });
+      await expect(transport.sync(testPosition("0"))).resolves.toEqual({
+        status: "upgrade_required",
+      });
       expect(request).toHaveBeenCalledOnce();
     },
   );
@@ -331,12 +334,12 @@ describe("WorkspaceTransport threads", () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
-      return jsonResponse({ message: retracted, syncCursor: "44" });
+      return jsonResponse({ message: retracted, syncCursor: testPosition("44") });
     });
 
     await expect(transport.retractMessage(THREAD_REPLY.id)).resolves.toEqual({
       message: retracted,
-      syncCursor: "44",
+      syncCursor: testPosition("44"),
     });
     expect(requests).toEqual([
       {
@@ -348,7 +351,7 @@ describe("WorkspaceTransport threads", () => {
 
   it("rejects a retract response that empties deletedAt", async () => {
     const transport = transportAnswering(() =>
-      jsonResponse({ message: THREAD_REPLY, syncCursor: "44" }),
+      jsonResponse({ message: THREAD_REPLY, syncCursor: testPosition("44") }),
     );
 
     await expect(transport.retractMessage(THREAD_REPLY.id)).rejects.toThrow();
@@ -430,7 +433,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("accepts a well-formed sync page", async () => {
     const transport = transportAnswering(() => jsonResponse(SYNC_RESPONSE));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "accepted",
       response: SYNC_RESPONSE,
     });
@@ -443,11 +446,11 @@ describe("WorkspaceTransport sync classification", () => {
       return jsonResponse(SYNC_RESPONSE);
     });
 
-    await transport.sync("41", 25);
+    await transport.sync(testPosition("41"), 25);
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: "https://chat.example/v2/sync?after=41&limit=25",
+      url: `https://chat.example/v2/sync?${new URLSearchParams({ after: JSON.stringify(testPosition("41")), limit: "25" })}`,
       init: { method: "GET" },
     });
     expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(null);
@@ -457,7 +460,7 @@ describe("WorkspaceTransport sync classification", () => {
     const requests: RequestInit[] = [];
     const { transport } = createTransport(async (_url, init) => {
       requests.push(init);
-      return jsonResponse({ ticket: "a".repeat(32), expiresAt: NOW });
+      return jsonResponse({ ticket: "a".repeat(32), position: testPosition("0"), expiresAt: NOW });
     });
 
     await transport.ticket();
@@ -470,7 +473,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("reports a revoked membership (403) as permanent instead of retryable", async () => {
     const transport = transportAnswering(() => statusResponse(403));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "permanent",
       reason: "forbidden",
     });
@@ -479,7 +482,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("reports a rejected sync request (400) as permanent validation instead of retryable", async () => {
     const transport = transportAnswering(() => statusResponse(400));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "permanent",
       reason: "validation",
     });
@@ -488,7 +491,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("reports a missing sync route (404) as permanent instead of retryable", async () => {
     const transport = transportAnswering(() => statusResponse(404));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "permanent",
       reason: "not_found",
     });
@@ -499,7 +502,7 @@ describe("WorkspaceTransport sync classification", () => {
       jsonResponse({ events: [], nextCursor: "not-a-sequence", hasMore: false }),
     );
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "permanent",
       reason: "invalid_response",
     });
@@ -516,20 +519,20 @@ describe("WorkspaceTransport sync classification", () => {
             occurredAt: NOW,
             workspaceId: CURRENT_USER.workspaceId,
             conversationId: MEMBER_ID,
-            workspaceSequence: "43",
+            position: testPosition("43"),
             conversationSequence: THREAD_ROOT.conversationSequence,
             entityVersion: THREAD_ROOT.version,
             delivery: "at_least_once",
             payload: { message: THREAD_ROOT, mentionedUserIds: [] },
           },
         ],
-        nextCursor: "43",
-        highWaterCursor: "43",
+        nextCursor: testPosition("43"),
+        highWaterCursor: testPosition("43"),
         hasMore: false,
       }),
     );
 
-    await expect(transport.sync("42")).resolves.toEqual({
+    await expect(transport.sync(testPosition("42"))).resolves.toEqual({
       status: "permanent",
       reason: "invalid_response",
     });
@@ -538,7 +541,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("reports a success response that is not JSON as permanent, never as retryable", async () => {
     const transport = transportAnswering(() => serverResponse("not json", { status: 200 }));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "permanent",
       reason: "invalid_response",
     });
@@ -547,7 +550,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("keeps an expired cursor (410) a reset request", async () => {
     const transport = transportAnswering(() => statusResponse(410));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "reset_required",
       reason: "cursor_expired",
     });
@@ -556,7 +559,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("carries Retry-After when the server rate limits sync", async () => {
     const transport = transportAnswering(() => statusResponse(429, { "retry-after": "30" }));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "retryable",
       reason: "rate_limited",
       retryAfterMs: 30_000,
@@ -566,7 +569,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("carries Retry-After when the server fails with a 5xx", async () => {
     const transport = transportAnswering(() => statusResponse(503, { "retry-after": "2" }));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "retryable",
       reason: "server",
       retryAfterMs: 2_000,
@@ -576,7 +579,7 @@ describe("WorkspaceTransport sync classification", () => {
   it("reports a 5xx without Retry-After as retryable with no delay hint", async () => {
     const transport = transportAnswering(() => statusResponse(500));
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "retryable",
       reason: "server",
       retryAfterMs: null,
@@ -588,7 +591,7 @@ describe("WorkspaceTransport sync classification", () => {
       throw new TypeError("fetch failed");
     });
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "retryable",
       reason: "network",
       retryAfterMs: null,
@@ -600,7 +603,7 @@ describe("WorkspaceTransport sync classification", () => {
       throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
     });
 
-    await expect(transport.sync("41")).resolves.toEqual({
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
       status: "retryable",
       reason: "network",
       retryAfterMs: null,
@@ -615,7 +618,9 @@ describe("WorkspaceTransport sync classification", () => {
     await session.restore();
     expect(session.state.status).toBe("signed-in");
 
-    await expect(transport.sync("41")).resolves.toEqual({ status: "authentication_required" });
+    await expect(transport.sync(testPosition("41"))).resolves.toEqual({
+      status: "authentication_required",
+    });
     expect(session.state).toEqual({ status: "signed-out" });
   });
 });
@@ -625,7 +630,7 @@ describe("WorkspaceTransport send classification", () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
-      return jsonResponse({ message: THREAD_REPLY, syncCursor: "43" });
+      return jsonResponse({ message: THREAD_REPLY, syncCursor: testPosition("43") });
     });
     const operation: SendMessageOperation = {
       ...SEND_OPERATION,
@@ -730,7 +735,10 @@ describe("WorkspaceTransport conversations", () => {
         body: typeof init.body === "string" ? init.body : null,
       });
       if (requests.length === 1) throw new TypeError("connection reset after commit");
-      return jsonResponse({ conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" });
+      return jsonResponse({
+        conversation: BOOTSTRAP_RESPONSE.conversations[0],
+        syncCursor: testPosition("43"),
+      });
     });
 
     await expect(
@@ -741,7 +749,7 @@ describe("WorkspaceTransport conversations", () => {
         access: "workspace",
         idempotencyKey: CLIENT_MESSAGE_ID,
       }),
-    ).resolves.toMatchObject({ syncCursor: "43" });
+    ).resolves.toMatchObject({ syncCursor: testPosition("43") });
     expect(requests).toEqual([
       {
         key: CLIENT_MESSAGE_ID,
@@ -772,7 +780,10 @@ describe("WorkspaceTransport conversations", () => {
         capability: new Headers(init.headers).get("x-hype-comms-capabilities"),
         body: typeof init.body === "string" ? init.body : null,
       });
-      return jsonResponse({ conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" });
+      return jsonResponse({
+        conversation: BOOTSTRAP_RESPONSE.conversations[0],
+        syncCursor: testPosition("43"),
+      });
     });
 
     await transport.createChannel({
@@ -807,7 +818,7 @@ describe("WorkspaceTransport tasks", () => {
       if (init.method === "GET") {
         return jsonResponse({ tasks: [TASK], nextCursor: null, hasMore: false });
       }
-      return jsonResponse({ task: TASK, syncCursor: "43" });
+      return jsonResponse({ task: TASK, syncCursor: testPosition("43") });
     });
 
     await expect(
@@ -1214,8 +1225,9 @@ describe("WorkspaceTransport reactions", () => {
         body: typeof init.body === "string" ? init.body : null,
       });
       if (init.method === "POST") return jsonResponse({ reactions: [REACTION] });
-      if (init.method === "PUT") return jsonResponse({ reaction: REACTION, syncCursor: "43" });
-      return jsonResponse({ removed: true, syncCursor: "44" });
+      if (init.method === "PUT")
+        return jsonResponse({ reaction: REACTION, syncCursor: testPosition("43") });
+      return jsonResponse({ removed: true, syncCursor: testPosition("44") });
     });
 
     await expect(transport.reactions([CLIENT_MESSAGE_ID])).resolves.toEqual({
@@ -1223,11 +1235,11 @@ describe("WorkspaceTransport reactions", () => {
     });
     await expect(transport.addReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
       reaction: REACTION,
-      syncCursor: "43",
+      syncCursor: testPosition("43"),
     });
     await expect(transport.removeReaction(CLIENT_MESSAGE_ID, "👩🏽‍💻")).resolves.toEqual({
       removed: true,
-      syncCursor: "44",
+      syncCursor: testPosition("44"),
     });
 
     const reactionUrl = `https://chat.example/v2/messages/${CLIENT_MESSAGE_ID}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
@@ -1270,7 +1282,10 @@ describe("WorkspaceTransport channel membership", () => {
       });
       return init.method === "GET"
         ? jsonResponse(CHANNEL_MEMBERS_RESPONSE)
-        : jsonResponse({ channelMembers: CHANNEL_MEMBERS_RESPONSE, syncCursor: "43" });
+        : jsonResponse({
+            channelMembers: CHANNEL_MEMBERS_RESPONSE,
+            syncCursor: testPosition("43"),
+          });
     });
 
     await expect(transport.channelMembers(CONVERSATION_ID)).resolves.toEqual(
