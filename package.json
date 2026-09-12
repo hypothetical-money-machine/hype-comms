@@ -52,7 +52,7 @@
     "test:hermes-plugin": "npm run build --workspace @hype-comms/cli && node scripts/test-hermes-plugin.mjs",
     "test:db": "scripts/test-database.sh",
     "test:postgres": "node scripts/test-postgres.mjs",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/rehearsal/tsconfig.json",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
@@ -60,13 +60,16 @@
     "test:unit": "npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts && npm test --workspace @hype-comms/api-client",
     "test:integration": "npm run test:postgres",
     "verify:test-database": "node scripts/test-postgres.mjs --ready",
-    "verify:zod-alignment": "node scripts/verify-zod-alignment.mjs"
+    "verify:zod-alignment": "node scripts/verify-zod-alignment.mjs",
+    "rehearse:native-cache": "tsc -b packages/api-client && node scripts/rehearse-native-cache.mjs",
+    "rehearse:claude": "npm run build --workspace @hype-comms/desktop && node scripts/rehearse-claude.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
     "@electron/fuses": "2.1.3",
     "@eslint/js": "10.0.1",
     "concurrently": "10.0.5",
+    "esbuild": "0.28.2",
     "eslint": "10.8.1",
     "globals": "17.11.0",
     "playwright": "1.62.1",
