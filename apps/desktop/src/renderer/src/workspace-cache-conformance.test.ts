@@ -683,6 +683,62 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
+  it("stages a first catalog page without treating unseen queued work as revoked", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, [messageSequence2]);
+    await cache.enqueue(queuedAlphaMessage, NOW);
+    const firstPage = {
+      ...snapshot,
+      syncCursor: testPosition("10"),
+      conversations: [directSummary],
+    };
+    await cache.stageMetadataPage(firstPage);
+    expect((await cache.load()).outbox[0]?.operation).toEqual(queuedAlphaMessage);
+    expect((await cache.load()).messages).toEqual([messageSequence2]);
+    expect((await cache.load()).syncCursor).toEqual(snapshot.syncCursor);
+    await cache.installMetadataSnapshot({ ...snapshot, syncCursor: testPosition("10") });
+    expect((await cache.load()).outbox[0]?.operation).toEqual(queuedAlphaMessage);
+    await cache.installMetadataSnapshot({ ...firstPage, syncCursor: testPosition("11") });
+    expect((await cache.load()).outbox).toEqual([]);
+    expect((await cache.load()).messages).toEqual([]);
+  });
+
+  it("keeps cold staged metadata unacknowledged while persisting a selected page", async () => {
+    const cache = create();
+    const firstPage = {
+      ...snapshot,
+      syncCursor: testPosition("10"),
+      conversations: [alphaSummary],
+    };
+    await cache.stageMetadataPage(firstPage);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, {
+      ...historyCommit("10"),
+      expectedPosition: null,
+    });
+    const staged = await cache.load();
+    expect(staged.bootstrap).toBeNull();
+    expect(staged.syncCursor).toBeNull();
+    expect(staged.messages).toEqual([messageSequence2]);
+    expect(staged.collections).toEqual([historyCommit("10").state]);
+    await cache.installMetadataSnapshot({ ...snapshot, syncCursor: testPosition("10") });
+    expect((await cache.load()).messages).toEqual([messageSequence2]);
+    expect((await cache.load()).collections).toEqual([historyCommit("10").state]);
+    expect((await cache.load()).syncCursor).toEqual(testPosition("10"));
+  });
+
+  it("invalidates retained collections whose snapshots predate a repaired catalog", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(snapshot, []);
+    await cache.upsertHistory(ALPHA_ID, [messageSequence2], [], undefined, historyCommit("10"));
+    await cache.installMetadataSnapshot({ ...snapshot, syncCursor: testPosition("11") });
+    expect((await cache.readCollections())[0]).toMatchObject({
+      loaded: true,
+      snapshotPosition: testPosition("10"),
+      invalidatedAt: testPosition("11"),
+    });
+    expect((await cache.load()).messages).toEqual([messageSequence2]);
+  });
+
   it("does not recreate a missing collection from a non-first page", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
