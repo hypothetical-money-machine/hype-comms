@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
 
 import type { CurrentUser } from "@hype-comms/contracts";
@@ -10,7 +10,7 @@ import { BotService } from "../src/modules/bots/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const now = new Date("2026-08-05T12:00:00.000Z");
 const expiresAt = "2026-11-03T12:00:00.000Z";
@@ -42,7 +42,7 @@ const owner: AuthenticatedIdentity = {
   principalKind: "human",
 };
 
-describeWithPostgres("BotService", () => {
+describe("BotService", () => {
   let database: TestDatabase;
   let pool: Pool;
   let service: BotService;

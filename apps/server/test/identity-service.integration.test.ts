@@ -9,7 +9,7 @@ import {
   type Email,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/email.js";
@@ -19,7 +19,7 @@ import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const initialNow = Date.parse("2026-07-24T12:00:00.000Z");
 
@@ -37,7 +37,7 @@ class FakeEmailSender implements EmailSender {
   }
 }
 
-describeWithPostgres("IdentityService and identity routes", () => {
+describe("IdentityService and identity routes", () => {
   let database: TestDatabase;
   let pool: Pool;
   let repository: IdentityRepository;

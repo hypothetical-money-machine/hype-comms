@@ -65,14 +65,10 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Check formatting, types, tests, and production builds
-        run: npm run check
-
-      - name: Run the complete PostgreSQL suite
+      - name: Check formatting, types, unit and integration tests, and production builds
         env:
           HYPE_COMMS_TEST_DATABASE_URL: postgresql://hype_comms:hype-comms-test-password@127.0.0.1:55432/hype_comms_test
-        # Bound database concurrency so the hosted runner and service remain deterministic.
-        run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000
+        run: npm run check
 
   headless-linux-smoke:
     name: Headless Linux smoke (Ubuntu x64)

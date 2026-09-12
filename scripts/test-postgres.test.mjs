@@ -73,10 +73,10 @@ test("gates every published server image through the guarded PostgreSQL entrypoi
 
   assert.equal(JSON.parse(packageJson).scripts["test:postgres"], "node scripts/test-postgres.mjs");
   assert.match(localDatabase, /npm run test:postgres/);
-  assert.match(github, /run: npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/);
+  assert.match(github, /run: npm run check/);
   assert.match(woodpecker, /image: postgres:16-alpine/);
   assert.doesNotMatch(woodpecker, /^concurrency:/mu);
-  assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run test:postgres/);
+  assert.match(woodpecker, /HYPE_COMMS_TEST_DATABASE_URL=.*npm run check/);
   assert.match(woodpecker, /name: build-push[\s\S]*?depends_on:\n\s+- check/);
   assert.match(woodpecker, /registry: &registry registry\.fastnfree\.dev/);
   assert.match(woodpecker, /project: &project homelab/);

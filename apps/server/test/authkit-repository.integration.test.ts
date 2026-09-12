@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
 
 import {
@@ -15,7 +15,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import type { AuthenticatedHumanIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const encryptionKey = Buffer.alloc(32, 19);
 const ownerId = "10000000-0000-4000-8000-000000000101";
@@ -23,7 +23,7 @@ const workspaceId = "10000000-0000-4000-8000-000000000102";
 const desktopVerifier = "desktop-verifier-value-that-is-long-enough-1234";
 const desktopChallenge = deriveAuthKitPkceCodeChallenge(desktopVerifier);
 
-describeWithPostgres("AuthKitRepository", () => {
+describe("AuthKitRepository", () => {
   let database: TestDatabase;
   let pool: Pool;
   let repository: AuthKitRepository;

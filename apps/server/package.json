@@ -24,7 +24,11 @@
     "pretest": "npm run build --workspace @hype-comms/contracts",
     "test": "vitest run",
     "pretypecheck": "npm run build --workspace @hype-comms/contracts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest:unit": "npm run build --workspace @hype-comms/contracts",
+    "pretest:integration": "npm run build --workspace @hype-comms/contracts",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "engines": {
     "node": ">=24"

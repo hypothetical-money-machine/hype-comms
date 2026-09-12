@@ -66,7 +66,7 @@ test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", asy
     postgresJob,
     /name: Restore dependency downloads[\s\S]*npm ci --no-audit --prefer-offline/u,
   );
-  assert.match(postgresJob, /npm run test:postgres -- --maxWorkers 4 --testTimeout 10000/u);
+  assert.match(postgresJob, /npm run check/u);
   assert.doesNotMatch(
     postgresJob,
     /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|initdb|pg_ctl|secrets\.|^ {4}environment:/mu,
