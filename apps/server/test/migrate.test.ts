@@ -10,40 +10,23 @@ import {
   listAgentTokensResponseSchema,
   workspaceEventSchema,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
-import { describe, expect, it } from "vitest";
+import { type Pool, type QueryResultRow } from "pg";
+import { afterAll, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
 
 import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
+let database: TestDatabase;
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
-async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void> {
-  if (testDatabaseUrl === undefined) return;
-
-  const schemaName = `migrate_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  const adminPool = createPool({ url: testDatabaseUrl, poolSize: 1 });
-  await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-  const pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 2 });
-  try {
-    await fn(pool);
-  } finally {
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
-  }
+async function withFreshDatabase(fn: (pool: Pool) => Promise<void>): Promise<void> {
+  // Migration cases need an empty schema, including migration metadata, inside this file's DB.
+  await database.pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+  await fn(database.pool);
 }
 
 /** Materializes the migration directory minus one file, so its own effect can be observed. */
@@ -104,8 +87,14 @@ async function withoutDesktopAuthVariantMigration(fn: (migrationsDirectory: URL)
 }
 
 describeWithPostgres("runMigrations", () => {
+  beforeAll(async () => {
+    database = await createTestDatabase({ migrate: false, poolSize: 2 });
+  });
+  afterAll(async () => {
+    await database?.dispose();
+  });
   it("applies migrations cleanly and is idempotent", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await expect(runMigrations(pool)).resolves.toEqual({
         applied: [
           "0001_identity.sql",
@@ -415,7 +404,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("defaults existing and previous-server AuthKit transactions to production", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await withoutDesktopAuthVariantMigration(async (migrationsDirectory) => {
         await runMigrations(pool, migrationsDirectory);
       });
@@ -472,7 +461,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("renames only the legacy default workspace", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
 
       const userId = randomUUID();
@@ -520,7 +509,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("rewrites legacy body formats, the default slug, and the body-format constraint", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       const userId = randomUUID();
       const defaultWorkspaceId = randomUUID();
       const customWorkspaceId = randomUUID();
@@ -697,7 +686,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("revokes every pre-cutover device session so old tokens stop authenticating", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       const userId = randomUUID();
       const activeSessionId = randomUUID();
       const revokedSessionId = randomUUID();
@@ -767,7 +756,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("leaves the legacy slug alone when the renamed slug already exists", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       const userId = randomUUID();
       const legacyWorkspaceId = randomUUID();
       const renamedWorkspaceId = randomUUID();
@@ -808,7 +797,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("keeps previous-server task creates compatible while seeding their actor", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const userId = randomUUID();
       const workspaceId = randomUUID();
@@ -851,7 +840,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("enforces announcement channel modes and tasklessness for old and new writers", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const ownerId = randomUUID();
       const memberId = randomUUID();
@@ -940,7 +929,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("upgrades active sessions and records subsequent token rotations", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await withoutTokenLineageMigration(async (migrationsDirectory) => {
         await runMigrations(pool, migrationsDirectory);
 
@@ -993,7 +982,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("upgrades existing human, bot, and device-ticket rows for agent identities", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await withoutAgentMigration(async (migrationsDirectory) => {
         await runMigrations(pool, migrationsDirectory);
 
@@ -1100,7 +1089,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("preserves pre-0023 agents while adding explicit equivalents for their old access", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await withoutMigrations(
         [
           "0023_default_agent_agency.sql",
@@ -1312,7 +1301,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("enforces the stored shape of group direct conversations", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const ownerId = randomUUID();
       const firstMemberId = randomUUID();
@@ -1518,7 +1507,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("keeps humans-only seats automatic and rejects non-human access at the database boundary", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const ownerId = randomUUID();
       const memberId = randomUUID();
@@ -1676,7 +1665,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("avoids a conversation/workspace deadlock while activating a human", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const ownerId = randomUUID();
       const memberId = randomUUID();
@@ -1747,7 +1736,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("seats a human activated while a humans-only channel transaction is open", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       await runMigrations(pool);
       const ownerId = randomUUID();
       const memberId = randomUUID();
@@ -1814,7 +1803,7 @@ describeWithPostgres("runMigrations", () => {
   });
 
   it("fails loudly when an applied migration file changes", async () => {
-    await withFreshSchema(async (pool) => {
+    await withFreshDatabase(async (pool) => {
       const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-migrations-"));
       const migrationUrl = new URL("../src/db/migrations/0001_identity.sql", import.meta.url);
       const copiedMigration = path.join(directory, "0001_identity.sql");

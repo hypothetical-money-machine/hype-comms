@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import type { Pool } from "pg";
 
 import {
   AGENT_CONTEXT_PACK_MAX_BYTES,
@@ -22,8 +22,6 @@ import {
   type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import { ApiError } from "../src/errors.js";
 import type {
   AuthenticatedAgentIdentity,
@@ -41,9 +39,8 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -75,12 +72,6 @@ const reactionEmojis = [
   "😋",
   "😛",
 ] as const;
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 function currentUser(
   id: string,
@@ -179,8 +170,7 @@ async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> 
 }
 
 describeWithPostgres("WorkspaceRepository", () => {
-  const schemaName = `workspace_repository_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let database: TestDatabase;
   let pool: Pool;
   let repository: WorkspaceRepository;
   let attachmentRoot: string;
@@ -193,11 +183,8 @@ describeWithPostgres("WorkspaceRepository", () => {
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
     attachmentStore = new LocalAttachmentStore(attachmentRoot);
     repository = new WorkspaceRepository(pool, repositoryHooks());
@@ -205,15 +192,7 @@ describeWithPostgres("WorkspaceRepository", () => {
 
   beforeEach(async () => {
     repository = new WorkspaceRepository(pool, repositoryHooks());
-    await pool.query(`
-      TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions,
-               attachments, messages,
-               conversation_memberships, conversations, device_sessions, magic_link_tokens,
-               invitations,
-               workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
@@ -248,10 +227,7 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
     if (attachmentRoot !== undefined) await rm(attachmentRoot, { recursive: true, force: true });
   });
 
