@@ -130,6 +130,7 @@ import {
   type AttachmentStore,
 } from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
+import { hashToken } from "../identity/tokens.js";
 import type { AuthenticatedAgentIdentity, AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
@@ -4555,7 +4556,7 @@ export class WorkspaceRepository {
       throw new Error("Realtime tickets require exactly one authenticated credential");
     }
     const token = randomBytes(32).toString("base64url");
-    const hash = createHash("sha256").update(token).digest();
+    const hash = hashToken(token);
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
@@ -4592,7 +4593,7 @@ export class WorkspaceRepository {
   }
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
-    const hash = createHash("sha256").update(token).digest();
+    const hash = hashToken(token);
     const result = await this.pool.query<TicketRow>(
       `WITH consumed_ticket AS (
          UPDATE realtime_tickets AS ticket
