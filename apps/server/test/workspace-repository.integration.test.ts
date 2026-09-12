@@ -2264,6 +2264,94 @@ describe("WorkspaceRepository", () => {
     });
   });
 
+  it.each(["event insert", "commit"] as const)(
+    "rolls task creation back on %s failure and safely retries the same key",
+    async (failurePoint) => {
+      const input = taskInput("Retry the launch task", { assigneeId: memberId });
+      const key = randomUUID();
+      const state = async () =>
+        (
+          await pool.query(`SELECT
+            (SELECT count(*)::int FROM tasks) AS tasks,
+            (SELECT count(*)::int FROM sync_events) AS events,
+            (SELECT count(*)::int FROM sync_event_audiences) AS audiences,
+            (SELECT count(*)::int FROM api_idempotency_records) AS idempotency,
+            (SELECT last_task_number::text FROM conversations WHERE slug = 'general') AS number,
+            (SELECT last_event_sequence::text FROM workspaces) AS sequence`)
+        ).rows[0];
+      const before = await state();
+      await pool.query(`CREATE FUNCTION reject_test_task_write() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_ARGV[0] = 'commit' AND NOT EXISTS (
+            SELECT 1 FROM api_idempotency_records
+             WHERE response_body->'task'->>'id' = NEW.payload->'task'->>'id'
+          ) THEN
+            RAISE EXCEPTION 'Task response was not stored before commit';
+          END IF;
+          RAISE EXCEPTION 'Injected task transaction failure';
+        END;
+        $$`);
+      try {
+        await pool.query(
+          failurePoint === "commit"
+            ? `CREATE CONSTRAINT TRIGGER reject_test_task_write
+                 AFTER INSERT ON sync_events DEFERRABLE INITIALLY DEFERRED
+                 FOR EACH ROW WHEN (NEW.event_type = 'task.created')
+                 EXECUTE FUNCTION reject_test_task_write('commit')`
+            : `CREATE TRIGGER reject_test_task_write
+                 BEFORE INSERT ON sync_events
+                 FOR EACH ROW WHEN (NEW.event_type = 'task.created')
+                 EXECUTE FUNCTION reject_test_task_write('event insert')`,
+        );
+        await expect(repository.createTask(owner, generalId, input, key)).rejects.toThrow(
+          "Injected task transaction failure",
+        );
+        expect(await state()).toEqual(before);
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_task_write ON sync_events");
+        await pool.query("DROP FUNCTION reject_test_task_write()");
+      }
+
+      const created = await repository.createTask(owner, generalId, input, key);
+      expect(created.task.number).toBe("1");
+      expect(created.syncCursor).toBe("1");
+      const sync = await repository.sync(owner, "0", 100, { taskEvents: true });
+      expect(sync.events).toEqual([
+        expect.objectContaining({
+          type: "task.created",
+          workspaceSequence: "1",
+          payload: { task: created.task },
+        }),
+      ]);
+      const committed = await state();
+      expect(committed).toEqual({
+        tasks: 1,
+        events: 1,
+        audiences: 3,
+        idempotency: 1,
+        number: "1",
+        sequence: "1",
+      });
+      await expect(repository.createTask(owner, generalId, input, key)).resolves.toEqual(created);
+      expect(await state()).toEqual(committed);
+      const transactions = await pool.query(`SELECT
+        task.xmin::text AS task,
+        event.xmin::text AS event,
+        audience.xmin::text AS audience,
+        response.xmin::text AS response
+        FROM tasks AS task
+        JOIN sync_events AS event ON event.payload->'task'->>'id' = task.id::text
+        JOIN sync_event_audiences AS audience ON audience.event_id = event.id
+        JOIN api_idempotency_records AS response
+          ON response.response_body->'task'->>'id' = task.id::text`);
+      expect(transactions.rows).toHaveLength(3);
+      for (const row of transactions.rows) {
+        expect(new Set(Object.values(row)).size).toBe(1);
+      }
+    },
+  );
+
   it("creates, pages, updates, and canonically reorders channel and personal tasks", async () => {
     const source = await repository.sendMessage(
       owner,
