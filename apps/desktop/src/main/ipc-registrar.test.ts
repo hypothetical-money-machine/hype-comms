@@ -1,3 +1,4 @@
+import { deferred } from "./test-support/deferred";
 import { describe, expect, it, vi } from "vitest";
 import type { User } from "@hype-comms/contracts";
 
@@ -10,6 +11,7 @@ import {
 import { createDesktopInvoker, parseInvokeResult } from "../shared/ipc-invoke";
 import { readDesktopInitialValues } from "../shared/ipc-initial-values";
 import { registerDesktopInitialValues, type IpcInitialValueRegistry } from "./ipc-initial-values";
+import { WorkspaceSessionOwner } from "./workspace-session-owner";
 import { registerDesktopInvokes, type IpcInvokeRegistry } from "./ipc-registrar";
 import {
   createWorkspaceInvokeHandlers,
@@ -150,7 +152,7 @@ describe("desktop invoke registration", () => {
     registerDesktopInvokes(
       registry,
       authorize,
-      handlers(createWorkspaceInvokeHandlers(() => transport)),
+      handlers(createWorkspaceInvokeHandlers(async (operation) => operation(transport))),
     );
     const { channel } = DESKTOP_INVOKE_CONTRACTS.workspaceTasksList;
     const request = { conversationId: CONVERSATION_ID, query: {} };
@@ -180,7 +182,12 @@ describe("desktop invoke registration", () => {
     registerDesktopInvokes(
       registry,
       authorize,
-      handlers(createWorkspaceInvokeHandlers(() => current)),
+      handlers(
+        createWorkspaceInvokeHandlers(async (operation) => {
+          if (current === null) throw new Error("Workspace transport is unavailable");
+          return operation(current);
+        }),
+      ),
     );
     const invoke = createDesktopInvoker(registry);
     await expect(
@@ -193,6 +200,36 @@ describe("desktop invoke registration", () => {
     expect(tasks).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a late task response after replacing the workspace session", async () => {
+    const registry = new Registry();
+    const body = deferred<typeof EMPTY_TASKS>();
+    const tasks = vi.fn<WorkspaceIpcTransport["tasks"]>(() => body.promise);
+    const sessions = new WorkspaceSessionOwner(() => ({
+      transport: workspaceTransport({ tasks }),
+    }));
+    await sessions.replace({ userId: USER.id, workspaceId: CONVERSATION_ID });
+    registerDesktopInvokes(
+      registry,
+      authorize,
+      handlers(
+        createWorkspaceInvokeHandlers((operation) => {
+          const session = sessions.current;
+          if (session === null) throw new Error("Workspace transport is unavailable");
+          return session.run(({ transport }) => operation(transport));
+        }),
+      ),
+    );
+    const response = createDesktopInvoker(registry)("workspaceTasksList", {
+      conversationId: CONVERSATION_ID,
+      query: {},
+    });
+    await vi.waitFor(() => expect(tasks).toHaveBeenCalledOnce());
+    await sessions.replace(null);
+    body.resolve(EMPTY_TASKS);
+    await expect(response).rejects.toThrow("Workspace session was replaced");
+    await sessions.dispose();
+  });
+
   it("wraps the transport's user in the profile response required by preload", async () => {
     const registry = new Registry();
     const updateProfile = vi.fn<WorkspaceIpcTransport["updateProfile"]>().mockResolvedValue(USER);
@@ -200,7 +237,7 @@ describe("desktop invoke registration", () => {
     registerDesktopInvokes(
       registry,
       authorize,
-      handlers(createWorkspaceInvokeHandlers(() => transport)),
+      handlers(createWorkspaceInvokeHandlers(async (operation) => operation(transport))),
     );
     await expect(
       createDesktopInvoker(registry)("workspaceProfileUpdate", "Engineer"),
