@@ -4428,8 +4428,8 @@ export class WorkspaceRuntime {
         }
         if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
         // A membership repair can finish while this request is still in flight. Its authoritative
-        // snapshot removes revoked sends from both the cache and this projection; a late response
-        // no longer owns anything and must not reinsert its message after the barrier has cleared.
+        // snapshot blocks revoked sends and retains their authored operation. The retired projection
+        // must not accept its late response or reinsert server content after the barrier clears.
         if (!this.#state.outbox.some((item) => item.operation.message.clientMessageId === id)) {
           continue;
         }

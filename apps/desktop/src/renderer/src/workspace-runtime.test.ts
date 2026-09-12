@@ -1,3 +1,4 @@
+import type { OutboxItem } from "./workspace-cache";
 import { type SyncPosition } from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { testPosition } from "../../shared/test-support/sync-position";
@@ -106,6 +107,12 @@ const THIRD_MEMBER_EVENT_ID = "20000000-0000-4000-8000-000000000017";
 const TASK_ID = "20000000-0000-4000-8000-000000000018";
 const THREAD_REPLY_ID = "20000000-0000-4000-8000-000000000020";
 const THREAD_REPLY_CLIENT_ID = "20000000-0000-4000-8000-000000000021";
+
+function expectRetainedUnsent(items: readonly OutboxItem[], operation: SendMessageOperation): void {
+  expect(items).toMatchObject([{ operation, status: "permanent_failure", nextAttemptAt: null }]);
+  expect(items[0]?.failureReason).toContain("retained on this device");
+}
+
 const NOW = "2026-07-24T12:00:00.000Z";
 const NEXT_PAGE_CURSOR = "eyJpZCI6InAxIn0";
 
@@ -7103,11 +7110,74 @@ describe("WorkspaceRuntime", () => {
       CONVERSATION_ID,
     ]);
     expect(durable.messages).toEqual([]);
-    expect(durable.outbox).toEqual([]);
+    expectRetainedUnsent(
+      durable.outbox,
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    );
     expect(runtime.state.messages).toEqual([]);
-    expect(runtime.state.outbox).toEqual([]);
+    expectRetainedUnsent(
+      runtime.state.outbox,
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    );
     expect(api.sent).toEqual([]);
     expect(runtime.state.error).toBeNull();
+    api.sendResults.push({
+      status: "accepted",
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("12") },
+    });
+    await runtime.sendMessage(
+      CONVERSATION_ID,
+      "Deliver outside the retained blocked conversation",
+      [],
+    );
+    await settle(
+      () => api.sent.length === 1 && runtime.state.outbox.length === 1,
+      "unrelated send despite retained work",
+    );
+    expect(api.sent[0]?.conversationId).toBe(CONVERSATION_ID);
+
+    api.bootstrapResults.push(
+      bootstrapAt("13", {
+        conversations: [channel(CONVERSATION_ID, "general"), secondPrivate],
+      }),
+    );
+    api.emitWorkspaceEvent(
+      membershipChanged("20000000-0000-4000-8000-000000000059", "13", "added", thirdConversationId),
+    );
+    await settle(() => api.acknowledged.includes("13"), "restored membership acknowledgement");
+    runtime.selectConversation(thirdConversationId);
+    await drain();
+    expect(runtime.state.selectedConversationId).toBe(thirdConversationId);
+    expectRetainedUnsent(
+      runtime.state.outbox.filter((item) => item.operation.conversationId === thirdConversationId),
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    );
+    expect(api.sent).toHaveLength(1);
+
+    api.sendResults.push({
+      status: "accepted",
+      response: {
+        message: { ...ownMessage, conversationId: thirdConversationId },
+        attachments: [],
+        syncCursor: testPosition("14"),
+      },
+    });
+    await runtime.retryMessage(queuedSecondRemovalId);
+    await settle(
+      () =>
+        !runtime.state.outbox.some(
+          (item) => item.operation.message.clientMessageId === queuedSecondRemovalId,
+        ),
+      "explicit retry of retained work",
+    );
+    expect(
+      api.sent.filter((operation) => operation.conversationId === thirdConversationId),
+    ).toEqual([
+      queuedOperation(queuedSecondRemovalId, "Queued before second removal", thirdConversationId),
+    ]);
+    expect(runtime.state.messages.map((message) => message.clientMessageId)).toContain(
+      queuedSecondRemovalId,
+    );
   });
 
   it("drops an older-history response released after membership repair is acknowledged", async () => {
@@ -7460,7 +7530,7 @@ describe("WorkspaceRuntime", () => {
     expect(
       blocked.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(blocked.outbox).toEqual([]);
+    expectRetainedUnsent(blocked.outbox, sent);
     expect(
       runtime.state.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
@@ -7525,11 +7595,11 @@ describe("WorkspaceRuntime", () => {
     expect(
       durable.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(durable.outbox).toEqual([]);
+    expectRetainedUnsent(durable.outbox, sent);
     expect(
       runtime.state.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(runtime.state.outbox).toEqual([]);
+    expectRetainedUnsent(runtime.state.outbox, sent);
     expect(runtime.state.error).toBeNull();
   });
 
@@ -7595,11 +7665,11 @@ describe("WorkspaceRuntime", () => {
     expect(
       durable.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(durable.outbox).toEqual([]);
+    expectRetainedUnsent(durable.outbox, sent);
     expect(
       runtime.state.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(runtime.state.outbox).toEqual([]);
+    expectRetainedUnsent(runtime.state.outbox, sent);
     expect(runtime.state.error).toBeNull();
   });
 
