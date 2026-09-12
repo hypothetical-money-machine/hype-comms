@@ -254,13 +254,22 @@ function trustedAncestorPin(
   };
 }
 
+/** Injectable seam for the ancestor `lstat`, following the pattern used by `readPrivateBoundedUtf8File`'s
+ *  `openFile`. Production always uses the default; only tests may substitute a stand-in so fixture
+ *  ancestors elsewhere in a checkout do not depend on that checkout's own directory permissions. */
+export type AgentWakeAncestorStat = (ancestorPath: string) => Promise<BigIntStats>;
+
+const defaultAncestorStat: AgentWakeAncestorStat = (ancestorPath) =>
+  lstat(ancestorPath, { bigint: true });
+
 async function inspectTrustedAncestors(
   filePath: string,
   accountUid: number,
+  statAncestor: AgentWakeAncestorStat,
 ): Promise<readonly AgentWakeExecutableAncestorPin[]> {
   return Promise.all(
     ancestorPaths(filePath).map(async (ancestorPath) =>
-      trustedAncestorPin(ancestorPath, await lstat(ancestorPath, { bigint: true }), accountUid),
+      trustedAncestorPin(ancestorPath, await statAncestor(ancestorPath), accountUid),
     ),
   );
 }
@@ -395,6 +404,8 @@ interface InspectExecutableOptions {
   readonly platform?: NodeJS.Platform;
   readonly architecture?: NodeJS.Architecture;
   readonly currentUid?: number | undefined;
+  /** Test-only seam; production callers never set this and get the real `lstat`-backed default. */
+  readonly statAncestor?: AgentWakeAncestorStat;
 }
 
 async function inspectExecutable(
@@ -423,11 +434,12 @@ async function inspectExecutable(
     throw executableIntegrityError();
   }
 
+  const statAncestor = options.statAncestor ?? defaultAncestorStat;
   let file: FileHandle | undefined;
   let result: AgentWakeExecutablePin | null = null;
   let failed = false;
   try {
-    const ancestorsBefore = await inspectTrustedAncestors(configuredPath, accountUid);
+    const ancestorsBefore = await inspectTrustedAncestors(configuredPath, accountUid, statAncestor);
     const pathMetadataBefore = await lstat(configuredPath, { bigint: true });
     if (pathMetadataBefore.isSymbolicLink() || !pathMetadataBefore.isFile()) {
       throw executableIntegrityError();
@@ -450,7 +462,7 @@ async function inspectExecutable(
     const openedMetadataAfter = await file.stat({ bigint: true });
     const pathMetadataAfter = await lstat(configuredPath, { bigint: true });
     const canonicalPathAfter = await realpath(configuredPath);
-    const ancestorsAfter = await inspectTrustedAncestors(configuredPath, accountUid);
+    const ancestorsAfter = await inspectTrustedAncestors(configuredPath, accountUid, statAncestor);
     if (
       canonicalPathAfter !== canonicalPath ||
       pathMetadataAfter.isSymbolicLink() ||
@@ -661,6 +673,8 @@ export async function loadAgentWakeConfiguration(options: {
   readonly platform?: NodeJS.Platform;
   readonly architecture?: NodeJS.Architecture;
   readonly currentUid?: number | undefined;
+  /** Test-only seam; production callers never set this and get the real `lstat`-backed default. */
+  readonly statAncestor?: AgentWakeAncestorStat;
 }): Promise<AgentWakeConfiguration> {
   const source = await readPrivateBoundedUtf8File(
     options.filePath,
@@ -692,16 +706,19 @@ export async function loadAgentWakeConfiguration(options: {
         platform: options.platform,
         architecture: options.architecture,
         currentUid: options.currentUid,
+        statAncestor: options.statAncestor,
       }),
       pinAgentWakeCliEntrypoint(parsed.data.source.cliEntrypointPath, {
         platform: options.platform,
         architecture: options.architecture,
         currentUid: options.currentUid,
+        statAncestor: options.statAncestor,
       }),
       pinAgentWakeExecutable(parsed.data.target.executablePath, {
         platform: options.platform,
         architecture: options.architecture,
         currentUid: options.currentUid,
+        statAncestor: options.statAncestor,
       }),
     ]);
     if (
