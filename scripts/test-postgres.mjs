@@ -8,39 +8,13 @@ import { Client } from "pg";
 const DEFAULT_ATTEMPTS = 60;
 const DEFAULT_DELAY_MS = 500;
 
-class NonTestDatabaseError extends Error {}
+import {
+  NonTestDatabaseError,
+  assertTestDatabaseName,
+  requireTestDatabaseUrl,
+} from "./test-database-config.mjs";
 
-function assertTestDatabaseName(name) {
-  if (name === "" || !/(^|[_-])test($|[_-])/i.test(name)) {
-    throw new NonTestDatabaseError(
-      `Refusing to run PostgreSQL tests against non-test database ${name || "<empty>"}`,
-    );
-  }
-}
-
-function databaseName(databaseUrl) {
-  const parsed = new URL(databaseUrl);
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL");
-  }
-  const name = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-  assertTestDatabaseName(name);
-  return name;
-}
-
-export function requireTestDatabaseUrl(environment) {
-  const databaseUrl = environment.HYPE_COMMS_TEST_DATABASE_URL?.trim() ?? "";
-  if (databaseUrl === "") throw new Error("HYPE_COMMS_TEST_DATABASE_URL is required");
-  try {
-    databaseName(databaseUrl);
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL", { cause: error });
-    }
-    throw error;
-  }
-  return databaseUrl;
-}
+export { requireTestDatabaseUrl } from "./test-database-config.mjs";
 
 function delay(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));

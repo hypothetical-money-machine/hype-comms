@@ -1,5 +1,4 @@
-import { chmod, mkdtemp, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { chmod, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -11,6 +10,7 @@ import {
   resolveDevelopmentProfile,
   resolveDevelopmentUserDataPath,
 } from "./development-profile";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 describe("resolveDevelopmentProfile", () => {
   it("accepts an optional lowercase slug", () => {
@@ -54,7 +54,7 @@ describe("development auth callback files", () => {
   });
 
   it("consumes a private file once and cannot replay it after restart", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-callback-"));
+    const directory = await createTemporaryDirectory("hmm-callback-");
     const file = path.join(directory, "claire.callback");
     await writeFile(file, "hype-comms://auth/callback?token=local\n", { mode: 0o600 });
     await chmod(file, 0o600);
@@ -66,7 +66,7 @@ describe("development auth callback files", () => {
   });
 
   it("removes an insecure callback without reading it", async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-callback-"));
+    const directory = await createTemporaryDirectory("hmm-callback-");
     const file = path.join(directory, "claire.callback");
     await writeFile(file, "secret", { mode: 0o644 });
     await chmod(file, 0o644);

@@ -1,22 +1,18 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { DevicePreferences } from "@hype-comms/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_DEVICE_PREFERENCES } from "../shared/device-preferences";
 import {
   DevicePreferencesStore,
   MAX_DEVICE_PREFERENCES_FILE_BYTES,
 } from "./device-preferences-store";
-
-const directories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-device-preferences-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hype-comms-device-preferences-");
 }
 
 function preferenceDirectory(userDataPath: string): string {
@@ -35,12 +31,6 @@ async function writeStoredValue(userDataPath: string, value: string): Promise<vo
   await mkdir(preferenceDirectory(userDataPath), { recursive: true });
   await writeFile(preferenceFile(userDataPath), value, "utf8");
 }
-
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
 
 describe("DevicePreferencesStore", () => {
   it("defaults every preference when the file is missing", async () => {

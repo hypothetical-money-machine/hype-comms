@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,8 +15,8 @@ import {
   redeemAgentEnrollmentResponseSchema,
   requestAgentEnrollmentSchema,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { type Pool, type QueryResultRow } from "pg";
+import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
 
 import { executeCli } from "../../../packages/cli/src/cli.js";
@@ -29,17 +29,14 @@ import {
 } from "../../../packages/cli/src/errors.js";
 import type { Runtime } from "../../../packages/cli/src/types.js";
 import { buildApp } from "../src/app.js";
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import { AgentEnrollmentModule } from "../src/modules/identity/agent-enrollment.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 const ownerSessionId = "10000000-0000-4000-8000-000000000003";
@@ -64,12 +61,6 @@ interface RevokedTokenRow extends QueryResultRow {
 
 class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
-}
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
 }
 
 function environment(homeDirectory: string, profile: string): NodeJS.ProcessEnv {
@@ -140,9 +131,8 @@ const cliErrorOutputSchema = z
   .strict();
 
 describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API boundary", () => {
-  const schemaName = `agent_cli_e2e_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const temporaryDirectories: string[] = [];
-  let adminPool: Pool;
+  let database: TestDatabase;
   let pool: Pool;
   let identityService: IdentityService;
   let enrollment: AgentEnrollmentModule;
@@ -184,11 +174,8 @@ describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API b
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     const identityRepository = new IdentityRepository(pool);
     identityService = new IdentityService(
       identityRepository,
@@ -231,10 +218,7 @@ describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API b
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
   });
 
   it("keeps the replacement secret child-owned through cutover, revocation, and the rollback gate", async () => {

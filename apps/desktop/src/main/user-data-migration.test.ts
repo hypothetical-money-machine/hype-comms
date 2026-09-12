@@ -1,13 +1,13 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { migrateLegacyUserData } from "./user-data-migration";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), "hmm-user-data-migration-"));
+  return createTemporaryDirectory("hmm-user-data-migration-");
 }
 
 describe("migrateLegacyUserData", () => {
@@ -21,8 +21,6 @@ describe("migrateLegacyUserData", () => {
     expect(migrateLegacyUserData({ currentPath, legacyPath })).toBe("migrated");
     await expect(readdir(currentPath)).resolves.toEqual(["Cookies"]);
     await expect(readdir(legacyPath)).rejects.toMatchObject({ code: "ENOENT" });
-
-    await rm(root, { recursive: true, force: true });
   });
 
   it("does nothing when there is no legacy profile", async () => {
@@ -32,8 +30,6 @@ describe("migrateLegacyUserData", () => {
 
     expect(migrateLegacyUserData({ currentPath, legacyPath })).toBe("not-needed");
     await expect(readdir(currentPath)).rejects.toMatchObject({ code: "ENOENT" });
-
-    await rm(root, { recursive: true, force: true });
   });
 
   it("replaces an empty new profile without losing legacy data", async () => {
@@ -46,8 +42,6 @@ describe("migrateLegacyUserData", () => {
 
     expect(migrateLegacyUserData({ currentPath, legacyPath })).toBe("migrated");
     await expect(readdir(currentPath)).resolves.toEqual(["Cookies"]);
-
-    await rm(root, { recursive: true, force: true });
   });
 
   it("refuses to overwrite a populated new profile", async () => {
@@ -64,8 +58,6 @@ describe("migrateLegacyUserData", () => {
     );
     await expect(readdir(legacyPath)).resolves.toEqual(["old"]);
     await expect(readdir(currentPath)).resolves.toEqual(["new"]);
-
-    await rm(root, { recursive: true, force: true });
   });
 
   it("refuses a non-directory collision", async () => {
@@ -78,7 +70,5 @@ describe("migrateLegacyUserData", () => {
     expect(() => migrateLegacyUserData({ currentPath, legacyPath })).toThrow(
       /Expected user-data path to be a directory/u,
     );
-
-    await rm(root, { recursive: true, force: true });
   });
 });

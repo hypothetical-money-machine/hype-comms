@@ -1,17 +1,13 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { MAX_THEME_PREFERENCE_FILE_BYTES, ThemePreferenceStore } from "./theme-preference-store";
-
-const directories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-theme-preference-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hmm-theme-preference-");
 }
 
 function preferenceDirectory(userDataPath: string): string {
@@ -26,12 +22,6 @@ async function writeStoredValue(userDataPath: string, value: string): Promise<vo
   await mkdir(preferenceDirectory(userDataPath), { recursive: true });
   await writeFile(preferenceFile(userDataPath), value, "utf8");
 }
-
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
 
 describe("ThemePreferenceStore", () => {
   it("uses an accent-free system design when the file is missing", async () => {
