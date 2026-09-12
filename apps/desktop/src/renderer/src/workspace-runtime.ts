@@ -1,3 +1,4 @@
+import type { WorkspaceClient } from "./workspace-client";
 import {
   compareSyncPositions,
   sendMessageOperationSchema,
@@ -35,7 +36,7 @@ import {
 } from "@hype-comms/contracts";
 
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
-import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
+import type { RealtimeConnectionState } from "../../shared/desktop-api";
 import {
   applyRetractReservation,
   compareMembers,
@@ -390,7 +391,7 @@ interface ProjectionGuard {
 
 export class WorkspaceRuntime {
   readonly #listeners = new Set<(state: WorkspaceRuntimeState) => void>();
-  readonly #client: DesktopApi;
+  readonly #client: WorkspaceClient;
   readonly #createCache: (status: CacheCryptoStatus) => WorkspaceCache;
   #state = INITIAL_STATE;
   readonly #recovery = new WorkspaceRecovery(() => this.#setState({}));
@@ -506,7 +507,7 @@ export class WorkspaceRuntime {
   readonly #presenceExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(client: DesktopApi, options: WorkspaceRuntimeOptions = {}) {
+  constructor(client: WorkspaceClient, options: WorkspaceRuntimeOptions = {}) {
     this.#client = client;
     this.#createCache =
       options.createCache ??
@@ -4415,7 +4416,7 @@ export class WorkspaceRuntime {
         }
         const committedPosition = this.#syncCursor;
         if (committedPosition === null) return;
-        let result: Awaited<ReturnType<DesktopApi["sendConversationMessage"]>>;
+        let result: Awaited<ReturnType<WorkspaceClient["sendConversationMessage"]>>;
         try {
           result = await this.#client.sendConversationMessage(next.operation);
         } catch {

@@ -1,9 +1,8 @@
 import { testPosition } from "../../shared/test-support/sync-position";
+import { createAppClient, createAppRuntimes } from "./app-test-fixture";
 // @vitest-environment happy-dom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
-  AiChannelState,
   Attachment,
   ChatSessionState,
   HumanWorkspaceBootstrapResponse,
@@ -11,25 +10,19 @@ import type {
   NotificationAction,
   NotificationActionAcknowledgement,
   NotificationContext,
-  NotificationState,
   ProductRealtimeEvent,
   RealtimeSessionScope,
-  SendMessageOperation,
   ScopedProductRealtimeEvent,
-  ThemeState,
-  UpdateState,
+  SendMessageOperation,
 } from "@hype-comms/contracts";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { DesktopApi } from "../../shared/desktop-api";
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
+import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
-import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
-import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
-import type { ThemeRuntime } from "./theme-runtime";
 
 const USER_ID = "30000000-0000-4000-8000-000000000001";
 const WORKSPACE_ID = "30000000-0000-4000-8000-000000000002";
@@ -51,7 +44,11 @@ const session: Extract<ChatSessionState, { status: "signed-in"; method: "email" 
   workspaceId: WORKSPACE_ID,
 };
 
-function conversationSummary(id: string, name: string, slug: string) {
+function conversationSummary(
+  id: string,
+  name: string,
+  slug: string,
+): HumanWorkspaceBootstrapResponse["conversations"][number] {
   return {
     conversation: {
       id,
@@ -112,8 +109,9 @@ const bootstrap = {
     directMessages: true,
     mentions: true,
     announcementChannels: false,
+    humansOnlyChannels: false,
   },
-} as unknown as HumanWorkspaceBootstrapResponse;
+} satisfies HumanWorkspaceBootstrapResponse;
 
 const threadRoot: Message = {
   id: ROOT_MESSAGE_ID,
@@ -197,25 +195,6 @@ function membershipRemoval(conversationId: string): ProductRealtimeEvent {
   };
 }
 
-const notificationState: NotificationState = {
-  version: 1,
-  devicePreference: "enabled",
-  contentPreviewPreference: "disabled",
-  nativeSupport: "supported",
-  osPermission: "granted",
-};
-
-const aiChannelState: AiChannelState = {
-  version: 1,
-  generation: 1,
-  status: "configured",
-  workspaceName: "hype-comms",
-  entries: [],
-  plan: [],
-  permissionRequest: null,
-  error: null,
-};
-
 interface Harness {
   readonly client: DesktopApi;
   readonly acknowledgedNotificationActions: readonly NotificationAction[];
@@ -256,147 +235,104 @@ function createHarness(): Harness {
     syncCursor: snapshotCursor,
   });
 
-  const client = {
-    platform: "linux",
-    isHeadless: true,
-    getSessionState: async () => session,
-    retrySession: async () => session,
-    onSessionChanged: () => () => undefined,
-    signOut: async () => ({ status: "signed-out" }) as const,
-    getAppVersion: async () => "0.1.27-test",
-    getUpdateState: async (): Promise<UpdateState> => ({ status: "idle" }),
-    checkForUpdates: async () => undefined,
-    restartToInstallUpdate: async () => undefined,
-    onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async () =>
-      ({
-        mode: "memory_only",
-        scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
-        reason: "credential_store_unavailable",
-      }) as const,
-    getWorkspaceBootstrap: async () => currentBootstrap(),
-    listWorkspaceMembers: async () => ({ members: [] }),
-    listConversations: async () => ({
-      conversations: currentBootstrap().conversations,
-      nextCursor: null,
-      hasMore: false,
-    }),
-    getConversationMessages: async () => ({
-      attachments: [],
-      reactions: [],
-      snapshotPosition: snapshotCursor,
-      messages: [],
-      threadSummaries: [],
-      threadsSupported: true,
-      nextCursor: null,
-    }),
-    getMessageById: async (messageId: string) => {
-      const message = notificationTargets.find((candidate) => candidate.id === messageId);
-      if (message === undefined) throw new Error(`Unknown message ${messageId}`);
-      return { message };
-    },
-    getMessageThread: async () => {
-      // A real macrotask gap, like the network round trip it stands in for: it guarantees React
-      // flushes the selection commit while the search dialog is still open, which is the ordering
-      // the thread search-jump regression below depends on.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      return {
+  const client = createAppClient({
+    session,
+    bootstrap: () => currentBootstrap(),
+    overrides: {
+      signOut: async () => ({ status: "signed-out" }) as const,
+      getWorkspaceBootstrap: async () => currentBootstrap(),
+      listWorkspaceMembers: async () => ({ members: [] }),
+      getConversationMessages: async () => ({
         attachments: [],
         reactions: [],
         snapshotPosition: snapshotCursor,
-        root: threadRoot,
-        replies: [threadReply],
+        messages: [],
+        threadSummaries: [],
+        threadsSupported: true,
         nextCursor: null,
-      };
+      }),
+      getMessageById: async (messageId: string) => {
+        const message = notificationTargets.find((candidate) => candidate.id === messageId);
+        if (message === undefined) throw new Error(`Unknown message ${messageId}`);
+        return { message, attachments: [] };
+      },
+      getMessageThread: async () => {
+        // A real macrotask gap, like the network round trip it stands in for: it guarantees React
+        // flushes the selection commit while the search dialog is still open, which is the ordering
+        // the thread search-jump regression below depends on.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return {
+          attachments: [],
+          reactions: [],
+          snapshotPosition: snapshotCursor,
+          root: threadRoot,
+          replies: [threadReply],
+          nextCursor: null,
+        };
+      },
+      listConversationFiles: async () => ({
+        snapshotPosition: snapshotCursor,
+        files: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
+        attachmentUploadRequests.push({ conversationId, maxFiles });
+        return attachmentUploadResult;
+      },
+      sendConversationMessage: async (operation: SendMessageOperation) => {
+        sentMessages.push(operation);
+        return { status: "retryable", reason: "network", retryAfterMs: 86_400_000 } as const;
+      },
+      openConversationFile: async () => ({ opened: true }),
+      searchMessages: async () => ({
+        results: [{ message: launchMessage }, { message: threadReply }],
+        nextCursor: null,
+      }),
+      listConversationTasks: async () => ({
+        snapshotPosition: snapshotCursor,
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      listMyTasks: async () => ({
+        snapshotPosition: snapshotCursor,
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
+        realtimeStarts += 1;
+        realtimeScope = Object.freeze({
+          userId: session.userId,
+          workspaceId: session.workspaceId,
+          epoch: realtimeStarts,
+        });
+        return realtimeScope;
+      },
+      activateWorkspaceRealtime: async () => undefined,
+      stopWorkspaceRealtime: async () => {
+        realtimeScope = null;
+      },
+      onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => {
+        workspaceEventListeners.add(listener);
+        return () => workspaceEventListeners.delete(listener);
+      },
+      getNotificationContext: async (): Promise<NotificationContext> => activeContext,
+      reportNotificationActivity: async () => undefined,
+      drainNotificationActions: async (ready) => ({ ...ready, actions: [] }),
+      acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
+        acknowledgedNotificationActions.push(acknowledgement.action);
+      },
+      onNotificationAction: (listener: (action: NotificationAction) => void) => {
+        actionListeners.add(listener);
+        return () => actionListeners.delete(listener);
+      },
     },
-    listMessageReactions: async () => ({ reactions: [] }),
-    listConversationFiles: async () => ({
-      snapshotPosition: snapshotCursor,
-      files: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    listMessageAttachments: async () => ({ attachments: [] }),
-    chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
-      attachmentUploadRequests.push({ conversationId, maxFiles });
-      return attachmentUploadResult;
-    },
-    sendConversationMessage: async (operation: SendMessageOperation) => {
-      sentMessages.push(operation);
-      return { status: "retryable", reason: "network", retryAfterMs: 86_400_000 } as const;
-    },
-    openConversationFile: async () => ({ opened: true }),
-    searchMessages: async () => ({
-      results: [{ message: launchMessage }, { message: threadReply }],
-      nextCursor: null,
-    }),
-    listConversationTasks: async () => ({
-      snapshotPosition: snapshotCursor,
-      tasks: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    listMyTasks: async () => ({
-      snapshotPosition: snapshotCursor,
-      tasks: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    advanceReadCursor: async () => undefined,
-    syncWorkspace: async (after: string) =>
-      ({
-        status: "accepted",
-        response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },
-      }) as const,
-    startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
-      realtimeStarts += 1;
-      realtimeScope = Object.freeze({
-        userId: session.userId,
-        workspaceId: session.workspaceId,
-        epoch: realtimeStarts,
-      });
-      return realtimeScope;
-    },
-    activateWorkspaceRealtime: async () => undefined,
-    stopWorkspaceRealtime: async () => {
-      realtimeScope = null;
-    },
-    acknowledgeWorkspaceEvent: async () => undefined,
-    getRealtimeState: async () => "offline",
-    onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: (listener: (frame: ScopedProductRealtimeEvent) => void) => {
-      workspaceEventListeners.add(listener);
-      return () => workspaceEventListeners.delete(listener);
-    },
-    getNotificationContext: async (): Promise<NotificationContext> => activeContext,
-    reportNotificationActivity: async () => undefined,
-    drainNotificationActions: async (ready: unknown) => ({
-      ...(ready as Record<string, unknown>),
-      actions: [],
-    }),
-    acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
-      acknowledgedNotificationActions.push(acknowledgement.action);
-    },
-    onNotificationAction: (listener: (action: NotificationAction) => void) => {
-      actionListeners.add(listener);
-      return () => actionListeners.delete(listener);
-    },
-    getNotificationState: async () => notificationState,
-    setNotificationPreference: async () => notificationState,
-    refreshNotificationCapability: async () => notificationState,
-    onNotificationStateChanged: () => () => undefined,
-    getAiChannelState: async () => aiChannelState,
-    startAiChannel: async () => aiChannelState,
-    chooseAiChannelWorkspace: async () => aiChannelState,
-    newAiChannelSession: async () => aiChannelState,
-    sendAiChannelPrompt: async () => aiChannelState,
-    cancelAiChannelPrompt: async () => aiChannelState,
-    respondAiChannelPermission: async () => aiChannelState,
-    onAiChannelStateChanged: () => () => undefined,
-  };
+  });
 
   return {
-    client: client as unknown as DesktopApi,
+    client,
     acknowledgedNotificationActions,
     sentMessages,
     attachmentUploadRequests,
@@ -421,45 +357,13 @@ function createHarness(): Harness {
   };
 }
 
-function createTheme(): ThemeRuntime {
-  const state: ThemeState = {
-    preference: "system",
-    resolvedThemeId: "dark",
-    resolvedColorScheme: "dark",
-  };
-  return {
-    state,
-    subscribe: () => () => undefined,
-    setPreference: async () => state,
-  } as unknown as ThemeRuntime;
-}
-
-function createCompactMode(): CompactModeRuntime {
-  return {
-    enabled: false,
-    subscribe: () => () => undefined,
-    toggle: async () => false,
-  } as unknown as CompactModeRuntime;
-}
-
-function createSidebarPosition(): SidebarPositionRuntime {
-  return {
-    position: "left",
-    subscribe: () => () => undefined,
-    setPosition: () => undefined,
-  } as unknown as SidebarPositionRuntime;
-}
-
 async function renderWorkspace(): Promise<Harness> {
   const harness = createHarness();
   render(
     createElement(App, {
       client: harness.client,
-      theme: createTheme(),
-      compactMode: createCompactMode(),
+      ...createAppRuntimes(harness.client),
       devicePreferences: createTestDevicePreferencesRuntime(),
-      fencedBlockquotes: new FencedBlockquoteRuntime(null),
-      sidebarPosition: createSidebarPosition(),
     }),
   );
   await screen.findByTestId("workspace-ready");
@@ -574,6 +478,88 @@ describe("composer attachment uploads", () => {
 });
 
 describe("main composer focus on conversation changes", () => {
+  it("marks a late thread root and its already-known reply read after their rows become visible", async () => {
+    const harness = createHarness();
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const advance = vi.fn<DesktopApi["advanceReadCursor"]>(async (conversationId, messageId) => ({
+      readCursor: {
+        conversationId,
+        userId: USER_ID,
+        lastReadMessageId: messageId,
+        lastReadConversationSequence: "2",
+        lastReadAt: NOW,
+        updatedAt: NOW,
+      },
+      syncCursor: testPosition("10"),
+    }));
+    const client: DesktopApi = {
+      ...harness.client,
+      isHeadless: false,
+      advanceReadCursor: advance,
+      getMessageThread: async () => {
+        await gate;
+        return {
+          root: threadRoot,
+          replies: [threadReply],
+          attachments: [],
+          reactions: [],
+          snapshotPosition: testPosition("10"),
+          nextCursor: null,
+        };
+      },
+    };
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.set(++frameId, callback);
+      return frameId;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+      frames.delete(id);
+    });
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.matches(".thread-message-list, .thread-message-list [data-message-id]")
+        ? new DOMRect(0, 10, 200, this.classList.contains("thread-message-list") ? 400 : 100)
+        : new DOMRect(0, 0, 0, 0);
+    });
+    const flush = async () => {
+      await act(async () => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        for (const callback of callbacks) callback(0);
+      });
+    };
+    try {
+      render(
+        createElement(App, {
+          client,
+          ...createAppRuntimes(client),
+          devicePreferences: createTestDevicePreferencesRuntime(),
+        }),
+      );
+      await screen.findByTestId("workspace-ready");
+      act(() => harness.pushNotificationAction(openMessageAction(threadReply)));
+      await screen.findByText("Loading thread…");
+      await flush();
+      expect(advance).not.toHaveBeenCalled();
+      release();
+      await screen.findByText(threadReply.body);
+      await flush();
+      expect(advance).toHaveBeenCalledExactlyOnceWith(LAUNCH_ID, REPLY_MESSAGE_ID);
+    } finally {
+      release();
+      cleanup();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("focuses the composer when the user switches conversations", async () => {
     await renderWorkspace();
     const { dispose } = parkFocus();
