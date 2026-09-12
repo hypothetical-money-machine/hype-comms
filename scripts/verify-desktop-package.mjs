@@ -25,7 +25,6 @@ const requiredAsarEntries = [
   "/dist/main/build-metadata.json",
   "/dist/main/index.js",
   "/dist/main/claude-acp-worker.js",
-  "/dist/main/codex-app-server-worker.js",
   "/dist/preload/index.js",
   "/dist/renderer/index.html",
   "/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
