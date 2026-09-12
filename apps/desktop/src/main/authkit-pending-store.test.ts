@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { StoredAuthKitPendingAuthorization } from "./authkit-flow";
 import {
@@ -12,9 +11,9 @@ import {
   SafeStorageAuthKitPendingStore,
   type AuthKitSafeStorageAdapter,
 } from "./authkit-pending-store";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 const API_ORIGIN = "https://chat-api.example.invalid";
-const temporaryDirectories: string[] = [];
 
 class FakeSafeStorage implements AuthKitSafeStorageAdapter {
   backendCalls = 0;
@@ -57,9 +56,7 @@ class FakeSafeStorage implements AuthKitSafeStorageAdapter {
 }
 
 async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-authkit-store-"));
-  temporaryDirectories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hmm-authkit-store-");
 }
 
 function pending(apiOrigin = API_ORIGIN): StoredAuthKitPendingAuthorization {
@@ -95,12 +92,6 @@ function store(
     userDataPath,
   });
 }
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
-  );
-});
 
 describe("SafeStorageAuthKitPendingStore", () => {
   it("round-trips protected pending material and one stable installation id", async () => {

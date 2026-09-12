@@ -1,9 +1,8 @@
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { CacheEncryptBatchRequest, CacheScope } from "@hype-comms/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   CacheCiphertextCorruptError,
@@ -12,10 +11,10 @@ import {
   cacheScopeForSession,
   type SafeStorageAdapter,
 } from "./cache-crypto";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 const API_ORIGIN = "https://chat.example";
 const LEGACY_KEY_FILE_NAME = "data-key.bin";
-const directories: string[] = [];
 const scope = {
   userId: "10000000-0000-4000-8000-000000000001",
   workspaceId: "10000000-0000-4000-8000-000000000002",
@@ -68,9 +67,7 @@ class UnwrapFailingSafeStorage implements SafeStorageAdapter {
 }
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-cache-crypto-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hmm-cache-crypto-");
 }
 
 function cryptoIn(
@@ -118,10 +115,6 @@ function storedKeyBytes(keyScope: CacheScope, fill: number): Buffer {
     "utf8",
   );
 }
-
-afterEach(async () => {
-  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
-});
 
 describe("CacheCrypto", () => {
   it("derives an offline scope only from main's credential-bound session context", () => {

@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import type { Pool } from "pg";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import {
   AuthKitAdmissionDeniedError,
   AuthKitCredentialRejectedError,
@@ -17,51 +15,35 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import type { AuthenticatedHumanIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const encryptionKey = Buffer.alloc(32, 19);
 const ownerId = "10000000-0000-4000-8000-000000000101";
 const workspaceId = "10000000-0000-4000-8000-000000000102";
 const desktopVerifier = "desktop-verifier-value-that-is-long-enough-1234";
 const desktopChallenge = deriveAuthKitPkceCodeChallenge(desktopVerifier);
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
 describeWithPostgres("AuthKitRepository", () => {
-  const schemaName = `authkit_repository_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let database: TestDatabase;
   let pool: Pool;
   let repository: AuthKitRepository;
   let identityRepository: IdentityRepository;
   let now: Date;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     repository = new AuthKitRepository(pool, encryptionKey);
     identityRepository = new IdentityRepository(pool);
   });
 
   beforeEach(async () => {
     now = new Date();
-    await pool.query("TRUNCATE authkit_transactions, workos_events, users CASCADE");
+    await database.reset();
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
   });
 
   async function seedOwner(email = "owner@example.com", username = "owner"): Promise<void> {
@@ -576,7 +558,7 @@ describeWithPostgres("AuthKitRepository", () => {
                      AND namespace.nspname = $1
                 )
            ) AS waiting`,
-          [schemaName],
+          ["public"],
         );
         if (activity.rows[0]?.waiting === true) {
           waitingOnConversation = true;
