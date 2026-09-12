@@ -1,40 +1,17 @@
-import { encodeSyncPosition, type SyncPosition } from "@hype-comms/contracts";
 import {
-  addReactionResponseSchema,
-  advanceReadCursorResponseSchema,
-  agentEnrollmentResponseSchema,
+  ApiClientError,
+  AttachmentClient,
+  HttpClient,
+  retryAfterMs,
+  sha256,
+  WorkspaceProtocolError,
+  workspaceEndpoints as endpoints,
+  type ApiRequestOptions,
+} from "@hype-comms/api-client";
+import {
+  ATTACHMENT_MAX_BYTES,
   apiErrorEnvelopeSchema,
-  attachmentSchema,
-  channelMembershipMutationResponseSchema,
-  channelMembersResponseSchema,
-  communicationPathsResponseSchema,
-  completeFileUploadResponseSchema,
-  CONVERSATION_PAGE_DEFAULT_LIMIT,
-  conversationFilesQuerySchema,
-  conversationFilesResponseSchema,
-  conversationMutationResponseSchema,
-  createFileUploadResponseSchema,
-  humanWorkspaceBootstrapResponseSchema,
-  listAgentEnrollmentsResponseSchema,
-  listConversationsResponseSchema,
-  listMembersResponseSchema,
-  listMessageAttachmentsResponseSchema,
-  listMessageReactionsResponseSchema,
-  messageByIdResponseSchema,
-  messageHistoryResponseSchema,
-  messageSearchResponseSchema,
-  messageThreadRequestSchema,
-  messageThreadResponseSchema,
-  realtimeTicketResponseSchema,
-  removeReactionResponseSchema,
-  retractMessageResponseSchema,
-  sendAttemptResultSchema,
-  sendMessageResponseSchema,
-  syncAttemptResultSchema,
-  taskListQuerySchema,
-  taskListResponseSchema,
-  taskMutationResponseSchema,
-  updateProfileResponseSchema,
+  type SyncPosition,
   type AddReactionResponse,
   type AdvanceReadCursorResponse,
   type AgentEnrollmentResponse,
@@ -78,685 +55,347 @@ import {
   type UpsertChannelMemberRequest,
   type User,
 } from "@hype-comms/contracts";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import type { ChatSession } from "./chat-session";
-import { requireWorkspaceProtocol, WorkspaceProtocolError } from "./workspace-protocol";
-function retryAfter(response: Response): number | null {
-  const value = response.headers.get("retry-after");
-  if (value === null) return null;
-  const seconds = Number(value);
-  return Number.isFinite(seconds) && seconds >= 0
-    ? Math.min(Math.round(seconds * 1000), 86400000)
-    : null;
-}
-
-function appendTaskListQuery(url: URL, input: Partial<TaskListQuery>): void {
-  const query = taskListQuerySchema.parse(input);
-  if (query.after !== undefined) url.searchParams.set("after", query.after);
-  url.searchParams.set("limit", String(query.limit));
-  if (query.status !== undefined) url.searchParams.set("status", query.status);
-  if (query.priority !== undefined) url.searchParams.set("priority", query.priority);
-  if (query.assignee !== undefined) url.searchParams.set("assignee", query.assignee);
-  if (query.dueAfter !== undefined) url.searchParams.set("dueAfter", query.dueAfter);
-  if (query.dueBefore !== undefined) url.searchParams.set("dueBefore", query.dueBefore);
-  if (query.updatedAfter !== undefined) url.searchParams.set("updatedAfter", query.updatedAfter);
-  if (query.updatedBy !== undefined) url.searchParams.set("updatedBy", query.updatedBy);
-}
-
-/**
- * A transport-level failure worth retrying. `fetch` reports connection problems as `TypeError`,
- * while `AbortSignal.timeout` rejects with a `DOMException` named `TimeoutError`, so a plain
- * request timeout must not be mistaken for a malformed response.
- */
-function isNetworkFailure(error: unknown): boolean {
-  if (error instanceof TypeError) return true;
-  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-}
-type SendPermanentReason = Extract<
-  SendAttemptResult,
-  {
-    status: "permanent";
-  }
->["reason"];
-type SyncPermanentReason = Extract<
-  SyncAttemptResult,
-  {
-    status: "permanent";
-  }
->["reason"];
-/** Statuses whose meaning is fixed: retrying the identical request cannot change the outcome. */
-const SEND_PERMANENT_REASONS = new Map<number, SendPermanentReason>([
-  [400, "validation"],
-  [403, "forbidden"],
-  [404, "not_found"],
-  [409, "conflict"],
-]);
-
-const SYNC_PERMANENT_REASONS = new Map<number, SyncPermanentReason>([
-  [400, "validation"],
-  [403, "forbidden"],
-  [404, "not_found"],
-]);
-
-/** 4xx statuses that describe a transient condition rather than a rejected request. */
-const RETRYABLE_CLIENT_STATUSES = new Set([408, 425]);
-
 type RequestScopeGuard = () => void;
-
 const alwaysCurrentRequestScope: RequestScopeGuard = () => undefined;
 
+/** Desktop owns session invalidation, filesystem access, and UI result mapping. */
 export class WorkspaceTransport {
+  readonly #origin: string;
+  readonly #http: HttpClient;
+  readonly #attachments: AttachmentClient;
   constructor(
-    private readonly apiOrigin: string,
+    apiOrigin: string,
     private readonly session: Pick<ChatSession, "fetch" | "markSignedOut">,
-  ) {}
-  async #fetch(url: string, init: RequestInit): Promise<Response> {
-    return requireWorkspaceProtocol(await this.session.fetch(url, init));
-  }
-  async #payload(response: Response): Promise<unknown> {
-    if (response.ok) return response.json();
-    if (response.status === 401) await this.session.markSignedOut();
-    let message = `Workspace request failed (${response.status})`;
-    try {
-      const parsed = apiErrorEnvelopeSchema.safeParse(await response.json());
-      if (parsed.success) message = parsed.data.error.message;
-    } catch {
-      // Keep the status-derived message.
-    }
-    throw new WorkspaceRequestError(message, response.status, retryAfter(response));
-  }
-
-  #url(pathname: string): URL {
-    return new URL(pathname, this.apiOrigin);
-  }
-
-  /** Fetch, abandoning the request if the calling scope is replaced on either side of the await. */
-  async #fetchInScope(
-    url: string,
-    init: RequestInit,
-    assertCurrentScope: RequestScopeGuard,
-  ): Promise<Response> {
-    assertCurrentScope();
-    const response = await this.#fetch(url, init);
-    try {
-      assertCurrentScope();
-    } catch (error) {
-      await response.body?.cancel().catch(() => undefined);
-      throw error;
-    }
-    return response;
-  }
-
-  async #fetchIdempotentMutation(
-    url: string,
-    init: RequestInit,
-    assertCurrentScope: RequestScopeGuard = alwaysCurrentRequestScope,
-  ): Promise<Response> {
-    let response: Response;
-    try {
-      response = await this.#fetchInScope(url, init, assertCurrentScope);
-    } catch (error) {
-      if (!isNetworkFailure(error)) throw error;
-      return this.#fetchInScope(url, init, assertCurrentScope);
-    }
-    if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
-      return this.#fetchInScope(url, init, assertCurrentScope);
-    }
-    return response;
-  }
-
-  async bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
-    const response = await this.#fetch(this.#url("/v2/bootstrap").href, {
-      method: "GET",
-    });
-    return humanWorkspaceBootstrapResponseSchema.parse(await this.#payload(response));
-  }
-
-  async members(): Promise<ListMembersResponse> {
-    const response = await this.#fetch(this.#url("/v2/members").href, {
-      method: "GET",
-    });
-    return listMembersResponseSchema.parse(await this.#payload(response));
-  }
-
-  async updateProfile(title: string | null): Promise<User> {
-    const response = await this.#fetch(this.#url("/v2/profile").href, {
-      method: "PATCH",
-      headers: {
-        "content-type": "application/json",
+  ) {
+    this.#origin = apiOrigin;
+    this.#http = new HttpClient({
+      origin: apiOrigin,
+      fetch: async (url, init) => {
+        const response = await session.fetch(url.href, init);
+        if (response.status === 401) await session.markSignedOut();
+        return response;
       },
-      body: JSON.stringify({ title }),
+      timeoutMs: 10_000,
     });
-    return updateProfileResponseSchema.parse(await this.#payload(response)).user;
+    this.#attachments = new AttachmentClient(this.#http);
   }
-
-  async communicationPaths(): Promise<CommunicationPathsResponse> {
-    const response = await this.#fetch(this.#url("/v2/admin/communication-paths").href, {
-      method: "GET",
+  async #request<B = never, R = unknown>(request: ApiRequestOptions<B, R>): Promise<R> {
+    try {
+      return await this.#http.request(request);
+    } catch (error) {
+      return this.#fail(error);
+    }
+  }
+  async #fail(error: unknown): Promise<never> {
+    if (error instanceof ApiClientError && error.kind === "http" && error.response !== undefined) {
+      const envelope = apiErrorEnvelopeSchema.safeParse(error.body);
+      throw new WorkspaceRequestError(
+        envelope.success
+          ? envelope.data.error.message
+          : `Workspace request failed (${error.response.status})`,
+        error.response.status,
+        retryAfterMs(error.response),
+      );
+    }
+    throw error;
+  }
+  #mutation<B, R>(request: ApiRequestOptions<B, R>, idempotencyKey: string): Promise<R> {
+    return this.#request({
+      ...request,
+      headers: { ...request.headers, "idempotency-key": idempotencyKey },
+      retry: "idempotent_once",
     });
-    return communicationPathsResponseSchema.parse(await this.#payload(response));
   }
-
-  async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
-    const response = await this.#fetch(this.#url("/v2/agent-enrollments").href, {
-      method: "GET",
-    });
-    return listAgentEnrollmentsResponseSchema.parse(await this.#payload(response));
+  bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
+    return this.#request(endpoints.humanBootstrap());
   }
-
-  async reviewAgentEnrollment(
+  members(): Promise<ListMembersResponse> {
+    return this.#request(endpoints.members());
+  }
+  async updateProfile(title: string | null): Promise<User> {
+    return (await this.#request(endpoints.updateProfile({ title }))).user;
+  }
+  communicationPaths(): Promise<CommunicationPathsResponse> {
+    return this.#request(endpoints.communicationPaths());
+  }
+  listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
+    return this.#request(endpoints.agentEnrollments());
+  }
+  reviewAgentEnrollment(
     enrollmentId: string,
     decision: ReviewAgentEnrollmentRequest["decision"],
   ): Promise<AgentEnrollmentResponse> {
-    const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v2/agent-enrollments/${encodeURIComponent(enrollmentId)}/review`).href,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "idempotency-key": crypto.randomUUID(),
-        },
-        body: JSON.stringify({ decision }),
-      },
+    return this.#mutation(
+      endpoints.reviewAgentEnrollment(enrollmentId, { decision }),
+      crypto.randomUUID(),
     );
-    return agentEnrollmentResponseSchema.parse(await this.#payload(response));
   }
-
-  async cancelAgentEnrollment(enrollmentId: string): Promise<AgentEnrollmentResponse> {
-    const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v2/agent-enrollments/${encodeURIComponent(enrollmentId)}/cancel`).href,
-      {
-        method: "POST",
-        headers: { "idempotency-key": crypto.randomUUID() },
-      },
-    );
-    return agentEnrollmentResponseSchema.parse(await this.#payload(response));
+  cancelAgentEnrollment(enrollmentId: string): Promise<AgentEnrollmentResponse> {
+    return this.#mutation(endpoints.cancelAgentEnrollment(enrollmentId), crypto.randomUUID());
   }
-
-  async conversations(
-    input: Partial<ListConversationsQuery> = {},
-  ): Promise<ListConversationsResponse> {
-    const url = this.#url("/v2/conversations");
-    if (input.after !== undefined) url.searchParams.set("after", input.after);
-    url.searchParams.set("limit", String(input.limit ?? CONVERSATION_PAGE_DEFAULT_LIMIT));
-    const response = await this.#fetch(url.href, {
-      method: "GET",
-    });
-    return listConversationsResponseSchema.parse(await this.#payload(response));
+  conversations(input: Partial<ListConversationsQuery> = {}): Promise<ListConversationsResponse> {
+    return this.#request(endpoints.conversations(input));
   }
-
-  async createChannel(input: CreateChannelOperation): Promise<ConversationMutationResponse> {
+  createChannel(input: CreateChannelOperation): Promise<ConversationMutationResponse> {
     const { idempotencyKey, ...request } = input;
-    const { channelMode, ...legacyRequest } = request;
-    const body = channelMode === "announcement" ? request : legacyRequest;
-    const response = await this.#fetchIdempotentMutation(this.#url("/v2/channels").href, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "idempotency-key": idempotencyKey,
-      },
-      body: JSON.stringify(body),
-    });
-    return conversationMutationResponseSchema.parse(await this.#payload(response));
+    return this.#mutation(endpoints.createChannel(request), idempotencyKey);
   }
-
-  async archiveChannel(
+  archiveChannel(
     conversationId: string,
     input: ArchiveChannelRequest,
   ): Promise<ConversationMutationResponse> {
-    const response = await this.#fetch(
-      this.#url(`/v2/channels/${encodeURIComponent(conversationId)}`).href,
-      {
-        method: "PATCH",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(input),
-      },
-    );
-    return conversationMutationResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.archiveChannel(conversationId, input));
   }
-
-  async channelMembers(conversationId: string): Promise<ChannelMembersResponse> {
-    const response = await this.#fetch(
-      this.#url(`/v2/channels/${encodeURIComponent(conversationId)}/members`).href,
-      {
-        method: "GET",
-      },
-    );
-    return channelMembersResponseSchema.parse(await this.#payload(response));
+  channelMembers(conversationId: string): Promise<ChannelMembersResponse> {
+    return this.#request(endpoints.channelMembers(conversationId));
   }
-
-  async upsertChannelMember(
+  upsertChannelMember(
     conversationId: string,
     userId: string,
     input: UpsertChannelMemberRequest,
   ): Promise<ChannelMembershipMutationResponse> {
-    const response = await this.#fetch(
-      this.#url(
-        `/v2/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
-      ).href,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
-      },
-    );
-    return channelMembershipMutationResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.upsertChannelMember(conversationId, userId, input));
   }
-
-  async removeChannelMember(
+  removeChannelMember(
     conversationId: string,
     userId: string,
   ): Promise<ChannelMembershipMutationResponse> {
-    const response = await this.#fetch(
-      this.#url(
-        `/v2/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
-      ).href,
-      { method: "DELETE" },
-    );
-    return channelMembershipMutationResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.removeChannelMember(conversationId, userId));
   }
-
-  async createDirectConversation(
+  createDirectConversation(
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse> {
-    const response = await this.#fetch(this.#url("/v2/direct-conversations").href, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(input),
-    });
-    return conversationMutationResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.directConversation(input));
   }
-
-  async history(input: {
+  history(input: {
     readonly conversationId: string;
     readonly before?: string;
     readonly limit?: number;
   }): Promise<MessageHistoryResponse> {
-    const url = this.#url(`/v2/conversations/${encodeURIComponent(input.conversationId)}/messages`);
-    if (input.before !== undefined) url.searchParams.set("before", input.before);
-    url.searchParams.set("limit", String(input.limit ?? 50));
-    const response = await this.#fetch(url.href, {
-      method: "GET",
-    });
-    return messageHistoryResponseSchema.parse(await this.#payload(response));
+    const { conversationId, ...query } = input;
+    return this.#request(endpoints.history(conversationId, query));
   }
-
-  async thread(input: MessageThreadRequest): Promise<MessageThreadResponse> {
-    const request = messageThreadRequestSchema.parse(input);
-    const url = this.#url(`/v2/messages/${encodeURIComponent(request.messageId)}/thread`);
-    if (request.before !== undefined) url.searchParams.set("before", request.before);
-    url.searchParams.set("limit", String(request.limit));
-    const response = await this.#fetch(url.href, { method: "GET" });
-    return messageThreadResponseSchema.parse(await this.#payload(response));
+  thread(input: MessageThreadRequest): Promise<MessageThreadResponse> {
+    const { messageId, ...query } = input;
+    return this.#request(endpoints.thread(messageId, query));
   }
-
-  async messageById(messageId: string): Promise<MessageByIdResponse> {
-    const response = await this.#fetch(
-      this.#url(`/v2/messages/${encodeURIComponent(messageId)}`).href,
-      { method: "GET" },
-    );
-    return messageByIdResponseSchema.parse(await this.#payload(response));
+  messageById(messageId: string): Promise<MessageByIdResponse> {
+    return this.#request(endpoints.message(messageId));
   }
-
-  async retractMessage(messageId: string): Promise<RetractMessageResponse> {
-    const response = await this.#fetch(
-      this.#url(`/v2/messages/${encodeURIComponent(messageId)}`).href,
-      { method: "DELETE" },
-    );
-    return retractMessageResponseSchema.parse(await this.#payload(response));
+  retractMessage(messageId: string): Promise<RetractMessageResponse> {
+    return this.#request(endpoints.retractMessage(messageId));
   }
-
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
-    const response = await this.#fetch(this.#url("/v2/reactions/query").href, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageIds }),
-    });
-    const parsed = listMessageReactionsResponseSchema.parse(await this.#payload(response));
+    const parsed = await this.#request(endpoints.reactions({ messageIds: [...messageIds] }));
     const requested = new Set(messageIds);
-    if (parsed.reactions.some((reaction) => !requested.has(reaction.messageId))) {
-      throw new Error("Reaction response included an unrequested message");
-    }
+    if (parsed.reactions.some((reaction) => !requested.has(reaction.messageId)))
+      throw new ApiClientError("contract", "Reaction response included an unrequested message");
     return parsed;
   }
-
-  async addReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
-    const response = await this.#fetch(
-      this.#url(
-        `/v2/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
-      ).href,
-      { method: "PUT" },
-    );
-    return addReactionResponseSchema.parse(await this.#payload(response));
+  addReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
+    return this.#request(endpoints.addReaction(messageId, emoji));
   }
-
-  async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<RemoveReactionResponse> {
-    const response = await this.#fetch(
-      this.#url(
-        `/v2/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
-      ).href,
-      { method: "DELETE" },
-    );
-    return removeReactionResponseSchema.parse(await this.#payload(response));
+  removeReaction(messageId: string, emoji: ReactionEmoji): Promise<RemoveReactionResponse> {
+    return this.#request(endpoints.removeReaction(messageId, emoji));
   }
-
-  async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
-    const url = this.#url("/v2/search");
-    url.searchParams.set("query", input.query);
-    if (input.after !== undefined) url.searchParams.set("after", input.after);
-    url.searchParams.set("limit", String(input.limit));
-    const response = await this.#fetch(url.href, { method: "GET" });
-    return messageSearchResponseSchema.parse(await this.#payload(response));
+  searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
+    return this.#request(endpoints.search(input));
   }
-
-  async tasks(
-    conversationId: string,
-    input: Partial<TaskListQuery> = {},
-  ): Promise<TaskListResponse> {
-    const url = this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/tasks`);
-    appendTaskListQuery(url, input);
-    const response = await this.#fetch(url.href, { method: "GET" });
-    return taskListResponseSchema.parse(await this.#payload(response));
+  tasks(conversationId: string, input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
+    return this.#request(endpoints.tasks(conversationId, input));
   }
-
-  async myTasks(input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
-    const url = this.#url("/v2/tasks/mine");
-    appendTaskListQuery(url, input);
-    const response = await this.#fetch(url.href, { method: "GET" });
-    return taskListResponseSchema.parse(await this.#payload(response));
+  myTasks(input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
+    return this.#request(endpoints.myTasks(input));
   }
-
-  async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
+  createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
     const { conversationId, idempotencyKey, ...request } = input;
-    const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/tasks`).href,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-        body: JSON.stringify(request),
-      },
-    );
-    return taskMutationResponseSchema.parse(await this.#payload(response));
+    return this.#mutation(endpoints.createTask(conversationId, request), idempotencyKey);
   }
-
-  async updateTask(input: UpdateTaskOperation): Promise<TaskMutationResponse> {
+  updateTask(input: UpdateTaskOperation): Promise<TaskMutationResponse> {
     const { taskId, idempotencyKey, ...request } = input;
-    const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v2/tasks/${encodeURIComponent(taskId)}`).href,
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-        body: JSON.stringify(request),
-      },
-    );
-    return taskMutationResponseSchema.parse(await this.#payload(response));
+    return this.#mutation(endpoints.updateTask(taskId, request), idempotencyKey);
   }
-
-  async moveTask(input: MoveTaskOperation): Promise<TaskMutationResponse> {
+  moveTask(input: MoveTaskOperation): Promise<TaskMutationResponse> {
     const { taskId, idempotencyKey, ...request } = input;
-    const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v2/tasks/${encodeURIComponent(taskId)}/move`).href,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-        body: JSON.stringify(request),
-      },
-    );
-    return taskMutationResponseSchema.parse(await this.#payload(response));
+    return this.#mutation(endpoints.moveTask(taskId, request), idempotencyKey);
   }
-
   async send(input: SendMessageOperation): Promise<SendAttemptResult> {
     try {
-      const response = await this.#fetch(
-        this.#url(`/v2/conversations/${encodeURIComponent(input.conversationId)}/messages`).href,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": input.idempotencyKey,
-          },
-          body: JSON.stringify(input.message),
-        },
-      );
-      if (response.ok) {
-        return sendAttemptResultSchema.parse({
-          status: "accepted",
-          response: sendMessageResponseSchema.parse(await response.json()),
-        });
-      }
-      if (response.status === 401) {
-        await this.session.markSignedOut();
-        return { status: "authentication_required" };
-      }
-      if (response.status === 429) {
+      const response = await this.#http.request({
+        ...endpoints.sendMessage(input.conversationId, input.message),
+        headers: { "idempotency-key": input.idempotencyKey },
+      });
+      return { status: "accepted", response };
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
+      if (!(error instanceof ApiClientError)) throw error;
+      const response = error.response;
+      if (response?.status === 401) return { status: "authentication_required" };
+      if (error.kind === "network")
+        return { status: "retryable", reason: "network", retryAfterMs: null };
+      if (error.kind !== "http" || response === undefined)
+        return { status: "retryable", reason: "invalid_response", retryAfterMs: null };
+      if (response.status === 429)
         return {
           status: "retryable",
           reason: "rate_limited",
-          retryAfterMs: retryAfter(response),
+          retryAfterMs: retryAfterMs(response),
         };
-      }
-      if (response.status >= 500 || RETRYABLE_CLIENT_STATUSES.has(response.status)) {
-        return { status: "retryable", reason: "server", retryAfterMs: retryAfter(response) };
-      }
+      if (response.status >= 500 || [408, 425].includes(response.status))
+        return { status: "retryable", reason: "server", retryAfterMs: retryAfterMs(response) };
       return {
         status: "permanent",
-        reason: SEND_PERMANENT_REASONS.get(response.status) ?? "validation",
+        reason:
+          response.status === 403
+            ? "forbidden"
+            : response.status === 404
+              ? "not_found"
+              : response.status === 409
+                ? "conflict"
+                : "validation",
       };
-    } catch (error) {
-      if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
-      if (isNetworkFailure(error)) {
-        return { status: "retryable", reason: "network", retryAfterMs: null };
-      }
-      return { status: "retryable", reason: "invalid_response", retryAfterMs: null };
     }
   }
-
-  async advanceRead(
+  advanceRead(
     conversationId: string,
     lastReadMessageId: string,
   ): Promise<AdvanceReadCursorResponse> {
-    const response = await this.#fetch(
-      this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/read-cursor`).href,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ lastReadMessageId }),
-      },
-    );
-    return advanceReadCursorResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.advanceRead(conversationId, { lastReadMessageId }));
   }
-
   async sync(after: SyncPosition, limit = 100): Promise<SyncAttemptResult> {
-    const url = this.#url("/v2/sync");
-    url.searchParams.set("after", encodeSyncPosition(after));
-    url.searchParams.set("limit", String(limit));
-
-    let response: Response;
     try {
-      response = await this.#fetch(url.href, {
-        method: "GET",
-      });
+      return {
+        status: "accepted",
+        response: await this.#http.request(endpoints.sync(after, limit)),
+      };
     } catch (error) {
       if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
-      // Only a transport failure is worth retrying; anything else would retry forever.
-      return isNetworkFailure(error)
-        ? { status: "retryable", reason: "network", retryAfterMs: null }
-        : { status: "permanent", reason: "invalid_response" };
-    }
-
-    if (response.ok) {
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
+      if (!(error instanceof ApiClientError)) throw error;
+      const response = error.response;
+      if (response?.status === 401) return { status: "authentication_required" };
+      if (error.kind === "network")
+        return { status: "retryable", reason: "network", retryAfterMs: null };
+      if (error.kind !== "http" || response === undefined)
         return { status: "permanent", reason: "invalid_response" };
+      if (response.status === 410) {
+        const envelope = apiErrorEnvelopeSchema.safeParse(error.body);
+        const mismatch =
+          envelope.success &&
+          envelope.data.error.details?.some(
+            (detail) => detail.field === "after.epoch" && detail.issue === "epoch_mismatch",
+          );
+        return { status: "reset_required", reason: mismatch ? "epoch_mismatch" : "cursor_expired" };
       }
-      // A response the client cannot parse never becomes retryable: the renderer must surface it.
-      const accepted = syncAttemptResultSchema.safeParse({ status: "accepted", response: body });
-      if (!accepted.success) return { status: "permanent", reason: "invalid_response" };
-      return accepted.data;
-    }
-    if (response.status === 401) {
-      await this.session.markSignedOut();
-      return { status: "authentication_required" };
-    }
-    if (response.status === 410) {
-      const envelope = apiErrorEnvelopeSchema.safeParse(await response.json().catch(() => null));
-      const epochMismatch =
-        envelope.success &&
-        envelope.data.error.details?.some(
-          (detail) => detail.field === "after.epoch" && detail.issue === "epoch_mismatch",
-        );
+      if (response.status === 429)
+        return {
+          status: "retryable",
+          reason: "rate_limited",
+          retryAfterMs: retryAfterMs(response),
+        };
+      if (response.status >= 500)
+        return { status: "retryable", reason: "server", retryAfterMs: retryAfterMs(response) };
       return {
-        status: "reset_required",
-        reason: epochMismatch ? "epoch_mismatch" : "cursor_expired",
+        status: "permanent",
+        reason:
+          response.status === 403
+            ? "forbidden"
+            : response.status === 404
+              ? "not_found"
+              : "validation",
       };
     }
-    if (response.status === 429) {
-      return { status: "retryable", reason: "rate_limited", retryAfterMs: retryAfter(response) };
-    }
-    if (response.status >= 500) {
-      return { status: "retryable", reason: "server", retryAfterMs: retryAfter(response) };
-    }
-    // Every remaining status is a rejected request, not a hiccup: retrying it changes nothing.
-    return {
-      status: "permanent",
-      reason: SYNC_PERMANENT_REASONS.get(response.status) ?? "validation",
-    };
   }
-
-  async conversationFiles(
+  conversationFiles(
     conversationId: string,
     input: Partial<ConversationFilesQuery> = {},
   ): Promise<ConversationFilesResponse> {
-    const query = conversationFilesQuerySchema.parse(input);
-    const url = this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/files`);
-    if (query.before !== undefined) url.searchParams.set("before", query.before);
-    url.searchParams.set("limit", String(query.limit));
-    const response = await this.#fetch(url.href, {
-      method: "GET",
-    });
-    return conversationFilesResponseSchema.parse(await this.#payload(response));
+    return this.#request(endpoints.files(conversationId, input));
   }
-
-  async attachments(messageIds: readonly string[]): Promise<ListMessageAttachmentsResponse> {
-    const response = await this.#fetch(this.#url("/v2/attachments/query").href, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ messageIds }),
-    });
-    return listMessageAttachmentsResponseSchema.parse(await this.#payload(response));
+  attachments(messageIds: readonly string[]): Promise<ListMessageAttachmentsResponse> {
+    return this.#request(endpoints.attachments({ messageIds: [...messageIds] }));
   }
-
   async uploadLocalFile(
     conversationId: string,
     filePath: string,
     assertCurrentScope: RequestScopeGuard = alwaysCurrentRequestScope,
   ): Promise<Attachment> {
     assertCurrentScope();
-    const bytes = await readFile(filePath);
+    const bytes = await readAttachment(filePath);
     assertCurrentScope();
     const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
     const contentType = contentTypeForFileName(fileName);
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    const created = createFileUploadResponseSchema.parse(
-      await this.#payload(
-        await this.#fetchIdempotentMutation(
-          this.#url("/v2/files/uploads").href,
-          {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "idempotency-key": crypto.randomUUID(),
-            },
-            body: JSON.stringify({
-              conversationId,
-              fileName,
-              contentType,
-              sizeBytes: bytes.byteLength,
-              contentSha256,
-            }),
-          },
-          assertCurrentScope,
-        ),
-      ),
-    );
-    const uploaded = await this.#fetchInScope(
-      this.#url(`/v2/files/${encodeURIComponent(created.attachment.id)}/content`).href,
-      {
-        method: "PUT",
-        headers: { "content-type": contentType },
-        body: bytes,
-      },
-      assertCurrentScope,
-    );
-    if (!uploaded.ok) {
-      throw new WorkspaceRequestError(
-        `Workspace request failed (${uploaded.status})`,
-        uploaded.status,
-        retryAfter(uploaded),
-      );
-    }
-    const completed = completeFileUploadResponseSchema.parse(
-      await this.#payload(
-        await this.#fetchIdempotentMutation(
-          this.#url(`/v2/files/${encodeURIComponent(created.attachment.id)}/complete`).href,
-          {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "idempotency-key": crypto.randomUUID(),
-            },
-            body: JSON.stringify({
-              sizeBytes: bytes.byteLength,
-              contentSha256,
-            }),
-          },
-          assertCurrentScope,
-        ),
-      ),
-    );
+    const contentSha256 = await sha256(new Uint8Array(bytes));
     assertCurrentScope();
-    return attachmentSchema.parse(completed.attachment);
-  }
-
-  async downloadFile(attachmentId: string): Promise<{
-    readonly fileName: string;
-    readonly contentType: string;
-    readonly bytes: Buffer;
-  }> {
-    const response = await this.#fetch(
-      this.#url(`/v2/files/${encodeURIComponent(attachmentId)}/content`).href,
-      { method: "GET" },
-    );
-    if (!response.ok) {
-      throw new WorkspaceRequestError(
-        `Workspace request failed (${response.status})`,
-        response.status,
-        retryAfter(response),
-      );
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-    const fileName = fileNameFromDisposition(
-      response.headers.get("content-disposition"),
-      "download",
-    );
-    return { fileName, contentType, bytes };
-  }
-
-  async ticket(): Promise<RealtimeTicketResponse> {
-    const response = await this.#fetch(this.#url("/v2/realtime/tickets").href, {
-      method: "POST",
+    // Bind every request, including retries, to this upload's session authorization.
+    const http = new HttpClient({
+      origin: this.#origin,
+      timeoutMs: 10_000,
+      fetch: async (url, init) => {
+        assertCurrentScope();
+        const response = await this.session.fetch(url.href, init);
+        try {
+          assertCurrentScope();
+        } catch (error) {
+          await response.body?.cancel().catch(() => undefined);
+          throw error;
+        }
+        if (response.status === 401) await this.session.markSignedOut();
+        return response;
+      },
     });
-    return realtimeTicketResponseSchema.parse(await this.#payload(response));
+    const files = new AttachmentClient(http);
+    try {
+      const created = await http.request({
+        ...endpoints.createUpload({
+          conversationId,
+          fileName,
+          contentType,
+          sizeBytes: bytes.byteLength,
+          contentSha256,
+        }),
+        headers: { "idempotency-key": crypto.randomUUID() },
+        retry: "idempotent_once",
+      });
+      await files.upload({
+        path: endpoints.attachmentContent(created.attachment.id),
+        headers: { "content-type": contentType },
+        bytes,
+      });
+      const completed = await http.request({
+        ...endpoints.completeUpload(created.attachment.id, {
+          sizeBytes: bytes.byteLength,
+          contentSha256,
+        }),
+        headers: { "idempotency-key": crypto.randomUUID() },
+        retry: "idempotent_once",
+      });
+      assertCurrentScope();
+      return completed.attachment;
+    } catch (error) {
+      return this.#fail(error);
+    }
+  }
+  async downloadFile(
+    attachmentId: string,
+  ): Promise<{ readonly fileName: string; readonly contentType: string; readonly bytes: Buffer }> {
+    try {
+      const { bytes, response } = await this.#attachments.download({
+        path: endpoints.attachmentContent(attachmentId),
+        maxBytes: ATTACHMENT_MAX_BYTES,
+      });
+      return {
+        bytes: Buffer.from(bytes),
+        contentType: response.headers.get("content-type") ?? "application/octet-stream",
+        fileName: fileNameFromDisposition(response.headers.get("content-disposition"), "download"),
+      };
+    } catch (error) {
+      return this.#fail(error);
+    }
+  }
+  ticket(signal?: AbortSignal): Promise<RealtimeTicketResponse> {
+    return this.#request({ ...endpoints.ticket(), ...(signal === undefined ? {} : { signal }) });
   }
 }
 
@@ -768,6 +407,27 @@ export class WorkspaceRequestError extends Error {
   ) {
     super(message);
     this.name = "WorkspaceRequestError";
+  }
+}
+
+async function readAttachment(filePath: string): Promise<Buffer> {
+  const file = await open(filePath, "r");
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size < 1 || stat.size > ATTACHMENT_MAX_BYTES)
+      throw new ApiClientError("request", "The attachment exceeded the supported size limit");
+    const bytes = Buffer.alloc(stat.size + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await file.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > stat.size)
+      throw new ApiClientError("request", "The attachment changed while being read");
+    return bytes.subarray(0, offset);
+  } finally {
+    await file.close();
   }
 }
 

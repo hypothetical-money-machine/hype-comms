@@ -1,20 +1,15 @@
+import { WorkspaceRealtimeClient, workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import {
-  WORKSPACE_PROTOCOL_HEADER,
   WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
   compareSyncPositions,
-  encodeSyncPosition,
-  ephemeralActivityFrameSchema,
-  isWorkspaceProtocolMismatch,
   productRealtimeEventSchema,
-  realtimeTicketResponseSchema,
   syncPositionQuerySchema,
-  workspaceBootstrapResponseSchema,
   type ProductRealtimeEvent,
   type SyncPosition,
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
-import WebSocket, { type RawData } from "ws";
+
+import WebSocket from "ws";
 
 import { parseCommandArguments, requirePositionals, stringOption } from "./argv.js";
 import { ApiClient } from "./client.js";
@@ -27,9 +22,8 @@ import {
   EXIT_TRANSIENT,
   MAX_RETRY_AFTER_MS,
   UsageError,
-  networkError,
 } from "./errors.js";
-import { writeEvent, writeResult } from "./output.js";
+import { EventWriter, writeResult } from "./output.js";
 import type { CommandContext } from "./types.js";
 
 /** Builds the body-free repair signal the client emits when it cannot continue from its cursor. */
@@ -52,7 +46,6 @@ function syntheticResyncEvent(
     payload: { reason },
   });
 }
-const PRODUCT_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 class ResyncRequiredError extends CliError {
   constructor() {
     super({
@@ -62,11 +55,6 @@ class ResyncRequiredError extends CliError {
       retryable: false,
     });
   }
-}
-
-interface ConnectionResult {
-  readonly cursor: SyncPosition;
-  readonly delivered: boolean;
 }
 
 export function laterCursor(current: SyncPosition, candidate: SyncPosition): SyncPosition {
@@ -79,16 +67,10 @@ export interface ProductRealtimeWatchOptions {
   readonly after: SyncPosition;
   readonly timeoutMs: number;
   readonly workspaceId: string;
+  readonly userId: string;
+  readonly signal?: AbortSignal;
   readonly random: () => number;
   readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
-}
-
-function websocketUrl(origin: string, ticket: string, after: SyncPosition): string {
-  const url = new URL("/v2/realtime", origin);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("ticket", ticket);
-  url.searchParams.set("after", encodeSyncPosition(after));
-  return url.toString();
 }
 
 function unexpectedStatusError(status: number): CliError {
@@ -134,243 +116,148 @@ export function watchRetryDelayMs(
  * repair. Command-specific projections belong in `onEvent`; ticketing, reconnects, cursor resume,
  * and websocket validation stay centralized here so machine consumers cannot drift from `watch`.
  */
-export async function watchProductRealtime(input: ProductRealtimeWatchOptions): Promise<{
-  readonly cursor: SyncPosition;
-}> {
+export async function watchProductRealtime(
+  input: ProductRealtimeWatchOptions,
+): Promise<{ readonly cursor: SyncPosition }> {
   let cursor = input.after;
+  let tail: Promise<void> = Promise.resolve();
   let stopped = false;
-  let currentSocket: WebSocket | undefined;
-  const stop = (): void => {
+  let finished = false;
+  let requestedRetryDelay = 0;
+  let incompatibleReason: string | undefined;
+  let resolve: (value: { readonly cursor: SyncPosition }) => void = () => undefined;
+  let reject: (error: unknown) => void = () => undefined;
+  const result = new Promise<{ readonly cursor: SyncPosition }>((done, failed) => {
+    resolve = done;
+    reject = failed;
+  });
+  const finish = (error?: unknown): void => {
+    if (finished) return;
+    finished = true;
     stopped = true;
-    currentSocket?.close(1000);
+    realtime.resetSession();
+    void tail.then(() => (error === undefined ? resolve({ cursor }) : reject(error)), reject);
   };
+  const enqueue = (event: ProductRealtimeEvent): void => {
+    const delivery = tail.then(async () => {
+      await input.onEvent(event);
+      // Only successful output delivery acknowledges the position used for reconnect.
+      if (event.type !== "system.resync_required") {
+        cursor = laterCursor(cursor, event.position);
+        realtime.acknowledge({ scope, cursor });
+      }
+      if (event.type === "system.resync_required") finish(new ResyncRequiredError());
+    });
+    tail = delivery.catch((error) => {
+      finish(error);
+      throw error;
+    });
+    // finish owns the rejected result; attach immediately while output may still be pending.
+    void tail.catch(() => undefined);
+  };
+  const realtime = new WorkspaceRealtimeClient({
+    apiOrigin: input.origin,
+    clientOrigin: input.origin,
+    transport: { ticket: (signal) => input.client.request({ ...endpoints.ticket(), signal }) },
+    createSocket: (url, options) =>
+      new WebSocket(url, {
+        ...options,
+        handshakeTimeout: input.timeoutMs,
+        perMessageDeflate: false,
+      }),
+    reconnectDelay: (failures) => {
+      const result = watchRetryDelayMs(failures, requestedRetryDelay, input.random);
+      requestedRetryDelay = 0;
+      return result;
+    },
+    onEvent({ event }) {
+      if (stopped) return false;
+      enqueue(event);
+      return true;
+    },
+    onDrop(reason) {
+      incompatibleReason = reason;
+    },
+    onState(state) {
+      if (state === "incompatible")
+        finish(
+          new CliError({
+            exitCode: EXIT_CONTRACT,
+            code:
+              incompatibleReason === "protocol-mismatch"
+                ? "UPGRADE_REQUIRED"
+                : "INVALID_SERVER_CONTRACT",
+            message:
+              incompatibleReason === "protocol-mismatch"
+                ? WORKSPACE_PROTOCOL_UPGRADE_MESSAGE
+                : "The realtime server sent an incompatible event",
+            retryable: false,
+          }),
+        );
+    },
+    onFailure(failure) {
+      if (failure.kind === "ticket") {
+        if (failure.error instanceof CliError && failure.error.retryable) {
+          requestedRetryDelay = failure.error.retryAfterMs ?? 0;
+          return false;
+        }
+        finish(failure.error);
+        return true;
+      }
+      if (failure.kind === "handshake") {
+        const error = unexpectedStatusError(failure.status);
+        if (error.retryable) return false;
+        finish(error);
+        return true;
+      }
+      if (failure.kind === "invalid_frame") {
+        finish(
+          new CliError({
+            exitCode: EXIT_CONTRACT,
+            code: "INVALID_SERVER_CONTRACT",
+            message: "The realtime server sent an invalid event",
+            retryable: false,
+          }),
+        );
+        return true;
+      }
+      if (failure.code === 4009) {
+        enqueue(syntheticResyncEvent(input.workspaceId, cursor, "cursor_expired"));
+        return true;
+      }
+      if (failure.code === 4401 || failure.code === 4403) {
+        finish(
+          new CliError({
+            exitCode: EXIT_AUTH,
+            code: "REALTIME_AUTH_REVOKED",
+            message: "Realtime access was revoked",
+            retryable: false,
+          }),
+        );
+        return true;
+      }
+      return false;
+    },
+  });
+  const scope = realtime.prepare({
+    after: input.after,
+    userId: input.userId,
+    workspaceId: input.workspaceId,
+  });
+  const stop = (): void => finish();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  let failures = 0;
-  let requestedRetryDelay: number;
+  input.signal?.addEventListener("abort", stop, { once: true });
   try {
-    while (!stopped) {
-      try {
-        const ticket = await input.client.request({
-          method: "POST",
-          path: "/v2/realtime/tickets",
-          responseSchema: realtimeTicketResponseSchema,
-        });
-        const result = await streamOneConnection({
-          origin: input.origin,
-          ticket: ticket.ticket,
-          after: cursor,
-          timeoutMs: input.timeoutMs,
-          workspaceId: input.workspaceId,
-          async write(event) {
-            await input.onEvent(event);
-            cursor = laterCursor(cursor, event.position);
-          },
-          stopped: () => stopped,
-          registerSocket(socket) {
-            currentSocket = socket;
-          },
-        });
-        cursor = result.cursor;
-        failures = result.delivered ? 0 : failures + 1;
-        requestedRetryDelay = 0;
-      } catch (error) {
-        if (error instanceof ResyncRequiredError) throw error;
-        if (!(error instanceof CliError) || !error.retryable) throw error;
-        requestedRetryDelay = error.retryAfterMs ?? 0;
-        failures += 1;
-      }
-      if (!stopped) {
-        await delay(watchRetryDelayMs(failures, requestedRetryDelay, input.random));
-      }
-    }
+    if (input.signal?.aborted === true) stop();
+    else realtime.activate(scope);
+    return await result;
   } finally {
+    input.signal?.removeEventListener("abort", stop);
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
-    currentSocket?.terminate();
+    realtime.resetSession();
   }
-  return { cursor };
-}
-
-async function streamOneConnection(input: {
-  readonly origin: string;
-  readonly ticket: string;
-  readonly after: SyncPosition;
-  readonly timeoutMs: number;
-  readonly workspaceId: string;
-  readonly write: (event: ProductRealtimeEvent) => void | Promise<void>;
-  readonly stopped: () => boolean;
-  readonly registerSocket: (socket: WebSocket | undefined) => void;
-}): Promise<ConnectionResult> {
-  return new Promise<ConnectionResult>((resolve, reject) => {
-    const socket = new WebSocket(websocketUrl(input.origin, input.ticket, input.after), {
-      handshakeTimeout: input.timeoutMs,
-      maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
-      perMessageDeflate: false,
-    });
-    input.registerSocket(socket);
-    let cursor = input.after;
-    let delivered = false;
-    let connected = false;
-    let resyncRequired = false;
-    let settled = false;
-    let queuedMessages = 0;
-    let messageTail: Promise<void> = Promise.resolve();
-    const settle = (error?: unknown): void => {
-      if (settled) return;
-      settled = true;
-      input.registerSocket(undefined);
-      if (error !== undefined) reject(error);
-      else resolve({ cursor, delivered });
-    };
-    const rejectContract = (message: string, cause?: unknown): void => {
-      socket.terminate();
-      settle(
-        new CliError({
-          exitCode: EXIT_CONTRACT,
-          code: "INVALID_SERVER_CONTRACT",
-          message,
-          retryable: false,
-          cause,
-        }),
-      );
-    };
-    const deliver = async (event: ProductRealtimeEvent): Promise<boolean> => {
-      try {
-        await input.write(event);
-        delivered = true;
-        cursor = laterCursor(cursor, event.position);
-        return true;
-      } catch (error) {
-        socket.terminate();
-        settle(error);
-        return false;
-      }
-    };
-    const handleMessage = async (data: RawData, isBinary: boolean): Promise<void> => {
-      if (settled) return;
-      if (isBinary) {
-        rejectContract("The realtime server sent a binary message");
-        return;
-      }
-      const serialized = data.toString("utf8");
-      let value: unknown;
-      try {
-        value = JSON.parse(serialized) as unknown;
-      } catch (error) {
-        rejectContract("The realtime server sent malformed JSON", error);
-        return;
-      }
-      const activity = ephemeralActivityFrameSchema.safeParse(value);
-      if (activity.success) {
-        if (activity.data.workspaceId !== input.workspaceId)
-          rejectContract("Realtime sent activity for the wrong workspace");
-        return;
-      }
-      const parsed = productRealtimeEventSchema.safeParse(value);
-      if (!parsed.success) {
-        rejectContract("The realtime server sent an invalid event");
-        return;
-      }
-      const event = parsed.data;
-      if (event.workspaceId !== input.workspaceId) {
-        rejectContract("Realtime sent an event for the wrong workspace");
-        return;
-      }
-
-      if (event.type === "system.connected") {
-        if (connected) {
-          rejectContract("Realtime sent more than one connection event");
-          return;
-        }
-        connected = true;
-        if (!(await deliver(event))) return;
-        return;
-      }
-
-      if (!(await deliver(event))) return;
-      if (event.type === "system.resync_required") {
-        resyncRequired = true;
-        socket.close(1000);
-      }
-    };
-    socket.on("message", (data: RawData, isBinary: boolean) => {
-      if (settled) return;
-      queuedMessages += 1;
-      socket.pause();
-      const handling = messageTail.then(() => handleMessage(data, isBinary));
-      messageTail = handling.then(
-        () => undefined,
-        (error: unknown) => {
-          socket.terminate();
-          settle(error);
-        },
-      );
-      void messageTail.then(() => {
-        queuedMessages -= 1;
-        if (queuedMessages === 0 && !settled) socket.resume();
-      });
-    });
-    socket.once("unexpected-response", (_request, response) => {
-      const major = response.headers[WORKSPACE_PROTOCOL_HEADER];
-      const status = response.statusCode ?? 500;
-      const mismatch = isWorkspaceProtocolMismatch({
-        status,
-        headers: { get: () => (Array.isArray(major) ? major.join(",") : (major ?? null)) },
-      });
-      response.destroy();
-      settle(
-        mismatch
-          ? new CliError({
-              exitCode: EXIT_CONTRACT,
-              code: "UPGRADE_REQUIRED",
-              message: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
-              httpStatus: status,
-              retryable: false,
-            })
-          : unexpectedStatusError(status),
-      );
-    });
-    socket.once("error", (error) => {
-      void messageTail.then(() => {
-        if (settled) return;
-        if (input.stopped()) settle();
-        else settle(networkError(error));
-      });
-    });
-    socket.once("close", (code) => {
-      void messageTail.then(async () => {
-        if (settled) return;
-        if (input.stopped()) {
-          settle();
-          return;
-        }
-        if (resyncRequired || code === 4009) {
-          if (!resyncRequired) {
-            const event = syntheticResyncEvent(input.workspaceId, cursor, "cursor_expired");
-            try {
-              await input.write(event);
-            } catch (error) {
-              settle(error);
-              return;
-            }
-          }
-          settle(new ResyncRequiredError());
-        } else if (code === 4401 || code === 4403) {
-          settle(
-            new CliError({
-              exitCode: EXIT_AUTH,
-              code: "REALTIME_AUTH_REVOKED",
-              message: "Realtime access was revoked",
-              retryable: false,
-            }),
-          );
-        } else {
-          settle();
-        }
-      });
-    });
-  });
 }
 
 export async function watchCommand(
@@ -397,22 +284,25 @@ export async function watchCommand(
       "INVALID_CURSOR",
     );
   }
-  const bootstrap = await client.request({
-    path: "/v2/bootstrap",
-    responseSchema: workspaceBootstrapResponseSchema,
-  });
-  const { cursor } = await watchProductRealtime({
-    client,
-    origin: profile.apiOrigin,
-    after:
-      afterOption === undefined ? bootstrap.syncCursor : syncPositionQuerySchema.parse(afterOption),
-    timeoutMs: context.options.timeoutMs,
-    workspaceId: bootstrap.workspace.id,
-    random: context.runtime.random,
-    onEvent(event) {
-      writeEvent(context.runtime.io, event);
-    },
-  });
-  // A stopped watch is a successful command. This is intentionally silent in JSON mode.
-  if (!context.options.json) writeResult(context.runtime.io, { cursor }, false);
+  const bootstrap = await client.request({ ...endpoints.bootstrap() });
+  const writer = new EventWriter(context.runtime.io.stdout);
+  try {
+    const { cursor } = await watchProductRealtime({
+      client,
+      origin: profile.apiOrigin,
+      after:
+        afterOption === undefined
+          ? bootstrap.syncCursor
+          : syncPositionQuerySchema.parse(afterOption),
+      timeoutMs: context.options.timeoutMs,
+      workspaceId: bootstrap.workspace.id,
+      userId: bootstrap.currentUser.user.id,
+      random: context.runtime.random,
+      onEvent: (event) => writer.write(event),
+    });
+    // A stopped watch is a successful command. This is intentionally silent in JSON mode.
+    if (!context.options.json) writeResult(context.runtime.io, { cursor }, false);
+  } finally {
+    writer.dispose();
+  }
 }

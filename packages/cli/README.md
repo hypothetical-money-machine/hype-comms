@@ -212,7 +212,7 @@ cursors remain opaque strings.
 
 Watch reconnects from the last successfully written position. If no position is given, it uses
 bootstrap's current position. An expired position or changed epoch emits `system.resync_required`
-before exit so callers can bootstrap again. Parsing a frame does not acknowledge it.
+before exit so callers can bootstrap again. The shared client acknowledges only after stdout completes the NDJSON write. Parsing a frame does not acknowledge it.
 
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
 `GET /v2/messages/:id`.
