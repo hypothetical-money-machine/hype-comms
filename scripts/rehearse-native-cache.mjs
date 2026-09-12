@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ import { build } from "esbuild";
 import { _electron as electron } from "playwright";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
+const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
 const directory = await mkdtemp(path.join(os.tmpdir(), "hype-native-cache-"));
 const buildDirectory = path.join(directory, "build");
 const evidenceFile = path.join(repository, ".dev-data/rehearsal/native-cache.json");
@@ -35,15 +37,7 @@ async function protectedFiles() {
 
 async function withApp(stage, body) {
   const app = await electron.launch({
-    executablePath: path.join(
-      repository,
-      "node_modules/electron/dist",
-      process.platform === "darwin"
-        ? "Electron.app/Contents/MacOS/Electron"
-        : process.platform === "win32"
-          ? "electron.exe"
-          : "electron",
-    ),
+    executablePath: require("electron"),
     args: [
       ...(process.env.HYPE_COMMS_REHEARSAL_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
       ...(process.platform === "linux" ? ["--password-store=gnome-libsecret"] : []),
