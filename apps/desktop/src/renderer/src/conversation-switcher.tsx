@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import type { DesktopPlatform } from "../../shared/desktop-api";
 import type { ChannelAccess, ChannelMode } from "@hype-comms/contracts";
 import { ChannelIcon, DirectMessageIcon, GroupDirectMessageIcon } from "./conversation-indicators";
+import { useOwnedOverlay } from "./overlay-ownership";
 import { useOpenChangeNotifier } from "./use-open-change-notifier";
 
 export interface SwitcherConversation {
@@ -54,7 +55,7 @@ export function ConversationSwitcher({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  const previousFocus = useRef<HTMLElement | null>(null);
+  const dialog = useRef<HTMLElement>(null);
   const selectedOption = useRef<HTMLButtonElement | null>(null);
   const openState = useRef(false);
 
@@ -67,21 +68,25 @@ export function ConversationSwitcher({
   }, [conversations, query]);
 
   const openSwitcher = useCallback(() => {
-    if (!openState.current) {
-      previousFocus.current =
-        document.activeElement instanceof HTMLElement ? document.activeElement : trigger.current;
-    }
     openState.current = true;
     setQuery("");
     setSelectedIndex(0);
     setOpen(true);
   }, []);
 
-  const closeSwitcher = useCallback((restoreFocus: boolean) => {
-    openState.current = false;
-    setOpen(false);
-    if (restoreFocus) previousFocus.current?.focus();
-  }, []);
+  const leaveForNavigation = useOwnedOverlay(open, {
+    container: dialog,
+    initialFocus: () => input.current,
+    onEscape: () => closeSwitcher(true),
+  });
+  const closeSwitcher = useCallback(
+    (restoreFocus: boolean) => {
+      if (!restoreFocus) leaveForNavigation();
+      openState.current = false;
+      setOpen(false);
+    },
+    [leaveForNavigation],
+  );
 
   const choose = useCallback(
     (conversationId: string) => {
@@ -112,22 +117,12 @@ export function ConversationSwitcher({
 
   useEffect(() => {
     if (!open) return;
-    input.current?.focus();
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
     selectedOption.current?.scrollIntoView?.({ block: "nearest" });
   }, [open, selectedIndex]);
 
   useOpenChangeNotifier(open, onOpenChange);
 
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeSwitcher(true);
-      return;
-    }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setSelectedIndex((current) => (matches.length === 0 ? 0 : (current + 1) % matches.length));
@@ -169,6 +164,7 @@ export function ConversationSwitcher({
           <div className="dialog-backdrop" onMouseDown={() => closeSwitcher(true)}>
             <section
               className="quick-switcher-dialog"
+              ref={dialog}
               role="dialog"
               aria-modal="true"
               aria-labelledby="quick-switcher-title"

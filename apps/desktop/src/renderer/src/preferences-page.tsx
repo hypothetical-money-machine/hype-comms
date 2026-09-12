@@ -1,3 +1,4 @@
+import { useOwnedOverlay, useOverlayOwnership } from "./overlay-ownership";
 import {
   forwardRef,
   useCallback,
@@ -6,7 +7,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
 
@@ -49,16 +49,6 @@ export interface PreferencesPageHandle {
   requestNavigationAway: (validateDiscard?: () => boolean) => Promise<boolean>;
 }
 
-const FOCUSABLE_SELECTOR = [
-  'button:not([disabled]):not([tabindex="-1"])',
-  'select:not([disabled]):not([tabindex="-1"])',
-  'input:not([disabled]):not([type="radio"]):not([tabindex="-1"])',
-  'input[type="radio"]:checked:not([disabled]):not([tabindex="-1"])',
-  'textarea:not([disabled]):not([tabindex="-1"])',
-  '[href]:not([tabindex="-1"])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(", ");
-
 export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPageProps>(
   function PreferencesPage(
     {
@@ -78,7 +68,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const discardDialogRef = useRef<HTMLElement>(null);
     const discardOverlayRef = useRef<HTMLDivElement>(null);
     const discardKeepEditingRef = useRef<HTMLButtonElement>(null);
-    const discardReturnFocusRef = useRef<HTMLElement | null>(null);
+    const overlays = useOverlayOwnership();
     const designerTriggerRef = useRef<HTMLButtonElement>(null);
     const previousView = useRef<"preferences" | "designer">("preferences");
     const leaveResolver = useRef<((confirmed: boolean) => void) | null>(null);
@@ -95,18 +85,21 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
       resolve?.(confirmed);
     }, []);
 
+    const leaveDiscardForNavigation = useOwnedOverlay(active && discardAction !== null, {
+      container: discardDialogRef,
+      initialFocus: () => discardKeepEditingRef.current,
+      onEscape: () => cancelDiscard(),
+    });
+
     const cancelDiscard = useCallback((): void => {
       const action = discardAction;
       setDiscardAction(null);
       if (action === "leave") resolvePendingLeave(false);
-      queueMicrotask(() => discardReturnFocusRef.current?.focus());
     }, [discardAction, resolvePendingLeave]);
 
     const returnToPreferences = useCallback((): void => {
       if (designerSaving) return;
       if (designerDirty) {
-        discardReturnFocusRef.current =
-          document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setDiscardAction("preferences");
         return;
       }
@@ -128,8 +121,6 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
         if (view !== "designer") return Promise.resolve(true);
         if (!designerDirty) return Promise.resolve(true);
 
-        discardReturnFocusRef.current =
-          document.activeElement instanceof HTMLElement ? document.activeElement : null;
         return new Promise<boolean>((resolve) => {
           leaveResolver.current = resolve;
           leaveDiscardValidation.current = validateDiscard ?? null;
@@ -145,11 +136,12 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
         cancelDiscard();
         return;
       }
+      leaveDiscardForNavigation();
       setDesignerDirty(false);
       setDiscardAction(null);
       setView("preferences");
       if (action === "leave") resolvePendingLeave(true);
-    }, [cancelDiscard, discardAction, resolvePendingLeave]);
+    }, [cancelDiscard, discardAction, leaveDiscardForNavigation, resolvePendingLeave]);
 
     useImperativeHandle(ref, () => ({ requestNavigationAway }), [requestNavigationAway]);
 
@@ -171,21 +163,9 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     }, [active, discardAction, resolvePendingLeave]);
 
     useEffect(() => {
-      if (!active || discardAction === null) return;
-      const onKeyDown = (event: KeyboardEvent): void => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        cancelDiscard();
-      };
-      document.addEventListener("keydown", onKeyDown, true);
-      return () => document.removeEventListener("keydown", onKeyDown, true);
-    }, [active, cancelDiscard, discardAction]);
-
-    useEffect(() => {
       if (!active || discardAction !== null || view !== "designer") return;
       const onKeyDown = (event: KeyboardEvent): void => {
-        if (event.key !== "Escape" || document.querySelector('[aria-modal="true"]') !== null) {
+        if (event.key !== "Escape" || overlays.hasOpen()) {
           return;
         }
         event.preventDefault();
@@ -194,7 +174,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
       };
       document.addEventListener("keydown", onKeyDown, true);
       return () => document.removeEventListener("keydown", onKeyDown, true);
-    }, [active, discardAction, returnToPreferences, view]);
+    }, [active, discardAction, overlays, returnToPreferences, view]);
 
     useEffect(() => {
       if (!active || discardAction === null) return;
@@ -210,32 +190,11 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
         previousView.current = view;
         return;
       }
-      if (discardAction !== null) {
-        discardKeepEditingRef.current?.focus();
-        return;
-      }
+      if (discardAction !== null) return;
       const returningFromDesigner = previousView.current === "designer" && view === "preferences";
       previousView.current = view;
       if (returningFromDesigner) designerTriggerRef.current?.focus();
     }, [active, discardAction, view]);
-
-    const trapDiscardFocus = (event: ReactKeyboardEvent<HTMLElement>): void => {
-      if (event.key !== "Tab") return;
-      const dialog = discardDialogRef.current;
-      if (dialog === null) return;
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (first === undefined || last === undefined) return;
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
 
     return (
       <>
@@ -327,7 +286,6 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
                 aria-modal="true"
                 aria-labelledby="theme-discard-title"
                 aria-describedby="theme-discard-description"
-                onKeyDown={trapDiscardFocus}
               >
                 <p className="eyebrow">Unsaved theme</p>
                 <h3 id="theme-discard-title">Discard your changes?</h3>
