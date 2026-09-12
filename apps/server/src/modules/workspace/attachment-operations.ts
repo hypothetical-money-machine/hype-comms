@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { createCursorCodec, cursorIdSchema, cursorTimestampSchema } from "./cursor-codec.js";
 import { readWorkspacePosition } from "./workspace-sequence.js";
 import {
   ATTACHMENT_MAX_BYTES,
@@ -36,40 +38,20 @@ import {
   type AttachmentStore,
 } from "./file-store.js";
 import { fingerprintApiRequest, runIdempotentMutation } from "./idempotency.js";
-import { UUID_PATTERN } from "./pagination.js";
 import { iso } from "./records.js";
 import { runWorkspaceTransaction } from "./transaction.js";
 import { requireActivePrincipal } from "./workspace-access.js";
 import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 
+const filesCursorCodec = createCursorCodec(
+  "files",
+  z.object({ createdAt: cursorTimestampSchema, id: cursorIdSchema }).strict(),
+);
+
 function encodeFilesCursor(createdAt: string, id: string): string {
-  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
+  return filesCursorCodec.encode({ createdAt, id });
 }
-function decodeFilesCursor(cursor: string | undefined): {
-  createdAt: string;
-  id: string;
-} | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("createdAt" in parsed) ||
-      !("id" in parsed) ||
-      typeof parsed.createdAt !== "string" ||
-      typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id)
-    ) {
-      return null;
-    }
-    const createdAt = new Date(parsed.createdAt);
-    if (Number.isNaN(createdAt.getTime())) return null;
-    return { createdAt: createdAt.toISOString(), id: parsed.id };
-  } catch {
-    return null;
-  }
-}
+const decodeFilesCursor = filesCursorCodec.decode;
 
 /** Owns attachment upload, completion and authorized reads. */
 export class WorkspaceAttachmentOperations {

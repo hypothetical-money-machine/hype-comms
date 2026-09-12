@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { createCursorCodec, cursorIdSchema } from "./cursor-codec.js";
 import { positionForRetainedSequence } from "./protocol-epoch.js";
 import type { SyncPosition } from "@hype-comms/contracts";
 import {
@@ -56,7 +58,6 @@ import {
 } from "./conversation-access.js";
 import type { ConversationEventWriter } from "./conversation-events.js";
 import { readUnreadCounts } from "./conversation-summary-reader.js";
-import { UUID_PATTERN } from "./pagination.js";
 import {
   iso,
   mapMessage,
@@ -172,35 +173,31 @@ function mapReaction(row: ReactionRow): Reaction {
   });
 }
 
+const positiveSequenceSchema = z
+  .string()
+  .regex(/^[1-9]\d*$/u)
+  .refine(isPostgresBigintString);
+const historyCursorCodec = createCursorCodec(
+  "history",
+  z.object({ sequence: positiveSequenceSchema }).strict(),
+);
+const searchCursorCodec = createCursorCodec(
+  "search",
+  z
+    .object({
+      queryHash: z.string(),
+      rank: z.number().min(0).max(POSTGRES_REAL_MAX),
+      workspaceSequence: positiveSequenceSchema,
+      id: cursorIdSchema,
+    })
+    .strict(),
+);
+
 function encodeHistoryCursor(sequence: string): string {
-  return Buffer.from(JSON.stringify({ sequence }), "utf8").toString("base64url");
+  return historyCursorCodec.encode({ sequence });
 }
-
 function decodeHistoryCursor(cursor: string | undefined): string | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("sequence" in parsed) ||
-      typeof parsed.sequence !== "string" ||
-      !/^[1-9]\d*$/.test(parsed.sequence) ||
-      !isPostgresBigintString(parsed.sequence)
-    ) {
-      throw new Error("Invalid cursor");
-    }
-    return parsed.sequence;
-  } catch {
-    throw new DomainError("invalid_input", "Invalid history cursor");
-  }
-}
-
-interface SearchCursor {
-  readonly queryHash: string;
-  readonly rank: number;
-  readonly workspaceSequence: string;
-  readonly id: string;
+  return historyCursorCodec.decode(cursor)?.sequence ?? null;
 }
 
 function searchQueryHash(query: string): string {
@@ -208,51 +205,18 @@ function searchQueryHash(query: string): string {
 }
 
 function encodeSearchCursor(row: SearchMessageRow, queryHash: string): string {
-  return Buffer.from(
-    JSON.stringify({
-      queryHash,
-      rank: Number(row.search_rank),
-      workspaceSequence: row.committed_workspace_sequence,
-      id: row.id,
-    } satisfies SearchCursor),
-    "utf8",
-  ).toString("base64url");
+  return searchCursorCodec.encode({
+    queryHash,
+    rank: Number(row.search_rank),
+    workspaceSequence: row.committed_workspace_sequence,
+    id: row.id,
+  });
 }
-
-function decodeSearchCursor(cursor: string | undefined, queryHash: string): SearchCursor | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("queryHash" in parsed) ||
-      typeof parsed.queryHash !== "string" ||
-      parsed.queryHash !== queryHash ||
-      !("rank" in parsed) ||
-      typeof parsed.rank !== "number" ||
-      !Number.isFinite(parsed.rank) ||
-      parsed.rank < 0 ||
-      parsed.rank > POSTGRES_REAL_MAX ||
-      !("workspaceSequence" in parsed) ||
-      typeof parsed.workspaceSequence !== "string" ||
-      !/^[1-9]\d*$/.test(parsed.workspaceSequence) ||
-      !isPostgresBigintString(parsed.workspaceSequence) ||
-      !("id" in parsed) ||
-      typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id)
-    ) {
-      throw new Error("Invalid cursor");
-    }
-    return {
-      queryHash: parsed.queryHash,
-      rank: parsed.rank,
-      workspaceSequence: parsed.workspaceSequence,
-      id: parsed.id,
-    };
-  } catch {
+function decodeSearchCursor(cursor: string | undefined, queryHash: string) {
+  const parsed = searchCursorCodec.decode(cursor);
+  if (parsed !== null && parsed.queryHash !== queryHash)
     throw new DomainError("invalid_input", "Invalid search cursor");
-  }
+  return parsed;
 }
 
 function fingerprintMessage(conversationId: string, input: SendConversationMessageRequest): Buffer {
