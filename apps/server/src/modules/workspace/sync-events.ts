@@ -20,27 +20,6 @@ export interface WorkspaceSyncEventInput {
   readonly payload: WorkspaceEvent["payload"];
   /** Defaults to every active workspace member when omitted. */
   readonly audienceUserIds?: readonly string[] | undefined;
-  /** During the compatible-server rollout, persist conversation events in their legacy shape. */
-  readonly stripChannelMode?: boolean | undefined;
-}
-
-function projectStoredEvent(event: WorkspaceEvent, stripChannelMode: boolean): WorkspaceEvent {
-  if (
-    !stripChannelMode ||
-    (event.type !== "channel.created" &&
-      event.type !== "channel.archived" &&
-      event.type !== "direct_conversation.created")
-  ) {
-    return event;
-  }
-  const conversation: Partial<(typeof event.payload)["conversation"]> = {
-    ...event.payload.conversation,
-  };
-  delete conversation.channelMode;
-  return {
-    ...event,
-    payload: { ...event.payload, conversation },
-  } as unknown as WorkspaceEvent;
 }
 
 /**
@@ -90,7 +69,6 @@ export async function insertSyncEventWithSequence(
     delivery: "at_least_once",
     payload: input.payload,
   });
-  const storedEvent = projectStoredEvent(event, input.stripChannelMode ?? false);
   await client.query(
     `INSERT INTO sync_events (
        id, workspace_id, workspace_sequence, conversation_id, conversation_sequence,
@@ -106,7 +84,7 @@ export async function insertSyncEventWithSequence(
       event.type,
       input.actorUserId,
       event.entityVersion,
-      JSON.stringify(storedEvent.payload),
+      JSON.stringify(event.payload),
       event.occurredAt,
     ],
   );
@@ -131,7 +109,7 @@ export async function insertSyncEventWithSequence(
   await client.query(`SELECT pg_notify('hype_comms_events', $1)`, [
     `${event.workspaceId}:${event.workspaceSequence}`,
   ]);
-  return storedEvent;
+  return event;
 }
 
 /** Allocate the next workspace sequence and insert the event in one call. */

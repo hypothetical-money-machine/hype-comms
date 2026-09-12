@@ -7,7 +7,7 @@ import {
   resolveDirectMemberSelector,
   resolveMemberSelector,
 } from "../src/selectors.js";
-import { channelSummary, CONVERSATION_ID, USER_ID, user } from "./fixtures.js";
+import { channelSummary, CONVERSATION_ID, user, USER_ID } from "./fixtures.js";
 import { jsonResponse } from "./helpers.js";
 
 function client(fetch: typeof globalThis.fetch): ApiClient {
@@ -27,8 +27,8 @@ describe("friendly selectors", () => {
   it("resolves member usernames and channel slugs to canonical IDs", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/members") return jsonResponse({ members: [user()] });
-      if (url.pathname === "/v1/conversations") {
+      if (url.pathname === "/v2/members") return jsonResponse({ members: [user()] });
+      if (url.pathname === "/v2/conversations") {
         return jsonResponse({
           conversations: [channelSummary()],
           nextCursor: null,

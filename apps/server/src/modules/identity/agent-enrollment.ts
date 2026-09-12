@@ -1,11 +1,9 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
-
 import {
-  DEFAULT_AGENT_AGENCY_PROFILE,
   DEFAULT_AGENCY_AGENT_SCOPES,
+  DEFAULT_AGENT_AGENCY_PROFILE,
   agentEnrollmentPolicyResponseSchema,
-  agentEnrollmentRestrictedChannelSchema,
   agentEnrollmentResponseSchema,
+  agentEnrollmentRestrictedChannelSchema,
   agentEnrollmentSchema,
   entityIdSchema,
   redeemAgentEnrollmentResponseSchema,
@@ -19,12 +17,12 @@ import {
   type RedeemAgentEnrollmentResponse,
   type RequestAgentEnrollment,
 } from "@hype-comms/contracts";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { z } from "zod";
 
 import { withTransaction } from "../../db/pool.js";
 import { ApiError } from "../../errors.js";
-import { hashToken } from "./tokens.js";
 import {
   fingerprintApiRequest,
   lockIdempotencyScope,
@@ -32,10 +30,10 @@ import {
 } from "../workspace/idempotency.js";
 import { insertSyncEvent } from "../workspace/sync-events.js";
 import { IdentityRepository } from "./repository.js";
-
+import { hashToken } from "./tokens.js";
 const MAX_ACTIVE_MEMBERS = 25;
 const MAX_OPEN_ENROLLMENTS_PER_REQUESTER = 100;
-const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1_000;
+const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_ROUTE = "/v1/agent-enrollments";
 
 export interface AgentEnrollmentActor {
@@ -131,11 +129,20 @@ const redeemSecurityContextSchema = z
 type RedeemSecurityContext = z.infer<typeof redeemSecurityContextSchema>;
 
 type RedeemResult =
-  | { readonly status: "redeemed"; readonly response: RedeemAgentEnrollmentResponse }
-  | { readonly status: "unauthorized" }
-  | { readonly status: "not_found" }
-  | { readonly status: "unavailable"; readonly message: string };
-
+  | {
+      readonly status: "redeemed";
+      readonly response: RedeemAgentEnrollmentResponse;
+    }
+  | {
+      readonly status: "unauthorized";
+    }
+  | {
+      readonly status: "not_found";
+    }
+  | {
+      readonly status: "unavailable";
+      readonly message: string;
+    };
 function timestamp(value: unknown): string {
   if (!(value instanceof Date)) {
     throw new TypeError("Expected Postgres to return a timestamptz value as a Date");
@@ -348,7 +355,11 @@ export class AgentEnrollmentModule {
       if (previous.agent_enrollment_policy !== mode) {
         const fromStatus = mode === "automatic" ? "pending_approval" : "ready_to_redeem";
         const toStatus = mode === "automatic" ? "ready_to_redeem" : "pending_approval";
-        const affected = await client.query<{ id: string } & QueryResultRow>(
+        const affected = await client.query<
+          {
+            id: string;
+          } & QueryResultRow
+        >(
           `UPDATE agent_enrollments
               SET status = $3, updated_at = $4
             WHERE workspace_id = $1
@@ -529,14 +540,10 @@ export class AgentEnrollmentModule {
     });
     return response.enrollment;
   }
-
-  async list(
-    actor: AgentEnrollmentActor,
-    includeRestrictedChannelReviewDetails = false,
-  ): Promise<AgentEnrollment[]> {
+  async list(actor: AgentEnrollmentActor): Promise<AgentEnrollment[]> {
     return this.#transaction(async (client) => {
       const owner = actor.kind === "human" && actor.role === "owner";
-      if (owner && includeRestrictedChannelReviewDetails) {
+      if (owner) {
         await this.#requireOwner(client, actor, true);
       } else {
         await this.#requireStatusReader(client, actor);
@@ -550,7 +557,7 @@ export class AgentEnrollmentModule {
         owner ? [actor.workspaceId] : [actor.workspaceId, actor.userId],
       );
       const enrollments = result.rows.map(mapEnrollment);
-      if (!owner || !includeRestrictedChannelReviewDetails) return enrollments;
+      if (!owner) return enrollments;
       const openEnrollmentIds = enrollments
         .filter(
           (enrollment) =>
@@ -854,7 +861,11 @@ export class AgentEnrollmentModule {
         );
 
         for (const conversationId of current.restrictedChannelIds) {
-          const audience = await client.query<{ user_id: string } & QueryResultRow>(
+          const audience = await client.query<
+            {
+              user_id: string;
+            } & QueryResultRow
+          >(
             `SELECT membership.user_id
                FROM conversation_memberships AS membership
                JOIN workspace_memberships AS workspace_membership
@@ -1046,7 +1057,11 @@ export class AgentEnrollmentModule {
     if (conversationIds.length === 0) return;
     const result =
       actor.kind === "human"
-        ? await client.query<{ id: string } & QueryResultRow>(
+        ? await client.query<
+            {
+              id: string;
+            } & QueryResultRow
+          >(
             `SELECT conversation.id
                FROM conversations AS conversation
               WHERE conversation.workspace_id = $1
@@ -1058,7 +1073,11 @@ export class AgentEnrollmentModule {
               ${lock ? "FOR SHARE OF conversation" : ""}`,
             [actor.workspaceId, [...conversationIds]],
           )
-        : await client.query<{ id: string } & QueryResultRow>(
+        : await client.query<
+            {
+              id: string;
+            } & QueryResultRow
+          >(
             `SELECT conversation.id
                FROM conversations AS conversation
                JOIN conversation_memberships AS membership

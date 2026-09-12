@@ -1,13 +1,14 @@
 import {
   sendMessageOperationSchema,
   TASK_PAGE_MAX_LIMIT,
+  WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+  type Attachment,
   type AuthenticatedSessionContext,
   type CacheCryptoStatus,
   type CacheScope,
+  type ChannelAccess,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
-  type Attachment,
-  type ChannelAccess,
   type ChannelMode,
   type ConversationSummary,
   type Message,
@@ -16,13 +17,13 @@ import {
   type MessageThreadSummary,
   type NotificationAction,
   type NotificationContext,
-  type ProductRealtimeEvent,
   type PresenceState,
+  type ProductRealtimeEvent,
   type Reaction,
   type ReactionEmoji,
   type RealtimeSessionScope,
-  type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
+  type ScopedProductRealtimeEvent,
   type SyncAttemptResult,
   type Task,
   type TaskPriority,
@@ -32,24 +33,25 @@ import {
   type WorkspaceSnapshot,
 } from "@hype-comms/contracts";
 
-import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
+import type { DesktopApi, RealtimeConnectionState } from "../../shared/desktop-api";
+import { mentionedMemberIds } from "./mentions";
 import {
+  applyRetractReservation,
   clearPersistentWorkspaceCache,
   compareConversations,
   compareMembers,
   compareTasks,
   isUnreadMessage,
+  membershipRoleForConversationEvent,
   MemoryWorkspaceCache,
   newestLiveMessage,
   PersistentWorkspaceCache,
-  projectConversationMembershipChange,
-  applyRetractReservation,
   preferRetainedMessage,
-  retractedMessageIds,
-  membershipRoleForConversationEvent,
-  retractReservationMap,
+  projectConversationMembershipChange,
   rememberCreatedMessageMentions,
+  retractedMessageIds,
+  retractReservationMap,
   tombstoneMessage,
   upsertRetractReservation,
   type CachedWorkspaceState,
@@ -60,7 +62,6 @@ import {
   type RetractReservation,
   type WorkspaceCache,
 } from "./workspace-cache";
-import { mentionedMemberIds } from "./mentions";
 
 /** Why the encrypted cache fell back to memory. Derived so a new crypto reason cannot drift. */
 export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_only" }>["reason"];
@@ -582,6 +583,7 @@ export class WorkspaceRuntime {
   #cache: WorkspaceCache | null = null;
   #generation = 0;
   #offlineOnly = false;
+  #protocolBlocked = false;
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
   #outboxFlushOwner: ProjectionGuard | null = null;
   #outboxFlushRequested = false;
@@ -734,6 +736,7 @@ export class WorkspaceRuntime {
       this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
     this.#offlineOnly = options.offline === true;
+    this.#protocolBlocked = false;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -777,9 +780,7 @@ export class WorkspaceRuntime {
     this.#unsubscribeActivity?.();
     this.#eventQueue = Promise.resolve();
     this.#realtimeScope = null;
-    // A session restart can reuse the same privileged main process. Stop any socket created by
-    // the previous renderer generation before a capable bootstrap replaces a legacy projection;
-    // otherwise a legacy-projected event could advance the cached cursor during that rebuild.
+    // Stop the preceding generation before replacing its snapshot or reopening the same cache.
     await this.#client.stopWorkspaceRealtime();
     if (generation !== this.#generation) return;
     this.#unsubscribeEvent = this.#client.onWorkspaceEvent((frame: ScopedProductRealtimeEvent) => {
@@ -828,7 +829,12 @@ export class WorkspaceRuntime {
         });
     });
     this.#unsubscribeConnection = this.#client.onRealtimeStateChanged((connection) => {
-      if (generation !== this.#generation || this.#realtimeScope === null) return;
+      if (generation !== this.#generation || this.#realtimeScope === null || this.#protocolBlocked)
+        return;
+      if (connection === "incompatible") {
+        this.#requireProtocolUpgrade();
+        return;
+      }
       if (connection !== "live") this.#clearActivity(true);
       this.#setState({ connection });
     });
@@ -854,7 +860,14 @@ export class WorkspaceRuntime {
       ) {
         throw new Error("The encrypted cache scope did not match the signed-in session");
       }
-      const cache = this.#createCache(cryptoStatus);
+      // A same-account transition to offline mode must retain the only copy of a memory outbox.
+      const cache =
+        !scopeChanged &&
+        this.#cache !== null &&
+        this.#state.cacheMode === "memory_only" &&
+        cryptoStatus.mode === "memory_only"
+          ? this.#cache
+          : this.#createCache(cryptoStatus);
       this.#cache = cache;
       let cached = await cache.load();
       if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
@@ -2467,7 +2480,7 @@ export class WorkspaceRuntime {
     );
   }
 
-  /** Pages `/v1/conversations` until the server stops claiming more, per the bootstrap contract. */
+  /** Pages `/v2/conversations` until the server stops claiming more, per the bootstrap contract. */
   async #fetchSnapshot(): Promise<WorkspaceSnapshot> {
     const bootstrap = await this.#client.getWorkspaceBootstrap();
     const conversations: ConversationSummary[] = [];
@@ -2843,7 +2856,7 @@ export class WorkspaceRuntime {
   }
 
   /**
-   * Answers a `member.updated` invalidation by re-reading `GET /v1/members` and replacing the
+   * Answers a `member.updated` invalidation by re-reading `GET /v2/members` and replacing the
    * member list outright.
    *
    * The event cannot be applied as a delta: its payload is a bare `User` with no status field, so
@@ -2897,7 +2910,7 @@ export class WorkspaceRuntime {
       }
       // `#membersDirty` stays set, and a retry is armed here rather than left to the next sync
       // pass. `#repairAndFlush` is the only drain site, and on a healthy realtime socket nothing
-      // schedules one -- its retry timer is armed only when `/v1/sync` itself returns retryable.
+      // schedules one -- its retry timer is armed only when `/v2/sync` itself returns retryable.
       // Without this timer a single failed read would leave a disabled member resolvable until
       // the app restarts, which is exactly what this refetch exists to prevent.
       this.#setState({ stale: true });
@@ -2955,6 +2968,7 @@ export class WorkspaceRuntime {
   }
 
   #scheduleMembersRetry(generation: number): void {
+    if (this.#protocolBlocked) return;
     this.#clearMembersRetryTimer();
     this.#membersAttempt += 1;
     this.#membersRetryTimer = setTimeout(() => {
@@ -2976,7 +2990,7 @@ export class WorkspaceRuntime {
     refreshSourceLessRetracts = true,
   ): Promise<void> {
     const cache = this.#cache;
-    if (cache === null || generation !== this.#generation) return;
+    if (cache === null || generation !== this.#generation || this.#protocolBlocked) return;
     this.#syncRecoveryPending = true;
     this.#clearSyncRetryTimer();
     let state = await cache.load();
@@ -2986,6 +3000,10 @@ export class WorkspaceRuntime {
     for (;;) {
       const result = await this.#client.syncWorkspace(cursor);
       if (generation !== this.#generation) return;
+      if (result.status === "upgrade_required") {
+        this.#requireProtocolUpgrade();
+        return;
+      }
       if (result.status === "authentication_required") return;
       if (result.status === "permanent") {
         // Retrying cannot help, so the failure must be visible instead of silently going stale.
@@ -3098,11 +3116,16 @@ export class WorkspaceRuntime {
     | { readonly status: "retryable"; readonly retryAfterMs: number | null }
     | { readonly status: "blocked" }
   > {
+    if (this.#protocolBlocked) return { status: "blocked" };
     let cursor = startCursor;
     let targetHighWater: string | null = null;
     for (;;) {
       const result = await this.#client.syncWorkspace(cursor);
       if (generation !== this.#generation || this.#cache === null) {
+        return { status: "blocked" };
+      }
+      if (result.status === "upgrade_required") {
+        this.#requireProtocolUpgrade();
         return { status: "blocked" };
       }
       if (result.status === "authentication_required") return { status: "blocked" };
@@ -3544,6 +3567,7 @@ export class WorkspaceRuntime {
   }
 
   #scheduleResync(generation: number, request: number, delayMs: number): void {
+    if (this.#protocolBlocked) return;
     this.#clearResyncTimer();
     this.#resyncTimer = setTimeout(() => {
       this.#resyncTimer = null;
@@ -3554,6 +3578,7 @@ export class WorkspaceRuntime {
   }
 
   async #completeStartupAfterReplicaCatchUp(generation: number): Promise<void> {
+    if (this.#protocolBlocked) return;
     if (generation !== this.#generation || this.#cache === null) return;
     const refreshed = await this.#refreshWorkspaceMetadata(generation);
     if (!refreshed || generation !== this.#generation || this.#cache === null) {
@@ -3610,6 +3635,7 @@ export class WorkspaceRuntime {
   }
 
   async #completeStartupAfterSnapshot(generation: number): Promise<void> {
+    if (this.#protocolBlocked) return;
     if (generation !== this.#generation || this.#cache === null) return;
     this.#startupRealtimePending = true;
     await this.#repairAndFlush(generation);
@@ -3629,6 +3655,7 @@ export class WorkspaceRuntime {
   }
 
   async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
+    if (this.#protocolBlocked) return null;
     const prepared = await this.#client.startWorkspaceRealtime(after);
     if (generation !== this.#generation) {
       await this.#client.stopWorkspaceRealtime(prepared);
@@ -3649,6 +3676,7 @@ export class WorkspaceRuntime {
   }
 
   async #restartRealtime(generation: number): Promise<void> {
+    if (this.#protocolBlocked) return;
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
     const loaded = await cache.load();
@@ -4234,10 +4262,32 @@ export class WorkspaceRuntime {
     });
   }
 
+  #requireProtocolUpgrade(): void {
+    if (this.#protocolBlocked) return;
+    this.#protocolBlocked = true;
+    this.#offlineOnly = true;
+    this.#clearResyncTimer();
+    this.#resetSourceLessRetractMetadataRefresh();
+    this.#clearRetryTimer();
+    this.#clearSyncRetryTimer();
+    this.#clearMembersRetryTimer();
+    this.#setState({
+      busy: false,
+      stale: true,
+      connection: "incompatible",
+      error: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+    });
+    const scope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    this.#clearActivity(true);
+    if (scope !== null) void this.#client.stopWorkspaceRealtime(scope).catch(() => undefined);
+  }
+
   async #flushOutbox(generation: number): Promise<void> {
     const cache = this.#cache;
     if (
       this.#offlineOnly ||
+      this.#protocolBlocked ||
       this.#membershipRepairPending ||
       cache === null ||
       generation !== this.#generation
@@ -4262,6 +4312,7 @@ export class WorkspaceRuntime {
     this.#clearRetryTimer();
     try {
       for (;;) {
+        if (this.#protocolBlocked) return;
         if (!this.#isOutboxFlushOwnerCurrent(owner)) return;
         const next = nextDeliverable(this.#state.outbox, Date.now());
         if (next === undefined) {
@@ -4286,7 +4337,16 @@ export class WorkspaceRuntime {
         if (!patched || !this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) {
           return;
         }
-        const result = await this.#client.sendConversationMessage(next.operation);
+        let result: Awaited<ReturnType<DesktopApi["sendConversationMessage"]>>;
+        try {
+          result = await this.#client.sendConversationMessage(next.operation);
+        } catch {
+          // Main may retire the session before IPC can deliver its result, including when a
+          // protocol mismatch caused that retirement. Keep the same operation and idempotency key;
+          // a replacement projection owns recovery if the session changed while we awaited IPC.
+          if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
+          result = { status: "retryable", reason: "network", retryAfterMs: null };
+        }
         if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
         // A membership repair can finish while this request is still in flight. Its authoritative
         // snapshot removes revoked sends from both the cache and this projection; a late response
@@ -4320,6 +4380,22 @@ export class WorkspaceRuntime {
           }
           this.#acceptMessage(result.response.message, id, result.response.attachments ?? []);
           continue;
+        }
+        if (result.status === "upgrade_required") {
+          this.#requireProtocolUpgrade();
+          await this.#patchOutbox(
+            id,
+            {
+              status: "pending",
+              attemptCount: attempt,
+              nextAttemptAt: null,
+              failureReason: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+            },
+            owner,
+            next.operation.conversationId,
+            { status: "sending", attemptCount: attempt },
+          );
+          return;
         }
         if (result.status === "authentication_required") {
           const paused = await this.#patchOutbox(
@@ -4550,6 +4626,7 @@ export class WorkspaceRuntime {
     startCursor: string,
     retryAfterMs: number | null,
   ): void {
+    if (this.#protocolBlocked) return;
     this.#clearSyncRetryTimer();
     this.#syncAttempt += 1;
     const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
@@ -4575,6 +4652,7 @@ export class WorkspaceRuntime {
   }
 
   #scheduleSyncRetry(generation: number, retryAfterMs: number | null): void {
+    if (this.#protocolBlocked) return;
     this.#clearSyncRetryTimer();
     this.#syncAttempt += 1;
     const delay = retryAfterMs ?? retryDelay(this.#syncAttempt);
@@ -4623,6 +4701,7 @@ export class WorkspaceRuntime {
   }
 
   #scheduleNextRetry(outbox: readonly OutboxItem[], generation: number): void {
+    if (this.#protocolBlocked) return;
     const times = firstItemsByConversation(outbox)
       .filter((item) => item.status === "retry_wait" && item.nextAttemptAt !== null)
       .map((item) => Date.parse(item.nextAttemptAt as string))
@@ -4654,6 +4733,7 @@ export class WorkspaceRuntime {
   }
 
   #scheduleSourceLessRetractMetadataRetry(generation: number): void {
+    if (this.#protocolBlocked) return;
     this.#clearSourceLessRetractMetadataRetryTimer();
     this.#sourceLessRetractMetadataAttempt += 1;
     this.#sourceLessRetractMetadataRetryTimer = setTimeout(() => {

@@ -104,7 +104,7 @@ describe("operational routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/auth/magic-links",
+      url: "/v2/auth/magic-links",
       headers: { "content-type": "application/json" },
       payload: "not json",
     });
@@ -116,7 +116,7 @@ describe("operational routes", () => {
   it("returns the stable error envelope for unknown routes", async () => {
     const app = await buildApp();
     apps.push(app);
-    const response = await app.inject({ method: "GET", url: "/v1/missing" });
+    const response = await app.inject({ method: "GET", url: "/v2/missing" });
 
     expect(response.statusCode).toBe(404);
     expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("NOT_FOUND");
@@ -125,7 +125,7 @@ describe("operational routes", () => {
   it("does not register identity routes without a configured identity service", async () => {
     const app = await buildApp();
     apps.push(app);
-    const response = await app.inject({ method: "GET", url: "/v1/auth/me" });
+    const response = await app.inject({ method: "GET", url: "/v2/auth/me" });
 
     expect(response.statusCode).toBe(404);
     expect(apiErrorEnvelopeSchema.parse(response.json()).error.code).toBe("NOT_FOUND");
@@ -176,7 +176,7 @@ describe("client address trust", () => {
   ) =>
     app.inject({
       method: "POST",
-      url: "/v1/auth/magic-link",
+      url: "/v2/auth/magic-link",
       remoteAddress,
       ...(forwardedFor === undefined ? {} : { headers: { "x-forwarded-for": forwardedFor } }),
       payload: { email: "member@example.com" },
@@ -315,7 +315,7 @@ describe("realtime route", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/v1/realtime?ticket=${"a".repeat(32)}&after=0`,
+      url: `/v2/realtime?ticket=${"a".repeat(32)}&after=0`,
       headers: {
         connection: "upgrade",
         upgrade: "websocket",
@@ -344,7 +344,7 @@ describe("realtime route", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=9`,
     );
 
     const [data] = await once(socket, "message");
@@ -370,7 +370,7 @@ describe("realtime route", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${"a".repeat(32)}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=9`,
     );
     const messages: string[] = [];
     socket.on("message", (data) => messages.push(data.toString()));

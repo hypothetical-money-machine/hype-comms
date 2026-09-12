@@ -221,3 +221,10 @@ sign, publishes nothing. After that, `Get-AuthenticodeSignature` validates both 
 provenance are also still open.
 
 Do not describe the current cross-platform feed as fully signed until those independent gates pass.
+
+## Workspace protocol cutover
+
+First-party desktop and CLI operations use `/v2`, including their identity requests. Provider
+callbacks and configured inbound webhooks retain their URLs. Do not deploy this breaking change
+independently: the replay epoch, preservation fixtures, compatible packages, and maintenance-window
+rehearsal are required. Follow [the protocol runbook](workspace-protocol.md).

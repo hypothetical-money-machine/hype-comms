@@ -24,9 +24,6 @@ export const DEFAULT_AGENT_SCOPES = ["workspace:read", "messages:write"] as cons
  * owner-minted credentials keep their explicit scopes and their legacy default unchanged.
  */
 export const DEFAULT_AGENT_AGENCY_PROFILE = "default-agency-v1" as const;
-export const AGENT_EFFECTIVE_SCOPES_CAPABILITY = "agent-effective-scopes-v1" as const;
-export const AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY =
-  "agent-enrollment-review-channels-v1" as const;
 export const DEFAULT_AGENCY_AGENT_SCOPES = [
   "workspace:read",
   "messages:write",

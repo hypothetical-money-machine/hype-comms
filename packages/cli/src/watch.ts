@@ -1,19 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
-
 import {
-  ATTACHMENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
+  WORKSPACE_PROTOCOL_HEADER,
+  WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+  ephemeralActivityFrameSchema,
+  isWorkspaceProtocolMismatch,
   productRealtimeEventSchema,
   realtimeTicketResponseSchema,
   sequenceSchema,
   workspaceBootstrapResponseSchema,
   type ProductRealtimeEvent,
 } from "@hype-comms/contracts";
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 
 import { parseCommandArguments, requirePositionals, stringOption } from "./argv.js";
@@ -52,25 +49,7 @@ function syntheticResyncEvent(
     payload: { reason },
   });
 }
-
-// Negotiated on the ticket request, which is where a websocket connection
-// settles its capabilities; the socket upgrade itself carries no headers.
-// participated-thread-notifications-v1 subscribes to nothing new: a watcher
-// already receives every message.created event for the conversations it
-// belongs to. It only asks the server to annotate the thread replies that land
-// in threads this principal has already written in, which is the difference
-// between a bot that can answer a follow-up and one that has to keep its own
-// ledger of where it has spoken.
-const WATCH_CAPABILITIES = [
-  ATTACHMENTS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-].join(",");
-const PRODUCT_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
-
+const PRODUCT_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 class ResyncRequiredError extends CliError {
   constructor() {
     super({
@@ -98,12 +77,11 @@ export interface ProductRealtimeWatchOptions {
   readonly timeoutMs: number;
   readonly workspaceId: string;
   readonly random: () => number;
-  readonly capabilities?: string;
   readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
 }
 
 function websocketUrl(origin: string, ticket: string, after: string): string {
-  const url = new URL("/v1/realtime", origin);
+  const url = new URL("/v2/realtime", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("ticket", ticket);
   url.searchParams.set("after", after);
@@ -143,7 +121,7 @@ export function watchRetryDelayMs(
   requestedRetryDelay: number,
   random: () => number,
 ): number {
-  const base = Math.min(10_000, 250 * 2 ** Math.min(failures, 6));
+  const base = Math.min(10000, 250 * 2 ** Math.min(failures, 6));
   const jitter = Math.floor(base * 0.25 * random());
   return Math.min(MAX_RETRY_AFTER_MS, Math.max(base + jitter, requestedRetryDelay));
 }
@@ -153,9 +131,9 @@ export function watchRetryDelayMs(
  * repair. Command-specific projections belong in `onEvent`; ticketing, reconnects, cursor resume,
  * and websocket validation stay centralized here so machine consumers cannot drift from `watch`.
  */
-export async function watchProductRealtime(
-  input: ProductRealtimeWatchOptions,
-): Promise<{ readonly cursor: string }> {
+export async function watchProductRealtime(input: ProductRealtimeWatchOptions): Promise<{
+  readonly cursor: string;
+}> {
   let cursor = input.after;
   let stopped = false;
   let currentSocket: WebSocket | undefined;
@@ -172,11 +150,8 @@ export async function watchProductRealtime(
       try {
         const ticket = await input.client.request({
           method: "POST",
-          path: "/v1/realtime/tickets",
+          path: "/v2/realtime/tickets",
           responseSchema: realtimeTicketResponseSchema,
-          ...(input.capabilities === undefined
-            ? {}
-            : { headers: { "x-hype-comms-capabilities": input.capabilities } }),
         });
         const result = await streamOneConnection({
           origin: input.origin,
@@ -283,6 +258,12 @@ async function streamOneConnection(input: {
         rejectContract("The realtime server sent malformed JSON", error);
         return;
       }
+      const activity = ephemeralActivityFrameSchema.safeParse(value);
+      if (activity.success) {
+        if (activity.data.workspaceId !== input.workspaceId)
+          rejectContract("Realtime sent activity for the wrong workspace");
+        return;
+      }
       const parsed = productRealtimeEventSchema.safeParse(value);
       if (!parsed.success) {
         rejectContract("The realtime server sent an invalid event");
@@ -328,8 +309,24 @@ async function streamOneConnection(input: {
       });
     });
     socket.once("unexpected-response", (_request, response) => {
-      response.resume();
-      settle(unexpectedStatusError(response.statusCode ?? 500));
+      const major = response.headers[WORKSPACE_PROTOCOL_HEADER];
+      const status = response.statusCode ?? 500;
+      const mismatch = isWorkspaceProtocolMismatch({
+        status,
+        headers: { get: () => (Array.isArray(major) ? major.join(",") : (major ?? null)) },
+      });
+      response.destroy();
+      settle(
+        mismatch
+          ? new CliError({
+              exitCode: EXIT_CONTRACT,
+              code: "UPGRADE_REQUIRED",
+              message: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+              httpStatus: status,
+              retryable: false,
+            })
+          : unexpectedStatusError(status),
+      );
     });
     socket.once("error", (error) => {
       void messageTail.then(() => {
@@ -395,9 +392,8 @@ export async function watchCommand(
     throw new UsageError("--after must be an unsigned decimal cursor", "INVALID_CURSOR");
   }
   const bootstrap = await client.request({
-    path: "/v1/bootstrap",
+    path: "/v2/bootstrap",
     responseSchema: workspaceBootstrapResponseSchema,
-    headers: { "x-hype-comms-capabilities": WATCH_CAPABILITIES },
   });
   const { cursor } = await watchProductRealtime({
     client,
@@ -406,7 +402,6 @@ export async function watchCommand(
     timeoutMs: context.options.timeoutMs,
     workspaceId: bootstrap.workspace.id,
     random: context.runtime.random,
-    capabilities: WATCH_CAPABILITIES,
     onEvent(event) {
       writeEvent(context.runtime.io, event);
     },

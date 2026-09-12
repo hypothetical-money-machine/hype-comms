@@ -4,19 +4,16 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-} from "@hype-comms/contracts";
+import {} from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
 import {
   channelSummary,
   CONVERSATION_ID,
   TIMESTAMP,
+  user,
   USER_ID,
   WORKSPACE_ID,
-  user,
 } from "./fixtures.js";
 import { jsonResponse, testRuntime } from "./helpers.js";
 
@@ -36,14 +33,12 @@ function authenticatedRuntime(fetch: typeof globalThis.fetch, homeDirectory: str
 }
 
 describe("workspace conversation commands", () => {
-  it("advertises group support on one-shot sync", async () => {
+  it("syncs without capability negotiation", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      expect(url.pathname).toBe("/v1/sync");
+      expect(url.pathname).toBe("/v2/sync");
       expect(url.searchParams.get("after")).toBe("0");
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        `${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       return jsonResponse({ events: [], nextCursor: "0", highWaterCursor: "0", hasMore: false });
     });
     const runtime = authenticatedRuntime(fetch, await home());
@@ -60,7 +55,7 @@ describe("workspace conversation commands", () => {
     };
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      expect(url.pathname).toBe("/v1/channels");
+      expect(url.pathname).toBe("/v2/channels");
       expect(url.searchParams.get("limit")).toBe("50");
       expect(init?.method).toBe("GET");
       return jsonResponse(response);
@@ -77,7 +72,7 @@ describe("workspace conversation commands", () => {
     const result = { conversation: joinedSummary, syncCursor: "7" };
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/channels") {
+      if (url.pathname === "/v2/channels") {
         expect(url.searchParams.get("limit")).toBe("100");
         return jsonResponse({
           channels: [{ conversation: channelSummary().conversation, joined: false }],
@@ -85,7 +80,7 @@ describe("workspace conversation commands", () => {
           hasMore: false,
         });
       }
-      expect(url.pathname).toBe(`/v1/channels/${CONVERSATION_ID}/membership`);
+      expect(url.pathname).toBe(`/v2/channels/${CONVERSATION_ID}/membership`);
       expect(init?.method).toBe("PUT");
       expect(init?.body).toBeUndefined();
       return jsonResponse(result);
@@ -133,13 +128,11 @@ describe("workspace conversation commands", () => {
     };
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/members") return jsonResponse({ members });
-      expect(url.pathname).toBe("/v1/group-direct-conversations");
+      if (url.pathname === "/v2/members") return jsonResponse({ members });
+      expect(url.pathname).toBe("/v2/group-direct-conversations");
       expect(init?.method).toBe("POST");
       expect(new Headers(init?.headers).get("idempotency-key")).toBe("group-test-1");
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        `${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       expect(JSON.parse(String(init?.body))).toEqual({ memberIds: [USER_ID, humanId] });
       return jsonResponse(result, { status: 201 });
     });
@@ -167,7 +160,7 @@ describe("workspace conversation commands", () => {
   it("rejects duplicate group participants before creating a conversation", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       const url = new URL(String(input));
-      expect(url.pathname).toBe("/v1/members");
+      expect(url.pathname).toBe("/v2/members");
       return jsonResponse({ members: [user()] });
     });
     const runtime = authenticatedRuntime(fetch, await home());

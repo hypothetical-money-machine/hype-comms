@@ -21,7 +21,7 @@ contract tests.
   My Tasks view may also include tasks assigned to that member from visible channel projects.
   Ordinary two-person DMs remain chat-only.
 - The supported clients are macOS (Apple silicon and Intel), Windows 11 (x64 and ARM64), and
-  Linux (x64 and ARM64) AppImage/Debian packages. Electron is currently the only client. Support
+  Linux (x64 and ARM64) AppImage/Debian packages. Electron and the TypeScript CLI are first-party clients. Support
   does not require optional capabilities to land simultaneously: feature scope and rollout evidence
   are platform-specific by default. Untargeted
   clients must retain safe existing behavior and shared wire contracts remain compatible.
@@ -110,7 +110,7 @@ Cloudflare DNS/WAF/TLS  --->  AWS ALB  --->  Fastify on ECS Fargate
 ```
 
 The packaged client API is `https://chat-api.example.invalid`; realtime uses
-`wss://chat-api.example.invalid/v1/realtime`. The email landing page is
+`wss://chat-api.example.invalid/v2/realtime`. The email landing page is
 `https://chat.hypemm.com/auth/verify`. Stable releases register `hype-comms://auth/callback`.
 Local packages default to the separate `Hype Comms DEV` identity and register
 `hype-comms-dev://auth/callback`, so both applications can be installed and signed in at once.
@@ -193,7 +193,8 @@ conversations.
 
 ## HTTP and realtime interface
 
-All product endpoints are under `/v1`, accept and return JSON unless transferring directly
+First-party product endpoints are under `/v2`; externally configured callback and inbound webhook
+URLs remain stable. Requests accept and return JSON unless transferring directly
 to S3, and are validated by shared strict schemas. Success responses contain canonical
 entities and the committed sync cursor where applicable. Errors use
 `{ error: { code, message, requestId, details? } }`; production messages are safe for users
@@ -221,46 +222,46 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | Route                                                                         | Contract                                                                                                                                  |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /livez`, `GET /readyz`                                                   | Process liveness and dependency readiness; no sensitive diagnostic data.                                                                  |
-| `GET /v1/auth/capabilities`                                                   | Discover the additive AuthKit and self-service magic-link methods without exposing configuration.                                         |
-| `POST /v1/auth/magic-link`                                                    | Uniformly accept an invited/active email when self-service delivery is enabled; never reveal membership.                                  |
-| `POST /v1/auth/desktop-authorizations`, `GET /v1/auth/workos/callback`        | Start dual-PKCE AuthKit in the system browser, then return a credential-free Hype Comms handoff to the fixed desktop scheme.              |
-| `POST /v1/auth/exchange`                                                      | Exchange a five-minute desktop-PKCE handoff once, set the existing HttpOnly `hype_comms_session` cookie, and return the current local user.       |
-| `POST /v1/auth/session/refresh`, `DELETE /v1/auth/session`                    | Rotate the local device credential or revoke the current device session.                                                                  |
+| `GET /v2/auth/capabilities`                                                   | Discover the additive AuthKit and self-service magic-link methods without exposing configuration.                                         |
+| `POST /v2/auth/magic-link`                                                    | Uniformly accept an invited/active email when self-service delivery is enabled; never reveal membership.                                  |
+| `POST /v2/auth/desktop-authorizations`, `GET /v1/auth/workos/callback`        | Start dual-PKCE AuthKit in the system browser, then return a credential-free Hype Comms handoff to the fixed desktop scheme.              |
+| `POST /v2/auth/exchange`                                                      | Exchange a five-minute desktop-PKCE handoff once, set the existing HttpOnly `hype_comms_session` cookie, and return the current local user.       |
+| `POST /v2/auth/session/refresh`, `DELETE /v2/auth/session`                    | Rotate the local device credential or revoke the current device session.                                                                  |
 | `POST /v1/auth/workos/webhook`                                                | Verify the exact signed raw WorkOS event and idempotently apply upstream session revocation.                                               |
-| `GET /v1/sessions`, `DELETE /v1/sessions/:id`                                 | List and revoke the caller's other device sessions.                                                                                       |
-| `GET /v1/bootstrap`                                                           | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
-| `GET /v1/members`                                                             | Active member directory for DMs and mention completion.                                                                                   |
-| `GET /v1/invitations`, `POST /v1/invitations`, `DELETE /v1/invitations/:id`   | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
-| `GET/POST /v1/agents`, `DELETE /v1/agents/:id`                                | Owner-only list/create/disable for non-email agent members; active agents share workspace capacity with people and bots.                  |
-| `GET/POST /v1/agents/:id/tokens`, `DELETE .../:tokenId`                       | Owner-only list/create/revoke for one-time agent tokens; metadata never returns plaintext or token hashes.                                |
-| `GET/PATCH /v1/agent-enrollment-policy`                                      | Owner-only read/update of the explicit `required` or `automatic` workspace policy; new workspaces default to `required`.                  |
-| `POST /v1/agent-enrollments`, `GET /v1/agent-enrollments[/:id]`               | An owner or agent with `agents:invite` requests and reads its enrollments; owners can read the workspace queue. Requests are idempotent and carry a child-generated verifier, immutable identity, label, and restricted-channel seats. A capable owner list may add only the ID and name of each channel on an open enrollment. |
-| `POST /v1/agent-enrollments/:id/review`, `POST .../:id/cancel`                 | An owner approves/rejects; an owner or original requester cancels an open enrollment. State transitions are bounded and audited.          |
-| `POST /v1/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
-| `GET /v1/conversations`, `POST /v1/channels`, `PATCH /v1/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
-| `GET /v1/channels`, `PUT /v1/channels/:id/membership`                         | Page discoverable public-channel metadata or idempotently self-join one active public channel; private and archived channels remain hidden. |
-| `GET /v1/channels/:id/members`, `PUT/DELETE /v1/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
-| `POST /v1/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it. A `workspace:read` agent may reopen its existing DM; creation requires narrow `direct-conversations:write` or legacy `conversations:write`. |
-| `POST /v1/group-direct-conversations`                                         | Idempotently create a fixed-membership group for the caller plus 2–24 distinct active human or agent members in the same workspace.       |
-| `GET /v1/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `agent-context-pack-v1` adds a bounded, anchored agent projection without changing the legacy shape. |
-| `POST /v1/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`; agent attachment IDs additionally require `attachments:write`. |
-| `GET /v1/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
-| `POST /v1/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
-| `PUT /v1/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
-| `PUT /v1/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
-| `GET/POST /v1/conversations/:id/tasks`                                        | Page a channel/self-DM project or idempotently add its next numbered task. Human cookies or channel-granted bot bearer credentials with the matching task scope are accepted. |
-| `GET/POST /v1/channels/:slug/tasks`, `GET /v1/channels/:slug/tasks/:number`    | Bot-friendly channel aliases for filtered board listing, idempotent creation, and stable lookup by the channel-local task number.          |
-| `GET /v1/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels. For a bot, this means assigned tasks in explicitly granted channels. |
-| `GET /v1/tasks/:id`                                                           | Return one authorized canonical task by UUID without scanning its board.                                                                  |
-| `PATCH /v1/tasks/:id`, `POST /v1/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version. Bot callers require `tasks:write`.                       |
-| `POST /v1/files/uploads`, `PUT /v1/files/:id/content`, `POST .../:id/complete` | Create a 15-minute quarantine upload, write its bytes, and confirm hash/size. Agent credentials require explicit `attachments:write`.     |
-| `GET /v1/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
-| `GET /v1/conversations/:id/files`, `POST /v1/attachments/query`               | List ready files in one visible conversation or for bounded visible message IDs; agents require `workspace:read`. `attachments-v1` affects shape, not authority. |
-| `GET /v1/files/:id/content`                                                   | Stream one ready, visible attachment with bounded length and a SHA-256 response header for non-desktop clients; agents require `workspace:read`. |
-| `GET /v1/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
-| `GET /v1/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
-| `POST /v1/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the human device session or agent token for a WSS connection; never return the access credential. |
-| `GET /v1/desktop/releases/latest`                                             | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
+| `GET /v2/sessions`, `DELETE /v2/sessions/:id`                                 | List and revoke the caller's other device sessions.                                                                                       |
+| `GET /v2/bootstrap`                                                           | Current user/workspace, active members, conversation summaries, read state, feature flags, and current sync cursor; no unbounded history. |
+| `GET /v2/members`                                                             | Active member directory for DMs and mention completion.                                                                                   |
+| `GET /v2/invitations`, `POST /v2/invitations`, `DELETE /v2/invitations/:id`   | Owner-only list/create/revoke; enforce normalized-email uniqueness, expiry, and capacity.                                                 |
+| `GET/POST /v2/agents`, `DELETE /v2/agents/:id`                                | Owner-only list/create/disable for non-email agent members; active agents share workspace capacity with people and bots.                  |
+| `GET/POST /v2/agents/:id/tokens`, `DELETE .../:tokenId`                       | Owner-only list/create/revoke for one-time agent tokens; metadata never returns plaintext or token hashes.                                |
+| `GET/PATCH /v2/agent-enrollment-policy`                                      | Owner-only read/update of the explicit `required` or `automatic` workspace policy; new workspaces default to `required`.                  |
+| `POST /v2/agent-enrollments`, `GET /v2/agent-enrollments[/:id]`               | An owner or agent with `agents:invite` requests and reads its enrollments; owners can read the workspace queue. Requests are idempotent and carry a child-generated verifier, immutable identity, label, and restricted-channel seats. A capable owner list may add only the ID and name of each channel on an open enrollment. |
+| `POST /v2/agent-enrollments/:id/review`, `POST .../:id/cancel`                 | An owner approves/rejects; an owner or original requester cancels an open enrollment. State transitions are bounded and audited.          |
+| `POST /v2/agent-enrollments/:id/redeem`                                       | The unauthenticated child proves possession through the enrollment authorization scheme; activation is atomic and returns no credential. |
+| `GET /v2/conversations`, `POST /v2/channels`, `PATCH /v2/channels/:id`        | List visible summaries, create a workspace-visible or members-only channel, or archive a visible channel as workspace owner.              |
+| `GET /v2/channels`, `PUT /v2/channels/:id/membership`                         | Page discoverable public-channel metadata or idempotently self-join one active public channel; private and archived channels remain hidden. |
+| `GET /v2/channels/:id/members`, `PUT/DELETE /v2/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
+| `POST /v2/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it. A `workspace:read` agent may reopen its existing DM; creation requires narrow `direct-conversations:write` or legacy `conversations:write`. |
+| `POST /v2/group-direct-conversations`                                         | Idempotently create a fixed-membership group for the caller plus 2–24 distinct active human or agent members in the same workspace.       |
+| `GET /v2/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `agent-context-pack-v1` adds a bounded, anchored agent projection without changing the legacy shape. |
+| `POST /v2/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`; agent attachment IDs additionally require `attachments:write`. |
+| `GET /v2/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
+| `POST /v2/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
+| `PUT /v2/messages/:id/reactions/:emoji`, `DELETE ...`                         | Idempotently add/remove the caller's normalized Unicode reaction.                                                                         |
+| `PUT /v2/conversations/:id/read-cursor`                                       | Advance through `lastReadMessageId`; never move backward.                                                                                 |
+| `GET/POST /v2/conversations/:id/tasks`                                        | Page a channel/self-DM project or idempotently add its next numbered task. Human cookies or channel-granted bot bearer credentials with the matching task scope are accepted. |
+| `GET/POST /v2/channels/:slug/tasks`, `GET /v2/channels/:slug/tasks/:number`    | Bot-friendly channel aliases for filtered board listing, idempotent creation, and stable lookup by the channel-local task number.          |
+| `GET /v2/tasks/mine`                                                          | Page the caller's personal tasks plus assigned tasks from currently visible, non-archived channels. For a bot, this means assigned tasks in explicitly granted channels. |
+| `GET /v2/tasks/:id`                                                           | Return one authorized canonical task by UUID without scanning its board.                                                                  |
+| `PATCH /v2/tasks/:id`, `POST /v2/tasks/:id/move`                              | Idempotently edit fields or move/reorder a task with an expected entity version. Bot callers require `tasks:write`.                       |
+| `POST /v2/files/uploads`, `PUT /v2/files/:id/content`, `POST .../:id/complete` | Create a 15-minute quarantine upload, write its bytes, and confirm hash/size. Agent credentials require explicit `attachments:write`.     |
+| `GET /v2/files/:id/download`                                                  | For an authorized ready file, return a five-minute signed download URL.                                                                   |
+| `GET /v2/conversations/:id/files`, `POST /v2/attachments/query`               | List ready files in one visible conversation or for bounded visible message IDs; agents require `workspace:read`. `attachments-v1` affects shape, not authority. |
+| `GET /v2/files/:id/content`                                                   | Stream one ready, visible attachment with bounded length and a SHA-256 response header for non-desktop clients; agents require `workspace:read`. |
+| `GET /v2/search`                                                              | Query authorized message text with ranked opaque-cursor pagination.                                                                       |
+| `GET /v2/sync?after=...`                                                      | Return authorized events, next scanned cursor, high-water cursor, and `hasMore`; `410 CURSOR_EXPIRED` requires bootstrap.                 |
+| `POST /v2/realtime/tickets`                                                   | Issue a single-use 30-second ticket bound to the human device session or agent token for a WSS connection; never return the access credential. |
+| `GET /v2/desktop/releases/latest`                                             | Authenticated metadata for the caller's platform/architecture and a short-lived signed artifact URL.                                      |
 
 The app requests a magic link only after generating a verifier and challenge. The emailed
 HTTPS URL lands at `https://chat.hypemm.com/auth/verify`, consumes the hashed single-use
@@ -281,7 +282,7 @@ the token. Credential-specific schemas and authorization remain separate: malfor
 cannot fall back to a human cookie, and identity routes reject mixed cookie/Bearer credentials.
 
 Main obtains a single-use realtime ticket over authenticated HTTP, then opens
-`wss://chat-api.example.invalid/v1/realtime?ticket=...&after=...`. The ticket expires after 30
+`wss://chat-api.example.invalid/v2/realtime?ticket=...&after=...`. The ticket expires after 30
 seconds, is stored only as a hash, is consumed atomically during upgrade, and is bound to the
 issuing member/device session. Bearer and refresh credentials never appear in WebSocket
 headers, URLs, or subprotocols. The server first replays authorized retained events after
@@ -308,32 +309,26 @@ delivery at the last acknowledged cursor. Shared event schemas also verify canon
 relations—such as message conversation/sequence/version and task workspace/conversation/version—
 for both WebSocket and HTTP sync before either path can reach the encrypted replica.
 
-Reaction, task, and read-state events are capability-gated for rolling compatibility. A client
-advertises `reaction-events-v1`, `task-events-v1`, and `read-state-events-v1` through
-`X-Hype-Comms-Capabilities` on both
-`GET /v1/sync` and `POST /v1/realtime/tickets`. Clients without a capability do not receive its
-events, but the server still advances their scanned cursor past those events so released clients
-neither fail strict parsing nor loop on an unsupported event.
+Workspace protocol 2 uses one current entity/event shape on `/v2`. Clients no longer send
+`X-Hype-Comms-Capabilities`, and tickets contain identity and expiry rather than feature booleans.
+History returns roots with bounded thread summaries. Authorized group and system conversations,
+reactions, tasks, read counts, member profiles, and recipient-specific notification reasons are
+part of the canonical contract. Feature availability and authorization do not select JSON shapes.
 
-Thread summaries are capability-gated separately because conversation-history responses are
-strict. A current client advertises `threads-v1` on
-`GET /v1/conversations/:id/messages`; the server then adds bounded reply-count and latest-reply
-metadata for the roots in that page and sets `threadsSupported: true`. Without the capability the
-server returns the previous exact history shape, stripping both the summaries and support flag,
-and continues paginating replies inline. Current clients default an absent summary collection and
-an absent `threadsSupported` flag to empty and `false`, respectively, so a rolled-back or
-immediately previous server remains readable and can be distinguished during a rolling upgrade.
+The server supports one protocol major at a time. Unsupported versioned endpoints return HTTP
+426 with the existing `CONFLICT` error envelope and an upgrade message before accessing data.
+Responses identify the supported major through `x-hype-comms-protocol: 2`; this distinguishes a
+current resource 404 from an older server's unmarked `/v2` 404. Desktop stops automatic retries
+and retains credentials, cache authorization, and pending local work. The CLI reports a
+nonretryable `UPGRADE_REQUIRED` error. Transient gateway failures remain retryable.
 
-Group direct messages use a separate `group-direct-messages-v1` capability because the immediately
-previous desktop could mistake a group for a one-to-one conversation and conceal recipients. For a
-client without that capability, conversation lists and message search exclude groups in SQL before
-applying `LIMIT`, so hidden rows cannot create empty middle pages or starve later visible results.
-HTTP sync and realtime use the same rule: group events are not delivered, but each scanned event
-still advances the client's cursor. An older client may continue using unrelated workspace routes;
-if it presents a known group conversation, message, or file ID to a group-aware route, the server
-returns an update-required conflict before any mutation. Normal authorization and resource-state
-checks still run first where necessary, so this response cannot reveal a retracted message or
-another participant's staged file.
+Provider callbacks and configured inbound webhooks retain their existing URLs:
+`/auth/magic-link`, `/v1/auth/workos/callback`, `/v1/auth/workos/webhook`, and
+`/v1/webhooks/incoming/:token`. Stored `/v1` idempotency route keys also remain unchanged; they
+identify accepted operations and must survive an HTTP URL change.
+
+See [the protocol cutover runbook](workspace-protocol.md). The protocol-2 branch must not deploy
+until the durable replay epoch, local-work migration, and coordinated release rehearsal are ready.
 
 Every domain envelope adds `cursor`, `version`, event ID/type, occurrence time, workspace
 and optional conversation IDs, and a typed payload. Workspace-channel events target active
@@ -529,7 +524,7 @@ requesting current state so a startup response cannot replace a newer update.
   inserts an older hit into the cached timeline when needed, and highlights it.
 - Reactions are grouped by emoji beneath each main-timeline message. The quick picker toggles the
   current member's reaction, archived conversations expose reactions read-only, history pages
-  batch-hydrate current state, and capability-gated sync/realtime events converge other devices.
+  batch-hydrate current state, and canonical sync/realtime events converge other devices.
 - Channels expose Chat and Tasks panes, with Board as the default task view and List as an option.
   The Board has fixed To do, In progress, and Done columns with canonical drag/drop and keyboard
   reordering. A message can create a source-linked task. The self-DM defaults to My Tasks in List
@@ -544,7 +539,7 @@ requesting current state so a startup response cannot replace a newer update.
 - Native notifications follow the main/renderer, freshness, and action boundaries described here.
   Milestones 0 through 3 are implemented and
   covered deterministically, including direct messages, verified mentions, and the
-  capability-gated recipient-specific `participated_thread_reply` reason. Main applies precedence
+  recipient-specific `participated_thread_reply` reason. Main applies precedence
   in that order: verified mention, direct message, then participated-thread reply. It never infers
   participation from local thread state.
 - The implementation is compiled off unless the build-time
@@ -676,7 +671,7 @@ most 20 live messages from one already-authorized conversation in a repeatable-r
 resolves authors from the member records, and derives `mentionedYou` from verified mention rows.
 It returns a canonical `#slug` or `@peer` selector, the anchor's one-level-thread reply target, and
 an optional root outside the tail. The pack is capped at 64 KiB by dropping whole oldest messages;
-ordinary history and clients that do not negotiate the capability keep their previous wire shape.
+ordinary history remains a separate canonical response.
 An anchored context `NOT_FOUND` covers both an unavailable trigger and a conversation that is no
 longer visible. The adapter checkpoints that event without inference or read-state mutation, keeping
 the privacy-preserving 404 and preventing one unavailable wake from poisoning every reconnect.

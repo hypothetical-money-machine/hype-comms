@@ -10,7 +10,6 @@ export type CanViewConversation = (
   workspaceId: string,
   userId: string,
   conversationId: string,
-  includeGroupDirectMessages: boolean,
 ) => Promise<boolean>;
 
 export interface EphemeralActivityConnection {
@@ -64,7 +63,7 @@ export class EphemeralActivityHub {
     connection: EphemeralActivityConnection,
     initialPresence: Exclude<PresenceState, "offline"> = "online",
   ): void {
-    if (!connection.principal.ephemeralActivity || this.#connections.has(connection.id)) return;
+    if (this.#connections.has(connection.id)) return;
 
     const existingPresence = this.#workspacePresence(connection.principal.workspaceId);
     const previousState = this.#presenceFor(
@@ -73,7 +72,7 @@ export class EphemeralActivityHub {
     );
     this.#connections.set(connection.id, { ...connection, presence: initialPresence });
 
-    // An automated principal may consume activity when capable, but never contributes a presence
+    // An automated principal may consume activity, but never contributes a presence
     // state. Human availability is represented only by device-session-backed connections.
     for (const [userId, state] of existingPresence) {
       connection.send(this.#presenceFrame(connection.principal.workspaceId, userId, state));
@@ -133,7 +132,6 @@ export class EphemeralActivityHub {
         connection.principal.workspaceId,
         connection.principal.userId,
         conversationId,
-        connection.principal.groupDirectMessages ?? false,
       );
       if (!authorized || this.#connections.get(connectionId) !== connection) {
         await this.#removeTypingDevice(connection, conversationId);
@@ -312,34 +310,21 @@ export class EphemeralActivityHub {
     userId: string,
     typing: boolean,
   ): Promise<void> {
-    // One user can have an older and an upgraded device connected at once. Keep their tickets in
-    // separate authorization buckets so a decision for the upgraded device never covers the old
-    // device as well.
-    const recipients = new Map<string, Map<boolean, RegisteredConnection[]>>();
+    const recipients = new Map<string, RegisteredConnection[]>();
     for (const connection of this.#connections.values()) {
       if (connection.principal.workspaceId !== workspaceId) continue;
-      const capabilityGroups = recipients.get(connection.principal.userId) ?? new Map();
-      recipients.set(connection.principal.userId, capabilityGroups);
-      const includeGroupDirectMessages = connection.principal.groupDirectMessages ?? false;
-      const devices = capabilityGroups.get(includeGroupDirectMessages) ?? [];
+      const devices = recipients.get(connection.principal.userId) ?? [];
       devices.push(connection);
-      capabilityGroups.set(includeGroupDirectMessages, devices);
+      recipients.set(connection.principal.userId, devices);
     }
-    // A failed authorization read fails closed for that recipient only. Broadcasts run from the
-    // maintenance timer and disconnect paths that cannot surface a rejection, so this method must
-    // never reject.
+    // Failed authorization affects only this recipient; timer and disconnect delivery cannot reject.
     const decisions = await Promise.all(
-      [...recipients].flatMap(([recipientUserId, capabilityGroups]) =>
-        [...capabilityGroups].map(async ([includeGroupDirectMessages, devices]) => ({
-          devices,
-          visible: await this.canViewConversation(
-            workspaceId,
-            recipientUserId,
-            conversationId,
-            includeGroupDirectMessages,
-          ).catch(() => false),
-        })),
-      ),
+      [...recipients].map(async ([recipientUserId, devices]) => ({
+        devices,
+        visible: await this.canViewConversation(workspaceId, recipientUserId, conversationId).catch(
+          () => false,
+        ),
+      })),
     );
     const frame = {
       version: 1,

@@ -479,17 +479,17 @@ describe("AuthKit routes", () => {
       stagedCallback,
       stagedExchange,
     ] = await Promise.all([
-      disabled.inject({ method: "GET", url: "/v1/auth/capabilities" }),
-      staged.inject({ method: "GET", url: "/v1/auth/capabilities" }),
-      enabled.inject({ method: "GET", url: "/v1/auth/capabilities" }),
+      disabled.inject({ method: "GET", url: "/v2/auth/capabilities" }),
+      staged.inject({ method: "GET", url: "/v2/auth/capabilities" }),
+      enabled.inject({ method: "GET", url: "/v2/auth/capabilities" }),
       disabled.inject({
         method: "POST",
-        url: "/v1/auth/desktop-authorizations",
+        url: "/v2/auth/desktop-authorizations",
         payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
       }),
       staged.inject({
         method: "POST",
-        url: "/v1/auth/desktop-authorizations",
+        url: "/v2/auth/desktop-authorizations",
         payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
       }),
       staged.inject({
@@ -498,7 +498,7 @@ describe("AuthKit routes", () => {
       }),
       staged.inject({
         method: "POST",
-        url: "/v1/auth/exchange",
+        url: "/v2/auth/exchange",
         payload: {
           code: HANDOFF_CODE,
           codeVerifier: "d".repeat(43),
@@ -554,17 +554,17 @@ describe("AuthKit routes", () => {
 
     const authKitResponse = await app.inject({
       method: "DELETE",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       headers,
     });
     const magicLinkResponse = await app.inject({
       method: "DELETE",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       headers,
     });
     const invalidProviderResponse = await app.inject({
       method: "DELETE",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       headers,
     });
 
@@ -604,7 +604,7 @@ describe("AuthKit routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
     });
 
@@ -634,12 +634,12 @@ describe("AuthKit routes", () => {
 
     const production = await app.inject({
       method: "POST",
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
     });
     const development = await app.inject({
       method: "POST",
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       payload: {
         codeChallenge: CODE_CHALLENGE,
         state: DESKTOP_STATE,
@@ -648,7 +648,7 @@ describe("AuthKit routes", () => {
     });
     const unknown = await app.inject({
       method: "POST",
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE, variant: "preview" },
     });
 
@@ -685,7 +685,7 @@ describe("AuthKit routes", () => {
     apps.push(app);
     const request = {
       method: "POST" as const,
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
     };
 
@@ -726,7 +726,7 @@ describe("AuthKit routes", () => {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const response = await app.inject({
         method: "POST",
-        url: "/v1/auth/desktop-authorizations",
+        url: "/v2/auth/desktop-authorizations",
         remoteAddress: "192.0.2.20",
         headers: { "x-forwarded-for": attempt % 2 === 0 ? "198.51.100.10" : "203.0.113.10" },
         payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
@@ -736,7 +736,7 @@ describe("AuthKit routes", () => {
 
     const throttled = await app.inject({
       method: "POST",
-      url: "/v1/auth/desktop-authorizations",
+      url: "/v2/auth/desktop-authorizations",
       remoteAddress: "192.0.2.20",
       headers: { "x-forwarded-for": "203.0.113.11" },
       payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
@@ -765,7 +765,7 @@ describe("AuthKit routes", () => {
     const injectFrom = (clientIp: string) =>
       app.inject({
         method: "POST",
-        url: "/v1/auth/desktop-authorizations",
+        url: "/v2/auth/desktop-authorizations",
         remoteAddress: "10.20.30.40",
         headers: { "x-forwarded-for": clientIp },
         payload: { codeChallenge: CODE_CHALLENGE, state: DESKTOP_STATE },
@@ -1013,10 +1013,10 @@ describe("AuthKit routes", () => {
     const [malformed, rejected] = await Promise.all([
       app.inject({
         method: "POST",
-        url: "/v1/auth/exchange",
+        url: "/v2/auth/exchange",
         payload: { ...request, code: "too-short" },
       }),
-      app.inject({ method: "POST", url: "/v1/auth/exchange", payload: request }),
+      app.inject({ method: "POST", url: "/v2/auth/exchange", payload: request }),
     ]);
 
     expect(malformed.statusCode).toBe(400);
@@ -1049,7 +1049,7 @@ describe("AuthKit routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/auth/exchange",
+      url: "/v2/auth/exchange",
       headers: { "user-agent": "Hype Comms integration test" },
       payload: {
         code: HANDOFF_CODE,

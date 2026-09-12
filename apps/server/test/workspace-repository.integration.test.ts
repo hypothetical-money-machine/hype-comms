@@ -3,19 +3,19 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AGENT_CONTEXT_PACK_MAX_BYTES,
+  agentContextHistoryResponseSchema,
   COMMUNICATION_PATHS_MAX_PATHS,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
+  injectionSafeCompactJsonByteLength,
   REACTIONS_PER_MEMBER_PER_MESSAGE_MAX,
   REACTIONS_PER_MESSAGE_MAX,
   type AgentCurrentPrincipal,
-  agentContextHistoryResponseSchema,
-  injectionSafeCompactJsonByteLength,
   type CreateTaskRequest,
   type CurrentUser,
   type SendConversationMessageRequest,
@@ -34,9 +34,9 @@ import {
   type AttachmentStore,
 } from "../src/modules/workspace/file-store.js";
 import {
+  WorkspaceRepository,
   type AnnouncementAuditRecord,
   type WorkspaceRepositoryHooks,
-  WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 import { createTestDatabase, type TestDatabase } from "./support/database.js";
@@ -372,13 +372,13 @@ describe("WorkspaceRepository", () => {
     const advanced = await repository.advanceReadCursor(member, generalId, rendered.message.id);
     const legacySync = await repository.sync(member, committedAfterRender.syncCursor, 100);
     const legacyReadEvent = legacySync.events.find((event) => event.type === "read_cursor.updated");
-    expect(legacyReadEvent?.payload).toEqual({
+    expect(legacyReadEvent?.payload).toMatchObject({
       readCursor: expect.objectContaining({ lastReadMessageId: rendered.message.id }),
+      unreadCount: 1,
+      mentionCount: 1,
     });
 
-    const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100, {
-      readStateEvents: true,
-    });
+    const memberSync = await repository.sync(member, committedAfterRender.syncCursor, 100);
     const readEvent = memberSync.events.find((event) => event.type === "read_cursor.updated");
     expect(readEvent).toMatchObject({
       workspaceSequence: advanced.syncCursor,
@@ -483,12 +483,10 @@ describe("WorkspaceRepository", () => {
 
     const afterCreate = channel.syncCursor;
     const legacy = await repository.sync(observer, afterCreate, 100);
-    expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(false);
+    expect(legacy.events.some((event) => event.type === "message.retracted")).toBe(true);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(observer, afterCreate, 100, {
-      messageRetractEvents: true,
-    });
+    const capable = await repository.sync(observer, afterCreate, 100);
     const retractEvents = capable.events.filter((event) => event.type === "message.retracted");
     expect(retractEvents).toEqual(
       expect.arrayContaining([
@@ -516,9 +514,7 @@ describe("WorkspaceRepository", () => {
       retractEvents.some((event) => event.conversationId === direct.conversation.conversation.id),
     ).toBe(false);
 
-    const dmCapable = await repository.sync(member, dm.syncCursor, 100, {
-      messageRetractEvents: true,
-    });
+    const dmCapable = await repository.sync(member, dm.syncCursor, 100);
     expect(
       dmCapable.events.filter(
         (event) =>
@@ -616,7 +612,7 @@ describe("WorkspaceRepository", () => {
       message: replayError.message,
     }).toEqual({ kind: "not_found", message: "Message not found" });
 
-    const sync = await repository.sync(observer, "0", 100, { messageRetractEvents: true });
+    const sync = await repository.sync(observer, "0", 100);
     expect(sync.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -691,14 +687,6 @@ describe("WorkspaceRepository", () => {
         latestReply: replies[2]?.message,
       },
     ]);
-
-    const legacyHistory = await repository.history(member, generalId, undefined, 50, true);
-    expect(legacyHistory.messages.map((entry) => entry.id)).toEqual([
-      root.message.id,
-      ...replies.map((entry) => entry.message.id),
-    ]);
-    expect(legacyHistory.threadSummaries).toEqual([]);
-    expect(legacyHistory.threadsSupported).toBe(false);
 
     const latestPage = await repository.thread(member, root.message.id, undefined, 2);
     expect(latestPage.root).toEqual(root.message);
@@ -1173,14 +1161,11 @@ describe("WorkspaceRepository", () => {
         channelMode: "announcement",
       },
       undefined,
-      true,
     );
     const announcementId = created.conversation.conversation.id;
     expect(created.conversation.conversation.channelMode).toBe("announcement");
     const legacySync = await repository.sync(member, "0", 100);
-    const capableSync = await repository.sync(member, "0", 100, {
-      announcementChannels: true,
-    });
+    const capableSync = await repository.sync(member, "0", 100);
     const legacyCreated = legacySync.events.find(
       (event) => event.type === "channel.created" && event.conversationId === announcementId,
     );
@@ -1189,7 +1174,7 @@ describe("WorkspaceRepository", () => {
     );
     expect(legacyCreated?.payload).toEqual(
       expect.objectContaining({
-        conversation: expect.not.objectContaining({ channelMode: expect.anything() }),
+        conversation: expect.objectContaining({ channelMode: "announcement" }),
       }),
     );
     expect(capableCreated?.payload).toEqual(
@@ -1209,7 +1194,6 @@ describe("WorkspaceRepository", () => {
           channelMode: "announcement",
         },
         undefined,
-        true,
       ),
     ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
     await expect(
@@ -1219,18 +1203,8 @@ describe("WorkspaceRepository", () => {
       }),
     ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
-    await expect(
-      repository.sendMessage(owner, announcementId, {
-        ...message(randomUUID(), "legacy owner root"),
-        mentionedUserIds: [],
-      }),
-    ).rejects.toMatchObject({
-      kind: "access_denied",
-      message: "A compatible client is required to post bulletins",
-    } satisfies Partial<DomainError>);
-
     const request = { ...message(randomUUID(), "owner bulletin"), mentionedUserIds: [] };
-    const bulletin = await repository.sendMessage(owner, announcementId, request, undefined, true);
+    const bulletin = await repository.sendMessage(owner, announcementId, request, undefined);
     const reply = await repository.sendMessage(member, announcementId, {
       ...message(randomUUID(), "member reply"),
       threadRootId: bulletin.message.id,
@@ -1301,14 +1275,6 @@ describe("WorkspaceRepository", () => {
           conversationId: announcementId,
           reason: "not_authorized",
         }),
-        expect.objectContaining({
-          operation: "bulletin.publish",
-          outcome: "rejected",
-          actorUserId: ownerId,
-          workspaceId,
-          conversationId: announcementId,
-          reason: "capability_required",
-        }),
       ]),
     );
     expect(audits.every((audit) => !("body" in audit))).toBe(true);
@@ -1329,7 +1295,6 @@ describe("WorkspaceRepository", () => {
         channelMode: "announcement",
       },
       undefined,
-      true,
     );
     const announcementId = created.conversation.conversation.id;
     const legacyTaskId = randomUUID();
@@ -1430,7 +1395,6 @@ describe("WorkspaceRepository", () => {
             channelMode: "announcement",
           },
           undefined,
-          true,
         )
       ).conversation.conversation.id;
 
@@ -1446,7 +1410,6 @@ describe("WorkspaceRepository", () => {
         mentionedUserIds: [],
       },
       undefined,
-      true,
     );
     const removal = await pool.connect();
     try {
@@ -1501,7 +1464,6 @@ describe("WorkspaceRepository", () => {
             mentionedUserIds: [],
           },
           undefined,
-          true,
         ),
       );
       await expectBlocked(attempt.isSettled);
@@ -1536,7 +1498,6 @@ describe("WorkspaceRepository", () => {
             mentionedUserIds: [],
           },
           undefined,
-          true,
         ),
       );
       await expectBlocked(attempt.isSettled);
@@ -1552,7 +1513,7 @@ describe("WorkspaceRepository", () => {
     }
   });
 
-  it("keeps pre-cutover events legacy-shaped and makes availability one-way across nodes", async () => {
+  it("stores canonical events and keeps availability one-way across nodes", async () => {
     expect(new WorkspaceRepository(pool).announcementChannelsEnabled).toBe(false);
     const rolloutRepository = new WorkspaceRepository(pool, {
       announcementChannelsEnabled: false,
@@ -1571,7 +1532,6 @@ describe("WorkspaceRepository", () => {
           channelMode: "announcement",
         },
         undefined,
-        true,
       ),
     ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
 
@@ -1589,27 +1549,12 @@ describe("WorkspaceRepository", () => {
         WHERE conversation_id = $1 AND event_type = 'channel.created'`,
       [compatibleChat.conversation.conversation.id],
     );
-    expect(legacyStored.rows[0]?.payload.conversation).not.toHaveProperty("channelMode");
+    expect(legacyStored.rows[0]?.payload.conversation).toHaveProperty("channelMode", "chat");
 
     const enabledRepository = new WorkspaceRepository(pool, {
       announcementChannelsEnabled: true,
     });
     expect((await enabledRepository.bootstrap(owner)).featureFlags.announcementChannels).toBe(true);
-    await expect(
-      enabledRepository.createChannel(
-        owner,
-        {
-          name: "Incapable Announcement",
-          slug: "incapable-announcement",
-          topic: null,
-          access: "workspace",
-          channelMode: "announcement",
-        },
-        undefined,
-        false,
-      ),
-    ).rejects.toMatchObject({ kind: "access_denied" } satisfies Partial<DomainError>);
-
     const announcement = await enabledRepository.createChannel(
       owner,
       {
@@ -1620,7 +1565,6 @@ describe("WorkspaceRepository", () => {
         channelMode: "announcement",
       },
       undefined,
-      true,
     );
     expect((await rolloutRepository.bootstrap(owner)).featureFlags.announcementChannels).toBe(true);
     await rolloutRepository.archiveChannel(owner, announcement.conversation.conversation.id);
@@ -1638,7 +1582,7 @@ describe("WorkspaceRepository", () => {
     );
   });
 
-  it("freezes a capability-gated participated-thread reason for each authorized recipient", async () => {
+  it("freezes a participated-thread reason for each authorized recipient", async () => {
     const root = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "thread root"),
       mentionedUserIds: [],
@@ -1682,14 +1626,15 @@ describe("WorkspaceRepository", () => {
       await repository.sync(owner, firstReply.syncCursor, 100),
       secondReply.message.id,
     );
-    expect(legacyOwner?.payload).not.toHaveProperty("recipientNotificationReason");
+    expect(legacyOwner?.payload).toHaveProperty(
+      "recipientNotificationReason",
+      "participated_thread_reply",
+    );
 
     const [ownerEvent, memberEvent, observerEvent] = await Promise.all(
       [owner, member, observer].map(async (recipient) =>
         eventFor(
-          await repository.sync(recipient, firstReply.syncCursor, 100, {
-            participatedThreadNotifications: true,
-          }),
+          await repository.sync(recipient, firstReply.syncCursor, 100),
           secondReply.message.id,
         ),
       ),
@@ -1705,9 +1650,7 @@ describe("WorkspaceRepository", () => {
 
     // A later participant cannot retroactively become eligible for an earlier reply.
     const earlierForObserver = eventFor(
-      await repository.sync(observer, root.syncCursor, 100, {
-        participatedThreadNotifications: true,
-      }),
+      await repository.sync(observer, root.syncCursor, 100),
       firstReply.message.id,
     );
     expect(earlierForObserver?.payload).not.toHaveProperty("recipientNotificationReason");
@@ -1757,9 +1700,7 @@ describe("WorkspaceRepository", () => {
         [replyEventId, workspaceId, memberId],
       ),
     ).rejects.toMatchObject({ code: "23503" });
-    const removedMemberSync = await repository.sync(member, removed.syncCursor, 100, {
-      participatedThreadNotifications: true,
-    });
+    const removedMemberSync = await repository.sync(member, removed.syncCursor, 100);
     expect(
       removedMemberSync.events.some(
         (event) =>
@@ -1905,12 +1846,14 @@ describe("WorkspaceRepository", () => {
     ]);
 
     const legacySync = await repository.sync(observer, sent.syncCursor, 100);
-    expect(legacySync.events).toEqual([]);
+    expect(legacySync.events.map((event) => event.type)).toEqual([
+      "reaction.added",
+      "reaction.added",
+      "reaction.removed",
+    ]);
     expect(legacySync.nextCursor).toBe(legacySync.highWaterCursor);
 
-    const sync = await repository.sync(observer, sent.syncCursor, 100, {
-      reactionEvents: true,
-    });
+    const sync = await repository.sync(observer, sent.syncCursor, 100);
     const reactionEvents = sync.events.filter(
       (event) => event.type === "reaction.added" || event.type === "reaction.removed",
     );
@@ -1961,7 +1904,7 @@ describe("WorkspaceRepository", () => {
     });
   });
 
-  it("hides message.retracted from clients that did not negotiate the capability", async () => {
+  it("delivers canonical retraction tombstones without negotiation", async () => {
     const sent = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "retract capability target"),
       mentionedUserIds: [],
@@ -1983,12 +1926,10 @@ describe("WorkspaceRepository", () => {
     }
 
     const legacy = await repository.sync(observer, sent.syncCursor, 100);
-    expect(legacy.events.filter((event) => event.type === "message.retracted")).toEqual([]);
+    expect(legacy.events.filter((event) => event.type === "message.retracted")).toHaveLength(1);
     expect(legacy.nextCursor).toBe(legacy.highWaterCursor);
 
-    const capable = await repository.sync(observer, sent.syncCursor, 100, {
-      messageRetractEvents: true,
-    });
+    const capable = await repository.sync(observer, sent.syncCursor, 100);
     expect(capable.events).toEqual([
       expect.objectContaining({
         type: "message.retracted",
@@ -2289,7 +2230,7 @@ describe("WorkspaceRepository", () => {
       const created = await repository.createTask(owner, generalId, input, key);
       expect(created.task.number).toBe("1");
       expect(created.syncCursor).toBe("1");
-      const sync = await repository.sync(owner, "0", 100, { taskEvents: true });
+      const sync = await repository.sync(owner, "0", 100);
       expect(sync.events).toEqual([
         expect.objectContaining({
           type: "task.created",
@@ -2449,8 +2390,8 @@ describe("WorkspaceRepository", () => {
       expect.objectContaining({ id: createdA.task.id, assigneeId: memberId }),
     );
     const legacySync = await repository.sync(owner, "0", 100);
-    expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(false);
-    const taskSync = await repository.sync(owner, "0", 100, { taskEvents: true });
+    expect(legacySync.events.some((event) => event.type.startsWith("task."))).toBe(true);
+    const taskSync = await repository.sync(owner, "0", 100);
     expect(taskSync.events).toContainEqual(
       expect.objectContaining({
         type: "task.updated",
@@ -2578,7 +2519,7 @@ describe("WorkspaceRepository", () => {
         undefined,
         10,
       );
-      const beforeSync = await repository.sync(owner, "0", 100, { taskEvents: true });
+      const beforeSync = await repository.sync(owner, "0", 100);
       await pool.query(`CREATE FUNCTION reject_test_membership_write() RETURNS trigger
       LANGUAGE plpgsql AS $$
       BEGIN
@@ -2607,9 +2548,7 @@ describe("WorkspaceRepository", () => {
         await expect(
           repository.listConversationTasks(member, conversationId, undefined, 10),
         ).resolves.toEqual(beforeTasks);
-        await expect(repository.sync(owner, "0", 100, { taskEvents: true })).resolves.toEqual(
-          beforeSync,
-        );
+        await expect(repository.sync(owner, "0", 100)).resolves.toEqual(beforeSync);
       } finally {
         await pool.query("DROP TRIGGER IF EXISTS reject_test_membership_write ON sync_events");
         await pool.query("DROP FUNCTION reject_test_membership_write()");
@@ -2626,9 +2565,7 @@ describe("WorkspaceRepository", () => {
       await expect(
         repository.listConversationTasks(member, conversationId, undefined, 10),
       ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
-      const memberSync = await repository.sync(member, created.syncCursor, 100, {
-        taskEvents: true,
-      });
+      const memberSync = await repository.sync(member, created.syncCursor, 100);
       expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
     },
   );
@@ -2895,7 +2832,7 @@ describe("WorkspaceRepository", () => {
     );
   });
 
-  it("projects humans-only channel events by capability and hides them from agents", async () => {
+  it("stores canonical humans-only channel events and hides them from agents", async () => {
     const agentId = randomUUID();
     const agentTokenId = randomUUID();
     await pool.query(
@@ -3099,45 +3036,23 @@ describe("WorkspaceRepository", () => {
         ? event.payload.conversation.access
         : undefined;
     };
-    const expectLegacyHumansOnlyProjection = async (after: string) => {
-      const [legacySync, legacyRealtime] = await Promise.all([
-        repository.sync(member, after, 100),
-        repository.syncPrincipal({ workspaceId, userId: memberId }, after, 100),
-      ]);
-      expect(channelEventAccess(legacySync.events, "channel.created")).toBe("members");
-      expect(channelEventAccess(legacySync.events, "channel.archived")).toBe("members");
-      expect(channelEventAccess(legacyRealtime.events, "channel.created")).toBe("members");
-      expect(channelEventAccess(legacyRealtime.events, "channel.archived")).toBe("members");
-    };
-    const expectCapableHumansOnlyProjection = async (after: string) => {
-      const [capableSync, capableRealtime] = await Promise.all([
-        repository.sync(member, after, 100, { humansOnlyChannels: true }),
-        repository.syncPrincipal(
-          { workspaceId, userId: memberId, humansOnlyChannels: true },
-          after,
-          100,
-        ),
-      ]);
-      expect(channelEventAccess(capableSync.events, "channel.created")).toBe("humans");
-      expect(channelEventAccess(capableSync.events, "channel.archived")).toBe("humans");
-      expect(channelEventAccess(capableRealtime.events, "channel.created")).toBe("humans");
-      expect(channelEventAccess(capableRealtime.events, "channel.archived")).toBe("humans");
-    };
-
-    await expectLegacyHumansOnlyProjection(beforeCreate);
-    await expectCapableHumansOnlyProjection(beforeCreate);
-
-    // Newly stored events persist access: "members". Rewrite to "humans" so the shared
-    // sync/realtime mapper must project the legacy enum when the capability is absent.
-    await pool.query(
-      `UPDATE sync_events
-          SET payload = jsonb_set(payload, '{conversation,access}', '"humans"')
-        WHERE conversation_id = $1
-          AND event_type IN ('channel.created', 'channel.archived')`,
+    const [httpEvents, realtimeEvents] = await Promise.all([
+      repository.sync(member, beforeCreate, 100),
+      repository.syncPrincipal({ workspaceId, userId: memberId }, beforeCreate, 100),
+    ]);
+    for (const events of [httpEvents.events, realtimeEvents.events]) {
+      expect(channelEventAccess(events, "channel.created")).toBe("humans");
+      expect(channelEventAccess(events, "channel.archived")).toBe("humans");
+    }
+    const storedEvents = await pool.query<{ payload: { conversation: { access: string } } }>(
+      `SELECT payload FROM sync_events WHERE conversation_id = $1
+       AND event_type IN ('channel.created', 'channel.archived')`,
       [conversationId],
     );
-    await expectLegacyHumansOnlyProjection(beforeCreate);
-    await expectCapableHumansOnlyProjection(beforeCreate);
+    expect(storedEvents.rows.map((row) => row.payload.conversation.access)).toEqual([
+      "humans",
+      "humans",
+    ]);
 
     const forgedRemoval = await (async () => {
       const client = await pool.connect();
@@ -3154,9 +3069,7 @@ describe("WorkspaceRepository", () => {
         client.release();
       }
     })();
-    const agentSync = await repository.sync(agent, beforeCreate, 100, {
-      humansOnlyChannels: true,
-    });
+    const agentSync = await repository.sync(agent, beforeCreate, 100);
     expect(agentSync.events.some((event) => event.id === forgedRemoval.id)).toBe(false);
     expect(agentSync.events.some((event) => event.conversationId === conversationId)).toBe(false);
   });
@@ -3237,7 +3150,7 @@ describe("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
   });
 
-  it("excludes group conversations from realtime visibility for legacy tickets only", async () => {
+  it("authorizes group activity using current membership", async () => {
     const group = await repository.createGroupDirectConversation(
       owner,
       { memberIds: [memberId, observerId] },
@@ -3245,13 +3158,13 @@ describe("WorkspaceRepository", () => {
     );
     const authorize = repository.canViewConversation.bind(repository);
 
-    await expect(
-      authorize(workspaceId, ownerId, group.conversation.conversation.id, false),
-    ).resolves.toBe(false);
-    await expect(
-      authorize(workspaceId, ownerId, group.conversation.conversation.id, true),
-    ).resolves.toBe(true);
-    await expect(authorize(workspaceId, ownerId, generalId, false)).resolves.toBe(true);
+    await expect(authorize(workspaceId, ownerId, group.conversation.conversation.id)).resolves.toBe(
+      true,
+    );
+    await expect(authorize(workspaceId, ownerId, group.conversation.conversation.id)).resolves.toBe(
+      true,
+    );
+    await expect(authorize(workspaceId, ownerId, generalId)).resolves.toBe(true);
   });
 
   it("consumes realtime tickets exactly once", async () => {
@@ -3261,49 +3174,15 @@ describe("WorkspaceRepository", () => {
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       agentTokenId: null,
-      reactionEvents: false,
-      readStateEvents: false,
-      taskEvents: false,
-      announcementChannels: false,
-      participatedThreadNotifications: false,
-      messageRetractEvents: false,
-      memberProfiles: false,
-      ephemeralActivity: false,
-      groupDirectMessages: false,
-      humansOnlyChannels: false,
-      systemChannels: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
-    const capable = await repository.issueRealtimeTicket(owner, {
-      reactionEvents: true,
-      readStateEvents: true,
-      taskEvents: true,
-      announcementChannels: true,
-      participatedThreadNotifications: true,
-      messageRetractEvents: true,
-      memberProfiles: true,
-      ephemeralActivity: true,
-      groupDirectMessages: true,
-      humansOnlyChannels: true,
-      systemChannels: true,
-    });
+    const capable = await repository.issueRealtimeTicket(owner);
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
       userId: ownerId,
       deviceSessionId: ownerSessionId,
       agentTokenId: null,
-      reactionEvents: true,
-      readStateEvents: true,
-      taskEvents: true,
-      announcementChannels: true,
-      participatedThreadNotifications: true,
-      messageRetractEvents: true,
-      memberProfiles: true,
-      ephemeralActivity: true,
-      groupDirectMessages: true,
-      humansOnlyChannels: true,
-      systemChannels: true,
     });
   });
 
@@ -3905,7 +3784,7 @@ describe("WorkspaceRepository", () => {
     ).resolves.toMatchObject({ rowCount: 0 });
   });
 
-  it("decides group attachment read capability before loading stored bytes", async () => {
+  it("authorizes group attachment reads before loading stored bytes", async () => {
     const group = await repository.createGroupDirectConversation(
       owner,
       { memberIds: [memberId, observerId] },
@@ -3933,9 +3812,9 @@ describe("WorkspaceRepository", () => {
     };
     repository = new WorkspaceRepository(pool, { attachmentStore: trackedStore });
 
-    await expect(
-      repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
+    await expect(repository.readFileContent(owner, staged.attachment.id)).rejects.toMatchObject({
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     expect(read).not.toHaveBeenCalled();
 
     await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
@@ -3947,14 +3826,7 @@ describe("WorkspaceRepository", () => {
     );
     read.mockClear();
 
-    await expect(
-      repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({
-      kind: "group_direct_client_upgrade_required",
-    } satisfies Partial<DomainError>);
-    expect(read).not.toHaveBeenCalled();
-
-    const capable = await repository.readFileContent(owner, staged.attachment.id, true);
+    const capable = await repository.readFileContent(owner, staged.attachment.id);
     expect(capable.bytes).toEqual(bytes);
     expect(read).toHaveBeenCalledOnce();
 
@@ -3975,15 +3847,15 @@ describe("WorkspaceRepository", () => {
       [workspaceId, outsiderId],
     );
     const outsider = identity(currentUser(outsiderId, "outsider", "Outsider", "member"));
-    await expect(
-      repository.readFileContent(outsider, staged.attachment.id, true),
-    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
+    await expect(repository.readFileContent(outsider, staged.attachment.id)).rejects.toMatchObject({
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     expect(read).toHaveBeenCalledOnce();
 
     await repository.retractMessage(owner, sent.message.id);
-    await expect(
-      repository.readFileContent(owner, staged.attachment.id, false),
-    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
+    await expect(repository.readFileContent(owner, staged.attachment.id)).rejects.toMatchObject({
+      kind: "not_found",
+    } satisfies Partial<DomainError>);
     expect(read).toHaveBeenCalledOnce();
   });
 
@@ -4011,7 +3883,7 @@ describe("WorkspaceRepository", () => {
     expect(files.files.map((file) => file.fileName)).toEqual(["brief.txt"]);
     expect(files.hasMore).toBe(false);
 
-    const downloaded = await repository.readFileContent(member, attachmentId, false);
+    const downloaded = await repository.readFileContent(member, attachmentId);
     expect(downloaded.bytes.toString()).toBe("channel notes");
   });
 
@@ -4021,7 +3893,7 @@ describe("WorkspaceRepository", () => {
       mode: 0o600,
     });
 
-    await expect(repository.readFileContent(owner, attachmentId, false)).rejects.toMatchObject({
+    await expect(repository.readFileContent(owner, attachmentId)).rejects.toMatchObject({
       kind: "integrity_failure",
       message: "Stored file failed its integrity check",
     } satisfies Partial<DomainError>);
@@ -4053,7 +3925,7 @@ describe("WorkspaceRepository", () => {
     ).rejects.toMatchObject({
       kind: "not_found",
     } satisfies Partial<DomainError>);
-    await expect(repository.readFileContent(member, attachmentId, false)).rejects.toMatchObject({
+    await expect(repository.readFileContent(member, attachmentId)).rejects.toMatchObject({
       kind: "not_found",
     } satisfies Partial<DomainError>);
 
@@ -4083,7 +3955,7 @@ describe("WorkspaceRepository", () => {
     await expect(
       repository.listConversationFiles(observer, conversationId, undefined, 50),
     ).rejects.toMatchObject({ kind: "not_found" });
-    await expect(repository.readFileContent(observer, attachmentId, false)).rejects.toMatchObject({
+    await expect(repository.readFileContent(observer, attachmentId)).rejects.toMatchObject({
       kind: "not_found",
     });
   });

@@ -1,30 +1,16 @@
 import { fileURLToPath } from "node:url";
+import { serverResponse } from "./test-support/server-response";
 
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
   DEFAULT_AGENT_AGENCY_PROFILE,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
   type SendMessageOperation,
   type Task,
 } from "@hype-comms/contracts";
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
-import { WorkspaceTransport, WorkspaceRequestError } from "./workspace-transport";
+import { WorkspaceRequestError, WorkspaceTransport } from "./workspace-transport";
 
 const API_ORIGIN = "https://chat.example";
 const NOW = "2026-07-24T12:00:00.000Z";
@@ -35,23 +21,6 @@ const MEMBER_ID = "10000000-0000-4000-8000-000000000011";
 const REACTION_ID = "10000000-0000-4000-8000-000000000012";
 const THREAD_REPLY_ID = "10000000-0000-4000-8000-000000000013";
 const THREAD_REPLY_CLIENT_ID = "10000000-0000-4000-8000-000000000014";
-const CLIENT_CAPABILITIES = [
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-].join(",");
 
 const CURRENT_USER = {
   user: {
@@ -257,14 +226,14 @@ class MemoryCookies implements SessionCookieStore {
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+  return serverResponse(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
 }
 
 function statusResponse(status: number, headers: Record<string, string> = {}): Response {
-  return new Response(null, { status, headers });
+  return serverResponse(null, { status, headers });
 }
 
 function createTransport(request: SessionFetch): {
@@ -286,33 +255,23 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
 }
 
 describe("WorkspaceTransport bootstrap compatibility", () => {
-  it("treats a pre-pagination bootstrap response as one complete conversation page", async () => {
-    // A pre-pagination server omitted both conversation-page fields entirely.
-    const legacyFeatureFlags: {
-      -readonly [
-        Key in keyof typeof BOOTSTRAP_RESPONSE.featureFlags
-      ]?: (typeof BOOTSTRAP_RESPONSE.featureFlags)[Key];
-    } = {
-      ...BOOTSTRAP_RESPONSE.featureFlags,
-    };
-    delete legacyFeatureFlags.announcementChannels;
-    delete legacyFeatureFlags.humansOnlyChannels;
-    const legacyConversation: {
-      -readonly [
-        Key in keyof (typeof BOOTSTRAP_RESPONSE.conversations)[number]["conversation"]
-      ]?: (typeof BOOTSTRAP_RESPONSE.conversations)[number]["conversation"][Key];
-    } = { ...BOOTSTRAP_RESPONSE.conversations[0].conversation };
-    delete legacyConversation.channelMode;
-    const legacyBootstrap: Record<string, unknown> = {
-      ...BOOTSTRAP_RESPONSE,
-      featureFlags: legacyFeatureFlags,
-      conversations: [{ ...BOOTSTRAP_RESPONSE.conversations[0], conversation: legacyConversation }],
-    };
-    delete legacyBootstrap.conversationsNextCursor;
-    delete legacyBootstrap.conversationsHasMore;
-    const transport = transportAnswering(() => jsonResponse(legacyBootstrap));
+  it.each([426, 404])(
+    "blocks protocol mismatch on HTTP %s without retrying a queued send",
+    async (status) => {
+      const request = vi.fn(async () => new Response(null, { status }));
+      const { transport } = createTransport(request);
+      await expect(transport.send(SEND_OPERATION)).resolves.toEqual({ status: "upgrade_required" });
+      await expect(transport.sync("0")).resolves.toEqual({ status: "upgrade_required" });
+      expect(request).toHaveBeenCalledOnce();
+    },
+  );
 
-    await expect(transport.bootstrap()).resolves.toEqual(BOOTSTRAP_RESPONSE);
+  it("rejects a protocol-2 bootstrap missing its required pagination metadata", async () => {
+    const incomplete: Record<string, unknown> = { ...BOOTSTRAP_RESPONSE };
+    delete incomplete.conversationsNextCursor;
+    delete incomplete.conversationsHasMore;
+    const transport = transportAnswering(() => jsonResponse(incomplete));
+    await expect(transport.bootstrap()).rejects.toThrow();
   });
 });
 
@@ -334,7 +293,7 @@ describe("WorkspaceTransport file uploads", () => {
     await expect(
       transport.uploadLocalFile(CONVERSATION_ID, UPLOAD_FIXTURE_PATH, assertCurrentScope),
     ).rejects.toThrow("File upload session changed");
-    expect(requests).toEqual([{ method: "POST", url: "https://chat.example/v1/files/uploads" }]);
+    expect(requests).toEqual([{ method: "POST", url: "https://chat.example/v2/files/uploads" }]);
     expect(cancel).toHaveBeenCalledOnce();
   });
 });
@@ -353,7 +312,7 @@ describe("WorkspaceTransport threads", () => {
     });
     expect(requests).toEqual([
       {
-        url: `https://chat.example/v1/messages/${THREAD_REPLY.id}`,
+        url: `https://chat.example/v2/messages/${THREAD_REPLY.id}`,
         init: expect.objectContaining({ method: "GET" }),
       },
     ]);
@@ -381,7 +340,7 @@ describe("WorkspaceTransport threads", () => {
     });
     expect(requests).toEqual([
       {
-        url: `https://chat.example/v1/messages/${THREAD_REPLY.id}`,
+        url: `https://chat.example/v2/messages/${THREAD_REPLY.id}`,
         init: expect.objectContaining({ method: "DELETE" }),
       },
     ]);
@@ -413,12 +372,10 @@ describe("WorkspaceTransport threads", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
+      url: `https://chat.example/v2/conversations/${CONVERSATION_ID}/messages?before=cursor-2&limit=25`,
       init: { method: "GET" },
     });
-    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
-      CLIENT_CAPABILITIES,
-    );
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(null);
   });
 
   it("detects the immediately previous server from an absent thread-support signal", async () => {
@@ -448,7 +405,7 @@ describe("WorkspaceTransport threads", () => {
     ).resolves.toEqual({ ...response, attachments: [] });
     expect(requests).toEqual([
       {
-        url: `https://chat.example/v1/messages/${THREAD_ROOT.id}/thread?before=cursor-2&limit=25`,
+        url: `https://chat.example/v2/messages/${THREAD_ROOT.id}/thread?before=cursor-2&limit=25`,
         init: expect.objectContaining({ method: "GET" }),
       },
     ]);
@@ -479,7 +436,7 @@ describe("WorkspaceTransport sync classification", () => {
     });
   });
 
-  it("sends the requested cursor, limit, and supported event capabilities", async () => {
+  it("sends the requested cursor, limit, without capability negotiation", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
@@ -490,15 +447,13 @@ describe("WorkspaceTransport sync classification", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: "https://chat.example/v1/sync?after=41&limit=25",
+      url: "https://chat.example/v2/sync?after=41&limit=25",
       init: { method: "GET" },
     });
-    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
-      CLIENT_CAPABILITIES,
-    );
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(null);
   });
 
-  it("advertises supported event capabilities when issuing a realtime ticket", async () => {
+  it("issues a realtime ticket without capability negotiation", async () => {
     const requests: RequestInit[] = [];
     const { transport } = createTransport(async (_url, init) => {
       requests.push(init);
@@ -509,9 +464,7 @@ describe("WorkspaceTransport sync classification", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ method: "POST" });
-    expect(new Headers(requests[0]?.headers).get("x-hype-comms-capabilities")).toBe(
-      CLIENT_CAPABILITIES,
-    );
+    expect(new Headers(requests[0]?.headers).get("x-hype-comms-capabilities")).toBe(null);
   });
 
   it("reports a revoked membership (403) as permanent instead of retryable", async () => {
@@ -583,7 +536,7 @@ describe("WorkspaceTransport sync classification", () => {
   });
 
   it("reports a success response that is not JSON as permanent, never as retryable", async () => {
-    const transport = transportAnswering(() => new Response("not json", { status: 200 }));
+    const transport = transportAnswering(() => serverResponse("not json", { status: 200 }));
 
     await expect(transport.sync("41")).resolves.toEqual({
       status: "permanent",
@@ -656,7 +609,7 @@ describe("WorkspaceTransport sync classification", () => {
 
   it("signs the device out on 401 and reports authentication_required", async () => {
     const { transport, session } = createTransport(async (url) =>
-      url.endsWith("/v1/auth/me") ? jsonResponse(CURRENT_USER) : statusResponse(401),
+      url.endsWith("/v2/auth/me") ? jsonResponse(CURRENT_USER) : statusResponse(401),
     );
 
     await session.restore();
@@ -688,13 +641,13 @@ describe("WorkspaceTransport send classification", () => {
     await expect(transport.send(operation)).resolves.toMatchObject({ status: "accepted" });
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: `https://chat.example/v1/conversations/${CONVERSATION_ID}/messages`,
+      url: `https://chat.example/v2/conversations/${CONVERSATION_ID}/messages`,
       init: { method: "POST", body: JSON.stringify(operation.message) },
     });
     const headers = new Headers(requests[0]?.init.headers);
     expect(headers.get("content-type")).toBe("application/json");
     expect(headers.get("idempotency-key")).toBe(THREAD_REPLY_CLIENT_ID);
-    expect(headers.get("x-hype-comms-capabilities")).toBe(CLIENT_CAPABILITIES);
+    expect(headers.get("x-hype-comms-capabilities")).toBe(null);
   });
 
   it("treats 408 Request Timeout as retryable instead of permanently blocking the outbox", async () => {
@@ -764,8 +717,8 @@ describe("WorkspaceTransport conversations", () => {
     await transport.conversations();
 
     expect(requests).toEqual([
-      "GET https://chat.example/v1/conversations?after=cursor-2&limit=10",
-      "GET https://chat.example/v1/conversations?limit=50",
+      "GET https://chat.example/v2/conversations?after=cursor-2&limit=10",
+      "GET https://chat.example/v2/conversations?limit=50",
     ]);
   });
 
@@ -833,7 +786,7 @@ describe("WorkspaceTransport conversations", () => {
 
     expect(requests).toEqual([
       {
-        capability: CLIENT_CAPABILITIES,
+        capability: null,
         body: JSON.stringify({
           name: "Company News",
           slug: "company-news",
@@ -902,12 +855,12 @@ describe("WorkspaceTransport tasks", () => {
     expect(requests.map((request) => [request.init.method, request.url])).toEqual([
       [
         "GET",
-        "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25&status=in_progress&priority=urgent&assignee=me&dueAfter=2026-08-01&dueBefore=2026-08-31&updatedAfter=2026-07-24T12%3A00%3A00.000Z&updatedBy=me",
+        "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25&status=in_progress&priority=urgent&assignee=me&dueAfter=2026-08-01&dueBefore=2026-08-31&updatedAfter=2026-07-24T12%3A00%3A00.000Z&updatedBy=me",
       ],
-      ["GET", "https://chat.example/v1/tasks/mine?limit=10"],
-      ["POST", "https://chat.example/v1/conversations/10000000-0000-4000-8000-000000000003/tasks"],
-      ["PATCH", `https://chat.example/v1/tasks/${TASK.id}`],
-      ["POST", `https://chat.example/v1/tasks/${TASK.id}/move`],
+      ["GET", "https://chat.example/v2/tasks/mine?limit=10"],
+      ["POST", "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks"],
+      ["PATCH", `https://chat.example/v2/tasks/${TASK.id}`],
+      ["POST", `https://chat.example/v2/tasks/${TASK.id}/move`],
     ]);
     for (const request of requests.slice(2)) {
       expect(new Headers(request.init.headers).get("idempotency-key")).toBe(CLIENT_MESSAGE_ID);
@@ -934,7 +887,7 @@ describe("WorkspaceTransport members", () => {
     // The one call that can tell an already-bootstrapped client a member is gone: the route
     // answers with active memberships only, and `member.updated` cannot express a removal.
     await expect(transport.members()).resolves.toEqual({ members: [CURRENT_USER.user] });
-    expect(requests).toEqual(["GET https://chat.example/v1/members"]);
+    expect(requests).toEqual(["GET https://chat.example/v2/members"]);
   });
 
   it("rejects a member directory the wire contract does not allow", async () => {
@@ -958,17 +911,15 @@ describe("WorkspaceTransport members", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: "https://chat.example/v1/members",
+      url: "https://chat.example/v2/members",
       init: { method: "GET" },
     });
-    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(
-      CLIENT_CAPABILITIES,
-    );
+    expect(new Headers(requests[0]?.init.headers).get("x-hype-comms-capabilities")).toBe(null);
   });
 });
 
 describe("WorkspaceTransport updateProfile", () => {
-  it("PATCHes /v1/profile with the title and returns the updated user", async () => {
+  it("PATCHes /v2/profile with the title and returns the updated user", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
     const updatedUser = { ...CURRENT_USER.user, title: "Engineering Lead" };
     const { transport } = createTransport(async (url, init) => {
@@ -979,7 +930,7 @@ describe("WorkspaceTransport updateProfile", () => {
     await expect(transport.updateProfile("Engineering Lead")).resolves.toEqual(updatedUser);
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
-      url: "https://chat.example/v1/profile",
+      url: "https://chat.example/v2/profile",
       init: {
         method: "PATCH",
         body: JSON.stringify({ title: "Engineering Lead" }),
@@ -987,7 +938,7 @@ describe("WorkspaceTransport updateProfile", () => {
     });
     const updateHeaders = new Headers(requests[0]?.init.headers);
     expect(updateHeaders.get("content-type")).toBe("application/json");
-    expect(updateHeaders.get("x-hype-comms-capabilities")).toBe(CLIENT_CAPABILITIES);
+    expect(updateHeaders.get("x-hype-comms-capabilities")).toBe(null);
   });
 
   it("allows the title to be cleared with null", async () => {
@@ -1077,26 +1028,26 @@ describe("WorkspaceTransport agent enrollments", () => {
     expect(requests).toEqual([
       {
         method: "GET",
-        url: "https://chat.example/v1/agent-enrollments",
+        url: "https://chat.example/v2/agent-enrollments",
         body: null,
         contentType: null,
-        capabilities: CLIENT_CAPABILITIES,
+        capabilities: null,
         idempotencyKey: null,
       },
       {
         method: "POST",
-        url: `https://chat.example/v1/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/review`,
+        url: `https://chat.example/v2/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/review`,
         body: JSON.stringify({ decision: "approve" }),
         contentType: "application/json",
-        capabilities: expect.any(String),
+        capabilities: null,
         idempotencyKey: expect.any(String),
       },
       {
         method: "POST",
-        url: `https://chat.example/v1/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/cancel`,
+        url: `https://chat.example/v2/agent-enrollments/${encodeURIComponent(ENROLLMENT_ID)}/cancel`,
         body: null,
         contentType: null,
-        capabilities: expect.any(String),
+        capabilities: null,
         idempotencyKey: expect.any(String),
       },
     ]);
@@ -1188,8 +1139,8 @@ describe("WorkspaceTransport agent enrollments", () => {
     );
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request.url)).toEqual([
-      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
-      `https://chat.example/v1/agent-enrollments/${ENROLLMENT_ID}/review`,
+      `https://chat.example/v2/agent-enrollments/${ENROLLMENT_ID}/review`,
+      `https://chat.example/v2/agent-enrollments/${ENROLLMENT_ID}/review`,
     ]);
     expect(requests.map((request) => request.init.body)).toEqual([
       JSON.stringify({ decision: "reject" }),
@@ -1279,11 +1230,11 @@ describe("WorkspaceTransport reactions", () => {
       syncCursor: "44",
     });
 
-    const reactionUrl = `https://chat.example/v1/messages/${CLIENT_MESSAGE_ID}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
+    const reactionUrl = `https://chat.example/v2/messages/${CLIENT_MESSAGE_ID}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
     expect(requests).toEqual([
       {
         method: "POST",
-        url: "https://chat.example/v1/reactions/query",
+        url: "https://chat.example/v2/reactions/query",
         body: JSON.stringify({ messageIds: [CLIENT_MESSAGE_ID] }),
       },
       { method: "PUT", url: reactionUrl, body: null },
@@ -1332,22 +1283,22 @@ describe("WorkspaceTransport channel membership", () => {
     expect(requests).toEqual([
       {
         method: "GET",
-        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members`,
+        url: `https://chat.example/v2/channels/${CONVERSATION_ID}/members`,
         body: null,
       },
       {
         method: "PUT",
-        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        url: `https://chat.example/v2/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
         body: JSON.stringify({ role: "member" }),
       },
       {
         method: "PUT",
-        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        url: `https://chat.example/v2/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
         body: JSON.stringify({ role: "owner" }),
       },
       {
         method: "DELETE",
-        url: `https://chat.example/v1/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
+        url: `https://chat.example/v2/channels/${CONVERSATION_ID}/members/${MEMBER_ID}`,
         body: null,
       },
     ]);
@@ -1378,7 +1329,7 @@ describe("WorkspaceTransport search", () => {
       }),
     ).resolves.toEqual(SEARCH_RESPONSE);
     expect(requests).toEqual([
-      "GET https://chat.example/v1/search?query=quarterly+avalanche&after=cursor-2&limit=25",
+      "GET https://chat.example/v2/search?query=quarterly+avalanche&after=cursor-2&limit=25",
     ]);
   });
 

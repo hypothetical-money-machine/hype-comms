@@ -10,8 +10,8 @@ import {
 } from "@hype-comms/contracts";
 import type { FastifyReply } from "fastify";
 import { z } from "zod";
-import { routeModule, validateRequest } from "../../http/route-registrar.js";
 import { humanPolicy } from "../../http/authentication-policies.js";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
 
 import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
@@ -44,12 +44,6 @@ function secretResponse(reply: FastifyReply): FastifyReply {
 
 export const channelWebhookRoutes = routeModule<ChannelWebhookRoutesOptions>((routes, options) => {
   const human = humanPolicy(options.identityService);
-  const throttle =
-    options.throttle ??
-    new FixedWindowAttemptThrottle({
-      maxAttempts: WEBHOOK_POST_LIMIT,
-      windowMs: WEBHOOK_POST_WINDOW_MS,
-    });
 
   routes.register({
     method: "GET",
@@ -128,7 +122,16 @@ export const channelWebhookRoutes = routeModule<ChannelWebhookRoutesOptions>((ro
       });
     },
   });
+});
 
+/** External webhook jobs keep their configured URL; management uses the current product API. */
+export const incomingWebhookRoutes = routeModule<ChannelWebhookRoutesOptions>((routes, options) => {
+  const throttle =
+    options.throttle ??
+    new FixedWindowAttemptThrottle({
+      maxAttempts: WEBHOOK_POST_LIMIT,
+      windowMs: WEBHOOK_POST_WINDOW_MS,
+    });
   routes.registerCredential({
     method: "POST",
     url: "/webhooks/incoming/:token",
