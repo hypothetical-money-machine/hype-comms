@@ -1,30 +1,14 @@
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import {
   AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
   AGENT_CONTEXT_PACK_MAX_LIMIT,
-  advanceReadCursorRequestSchema,
-  advanceReadCursorResponseSchema,
   agentContextHistoryQuerySchema,
-  agentContextHistoryResponseSchema,
-  archiveChannelRequestSchema,
   channelSlugFromName,
   clientMessageIdSchema,
-  conversationMutationResponseSchema,
-  createChannelRequestSchema,
-  directConversationRequestSchema,
   entityIdSchema,
-  groupDirectConversationRequestSchema,
   idempotencyKeySchema,
-  listConversationsResponseSchema,
-  listMembersResponseSchema,
-  listPublicChannelsResponseSchema,
-  messageByIdResponseSchema,
-  messageHistoryResponseSchema,
   paginationCursorSchema,
-  sendConversationMessageRequestSchema,
-  sendMessageResponseSchema,
   syncPositionQuerySchema,
-  syncResponseSchema,
-  workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import {
@@ -57,10 +41,7 @@ export async function workspaceCommand(
   if (subcommand === "bootstrap") {
     writeResult(
       context.runtime.io,
-      await client.request({
-        path: "/v2/bootstrap",
-        responseSchema: workspaceBootstrapResponseSchema,
-      }),
+      await client.request({ ...endpoints.bootstrap() }),
       context.options.json,
     );
     return;
@@ -68,7 +49,7 @@ export async function workspaceCommand(
   if (subcommand === "members") {
     writeResult(
       context.runtime.io,
-      await client.request({ path: "/v2/members", responseSchema: listMembersResponseSchema }),
+      await client.request({ ...endpoints.members() }),
       context.options.json,
     );
     return;
@@ -116,9 +97,7 @@ export async function conversationsCommand(
   }
   const after = parsedAfter?.data;
   const response = await client.request({
-    path: "/v2/conversations",
-    query: { after, limit: integerOption(parsed, "limit", 50, 100) },
-    responseSchema: listConversationsResponseSchema,
+    ...endpoints.conversations({ after, limit: integerOption(parsed, "limit", 50, 100) }),
   });
   writeResult(context.runtime.io, response, context.options.json);
 }
@@ -142,12 +121,10 @@ export async function channelsCommand(
       throw new UsageError("--after is not a valid pagination cursor", "INVALID_CURSOR");
     }
     const response = await client.request({
-      path: "/v2/channels",
-      query: {
+      ...endpoints.publicChannels({
         after: parsedAfter?.data,
         limit: integerOption(parsed, "limit", 50, 100),
-      },
-      responseSchema: listPublicChannelsResponseSchema,
+      }),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -163,13 +140,7 @@ export async function channelsCommand(
       slug: stringOption(parsed, "slug") ?? channelSlugFromName(name!),
       topic: stringOption(parsed, "topic") ?? null,
     };
-    const response = await client.request({
-      method: "POST",
-      path: "/v2/channels",
-      body,
-      requestSchema: createChannelRequestSchema,
-      responseSchema: conversationMutationResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.createChannel(body) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -178,13 +149,7 @@ export async function channelsCommand(
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolveConversationSelector(client, selector!);
     const body = { isArchived: true } as const;
-    const response = await client.request({
-      method: "PATCH",
-      path: `/v2/channels/${id}`,
-      body,
-      requestSchema: archiveChannelRequestSchema,
-      responseSchema: conversationMutationResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.archiveChannel(id, body) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -192,11 +157,7 @@ export async function channelsCommand(
     const parsed = parseCommandArguments(args, {});
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolvePublicChannelSelector(client, selector!);
-    const response = await client.request({
-      method: "PUT",
-      path: `/v2/channels/${id}/membership`,
-      responseSchema: conversationMutationResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.joinChannel(id) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -213,13 +174,7 @@ export async function dmsCommand(
     const parsed = parseCommandArguments(args, {});
     const [member] = requirePositionals(parsed, 1);
     const body = { memberId: await resolveDirectMemberSelector(client, member!) };
-    const response = await client.request({
-      method: "POST",
-      path: "/v2/direct-conversations",
-      body,
-      requestSchema: directConversationRequestSchema,
-      responseSchema: conversationMutationResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.directConversation(body) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -248,11 +203,7 @@ export async function dmsCommand(
     }
     const body = { memberIds };
     const response = await client.request({
-      method: "POST",
-      path: "/v2/group-direct-conversations",
-      body,
-      requestSchema: groupDirectConversationRequestSchema,
-      responseSchema: conversationMutationResponseSchema,
+      ...endpoints.groupDirectConversation(body),
       headers: {
         "idempotency-key": key.data,
       },
@@ -278,10 +229,7 @@ export async function messagesCommand(
     if (!messageId.success) {
       throw new UsageError("The message ID must be a UUID", "INVALID_MESSAGE_ID");
     }
-    const response = await client.request({
-      path: `/v2/messages/${messageId.data}`,
-      responseSchema: messageByIdResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.message(messageId.data) });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -330,19 +278,13 @@ export async function messagesCommand(
       if (!query.success) {
         throw new UsageError("The context-pack history options are invalid");
       }
-      const response = await client.request({
-        path: `/v2/conversations/${id}/messages`,
-        query: query.data,
-        responseSchema: agentContextHistoryResponseSchema,
-      });
+      const response = await client.request({ ...endpoints.contextHistory(id, query.data) });
       writeResult(context.runtime.io, response, context.options.json);
       return;
     }
 
     const response = await client.request({
-      path: `/v2/conversations/${id}/messages`,
-      query: { before, limit: integerOption(parsed, "limit", 50, 100) },
-      responseSchema: messageHistoryResponseSchema,
+      ...endpoints.history(id, { before, limit: integerOption(parsed, "limit", 50, 100) }),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -388,11 +330,7 @@ export async function messagesCommand(
       attachmentIds: [],
     };
     const response = await client.request({
-      method: "POST",
-      path: `/v2/conversations/${conversationId}/messages`,
-      body,
-      requestSchema: sendConversationMessageRequestSchema,
-      responseSchema: sendMessageResponseSchema,
+      ...endpoints.sendMessage(conversationId, body),
       headers: {
         "idempotency-key": clientMessageId.data,
       },
@@ -420,13 +358,7 @@ export async function readCursorsCommand(
   const client = await clientFromContext(context);
   const conversationId = await resolveConversationSelector(client, conversation!);
   const body = { lastReadMessageId: messageId.data };
-  const response = await client.request({
-    method: "PUT",
-    path: `/v2/conversations/${conversationId}/read-cursor`,
-    body,
-    requestSchema: advanceReadCursorRequestSchema,
-    responseSchema: advanceReadCursorResponseSchema,
-  });
+  const response = await client.request({ ...endpoints.advanceRead(conversationId, body) });
   writeResult(context.runtime.io, response, context.options.json);
 }
 
@@ -437,15 +369,12 @@ export async function syncCommand(context: CommandContext, args: readonly string
   });
   requirePositionals(parsed, 0);
   const afterValue = stringOption(parsed, "after");
-  if (afterValue === undefined || !syncPositionQuerySchema.safeParse(afterValue).success) {
+  const after = syncPositionQuerySchema.safeParse(afterValue);
+  if (!after.success) {
     throw new UsageError("sync requires --after with a JSON epoch and sequence", "INVALID_CURSOR");
   }
   const response = await (
     await clientFromContext(context)
-  ).request({
-    path: "/v2/sync",
-    query: { after: afterValue, limit: integerOption(parsed, "limit", 100, 100) },
-    responseSchema: syncResponseSchema,
-  });
+  ).request({ ...endpoints.sync(after.data, integerOption(parsed, "limit", 100, 100)) });
   writeResult(context.runtime.io, response, context.options.json);
 }
