@@ -248,6 +248,75 @@ describe("seedSystemChannels", () => {
     ]);
   });
 
+  it.each(["channel.created", "message.created"] as const)(
+    "retries %s after commit failure without a false acceptance audit or consumed bulletin key",
+    async (eventType) => {
+      const repository = repositoryFor(true);
+      if (eventType === "message.created") {
+        await repository.seedSystemChannels([{ ...definition, loadBulletins: async () => [] }]);
+      }
+      audits = [];
+      const state = async () =>
+        (
+          await pool.query(`SELECT
+          (SELECT count(*)::int FROM conversations) AS conversations,
+          (SELECT count(*)::int FROM messages) AS messages,
+          (SELECT count(*)::int FROM workspace_memberships) AS memberships,
+          (SELECT count(*)::int FROM system_bulletins) AS bulletins,
+          (SELECT count(*)::int FROM sync_events) AS events,
+          (SELECT count(*)::int FROM sync_event_audiences) AS audiences,
+          (SELECT jsonb_agg(jsonb_build_object('id', id, 'sequence', last_event_sequence::text) ORDER BY id) FROM workspaces) AS workspace_sequences,
+          (SELECT jsonb_agg(jsonb_build_object('id', id, 'sequence', last_message_sequence::text) ORDER BY id) FROM conversations) AS conversation_sequences`)
+        ).rows[0];
+      const before = await state();
+      await pool.query(`CREATE FUNCTION reject_test_system_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'Injected system publisher commit failure';
+        END;
+        $$`);
+      try {
+        await pool.query(`CREATE CONSTRAINT TRIGGER reject_test_system_commit
+          AFTER INSERT ON sync_events DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW WHEN (NEW.event_type = '${eventType}')
+          EXECUTE FUNCTION reject_test_system_commit()`);
+        const errors: unknown[] = [];
+        await repository.seedSystemChannels([definition], (error) => {
+          errors.push(error);
+        });
+        expect(errors).toHaveLength(2);
+        for (const error of errors) {
+          expect(error).toBeInstanceOf(Error);
+          expect(error).toMatchObject({ message: "Injected system publisher commit failure" });
+        }
+        expect(await state()).toEqual(before);
+        expect(audits).toEqual([]);
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_system_commit ON sync_events");
+        await pool.query("DROP FUNCTION reject_test_system_commit()");
+      }
+      const errors: unknown[] = [];
+      await repository.seedSystemChannels([definition], (error) => {
+        errors.push(error);
+      });
+      expect(errors).toEqual([]);
+      expect(await bodies()).toEqual(bulletins.map((bulletin) => bulletin.body));
+      expect(await bodies(otherWorkspaceId)).toEqual(bulletins.map((bulletin) => bulletin.body));
+      const accepted = audits.filter(
+        (record) =>
+          record.operation ===
+          (eventType === "channel.created" ? "channel.create" : "bulletin.publish"),
+      );
+      expect(accepted).toHaveLength(eventType === "channel.created" ? 2 : 4);
+      expect(accepted.every((record) => record.outcome === "accepted")).toBe(true);
+      const committed = await state();
+      const auditCount = audits.length;
+      await repository.seedSystemChannels([definition]);
+      expect(await state()).toEqual(committed);
+      expect(audits).toHaveLength(auditCount);
+    },
+  );
+
   it("hides built-in channels from clients that cannot parse the reserved namespace", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);
