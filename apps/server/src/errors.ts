@@ -1,6 +1,8 @@
 import type { ApiErrorCode, ApiErrorDetail, ApiErrorEnvelope } from "@hype-comms/contracts";
 import type { FastifyError, FastifyInstance } from "fastify";
 
+import { DomainError, type DomainErrorKind } from "./domain-errors.js";
+
 export class ApiError extends Error {
   constructor(
     readonly statusCode: number,
@@ -59,12 +61,43 @@ const CLIENT_ERRORS: ReadonlyMap<number, { code: ApiErrorCode; message: string }
   [429, { code: "RATE_LIMITED", message: "Too many requests" }],
 ]);
 
+interface DomainErrorResponse {
+  readonly statusCode: number;
+  readonly code: ApiErrorCode;
+  readonly details?: readonly ApiErrorDetail[];
+}
+
+const DOMAIN_ERRORS: Readonly<Record<DomainErrorKind, DomainErrorResponse>> = {
+  invalid_input: { statusCode: 400, code: "BAD_REQUEST" },
+  not_found: { statusCode: 404, code: "NOT_FOUND" },
+  conflict: { statusCode: 409, code: "CONFLICT" },
+  access_denied: { statusCode: 403, code: "FORBIDDEN" },
+  authentication_required: { statusCode: 401, code: "UNAUTHORIZED" },
+  sync_position_expired: { statusCode: 410, code: "CURSOR_EXPIRED" },
+  integrity_failure: { statusCode: 500, code: "INTERNAL_ERROR" },
+  group_direct_client_upgrade_required: {
+    statusCode: 409,
+    code: "CONFLICT",
+    details: [
+      { field: "X-Hype-Comms-Capabilities", issue: "group-direct-messages-v1 is required" },
+    ],
+  },
+};
+
 export function registerErrorHandling(app: FastifyInstance): void {
   app.setNotFoundHandler((request, reply) => {
     void reply.code(404).send(envelope(request.id, "NOT_FOUND", "Route not found"));
   });
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof DomainError) {
+      const response = DOMAIN_ERRORS[error.kind];
+      void reply
+        .code(response.statusCode)
+        .send(envelope(request.id, response.code, error.message, response.details));
+      return;
+    }
+
     if (error instanceof ApiError) {
       void reply
         .code(error.statusCode)

@@ -57,6 +57,24 @@ export default tseslint.config(
     },
   },
   {
+    files: ["apps/server/src/modules/workspace/**/*.ts"],
+    ignores: ["apps/server/src/modules/workspace/**/routes.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/errors.js", "**/http/**", "fastify"],
+              message:
+                "Workspace operations report DomainError; HTTP policies and response mapping belong at the route boundary.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["apps/desktop/src/main/**/*.ts", "apps/desktop/src/preload/**/*.ts"],
     rules: {
       "no-restricted-syntax": [

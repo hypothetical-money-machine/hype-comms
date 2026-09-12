@@ -1,5 +1,5 @@
 import type { PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 
 export async function requireActivePrincipal(
@@ -21,7 +21,7 @@ export async function requireActivePrincipal(
   );
   const principal = result.rows[0];
   if (principal === undefined) {
-    throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    throw new DomainError("access_denied", "Workspace unavailable");
   }
   // Existing membership mutations take the membership row before the workspace sequence row.
   // This matches delivery and identity revocation, preventing a membership/workspace inversion.
