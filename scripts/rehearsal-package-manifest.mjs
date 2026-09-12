@@ -9,7 +9,11 @@ if (!/^[a-f0-9]{40}$/u.test(revision ?? ""))
   throw new Error("A complete candidate revision is required");
 const packageInfo = JSON.parse(await readFile("apps/desktop/package.json", "utf8"));
 const files = (await readdir(directory))
-  .filter((name) => /\.(?:dmg|zip|exe|AppImage|deb|yml|blockmap)$/u.test(name))
+  .filter(
+    (name) =>
+      /^hype-comms-.+\.(?:dmg|zip|exe|AppImage|deb|blockmap)$/u.test(name) ||
+      /^latest(?:-[a-z0-9-]+)?\.yml$/u.test(name),
+  )
   .sort();
 if (files.length === 0) throw new Error("No native rehearsal artifacts were produced");
 const artifacts = [];
