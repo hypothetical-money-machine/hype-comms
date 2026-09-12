@@ -1,20 +1,12 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
     "lib": ["ES2024"],
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
-    "composite": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true
+    "composite": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
