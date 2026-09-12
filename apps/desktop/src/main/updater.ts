@@ -67,7 +67,6 @@ interface ActiveDownload {
 
 interface UpdateControllerOptions {
   readonly updater: UpdateSource;
-  readonly updatesAllowed: boolean;
   readonly isProductionBuild: boolean;
   readonly isPackaged: boolean;
   readonly apiOrigin: string;
@@ -77,10 +76,6 @@ interface UpdateControllerOptions {
 }
 
 function isSupported(options: UpdateControllerOptions): boolean {
-  if (!options.updatesAllowed) {
-    return false;
-  }
-
   if (!options.isProductionBuild) {
     return false;
   }

@@ -6,21 +6,10 @@ import { extractFile, listPackage } from "@electron/asar";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
 import { isReservedInvalidHostname } from "../apps/desktop/api-origin-policy.mjs";
-import {
-  resolveAgentWakePackageEvidence as resolveExpectedAgentWakePackageEvidence,
-  resolveAgentWakeRollout as resolveExpectedAgentWakeBuild,
-} from "../apps/desktop/agent-wake-rollout.mjs";
 import { resolveDesktopBuildFlavor } from "../apps/desktop/build-flavor.mjs";
 
 const expectedUpdateProvider = "generic";
 const packagedApplicationIconFilename = "hype-comms-icon.png";
-const agentWakeConfigurationCall =
-  /resolveAgentWakeConfigurationPath\(\{\s*compiledIn:\s*(true|false),/gu;
-const agentWakeOperatorCall =
-  /resolveAgentWakeOperatorRequestPath\(\{\s*compiledIn:\s*(true|false),/gu;
-// Vite substitutes a dedicated updates-allowed define directly. Accept the equivalent boolean
-// spellings Rolldown may retain or minify without depending on constant folding.
-const agentWakeUpdaterPolicy = /updatesAllowed:\s*(!?)(true|false|[01]),/gu;
 const requiredAsarEntries = [
   "/dist/main/build-metadata.json",
   "/dist/main/index.js",
@@ -305,62 +294,6 @@ export function verifyPackagedApiOrigin(
   }
 }
 
-export { resolveExpectedAgentWakeBuild, resolveExpectedAgentWakePackageEvidence };
-
-export function verifyAgentWakeBuild(
-  asarPath,
-  expectedEnabled,
-  extractFileImplementation = extractFile,
-) {
-  const mainPath = path.join("dist", "main", "index.js");
-  let source;
-  try {
-    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
-  } catch (error) {
-    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
-  }
-
-  const configurationMatches = [...source.matchAll(agentWakeConfigurationCall)];
-  const operatorMatches = [...source.matchAll(agentWakeOperatorCall)];
-  if (configurationMatches.length !== 1 || operatorMatches.length !== 1) {
-    throw new Error(`${asarPath} has an ambiguous or missing Agent Wake build marker`);
-  }
-
-  const expected = String(expectedEnabled);
-  if (configurationMatches[0][1] !== expected || operatorMatches[0][1] !== expected) {
-    throw new Error(
-      `${asarPath} Agent Wake build state does not match HYPE_COMMS_AGENT_WAKE_ENABLED=${expectedEnabled ? "1" : "0"}`,
-    );
-  }
-}
-
-export function verifyAgentWakeUpdateIsolation(
-  asarPath,
-  expectedEvidenceBuild,
-  extractFileImplementation = extractFile,
-) {
-  const mainPath = path.join("dist", "main", "index.js");
-  let source;
-  try {
-    source = extractFileImplementation(asarPath, mainPath).toString("utf8");
-  } catch (error) {
-    throw new Error(`${asarPath} contains an unreadable ${mainPath}`, { cause: error });
-  }
-
-  const matches = [...source.matchAll(agentWakeUpdaterPolicy)];
-  if (matches.length !== 1) {
-    throw new Error(`${asarPath} has an ambiguous or missing Agent Wake updater-isolation marker`);
-  }
-  const negated = matches[0][1] === "!";
-  const literal = matches[0][2] === "true" || matches[0][2] === "1";
-  const updatesAllowed = negated ? !literal : literal;
-  if (updatesAllowed === expectedEvidenceBuild) {
-    throw new Error(
-      `${asarPath} Agent Wake updater isolation does not match HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED=${expectedEvidenceBuild ? "1" : "0"}`,
-    );
-  }
-}
-
 export async function verifyDesktopPackages(
   flavor = resolveDesktopBuildFlavor(),
   releaseRoot = path.resolve("apps/desktop", flavor.releaseDirectory),
@@ -368,13 +301,6 @@ export async function verifyDesktopPackages(
   const expectedApiOrigin = flavor.isProduction
     ? resolveExpectedProductionApiOrigin(process.env.HYPE_COMMS_API_ORIGIN)
     : null;
-  const expectedAgentWakeBuild = resolveExpectedAgentWakeBuild(
-    process.env.HYPE_COMMS_AGENT_WAKE_ENABLED,
-  );
-  const expectedAgentWakePackageEvidence = resolveExpectedAgentWakePackageEvidence(
-    process.env.HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED,
-    expectedAgentWakeBuild,
-  );
   const excludedDirectories = excludedPackageDirectories(flavor, releaseRoot);
   const asarPaths = await collectPackageFiles(releaseRoot, "app.asar", excludedDirectories);
   if (asarPaths.length === 0) {
@@ -389,8 +315,6 @@ export async function verifyDesktopPackages(
     if (expectedApiOrigin !== null) {
       verifyPackagedApiOrigin(asarPath, expectedApiOrigin);
     }
-    verifyAgentWakeBuild(asarPath, expectedAgentWakeBuild);
-    verifyAgentWakeUpdateIsolation(asarPath, expectedAgentWakePackageEvidence);
     await verifyUpdateConfiguration(asarPath, flavor);
 
     const executablePath = await executableForAsar(asarPath, flavor);
@@ -406,7 +330,7 @@ export async function verifyDesktopPackages(
 
   const apiOriginCheck = expectedApiOrigin === null ? "" : "the API origin, ";
   console.log(
-    `Verified ${apiOriginCheck}application icon, Agent Wake build state, updater isolation, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
+    `Verified ${apiOriginCheck}application icon, updater configuration, AI Channel worker contents, and Electron fuses in ${asarPaths.length} ${flavor.name} packaged app(s).`,
   );
 }
 

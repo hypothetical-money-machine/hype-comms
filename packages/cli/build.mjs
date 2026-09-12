@@ -44,7 +44,7 @@ const result = await build({
   bundle: true,
   define: {
     // `ws` treats these native addons as optional accelerators. Pin the portable bundled path so
-    // the wake CLI cannot load an unpinned module beside the otherwise self-contained entrypoint.
+    // the CLI cannot load an unpinned module beside the otherwise self-contained entrypoint.
     "process.env.WS_NO_BUFFER_UTIL": '"1"',
     "process.env.WS_NO_UTF_8_VALIDATE": '"1"',
   },

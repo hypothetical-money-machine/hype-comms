@@ -32,6 +32,15 @@ describe("CLI output and exit contracts", () => {
     });
   });
 
+  it("rejects the retired Wake command without contacting the server", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const runtime = testRuntime({ homeDirectory: await home(), fetch });
+    expect(await executeCli(["wake", "watch", "--json"], runtime)).toBe(EXIT_USAGE);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(runtime.stdoutText()).toBe("");
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({ error: { code: "USAGE" } });
+  });
+
   it("keeps successful JSON on stdout with no diagnostics", async () => {
     const runtime = testRuntime({
       homeDirectory: await home(),
@@ -118,7 +127,7 @@ describe("CLI output and exit contracts", () => {
     });
   });
 
-  it("hydrates a wake by fetching exactly one authorized message", async () => {
+  it("fetches exactly one authorized message", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       expect(String(url)).toBe(`https://chat.example.test/v1/messages/${MESSAGE_ID}`);
       expect(init?.method).toBe("GET");
@@ -156,7 +165,7 @@ describe("CLI output and exit contracts", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
-  it("rejects an invalid exact-message wake pointer before networking", async () => {
+  it("rejects an invalid message ID before networking", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const runtime = testRuntime({
       homeDirectory: await home(),

@@ -1,11 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  AGENT_WAKE_REALTIME_PREAMBLE,
-  agentWakeCheckpointSchema,
   clientEphemeralActivityFrameSchema,
-  realtimeTicketSchema,
-  sequenceSchema,
+  realtimeConnectionQuerySchema,
   type ClientEphemeralActivityFrame,
   type EphemeralActivityFrame,
   type SyncResponse,
@@ -27,13 +24,11 @@ export const REALTIME_SESSION_REVOKED_CLOSE_CODE = 4401;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVITY_MAX_PAYLOAD_BYTES = 1_024;
 const ACTIVITY_BACKPRESSURE_BYTES = 64 * 1_024;
-type RealtimePreamble = typeof AGENT_WAKE_REALTIME_PREAMBLE | null;
 
 declare module "fastify" {
   interface FastifyRequest {
     realtimePrincipal: RealtimePrincipal | null;
     realtimeCursor: string | null;
-    realtimePreamble: RealtimePreamble;
   }
 }
 
@@ -54,7 +49,6 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
 ) => {
   app.decorateRequest("realtimePrincipal", null);
   app.decorateRequest("realtimeCursor", null);
-  app.decorateRequest("realtimePreamble", null);
 
   app.get(
     "/realtime",
@@ -66,21 +60,16 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
           throw new ApiError(403, "FORBIDDEN", "Origin is not allowed");
         }
 
-        const result = realtimeTicketSchema.safeParse(
-          (request.query as { ticket?: unknown }).ticket,
-        );
+        const result = realtimeConnectionQuerySchema.safeParse(request.query);
         if (!result.success) {
-          throw new ApiError(401, "UNAUTHORIZED", "A valid realtime ticket is required");
+          if (result.error.issues.some((issue) => issue.path[0] === "ticket")) {
+            throw new ApiError(401, "UNAUTHORIZED", "A valid realtime ticket is required");
+          }
+          if (result.error.issues.some((issue) => issue.path[0] === "after")) {
+            throw new ApiError(400, "BAD_REQUEST", "A valid realtime cursor is required");
+          }
+          throw new ApiError(400, "BAD_REQUEST", "Unsupported realtime connection option");
         }
-        const cursor = sequenceSchema.safeParse((request.query as { after?: unknown }).after);
-        if (!cursor.success) {
-          throw new ApiError(400, "BAD_REQUEST", "A valid realtime cursor is required");
-        }
-        const preamble = (request.query as { preamble?: unknown }).preamble;
-        if (preamble !== undefined && preamble !== AGENT_WAKE_REALTIME_PREAMBLE) {
-          throw new ApiError(400, "BAD_REQUEST", "Invalid realtime preamble capability");
-        }
-
         // An absent Origin is accepted for human and agent tickets alike. Requiring it here would
         // break every non-browser client that holds a human session -- `hype-comms-cli watch` opens
         // its socket through `ws`, which sends no Origin -- and it buys little: a hostile page
@@ -89,13 +78,12 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         // merely withholding response headers. Tickets are additionally single-use and expire in
         // 30s. Browsers cannot forge Origin, so the allowlist check above still constrains them.
         const principal = await consumeTicket({
-          ticket: result.data,
+          ticket: result.data.ticket,
           origin,
           request,
         });
         request.realtimePrincipal = principal;
-        request.realtimeCursor = cursor.data;
-        request.realtimePreamble = preamble ?? null;
+        request.realtimeCursor = result.data.after;
       },
     },
     (socket, request) => {
@@ -106,12 +94,6 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         return;
       }
       metrics?.realtimeConnected();
-
-      // This ordering is a Wake-only protocol capability. Desktop and plain-watch clients retain
-      // replay-before-connected freshness semantics, and human principals cannot opt themselves in.
-      const sendAgentWakePreamble =
-        request.realtimePreamble === AGENT_WAKE_REALTIME_PREAMBLE &&
-        principal.agentTokenId !== null;
 
       let cursor = initialCursor;
       let closed = false;
@@ -126,28 +108,6 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
       let desiredPresence: "online" | "away" = "online";
       let activityProcessing = false;
       let pendingActivity: ClientEphemeralActivityFrame | null = null;
-
-      const sendDurableFrame = (serialized: string): Promise<boolean> => {
-        if (closed || socket.readyState !== 1) return Promise.resolve(false);
-        return new Promise<boolean>((resolve, reject) => {
-          try {
-            socket.send(serialized, (error) => {
-              // ws forwards net.Socket's successful write callback as null at runtime even though
-              // its public TypeScript declaration documents only Error | undefined.
-              if (error === undefined || error === null) {
-                resolve(!closed && socket.readyState === 1);
-              } else if (closed || socket.readyState !== 1) {
-                resolve(false);
-              } else {
-                reject(error);
-              }
-            });
-          } catch (error) {
-            if (closed || socket.readyState !== 1) resolve(false);
-            else reject(error);
-          }
-        });
-      };
 
       const sendActivity = (frame: EphemeralActivityFrame): boolean => {
         if (
@@ -320,41 +280,15 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
                 if (authorizedResponse === null) return;
                 response = authorizedResponse;
               }
-              const pageStartCursor = cursor;
-              if (sendAgentWakePreamble && !sendConnected()) return;
               for (const event of response.events) {
-                const serialized = JSON.stringify(event);
-                if (sendAgentWakePreamble) {
-                  if (!(await sendDurableFrame(serialized))) return;
-                } else {
-                  // Preserve the existing desktop/plain-watch replay and activity timing. Wake is
-                  // opted in because its bounded provider queue can deliberately pause the source.
-                  if (socket.readyState !== 1) return;
-                  socket.send(serialized);
-                }
-              }
-              const lastVisibleCursor =
-                response.events.at(-1)?.workspaceSequence ?? pageStartCursor;
-              if (
-                sendAgentWakePreamble &&
-                BigInt(response.nextCursor) > BigInt(lastVisibleCursor)
-              ) {
-                const checkpoint = agentWakeCheckpointSchema.parse({
-                  version: 1,
-                  type: "agent.wake.checkpoint",
-                  workspaceId: principal.workspaceId,
-                  agentUserId: principal.userId,
-                  cursor: response.nextCursor,
-                });
-                if (!(await sendDurableFrame(JSON.stringify(checkpoint)))) return;
+                if (socket.readyState !== 1) return;
+                socket.send(JSON.stringify(event));
               }
               cursor = response.nextCursor;
             } while (response.hasMore && !closed);
 
-            // In legacy ordering the desktop holds message-bearing replay until this user-bound
-            // handshake, then applies it while notifications are still disarmed. Every agent page
-            // remains withheld until its authorization resolves; the handshake position changes
-            // only client freshness classification, not delivery authorization.
+            // Clients hold replay until the user-bound handshake, then apply it while
+            // notifications are disarmed. Every agent page remains withheld until authorized.
             sendConnected();
           } while (flushAgain && !closed);
         } catch (error) {

@@ -8,15 +8,11 @@ import {
   PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
   REACTION_EVENTS_CAPABILITY,
   READ_STATE_EVENTS_CAPABILITY,
-  agentWakeCheckpointSchema,
   productRealtimeEventSchema,
   realtimeTicketResponseSchema,
   sequenceSchema,
   workspaceBootstrapResponseSchema,
-  type AGENT_WAKE_REALTIME_PREAMBLE,
-  type AgentWakeCheckpoint,
   type ProductRealtimeEvent,
-  type SystemConnectedEvent,
 } from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
 
@@ -74,8 +70,6 @@ const WATCH_CAPABILITIES = [
   GROUP_DIRECT_MESSAGES_CAPABILITY,
 ].join(",");
 const PRODUCT_REALTIME_MAX_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
-export const PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT = 1_024;
-export const PRODUCT_REALTIME_PENDING_REPLAY_BYTE_LIMIT = 4 * 1_024 * 1_024;
 
 class ResyncRequiredError extends CliError {
   constructor() {
@@ -105,26 +99,14 @@ export interface ProductRealtimeWatchOptions {
   readonly workspaceId: string;
   readonly random: () => number;
   readonly capabilities?: string;
-  /** Requests the Wake-only, requested-cursor handshake before authorized replay begins. */
-  readonly preamble?: typeof AGENT_WAKE_REALTIME_PREAMBLE;
-  /** Validates the user-bound handshake before any buffered replay is exposed to the projection. */
-  readonly validateConnected?: (event: SystemConnectedEvent) => void;
-  /** Durably accepts Wake-only scan progress that has no visible product event. */
-  readonly onScanCheckpoint?: (checkpoint: AgentWakeCheckpoint) => void | Promise<void>;
   readonly onEvent: (event: ProductRealtimeEvent) => void | Promise<void>;
 }
 
-function websocketUrl(
-  origin: string,
-  ticket: string,
-  after: string,
-  preamble: typeof AGENT_WAKE_REALTIME_PREAMBLE | undefined,
-): string {
+function websocketUrl(origin: string, ticket: string, after: string): string {
   const url = new URL("/v1/realtime", origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("ticket", ticket);
   url.searchParams.set("after", after);
-  if (preamble !== undefined) url.searchParams.set("preamble", preamble);
   return url.toString();
 }
 
@@ -202,15 +184,6 @@ export async function watchProductRealtime(
           after: cursor,
           timeoutMs: input.timeoutMs,
           workspaceId: input.workspaceId,
-          preamble: input.preamble,
-          validateConnected: input.validateConnected,
-          onScanCheckpoint:
-            input.onScanCheckpoint === undefined
-              ? undefined
-              : async (checkpoint) => {
-                  await input.onScanCheckpoint?.(checkpoint);
-                  cursor = laterCursor(cursor, checkpoint.cursor);
-                },
           async write(event) {
             await input.onEvent(event);
             cursor = laterCursor(cursor, event.workspaceSequence);
@@ -247,38 +220,27 @@ async function streamOneConnection(input: {
   readonly after: string;
   readonly timeoutMs: number;
   readonly workspaceId: string;
-  readonly preamble: typeof AGENT_WAKE_REALTIME_PREAMBLE | undefined;
-  readonly validateConnected: ((event: SystemConnectedEvent) => void) | undefined;
-  readonly onScanCheckpoint:
-    ((checkpoint: AgentWakeCheckpoint) => void | Promise<void>) | undefined;
   readonly write: (event: ProductRealtimeEvent) => void | Promise<void>;
   readonly stopped: () => boolean;
   readonly registerSocket: (socket: WebSocket | undefined) => void;
 }): Promise<ConnectionResult> {
   return new Promise<ConnectionResult>((resolve, reject) => {
-    const socket = new WebSocket(
-      websocketUrl(input.origin, input.ticket, input.after, input.preamble),
-      {
-        handshakeTimeout: input.timeoutMs,
-        maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
-        perMessageDeflate: false,
-      },
-    );
+    const socket = new WebSocket(websocketUrl(input.origin, input.ticket, input.after), {
+      handshakeTimeout: input.timeoutMs,
+      maxPayload: PRODUCT_REALTIME_MAX_PAYLOAD_BYTES,
+      perMessageDeflate: false,
+    });
     input.registerSocket(socket);
     let cursor = input.after;
     let delivered = false;
     let connected = false;
     let resyncRequired = false;
     let settled = false;
-    const pendingReplay: ProductRealtimeEvent[] = [];
-    let pendingReplayBytes = 0;
     let queuedMessages = 0;
     let messageTail: Promise<void> = Promise.resolve();
     const settle = (error?: unknown): void => {
       if (settled) return;
       settled = true;
-      pendingReplay.length = 0;
-      pendingReplayBytes = 0;
       input.registerSocket(undefined);
       if (error !== undefined) reject(error);
       else resolve({ cursor, delivered });
@@ -307,18 +269,6 @@ async function streamOneConnection(input: {
         return false;
       }
     };
-    const deliverScanCheckpoint = async (checkpoint: AgentWakeCheckpoint): Promise<boolean> => {
-      try {
-        await input.onScanCheckpoint?.(checkpoint);
-        delivered = true;
-        cursor = laterCursor(cursor, checkpoint.cursor);
-        return true;
-      } catch (error) {
-        socket.terminate();
-        settle(error);
-        return false;
-      }
-    };
     const handleMessage = async (data: RawData, isBinary: boolean): Promise<void> => {
       if (settled) return;
       if (isBinary) {
@@ -326,29 +276,11 @@ async function streamOneConnection(input: {
         return;
       }
       const serialized = data.toString("utf8");
-      const frameBytes = Buffer.byteLength(serialized);
       let value: unknown;
       try {
         value = JSON.parse(serialized) as unknown;
       } catch (error) {
         rejectContract("The realtime server sent malformed JSON", error);
-        return;
-      }
-      const scanCheckpoint = agentWakeCheckpointSchema.safeParse(value);
-      if (scanCheckpoint.success) {
-        if (input.onScanCheckpoint === undefined || input.preamble === undefined) {
-          rejectContract("Realtime sent a Wake checkpoint without the Wake capability");
-          return;
-        }
-        if (!connected) {
-          rejectContract("Realtime sent a Wake checkpoint before the connection event");
-          return;
-        }
-        if (scanCheckpoint.data.workspaceId !== input.workspaceId) {
-          rejectContract("Realtime sent a Wake checkpoint for the wrong workspace");
-          return;
-        }
-        await deliverScanCheckpoint(scanCheckpoint.data);
         return;
       }
       const parsed = productRealtimeEventSchema.safeParse(value);
@@ -368,53 +300,7 @@ async function streamOneConnection(input: {
           return;
         }
         connected = true;
-        // Consumers that require a user-bound handshake keep legacy-server replay private and
-        // bounded until identity validation. Release that replay before its high-water handshake
-        // so a durable consumer cannot checkpoint past an event it has not received yet.
-        try {
-          input.validateConnected?.(event);
-        } catch (error) {
-          socket.terminate();
-          settle(error);
-          return;
-        }
-        for (const replayEvent of pendingReplay) {
-          if (!(await deliver(replayEvent))) return;
-        }
-        pendingReplay.length = 0;
-        pendingReplayBytes = 0;
         if (!(await deliver(event))) return;
-        return;
-      }
-
-      if (!connected && input.validateConnected !== undefined) {
-        if (event.type === "system.resync_required") {
-          // Cursor recovery is body-free and may replace the handshake. Never release a partial
-          // replay when the server could not establish its authoritative boundary.
-          pendingReplay.length = 0;
-          pendingReplayBytes = 0;
-          if (!(await deliver(event))) return;
-          resyncRequired = true;
-          socket.close(1000);
-          return;
-        }
-        if (
-          pendingReplay.length >= PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT ||
-          pendingReplayBytes + frameBytes > PRODUCT_REALTIME_PENDING_REPLAY_BYTE_LIMIT
-        ) {
-          // This is a local capacity limit rather than malformed server data. Discard the
-          // unvalidated replay and surface the same body-free repair signal used by the desktop
-          // realtime client so durable consumers can reset deliberately from their last cursor.
-          pendingReplay.length = 0;
-          pendingReplayBytes = 0;
-          const event = syntheticResyncEvent(input.workspaceId, cursor, "client_replay_overflow");
-          if (!(await deliver(event))) return;
-          socket.terminate();
-          settle(new ResyncRequiredError());
-          return;
-        }
-        pendingReplay.push(event);
-        pendingReplayBytes += frameBytes;
         return;
       }
 
