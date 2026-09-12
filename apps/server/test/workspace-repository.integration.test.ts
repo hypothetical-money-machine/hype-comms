@@ -2580,35 +2580,85 @@ describe("WorkspaceRepository", () => {
     );
   });
 
-  it("unassigns tasks before removing a member from a private channel", async () => {
-    const channel = await repository.createChannel(owner, {
-      name: "Task Crew",
-      slug: "task-crew",
-      topic: null,
-      access: "members",
-    });
-    const conversationId = channel.conversation.conversation.id;
-    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
-    const created = await repository.createTask(
-      owner,
-      conversationId,
-      taskInput("Member-owned work", { assigneeId: memberId }),
-      randomUUID(),
-    );
+  it.each(["event insert", "commit"] as const)(
+    "keeps task unassignment and member removal atomic on %s failure",
+    async (failurePoint) => {
+      const channel = await repository.createChannel(owner, {
+        name: "Task Crew",
+        slug: "task-crew",
+        topic: null,
+        access: "members",
+      });
+      const conversationId = channel.conversation.conversation.id;
+      await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+      const created = await repository.createTask(
+        owner,
+        conversationId,
+        taskInput("Member-owned work", { assigneeId: memberId }),
+        randomUUID(),
+      );
 
-    await repository.removeChannelMember(owner, conversationId, memberId);
+      const beforeMembers = await repository.listChannelMembers(owner, conversationId);
+      const beforeTasks = await repository.listConversationTasks(
+        member,
+        conversationId,
+        undefined,
+        10,
+      );
+      const beforeSync = await repository.sync(owner, "0", 100, { taskEvents: true });
+      await pool.query(`CREATE FUNCTION reject_test_membership_write() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'Injected membership transaction failure';
+      END;
+      $$`);
+      try {
+        await pool.query(
+          failurePoint === "commit"
+            ? `CREATE CONSTRAINT TRIGGER reject_test_membership_write
+               AFTER INSERT ON sync_events DEFERRABLE INITIALLY DEFERRED
+               FOR EACH ROW WHEN (
+                 NEW.event_type = 'channel.membership_changed' AND NEW.payload->>'action' = 'removed'
+               ) EXECUTE FUNCTION reject_test_membership_write()`
+            : `CREATE TRIGGER reject_test_membership_write
+               BEFORE INSERT ON sync_events FOR EACH ROW WHEN (
+                 NEW.event_type = 'channel.membership_changed' AND NEW.payload->>'action' = 'removed'
+               ) EXECUTE FUNCTION reject_test_membership_write()`,
+        );
+        await expect(
+          repository.removeChannelMember(owner, conversationId, memberId),
+        ).rejects.toThrow("Injected membership transaction failure");
+        await expect(repository.listChannelMembers(owner, conversationId)).resolves.toEqual(
+          beforeMembers,
+        );
+        await expect(
+          repository.listConversationTasks(member, conversationId, undefined, 10),
+        ).resolves.toEqual(beforeTasks);
+        await expect(repository.sync(owner, "0", 100, { taskEvents: true })).resolves.toEqual(
+          beforeSync,
+        );
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_membership_write ON sync_events");
+        await pool.query("DROP FUNCTION reject_test_membership_write()");
+      }
 
-    const [task] = (await repository.listConversationTasks(owner, conversationId, undefined, 10))
-      .tasks;
-    expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
-    await expect(
-      repository.listConversationTasks(member, conversationId, undefined, 10),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
-    const memberSync = await repository.sync(member, created.syncCursor, 100, {
-      taskEvents: true,
-    });
-    expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
-  });
+      const removed = await repository.removeChannelMember(owner, conversationId, memberId);
+      await expect(
+        repository.removeChannelMember(owner, conversationId, memberId),
+      ).resolves.toEqual(removed);
+
+      const [task] = (await repository.listConversationTasks(owner, conversationId, undefined, 10))
+        .tasks;
+      expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
+      await expect(
+        repository.listConversationTasks(member, conversationId, undefined, 10),
+      ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+      const memberSync = await repository.sync(member, created.syncCursor, 100, {
+        taskEvents: true,
+      });
+      expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
+    },
+  );
 
   it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
     const [staleCursor] = await seedMessageEvents(2);
