@@ -430,8 +430,13 @@ compatible app update or full resync; it is never skipped.
 
 A channel-membership event refreshes the authoritative visible-conversation snapshot instead of
 trying to infer access locally. If the current member was removed, that refresh deletes the
-channel summary and acknowledged history from the cache, preserves unrelated outbox entries, and
-moves selection to the first remaining visible conversation.
+channel summary and acknowledged history from the cache and moves selection to the first remaining
+visible conversation. The user's authored unsent operations remain encrypted in the same per-account
+outbox, marked as permanent failures with no retry time. Unrelated pending sends continue normally.
+The runtime hides the removed conversation during repair; retained sends do not appear in another
+conversation. If access is restored, its failed-send rows are available again for explicit edit,
+retry or discard. Restoring access never automatically retries them. This preserves local authored
+work while continuing to remove replicated server content.
 
 Each queued send stores one generated UUID as both `clientMessageId` and idempotency key.
 The optimistic row is reconciled by that ID, not by body or timestamp. Network errors,

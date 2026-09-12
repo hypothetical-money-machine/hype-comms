@@ -3370,6 +3370,44 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         })
         await restarted.disconnect()
 
+    async def test_interrupted_v2_cursor_upgrade_keeps_the_original_checkpoint_for_restart(self) -> None:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed)
+        anchor_id = message_id_for("101")
+        original = json.dumps({
+            "version": 2, "cursor": "101", "pendingReadCursors": {
+                DM_ID: {"messageId": anchor_id, "conversationSequence": "101"},
+            },
+        }).encode("utf-8")
+        seed._cursor_path.write_bytes(original)
+        scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+        interrupted_factory = FakeProcessFactory(startup_specs("500", scopes))
+        interrupted = self.new_adapter(interrupted_factory)
+        real_replace = adapter_module.os.replace
+
+        def fail_checkpoint_replace(source: Any, destination: Any) -> None:
+            if Path(destination) == seed._cursor_path:
+                raise OSError("interrupted checkpoint replacement")
+            real_replace(source, destination)
+
+        with patch.object(adapter_module.os, "replace", side_effect=fail_checkpoint_replace):
+            self.assertFalse(await interrupted.connect())
+        self.assertEqual(seed._cursor_path.read_bytes(), original)
+        self.assertFalse(interrupted._lock_held)
+        self.assertFalse(any(call["args"][0] == "watch" for call in interrupted_factory.calls))
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(startup_specs("600", scopes) + [
+            read_cursor_spec(DM_ID, anchor_id),
+            ProcessSpec(("watch", "--json", "--after", cursor_text("600")), watch),
+        ])
+        restarted = self.new_adapter(factory)
+        self.assertTrue(await restarted.connect())
+        self.assertEqual(restarted.handled_events, [])
+        self.assertEqual(json.loads(seed._cursor_path.read_bytes()), {
+            "version": 3, "cursor": position("600"), "pendingReadCursors": {},
+        })
+        await restarted.disconnect()
+
     async def test_changed_event_epoch_requires_bootstrap_without_checkpointing_or_handoff(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)
