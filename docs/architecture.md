@@ -249,7 +249,7 @@ opaque cursors are bound to that exact filter set; changing filters requires a f
 | `GET /v2/channels/:id/members`, `PUT/DELETE /v2/channels/:id/members/:userId` | List a visible channel's audience or, for a members-only channel owner, add, remove, promote, or demote one active workspace member.      |
 | `POST /v2/direct-conversations`                                               | Return the existing DM for `memberId` or atomically create it. A `workspace:read` agent may reopen its existing DM; creation requires narrow `direct-conversations:write` or legacy `conversations:write`. |
 | `POST /v2/group-direct-conversations`                                         | Idempotently create a fixed-membership group for the caller plus 2–24 distinct active human or agent members in the same workspace.       |
-| `GET /v2/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `agent-context-pack-v1` adds a bounded, anchored agent projection without changing the legacy shape. |
+| `GET /v2/conversations/:id/messages`                                          | Authorized, reverse-chronological history pagination rendered oldest-first. `contextPack=true` selects the bounded, anchored agent context operation. |
 | `POST /v2/conversations/:id/messages`                                         | Create a top-level message or reply (`threadRootId`), mentioned member IDs, and ready attachment IDs. Requires stable `clientMessageId`; agent attachment IDs additionally require `attachments:write`. |
 | `GET /v2/messages/:id/thread`                                                 | Root plus paginated replies, authorized through the parent conversation; agents require `workspace:read`.                                 |
 | `POST /v2/reactions/query`                                                    | Return reactions for up to 100 authorized message IDs without changing the strict history response.                                       |
@@ -675,13 +675,17 @@ database-validated human owner. It does not change ordinary conversation visibil
 Agents and older clients receive the legacy enrollment shape, and settled rows contain no channel
 name projection.
 
-An eligible Hermes wake requests `agent-context-pack-v1` only after its self-message, author
+An eligible Hermes message requests a context pack only after its self-message, author
 allowlist, DM/channel-mention, and optional participated-thread gates pass. The server projects at
 most 20 live messages from one already-authorized conversation in a repeatable-read snapshot,
 resolves authors from the member records, and derives `mentionedYou` from verified mention rows.
 It returns a canonical `#slug` or `@peer` selector, the anchor's one-level-thread reply target, and
 an optional root outside the tail. The pack is capped at 64 KiB by dropping whole oldest messages;
 ordinary history remains a separate canonical response.
+The CLI validates and renders this pack, then emits an adapter-protocol-1 envelope. Python
+verifies the envelope, binds the result to its authorized conversation and trigger, and adds
+Hermes routing policy. It does not maintain TypeScript entity or Unicode schema copies.
+The mandatory Hermes gate runs Ruff, mypy and real CLI-to-Python fixtures.
 An anchored context `NOT_FOUND` covers both an unavailable trigger and a conversation that is no
 longer visible. The adapter checkpoints that event without inference or read-state mutation, keeping
 the privacy-preserving 404 and preventing one unavailable wake from poisoning every reconnect.

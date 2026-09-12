@@ -1,7 +1,3 @@
-> Workspace protocol 2 requires the matching CLI release. The CLI owns protocol validation and
-> rejects incompatible servers before Hermes can consume their output. The versioned CLI adapter
-> output contract is a separate remediation milestone.
-
 # Hype Comms platform plugin for Hermes
 
 This directory is a drop-in Hermes platform plugin. It makes a Hype Comms agent
@@ -33,15 +29,14 @@ The adapter:
   cron processes.
 
 Every author, selector, mention flag, reply target, and message body in a
-context pack is untrusted conversation content. The adapter validates the
-strict v1 structure and anchor, then places one-line JSON between explicit
-untrusted-content boundaries in `MessageEvent.text`. It never places dynamic
+context pack is untrusted conversation content. The CLI validates the canonical
+structure and renders one-line JSON between explicit untrusted-content boundaries.
+Python binds that result to the authorized trigger and puts it in `MessageEvent.text`. It never places dynamic
 context in `channel_prompt`, plugin configuration, or system instructions. The
-shared contract, server pruning, and adapter all measure the same compact,
+shared contract, server pruning, and CLI use one compact,
 injection-safe JSON representation and cap it at 64 KiB, including expansion
-when Unicode line separators become JSON escapes. Fixed ASCII framing plus a
-bounded UUID-only authorization-routing line is reserved outside that shared
-pack budget.
+when Unicode line separators become JSON escapes. The CLI adds fixed framing. Python adds a bounded UUID-only
+routing line outside the rendered content and retains Hermes authorization decisions.
 
 ## Compatibility
 
@@ -76,14 +71,24 @@ NousResearch/hermes-agent commit
   (`[SILENT]`, `SILENT`, `NO_REPLY`, `NO REPLY`), matched against a whole
   response only
 
-The installed `hype-comms-cli` must support protocol-2 context
-history and read-cursor advancement:
+Every CLI child is invoked with `--adapter-protocol=1` before the command. Its stdout
+must use a strict `{ "adapterProtocol": 1, "kind": "result" | "event", "data": ... }`
+envelope. Python verifies every envelope. An incompatible CLI fails during startup,
+before watch or context delivery. The flag also protects separately invoked sends.
+Workspace protocol 2 and this output protocol are distinct compatibility boundaries.
 
-```text
-hype-comms-cli messages history CONVERSATION --context-pack \
-  --through-message-id MESSAGE --limit N --json
-hype-comms-cli read-cursors advance CONVERSATION MESSAGE --json
-```
+The CLI owns full entity validation, Unicode normalization and context rendering.
+Python retains bounded stdout/stderr handling, result/trigger binding, routing policy,
+checkpoint persistence and Hermes lifecycle integration. Its UTF-16 length callback
+remains for Hermes's outbound message splitting; silence-marker handling remains Hermes policy.
+The adapter no longer keeps a list of all canonical realtime events. Validated events
+without a Hermes action can be checkpointed; unknown wire events are rejected by the CLI.
+
+`adapter protocol` reports the output protocol without credentials or networking.
+`adapter render-context CONVERSATION --through-message-id MESSAGE --limit N` accepts a
+context-history response on bounded stdin and runs the same validator and renderer as
+`messages history --context-pack`. It is useful for replaying fixtures without contacting
+an API. Neither command changes server state.
 
 If context history is malformed, transiently unavailable, or does not match
 the triggering conversation and message, the wake is not handed to Hermes and
@@ -450,13 +455,26 @@ adapter version.
 
 ## Verify
 
-The tests install small fake modules at the real Hermes import paths and use
-fake CLI processes, so Hermes itself is not required:
+Install the development checks with Python 3.11 or newer:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s integrations/hermes-hype-comms -p 'test_*.py' -v
+python3 -m venv .venv/hermes
+.venv/hermes/bin/python -m pip install -r integrations/hermes-hype-comms/requirements-dev.txt
+npm run test:hermes-plugin
 ```
+
+The command builds the CLI, then runs Ruff, mypy and the mandatory tests. Set
+`HYPE_COMMS_PYTHON` to use another prepared interpreter. Windows environments use
+`.venv/hermes/Scripts/python.exe` automatically. The pinned development dependencies
+are separate from the drop-in plugin's runtime, which only needs Hermes and the CLI.
+
+Lifecycle tests use a typed framework boundary and small process fixtures. Explicit
+context fixtures execute the built CLI; `test_cli_boundary.py` also runs real subprocesses
+for the Unicode 17 U+11DB0 case, non-BMP content, delimiters, protocol mismatch, request
+binding, pipe overflow and cancellation. Retry-timing tests use prevalidated fixtures so
+process startup time does not affect the ordering assertions. No Hermes installation is
+needed for these checks. The `typings/` stubs describe the consumed API at the pinned
+Hermes commit above; review them alongside any Hermes upgrade.
 
 Coverage includes startup/bootstrap, scoped locking, DM delivery, allowlist and
 mention gating before context retrieval, self-message suppression, exact

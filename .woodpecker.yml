@@ -21,6 +21,9 @@ steps:
   - name: check
     image: node:24.18.0-bookworm
     commands:
+      - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
+      - python3 -m venv .venv/hermes
+      - .venv/hermes/bin/python -m pip install -r integrations/hermes-hype-comms/requirements-dev.txt
       - npm ci
       - HYPE_COMMS_TEST_DATABASE_URL=postgres://hype_comms:hype-comms-test-password@postgres:5432/hype_comms_test npm run check
 
