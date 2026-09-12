@@ -1,11 +1,6 @@
 import path from "node:path";
 
-import {
-  atomicWrite,
-  readBoundedUtf8File,
-  syncDirectoryBestEffort,
-  type SyncDirectory,
-} from "./preference-file";
+import { JsonPreferenceFile, type PreferenceStoreOptions } from "./preference-file";
 
 export const MAX_AI_CHANNEL_PREFERENCE_FILE_BYTES = 16_384;
 const STORED_AI_CHANNEL_PREFERENCE_VERSION = 1;
@@ -53,37 +48,21 @@ export function parseStoredAiChannelPreference(value: unknown): AiChannelPrefere
   };
 }
 
-export class AiChannelPreferenceStore {
-  readonly #filePath: string;
-  readonly #syncDirectory: SyncDirectory;
-  #saveTail: Promise<void> = Promise.resolve();
-
-  constructor(options: { readonly userDataPath: string; readonly syncDirectory?: SyncDirectory }) {
-    this.#filePath = path.join(options.userDataPath, "hype-comms-settings", "ai-channel.json");
-    this.#syncDirectory = options.syncDirectory ?? syncDirectoryBestEffort;
-  }
-
-  async load(): Promise<AiChannelPreference> {
-    const source = await readBoundedUtf8File(this.#filePath, MAX_AI_CHANNEL_PREFERENCE_FILE_BYTES);
-    if (source === null) return DEFAULT_AI_CHANNEL_PREFERENCE;
-    try {
-      return parseStoredAiChannelPreference(JSON.parse(source)) ?? DEFAULT_AI_CHANNEL_PREFERENCE;
-    } catch {
-      return DEFAULT_AI_CHANNEL_PREFERENCE;
-    }
-  }
-
-  save(preference: AiChannelPreference): Promise<void> {
-    const stored = {
-      version: STORED_AI_CHANNEL_PREFERENCE_VERSION,
-      workspacePath: preference.workspacePath,
-      sessionId: preference.sessionId,
-    };
-    const source = `${JSON.stringify(stored)}\n`;
-    const request = this.#saveTail.then(() =>
-      atomicWrite(this.#filePath, source, this.#syncDirectory),
-    );
-    this.#saveTail = request.catch(() => undefined);
-    return request;
+export class AiChannelPreferenceStore extends JsonPreferenceFile<AiChannelPreference> {
+  constructor(options: PreferenceStoreOptions) {
+    super({
+      filePath: path.join(options.userDataPath, "hype-comms-settings", "ai-channel.json"),
+      syncDirectory: options.syncDirectory,
+      maxBytes: MAX_AI_CHANNEL_PREFERENCE_FILE_BYTES,
+      defaultValue: DEFAULT_AI_CHANNEL_PREFERENCE,
+      codec: {
+        decode: parseStoredAiChannelPreference,
+        encode: (preference) => ({
+          version: STORED_AI_CHANNEL_PREFERENCE_VERSION,
+          workspacePath: preference.workspacePath,
+          sessionId: preference.sessionId,
+        }),
+      },
+    });
   }
 }
