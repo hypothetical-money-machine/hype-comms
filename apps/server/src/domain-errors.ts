@@ -6,8 +6,7 @@ export type DomainErrorKind =
   | "access_denied"
   | "authentication_required"
   | "sync_position_expired"
-  | "integrity_failure"
-  | "group_direct_client_upgrade_required";
+  | "integrity_failure";
 
 export class DomainError extends Error {
   constructor(

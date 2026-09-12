@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serverResponse } from "./helpers.js";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -70,7 +71,7 @@ describe("CLI output and exit contracts", () => {
       observed.push(token ?? "");
       const next = observed.length === 1 ? "b".repeat(43) : "c".repeat(43);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      return new Response(null, {
+      return serverResponse(null, {
         status: 204,
         headers: { "set-cookie": `hype_comms_session=${next}; Path=/; HttpOnly` },
       });
@@ -129,7 +130,7 @@ describe("CLI output and exit contracts", () => {
 
   it("fetches exactly one authorized message", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe(`https://chat.example.test/v1/messages/${MESSAGE_ID}`);
+      expect(String(url)).toBe(`https://chat.example.test/v2/messages/${MESSAGE_ID}`);
       expect(init?.method).toBe("GET");
       return jsonResponse({
         message: {
@@ -351,7 +352,7 @@ describe("CLI output and exit contracts", () => {
       },
     );
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe("https://override.example.test/v1/auth/me");
+      expect(String(url)).toBe("https://override.example.test/v2/auth/me");
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
       expect(new Headers(init?.headers).has("cookie")).toBe(false);
       return jsonResponse(agentPrincipal());

@@ -29,7 +29,7 @@ export const chatSessionStateSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("session-unavailable"),
-      reason: z.enum(["server_unreachable", "server_error"]),
+      reason: z.enum(["server_unreachable", "server_error", "protocol_mismatch"]),
       message: z.string().trim().min(1).max(300),
       /**
        * Main exposes this credential-free identity only after matching an OS-protected record to

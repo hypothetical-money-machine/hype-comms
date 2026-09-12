@@ -1,6 +1,5 @@
 import {
   entityIdSchema,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
   listConversationsResponseSchema,
   listMembersResponseSchema,
   listPublicChannelsResponseSchema,
@@ -25,20 +24,15 @@ const publicChannelCache = new WeakMap<
 >();
 const memberCache = new WeakMap<ApiClient, Promise<readonly User[]>>();
 const currentUserIdCache = new WeakMap<ApiClient, Promise<string>>();
-const GROUP_DIRECT_MESSAGES_HEADER = {
-  "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
-} as const;
-
 async function fetchAllConversations(client: ApiClient): Promise<readonly ConversationSummary[]> {
   const conversations: ConversationSummary[] = [];
   const seen = new Set<string>();
   let after: string | undefined;
   for (let page = 0; page < 100; page += 1) {
     const response = await client.request({
-      path: "/v1/conversations",
+      path: "/v2/conversations",
       query: { limit: 100, after },
       responseSchema: listConversationsResponseSchema,
-      headers: GROUP_DIRECT_MESSAGES_HEADER,
     });
     conversations.push(...response.conversations);
     if (!response.hasMore) return conversations;
@@ -69,7 +63,7 @@ async function fetchAllPublicChannels(
   let after: string | undefined;
   for (let page = 0; page < 100; page += 1) {
     const response = await client.request({
-      path: "/v1/channels",
+      path: "/v2/channels",
       query: { limit: 100, after },
       responseSchema: listPublicChannelsResponseSchema,
     });
@@ -101,7 +95,7 @@ export async function listMembers(client: ApiClient): Promise<readonly User[]> {
   const cached = memberCache.get(client);
   if (cached !== undefined) return cached;
   const pending = client
-    .request({ path: "/v1/members", responseSchema: listMembersResponseSchema })
+    .request({ path: "/v2/members", responseSchema: listMembersResponseSchema })
     .then((response) => response.members);
   memberCache.set(client, pending);
   return pending;
@@ -112,9 +106,8 @@ async function currentUserId(client: ApiClient): Promise<string> {
   if (cached !== undefined) return cached;
   const pending = client
     .request({
-      path: "/v1/bootstrap",
+      path: "/v2/bootstrap",
       responseSchema: workspaceBootstrapResponseSchema,
-      headers: GROUP_DIRECT_MESSAGES_HEADER,
     })
     .then((bootstrap) => bootstrap.currentUser.user.id);
   currentUserIdCache.set(client, pending);

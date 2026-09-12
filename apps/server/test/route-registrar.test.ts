@@ -112,11 +112,11 @@ describe("route registration", () => {
           },
         });
       }),
-      { prefix: "/v1" },
+      { prefix: "/v2" },
     );
     const response = await app.inject({
       method: "POST",
-      url: "/v1/items/7",
+      url: "/v2/items/7",
       headers: { authorization: "Bearer valid" },
       payload: { title: " hello " },
     });
@@ -129,7 +129,7 @@ describe("route registration", () => {
     });
     const strict = await app.inject({
       method: "POST",
-      url: "/v1/items/7?unknown=1",
+      url: "/v2/items/7?unknown=1",
       headers: { authorization: "Bearer valid" },
       payload: { title: "hello" },
     });

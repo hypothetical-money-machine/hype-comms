@@ -1,6 +1,7 @@
-import { deferred } from "./test-support/deferred";
 import { describe, expect, it, vi } from "vitest";
 import { scopedWorkspaceSession } from "./scoped-workspace-session";
+import { serverResponse } from "./test-support/server-response";
+import { deferred } from "./test-support/deferred";
 import { OwnedWorkspaceSession } from "./workspace-session-owner";
 import { WorkspaceTransport } from "./workspace-transport";
 
@@ -22,12 +23,12 @@ describe("scoped workspace networking", () => {
       markSignedOut: vi.fn(async () => undefined),
     };
     const scoped = scopedWorkspaceSession(chat, session);
-    const response = scoped.fetch("https://chat.example/v1/members");
+    const response = scoped.fetch("https://chat.example/v2/members");
     await session.dispose();
     pending.resolve(new Response(new ReadableStream({ cancel })));
     await expect(response).rejects.toMatchObject({ name: "AbortError" });
     expect(cancel).toHaveBeenCalledOnce();
-    await expect(scoped.fetch("https://chat.example/v1/members")).rejects.toMatchObject({
+    await expect(scoped.fetch("https://chat.example/v2/members")).rejects.toMatchObject({
       name: "AbortError",
     });
     expect(chat.fetch).toHaveBeenCalledOnce();
@@ -37,7 +38,7 @@ describe("scoped workspace networking", () => {
     const session = lifetime();
     const reading = deferred<void>();
     let body: ReadableStreamDefaultController<Uint8Array> | undefined;
-    const response = new Response(
+    const response = serverResponse(
       new ReadableStream<Uint8Array>({
         start(controller) {
           body = controller;
@@ -78,7 +79,7 @@ describe("scoped workspace networking", () => {
       },
       session,
     );
-    await scoped.fetch("https://chat.example/v1/members", { signal: caller.signal });
+    await scoped.fetch("https://chat.example/v2/members", { signal: caller.signal });
     const signal = fetch.mock.calls[0]?.[1].signal;
     caller.abort();
     expect(signal?.aborted).toBe(true);

@@ -154,7 +154,7 @@ describe("agent enrollment CLI", () => {
     const observedUrls: string[] = [];
     const requestFetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       observedUrls.push(String(url));
-      expect(String(url)).toBe(`${API_ORIGIN}/v1/agent-enrollments`);
+      expect(String(url)).toBe(`${API_ORIGIN}/v2/agent-enrollments`);
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${ATLAS_TOKEN}`);
       expect(new Headers(init?.headers).get("idempotency-key")).toBe(
         `agent-enrollment:${offer.request.credentialVerifier}`,
@@ -206,7 +206,7 @@ describe("agent enrollment CLI", () => {
       env: env(homeDirectory, "owner"),
       fetch: vi.fn<typeof globalThis.fetch>(async (url, init) => {
         observedUrls.push(String(url));
-        expect(String(url)).toBe(`${API_ORIGIN}/v1/agent-enrollments/${ENROLLMENT_ID}/review`);
+        expect(String(url)).toBe(`${API_ORIGIN}/v2/agent-enrollments/${ENROLLMENT_ID}/review`);
         expect(new Headers(init?.headers).get("cookie")).toBe(
           `hype_comms_session=${"o".repeat(43)}`,
         );
@@ -227,14 +227,14 @@ describe("agent enrollment CLI", () => {
     ] as const;
     const redeemFetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       observedUrls.push(String(url));
-      if (String(url).endsWith(`/v1/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
+      if (String(url).endsWith(`/v2/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
         expect(new Headers(init?.headers).get("authorization")).toBe(
           `Enrollment ${candidate.token}`,
         );
         expect(init?.body).toBeUndefined();
         return jsonResponse({ enrollment: enrollment("active"), agent: childAgent() });
       }
-      expect(String(url)).toBe(`${API_ORIGIN}/v1/auth/me`);
+      expect(String(url)).toBe(`${API_ORIGIN}/v2/auth/me`);
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${candidate.token}`);
       return jsonResponse(childPrincipal());
     });
@@ -375,7 +375,7 @@ describe("agent enrollment CLI", () => {
       homeDirectory,
       env: env(homeDirectory, "child"),
       fetch: vi.fn<typeof globalThis.fetch>(async (url, init) => {
-        if (String(url).endsWith(`/v1/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
+        if (String(url).endsWith(`/v2/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
           expect(serverActivated).toBe(true);
           expect(new Headers(init?.headers).get("authorization")).toBe(
             `Enrollment ${candidate.token}`,
@@ -436,7 +436,7 @@ describe("agent enrollment CLI", () => {
       if (candidate?.kind !== "agent") throw new Error("Missing candidate fixture");
 
       const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-        if (String(url).endsWith(`/v1/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
+        if (String(url).endsWith(`/v2/agent-enrollments/${ENROLLMENT_ID}/redeem`)) {
           expect(new Headers(init?.headers).get("authorization")).toBe(
             `Enrollment ${candidate.token}`,
           );
@@ -455,7 +455,7 @@ describe("agent enrollment CLI", () => {
           );
           return jsonResponse({ enrollment: enrollment("active"), agent: childAgent() });
         }
-        expect(String(url)).toBe(`${API_ORIGIN}/v1/auth/me`);
+        expect(String(url)).toBe(`${API_ORIGIN}/v2/auth/me`);
         expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${candidate.token}`);
         return jsonResponse(childPrincipal());
       });
@@ -604,19 +604,19 @@ describe("agent enrollment CLI", () => {
       {
         args: ["status", ENROLLMENT_ID],
         method: "GET",
-        path: `/v1/agent-enrollments/${ENROLLMENT_ID}`,
+        path: `/v2/agent-enrollments/${ENROLLMENT_ID}`,
         body: { enrollment: enrollment("pending_approval") },
       },
       {
         args: ["cancel", ENROLLMENT_ID],
         method: "POST",
-        path: `/v1/agent-enrollments/${ENROLLMENT_ID}/cancel`,
+        path: `/v2/agent-enrollments/${ENROLLMENT_ID}/cancel`,
         body: { enrollment: enrollment("cancelled") },
       },
       {
         args: ["list"],
         method: "GET",
-        path: "/v1/agent-enrollments",
+        path: "/v2/agent-enrollments",
         body: { enrollments: [enrollment("pending_approval")] },
       },
     ] as const;
@@ -658,7 +658,7 @@ describe("agent enrollment CLI", () => {
       homeDirectory,
       env: env(homeDirectory, "owner"),
       fetch: vi.fn<typeof globalThis.fetch>(async (url, init) => {
-        expect(String(url)).toBe(`${API_ORIGIN}/v1/agent-enrollments/${ENROLLMENT_ID}/review`);
+        expect(String(url)).toBe(`${API_ORIGIN}/v2/agent-enrollments/${ENROLLMENT_ID}/review`);
         expect(JSON.parse(String(init?.body))).toEqual({ decision: "reject" });
         return jsonResponse({ enrollment: enrollment("rejected") });
       }),
