@@ -39,7 +39,7 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
@@ -169,7 +169,7 @@ async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> 
   throw new Error("Expected the operation to reject");
 }
 
-describeWithPostgres("WorkspaceRepository", () => {
+describe("WorkspaceRepository", () => {
   let database: TestDatabase;
   let pool: Pool;
   let repository: WorkspaceRepository;
