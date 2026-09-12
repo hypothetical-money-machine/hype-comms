@@ -62,7 +62,8 @@
     "verify:test-database": "node scripts/test-postgres.mjs --ready",
     "verify:zod-alignment": "node scripts/verify-zod-alignment.mjs",
     "rehearse:native-cache": "tsc -b packages/api-client && node scripts/rehearse-native-cache.mjs",
-    "rehearse:claude": "npm run build --workspace @hype-comms/desktop && node scripts/rehearse-claude.mjs"
+    "rehearse:claude": "npm run build --workspace @hype-comms/desktop && node scripts/rehearse-claude.mjs",
+    "rehearse:server-cutover": "tsc -b packages/api-client && node scripts/rehearse-server-cutover.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
