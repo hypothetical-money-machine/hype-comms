@@ -1,3 +1,11 @@
+import {
+  CLI_ADAPTER_PROTOCOL,
+  agentContextHistoryQuerySchema,
+  entityIdSchema,
+} from "@hype-comms/contracts";
+import { adapterContext } from "./adapter-protocol.js";
+import { parseCommandArguments, requirePositionals, stringOption, integerOption } from "./argv.js";
+import { readStream } from "./input.js";
 import { agentTokensCommand, agentsCommand, invitationsCommand } from "./commands/admin.js";
 import { authCommand } from "./commands/auth.js";
 import { agentEnrollmentPolicyCommand, agentEnrollmentsCommand } from "./commands/enrollments.js";
@@ -26,11 +34,14 @@ Usage:
 
 Global options:
   --json                    Emit JSON results (watch emits NDJSON)
+  --adapter-protocol 1      Require versioned machine envelopes for integrations
   --profile NAME            Select a named profile
   --api-origin URL          Override the profile API origin
   --timeout-ms MS           Request timeout (default: 30000)
 
 Commands:
+  adapter protocol
+  adapter render-context CONVERSATION [--through-message-id UUID] [--limit N]
   health
   readiness
   profiles list
@@ -101,14 +112,46 @@ export const VERSION = "0.1.0";
 export async function runCli(argv: readonly string[], runtime: Runtime): Promise<void> {
   const extracted = extractGlobalOptions(argv);
   const [command, subcommand, ...rest] = extracted.args;
-  const context: CommandContext = { runtime, options: extracted.options };
+  const context: CommandContext = {
+    runtime:
+      extracted.options.adapterProtocol === undefined
+        ? runtime
+        : {
+            ...runtime,
+            io: { ...runtime.io, adapterProtocol: extracted.options.adapterProtocol },
+          },
+    options: extracted.options,
+  };
+  if (command === "adapter") {
+    if (subcommand === "protocol" && rest.length === 0) {
+      writeResult(context.runtime.io, { protocol: CLI_ADAPTER_PROTOCOL }, true);
+      return;
+    }
+    if (subcommand === "render-context") {
+      const parsed = parseCommandArguments(rest, {
+        "through-message-id": { kind: "string" },
+        limit: { kind: "string" },
+      });
+      const [conversation] = requirePositionals(parsed, 1);
+      const id = entityIdSchema.parse(conversation);
+      const query = agentContextHistoryQuerySchema.parse({
+        contextPack: true,
+        throughMessageId: stringOption(parsed, "through-message-id"),
+        limit: integerOption(parsed, "limit", 8, 20),
+      });
+      const input: unknown = JSON.parse(await readStream(runtime.io.stdin, 1_048_576));
+      writeResult(context.runtime.io, adapterContext(input, id, query), true);
+      return;
+    }
+    throw new UsageError("Use adapter protocol or adapter render-context CONVERSATION");
+  }
 
   if (command === undefined || command === "help" || command === "--help" || command === "-h") {
-    writeResult(runtime.io, HELP, extracted.options.json);
+    writeResult(context.runtime.io, HELP, extracted.options.json);
     return;
   }
   if (command === "--version" || command === "version") {
-    writeResult(runtime.io, { version: VERSION }, extracted.options.json);
+    writeResult(context.runtime.io, { version: VERSION }, extracted.options.json);
     return;
   }
   if (command === "health") {
@@ -202,7 +245,15 @@ export async function executeCli(argv: readonly string[], runtime: Runtime): Pro
     return EXIT_SUCCESS;
   } catch (error) {
     const cliError = asCliError(error);
-    writeError(runtime.io, cliError, argv.includes("--json"));
+    writeError(
+      runtime.io,
+      cliError,
+      argv.includes("--json") ||
+        argv.some(
+          (argument) =>
+            argument === "--adapter-protocol" || argument.startsWith("--adapter-protocol="),
+        ),
+    );
     return cliError.exitCode;
   }
 }

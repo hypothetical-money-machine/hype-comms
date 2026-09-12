@@ -1,3 +1,4 @@
+import { adapterContext } from "../adapter-protocol.js";
 import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import {
   AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
@@ -279,7 +280,14 @@ export async function messagesCommand(
         throw new UsageError("The context-pack history options are invalid");
       }
       const response = await client.request({ ...endpoints.contextHistory(id, query.data) });
-      writeResult(context.runtime.io, response, context.options.json);
+      const result = adapterContext(response, id, query.data);
+      writeResult(
+        context.runtime.io,
+        context.options.adapterProtocol === undefined
+          ? { contextPack: result.contextPack }
+          : result,
+        context.options.json,
+      );
       return;
     }
 

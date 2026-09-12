@@ -30,3 +30,8 @@ Thumbs.db
 *.iml
 
 .dev-data/
+
+# Local Python verification environment
+.venv/
+.mypy_cache/
+.ruff_cache/

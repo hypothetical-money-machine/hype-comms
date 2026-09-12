@@ -22,3 +22,4 @@ export * from "./theme.js";
 export * from "./update.js";
 export * from "./webhooks.js";
 export * from "./workspace.js";
+export * from "./adapter-protocol.js";

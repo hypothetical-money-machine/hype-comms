@@ -1,3 +1,4 @@
+import { cliAdapterEnvelope } from "@hype-comms/contracts";
 import { inspect } from "node:util";
 
 import type { CliError } from "./errors.js";
@@ -9,7 +10,12 @@ function write(stream: CliIo["stdout"] | CliIo["stderr"], value: string): boolea
 
 export function writeResult(io: CliIo, value: unknown, json: boolean): void {
   if (json) {
-    write(io.stdout, JSON.stringify(value));
+    write(
+      io.stdout,
+      JSON.stringify(
+        io.adapterProtocol === undefined ? value : cliAdapterEnvelope("result", value),
+      ),
+    );
     return;
   }
   if (typeof value === "string") {
@@ -37,7 +43,10 @@ export class EventWriter {
     this.#pending.clear();
   };
   readonly #closed = (): void => this.#failed(new Error("Event output closed"));
-  constructor(private readonly stream: CliIo["stdout"]) {
+  constructor(
+    private readonly stream: CliIo["stdout"],
+    private readonly adapterProtocol?: 1,
+  ) {
     stream.on("error", this.#failed);
     stream.on("close", this.#closed);
   }
@@ -47,11 +56,14 @@ export class EventWriter {
       throw new Error("Event output is unavailable");
     await new Promise<void>((resolve, reject) => {
       this.#pending.add(reject);
-      this.stream.write(`${JSON.stringify(value)}\n`, (error) => {
-        this.#pending.delete(reject);
-        if (error != null) reject(error);
-        else resolve();
-      });
+      this.stream.write(
+        `${JSON.stringify(this.adapterProtocol === undefined ? value : cliAdapterEnvelope("event", value))}\n`,
+        (error) => {
+          this.#pending.delete(reject);
+          if (error != null) reject(error);
+          else resolve();
+        },
+      );
     });
   }
   dispose(): void {

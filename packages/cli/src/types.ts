@@ -1,6 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 
 export interface CliIo {
+  readonly adapterProtocol?: 1;
   readonly stdin: Readable;
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -18,6 +19,7 @@ export interface Runtime {
 }
 
 export interface GlobalOptions {
+  readonly adapterProtocol?: 1;
   readonly json: boolean;
   readonly profile?: string;
   readonly apiOrigin?: string;
