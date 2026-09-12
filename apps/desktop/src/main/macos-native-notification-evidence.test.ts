@@ -1,5 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -17,6 +16,7 @@ import type {
   NotificationPresentationCallbacks,
   NotificationPresenter,
 } from "./notification-presenter";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 class EvidencePresenter implements NotificationPresenter {
   readonly kind = "native" as const;
@@ -70,7 +70,7 @@ describe("macOS native notification evidence", () => {
   });
 
   it("presents fixed synthetic content and records delivery and click without target data", async () => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const onClick = vi.fn();
     const priorSyntheticClose = vi.fn();
@@ -161,7 +161,7 @@ describe("macOS native notification evidence", () => {
   });
 
   it("fails before presenting when a prior synthetic notification does not disappear", async () => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const staleClose = vi.fn();
     const notificationId = "evidence-notification-cleanup-timeout";
@@ -198,7 +198,7 @@ describe("macOS native notification evidence", () => {
   });
 
   it("records click success only after the installed interaction state is ready", async () => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const notificationId = "evidence-notification-click-failure";
     const session = await startMacosNativeNotificationEvidence({
@@ -227,7 +227,7 @@ describe("macOS native notification evidence", () => {
   });
 
   it("fails before presentation when the real app is not authorized", async () => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const notificationId = "evidence-notification-denied";
 
@@ -251,7 +251,7 @@ describe("macOS native notification evidence", () => {
   });
 
   it("records a native authorization error before exiting", async () => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const notificationId = "evidence-notification-authorization-error";
     const getHistory = vi.fn(async () => []);
@@ -286,7 +286,7 @@ describe("macOS native notification evidence", () => {
       "Timed out waiting for the synthetic notification in Notification Center",
     ],
   ] as const)("records failure when %s", async (_name, failure, expectedError) => {
-    const artifactDirectory = await mkdtemp(path.join(os.tmpdir(), "hmm-native-evidence-"));
+    const artifactDirectory = await createTemporaryDirectory("hmm-native-evidence-");
     const presenter = new EvidencePresenter();
     const notificationId = `evidence-notification-delivery-${failure}`;
     let historyReadCount = 0;
