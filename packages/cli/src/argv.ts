@@ -111,6 +111,7 @@ export function extractGlobalOptions(argv: readonly string[]): {
 } {
   const args: string[] = [];
   let json = false;
+  let adapterProtocol: 1 | undefined;
   let profile: string | undefined;
   let apiOrigin: string | undefined;
   let timeoutMs = 30_000;
@@ -137,7 +138,14 @@ export function extractGlobalOptions(argv: readonly string[]): {
       if (inline === undefined) index += 1;
       return value;
     };
-    if (argument === "--json") {
+    if (argument === "--adapter-protocol" || argument.startsWith("--adapter-protocol=")) {
+      if (adapterProtocol !== undefined)
+        throw new UsageError("--adapter-protocol may only be used once");
+      if (takeValue("--adapter-protocol") !== "1")
+        throw new UsageError("This CLI supports adapter protocol 1", "ADAPTER_UPGRADE_REQUIRED");
+      adapterProtocol = 1;
+      json = true;
+    } else if (argument === "--json") {
       json = true;
     } else if (argument === "--profile" || argument.startsWith("--profile=")) {
       if (profile !== undefined) throw new UsageError("--profile may only be used once");
@@ -156,6 +164,7 @@ export function extractGlobalOptions(argv: readonly string[]): {
     args,
     options: {
       json,
+      ...(adapterProtocol === undefined ? {} : { adapterProtocol }),
       ...(profile === undefined ? {} : { profile }),
       ...(apiOrigin === undefined ? {} : { apiOrigin }),
       timeoutMs,

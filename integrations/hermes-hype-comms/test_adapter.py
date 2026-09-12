@@ -11,6 +11,8 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
+import shutil
 import sys
 import tempfile
 import types
@@ -575,7 +577,15 @@ class FakeWatchProcess:
         blocking: bool = False,
     ):
         self.returncode: Optional[int] = None if blocking else returncode
-        self.stdout = FakeStream(list(lines or []), closed=not blocking)
+        wrapped = []
+        for line in lines or []:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                value = None
+            wrapped.append(adapter_envelope(value, "event") + b"\n"
+                           if isinstance(value, dict) and "adapterProtocol" not in value else line)
+        self.stdout = FakeStream(wrapped, closed=not blocking)
         self.stderr = FakeStream(list(stderr_lines or []), closed=not blocking)
         self._done = asyncio.Event()
         if not blocking:
@@ -617,7 +627,8 @@ class FakeProcessFactory:
         self.calls: list[dict[str, Any]] = []
 
     async def __call__(self, cli: str, *args: str, **kwargs: Any) -> Any:
-        argv = tuple(args)
+        assert args[0] == "--adapter-protocol=1", "Every process must require its output protocol"
+        argv = tuple(args[1:])
         if self.specs and argv == self.specs[0].args:
             spec = self.specs.popleft()
         elif (
@@ -631,14 +642,38 @@ class FakeProcessFactory:
             message_id = argv[5]
             if message_id not in _MESSAGE_CONTEXT:
                 raise AssertionError(f"No fake context for trigger: {message_id!r}")
-            spec = ProcessSpec(argv, json_process(context_pack_result(message_id)))
+            value = context_pack_result(message_id)
+            # Lifecycle fixtures use prevalidated data; the explicit context cases below
+            # run the real CLI. Keep subprocess startup out of retry-timing tests.
+            value["renderedContext"] = (
+                "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---\n"
+                "UNTRUSTED CONVERSATION CONTENT (test fixture)\n"
+                + json.dumps(value["contextPack"], separators=(",", ":"))
+                + "\n--- END HYPE COMMS CONTEXT PACK V1 ---"
+            )
+            spec = ProcessSpec(argv, json_process(value))
         else:
             expected = self.specs[0].args if self.specs else None
             raise AssertionError(f"Expected {expected!r}, got {args!r}")
-        self.calls.append({"cli": cli, "args": tuple(args), "kwargs": kwargs, "process": spec.result})
+        self.calls.append({"cli": cli, "args": argv, "wire_args": args, "kwargs": kwargs, "process": spec.result})
         if isinstance(spec.result, BaseException):
             raise spec.result
-        return spec.result
+        process = spec.result
+        if isinstance(process, FakeProcess) and process.returncode == 0:
+            try:
+                value = json.loads(process._communicate_stdout)
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and "contextPack" in value and "renderedContext" not in value:
+                # Run the real CLI validation/rendering for context fixtures. These tests
+                # now exercise the cross-language boundary instead of a Python schema copy.
+                result = render_with_cli(value, argv[2], argv[5], int(argv[7]))
+                process._communicate_stdout = result.stdout
+                process._communicate_stderr = result.stderr
+                process.returncode = result.returncode
+            elif isinstance(value, dict) and "adapterProtocol" not in value:
+                process._communicate_stdout = adapter_envelope(value, "result")
+        return process
 
 
 def send_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
@@ -647,6 +682,21 @@ def send_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
 
 def context_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
     return [call for call in factory.calls if call["args"][:2] == ("messages", "history")]
+
+
+def adapter_envelope(value: dict[str, Any], kind: str) -> bytes:
+    return json.dumps({"adapterProtocol": 1, "kind": kind, "data": value}).encode("utf-8")
+
+
+def render_with_cli(value: dict[str, Any], conversation: str, anchor: str, limit: int = 8) -> subprocess.CompletedProcess[bytes]:
+    cli = Path(__file__).resolve().parents[2] / "packages/cli/dist/bin.js"
+    node = shutil.which("node")
+    assert node is not None and cli.exists(), "Build the CLI before running Hermes tests"
+    return subprocess.run(
+        [node, str(cli), "--adapter-protocol=1", "adapter", "render-context", conversation,
+         "--through-message-id", anchor, "--limit", str(limit), "--json"],
+        input=json.dumps(value).encode("utf-8"), capture_output=True, timeout=10, check=False,
+    )
 
 
 def json_process(value: dict[str, Any]) -> FakeProcess:
@@ -1250,7 +1300,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(adapter.handled_events), 1)
         dispatched = adapter.handled_events[0]
         lines = dispatched.text.splitlines()
-        self.assertEqual(lines[0], "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---")
+        self.assertEqual(lines[1], "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---")
         self.assertEqual(lines[-1], "--- END HYPE COMMS CONTEXT PACK V1 ---")
         rendered = json.loads(lines[-2])
         self.assertEqual(
@@ -1305,11 +1355,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         noncanonical_adapter = self.new_adapter(noncanonical_factory)
         self.prepare_adapter(noncanonical_adapter)
 
-        with self.assertRaises(adapter_module.CliFailure) as caught:
-            await noncanonical_adapter._accept_event(trigger)
-
-        self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
-        self.assertEqual(noncanonical_adapter.handled_events, [])
+        await noncanonical_adapter._accept_event(trigger)
+        rendered = json.loads(noncanonical_adapter.handled_events[0].text.splitlines()[-2])
+        self.assertEqual(rendered["messages"][0]["author"]["username"], "morgan")
+        self.assertEqual(rendered["messages"][0]["author"]["displayName"], HUMAN_USER["displayName"])
 
     async def test_context_author_metadata_uses_utf16_lengths(self) -> None:
         anchor_id = message_id_for("101")
@@ -1330,10 +1379,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(valid_adapter.handled_events), 1)
 
-        for field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
+        for author_field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
             with self.subTest(field=field):
                 response = context_pack_result(anchor_id)
-                response["contextPack"]["messages"][0]["author"][field] = value
+                response["contextPack"]["messages"][0]["author"][author_field] = value
                 factory = FakeProcessFactory(
                     [
                         ProcessSpec(
@@ -1549,8 +1598,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(
             len(accepted_text.encode("utf-8")),
-            adapter_module.MAX_CONTEXT_PACK_BYTES
-            + adapter_module._CONTEXT_PACK_RENDER_OVERHEAD_BYTES,
+            adapter_module.MAX_RENDERED_CONTEXT_PACK_BYTES,
         )
 
         expanded_response = separator_response(5, 3_500)
@@ -1560,10 +1608,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             separators=(",", ":"),
         ).encode("utf-8")
         self.assertLessEqual(len(raw_json), adapter_module.MAX_CONTEXT_PACK_BYTES)
-        safe_json = adapter_module._injection_safe_context_json(
-            expanded_response["contextPack"]
-        ).encode("utf-8")
-        self.assertGreater(len(safe_json), adapter_module.MAX_CONTEXT_PACK_BYTES)
         rejected_factory = FakeProcessFactory(
             [
                 ProcessSpec(
@@ -2147,15 +2191,15 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "INVALID_MEMBERSHIP_EVENT")
         self.assertEqual(adapter._cursor, cursor_text("100"))
 
-    async def test_unrecognized_event_type_is_ignored_without_advancing_cursor(self) -> None:
+    async def test_validated_event_without_a_hermes_action_advances_cursor(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)
         unknown = event("reaction.added", "101", {"reaction": "thumbsup"})
 
         outcome = await adapter._accept_event(unknown)
 
-        self.assertEqual(outcome, "ignored")
-        self.assertEqual(adapter._cursor, cursor_text("100"))
+        self.assertEqual(outcome, "accepted")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_unrecognized_event_with_null_workspace_id_is_ignored_not_fatal(self) -> None:
         # system.error has a nullable workspaceId in the contract. Unknown
@@ -2249,7 +2293,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter: Any
 
         async def observing_factory(cli: str, *args: str, **kwargs: Any) -> Any:
-            if args[:2] == ("read-cursors", "advance"):
+            if args[1:3] == ("read-cursors", "advance"):
                 durable_state_seen_by_server.append(
                     json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
                 )
@@ -4610,6 +4654,19 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             send_calls(factory)[1]["args"],
             ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
         )
+
+    async def test_incompatible_cli_stops_startup_before_watch_or_context(self) -> None:
+        factory = FakeProcessFactory([
+            ProcessSpec(("auth", "whoami", "--json"), json_process({
+                "adapterProtocol": 2, "kind": "result", "data": {},
+            })),
+        ])
+        adapter = self.new_adapter(factory)
+        self.assertFalse(await adapter.connect())
+        self.assertEqual(len(factory.calls), 1)
+        self.assertIsNone(adapter._watch_task)
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(adapter.fatal_error[0], "ADAPTER_UPGRADE_REQUIRED")
 
     async def test_lock_conflict_stops_before_watch(self) -> None:
         factory = FakeProcessFactory(startup_specs())
