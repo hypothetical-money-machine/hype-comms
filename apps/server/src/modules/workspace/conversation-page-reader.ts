@@ -1,10 +1,10 @@
 import { CONVERSATION_PAGE_MAX_LIMIT, type ConversationSummary } from "@hype-comms/contracts";
 import type { PoolClient } from "pg";
-import { DomainError } from "../../domain-errors.js";
+import { z } from "zod";
+import { createCursorCodec, cursorIdSchema } from "./cursor-codec.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { conversationVisibilitySql } from "./conversation-access.js";
 import { readConversationSummaries } from "./conversation-summary-reader.js";
-import { UUID_PATTERN } from "./pagination.js";
 import { type ConversationRow } from "./records.js";
 
 /** One bounded page of conversation summaries plus the keyset cursor that follows it. */
@@ -14,32 +14,17 @@ export interface ConversationPage {
   readonly hasMore: boolean;
 }
 
+const conversationCursorCodec = createCursorCodec(
+  "conversation",
+  z.object({ id: cursorIdSchema }).strict(),
+);
+
 export function encodeConversationCursor(conversationId: string): string {
-  return Buffer.from(JSON.stringify({ id: conversationId }), "utf8").toString("base64url");
+  return conversationCursorCodec.encode({ id: conversationId });
 }
 
-/**
- * Decode the opaque keyset cursor back into the anchor conversation id. A cursor that does not
- * carry a conversation id is a client error, not a server fault, so it is rejected with 400
- * instead of failing the whole listing.
- */
 export function decodeConversationCursor(cursor: string | undefined): string | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("id" in parsed) ||
-      typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id)
-    ) {
-      throw new Error("Invalid cursor");
-    }
-    return parsed.id;
-  } catch {
-    throw new DomainError("invalid_input", "Invalid conversation cursor");
-  }
+  return conversationCursorCodec.decode(cursor)?.id ?? null;
 }
 
 /**
