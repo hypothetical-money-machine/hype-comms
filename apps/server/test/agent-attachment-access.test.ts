@@ -15,12 +15,19 @@ import {
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import { z } from "zod";
 
 import { buildApp } from "../src/app.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
+import {
+  describeWithPostgres,
+  createTestSchema,
+  resetDatabase,
+  schemaScopedUrl,
+  testDatabaseUrl,
+} from "./helpers/database.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -29,9 +36,6 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 const ownerId = "a1000000-0000-4000-8000-000000000001";
 const agentId = "a1000000-0000-4000-8000-000000000002";
@@ -51,30 +55,20 @@ class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
 describeWithPostgres("default agent attachment access", () => {
-  const schemaName = `agent_attachment_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let attachmentRoot: string;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 1 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "agent_attachment", adminPoolSize: 1, poolSize: 8 });
+    pool = schema.pool;
     attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "agent-attachment-access-"));
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE users CASCADE");
+    await resetDatabase(pool, { only: ["users"] });
     await pool.query(
       `INSERT INTO users (id, email, username, display_name, kind)
        VALUES ($1, 'owner@example.test', 'owner', 'Owner', 'human'),
@@ -162,10 +156,7 @@ describeWithPostgres("default agent attachment access", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
     await rm(attachmentRoot, { recursive: true, force: true });
   });
 

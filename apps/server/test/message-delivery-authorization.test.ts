@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { escapeIdentifier, Pool, type PoolClient } from "pg";
 
 import type {
@@ -18,9 +18,13 @@ import { IdentityService } from "../src/modules/identity/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
+import {
+  describeWithPostgres,
+  resetDatabase,
+  schemaScopedUrl,
+  testDatabaseUrl,
+} from "./helpers/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-08-09T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -32,12 +36,6 @@ const agentTokenId = "10000000-0000-4000-8000-000000000007";
 
 class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
-}
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
 }
 
 function identity(
@@ -139,14 +137,27 @@ describeWithPostgres("message-delivery authorization", () => {
   });
 
   beforeEach(async () => {
-    await pool.query(`
-      TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions,
-               attachments, messages,
-               conversation_memberships, conversations, device_sessions, magic_link_tokens,
-               invitations, workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "realtime_tickets",
+        "api_idempotency_records",
+        "sync_event_audiences",
+        "sync_events",
+        "conversation_read_cursors",
+        "message_reactions",
+        "message_mentions",
+        "attachments",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
