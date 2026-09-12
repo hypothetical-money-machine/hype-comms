@@ -6,6 +6,7 @@ import {
   type ClientEphemeralActivityFrame,
   type EphemeralActivityFrame,
   type SyncResponse,
+  type SyncPosition,
   type SystemConnectedEvent,
 } from "@hype-comms/contracts";
 import { routeModule, validateRequest } from "../../http/route-registrar.js";
@@ -29,7 +30,7 @@ const ACTIVITY_BACKPRESSURE_BYTES = 64 * 1_024;
 interface RealtimeRoutesOptions {
   allowedOrigins: ReadonlySet<string>;
   consumeTicket: ConsumeRealtimeTicket;
-  loadEvents?: (principal: RealtimePrincipal, after: string) => Promise<SyncResponse>;
+  loadEvents?: (principal: RealtimePrincipal, after: SyncPosition) => Promise<SyncResponse>;
   subscribe?: (workspaceId: string, listener: () => void) => () => void;
   /** Re-checks the bound session/token and membership of an already-connected socket. */
   revalidate?: RevalidateRealtimePrincipal;
@@ -141,7 +142,7 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
             occurredAt: new Date().toISOString(),
             workspaceId: principal.workspaceId,
             conversationId: null,
-            workspaceSequence: cursor,
+            position: cursor,
             conversationSequence: null,
             entityVersion: 1,
             delivery: "at_least_once",
@@ -270,7 +271,10 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
               sendConnected();
             } while (flushAgain && !closed);
           } catch (error) {
-            if (error instanceof DomainError && error.kind === "sync_position_expired") {
+            if (
+              error instanceof DomainError &&
+              (error.kind === "sync_position_expired" || error.kind === "sync_epoch_mismatch")
+            ) {
               if (socket.readyState === 1) {
                 socket.send(
                   JSON.stringify({
@@ -280,11 +284,14 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
                     occurredAt: new Date().toISOString(),
                     workspaceId: principal.workspaceId,
                     conversationId: null,
-                    workspaceSequence: cursor,
+                    position: cursor,
                     conversationSequence: null,
                     entityVersion: 1,
                     delivery: "at_least_once",
-                    payload: { reason: "cursor_expired" },
+                    payload: {
+                      reason:
+                        error.kind === "sync_epoch_mismatch" ? "epoch_mismatch" : "cursor_expired",
+                    },
                   }),
                 );
                 socket.close(4009, "Resync required");

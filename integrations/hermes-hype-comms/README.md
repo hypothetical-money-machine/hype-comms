@@ -369,14 +369,16 @@ never used for authorization.
 
 State is scoped by SHA-256 of the credential-free API origin plus agent user
 ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
-mode `0600`. Version 2 stores the decimal workspace checkpoint and, per
-conversation, a pending read target with its conversation sequence. A valid
-version 1 checkpoint is migrated in place before watch starts.
+mode `0600`. Version 3 stores the workspace `{epoch, sequence}` position and, per
+conversation, a pending read target with its conversation sequence. Version 1 and 2
+checkpoints have no epoch, so migration starts watch from a fresh bootstrap. Version 2
+pending read targets are retained and retried. The cursor file is replaced atomically.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
-installations resume from their persisted cursor. At-least-once duplicate
-events at or below that cursor are ignored.
+installations with a current version 3 checkpoint resume from that position. Duplicate
+events at or below its sequence are ignored within the same epoch. An epoch mismatch
+requires another bootstrap.
 
 When `read-cursors:write` is present, `handle_message` must return successfully
 before the adapter marks anything read. It then writes the triggering workspace

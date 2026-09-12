@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { sequenceSchema, syncPositionSchema } from "@hype-comms/contracts";
 
 import type { PoolClient, QueryResultRow } from "pg";
 
 import { DomainError } from "../../domain-errors.js";
+import { positionForRetainedSequence } from "./protocol-epoch.js";
 
 interface IdempotencyRecordRow extends QueryResultRow {
   readonly request_fingerprint: Buffer;
@@ -15,6 +17,7 @@ interface ResponseSchema<Response> {
 }
 
 interface IdempotentMutationOptions<Response> {
+  readonly workspaceId: string;
   readonly actorUserId: string;
   readonly route: string;
   readonly idempotencyKey: string;
@@ -91,7 +94,25 @@ export async function runIdempotentMutation<Response>(
     if (replay.response_status !== options.responseStatus) {
       throw new Error("Stored idempotency response status does not match the route");
     }
-    return options.responseSchema.parse(replay.response_body);
+    const stored = replay.response_body;
+    if (typeof stored === "object" && stored !== null && "syncCursor" in stored) {
+      const sequence =
+        typeof stored.syncCursor === "string"
+          ? sequenceSchema.parse(stored.syncCursor)
+          : syncPositionSchema.parse(stored.syncCursor).sequence;
+      const response = options.responseSchema.parse({
+        ...stored,
+        syncCursor: await positionForRetainedSequence(client, options.workspaceId, sequence),
+      });
+      await client.query(
+        `UPDATE api_idempotency_records SET response_body = $4::jsonb
+          WHERE actor_user_id = $1 AND route = $2 AND idempotency_key = $3
+            AND response_body IS DISTINCT FROM $4::jsonb`,
+        [options.actorUserId, options.route, options.idempotencyKey, JSON.stringify(response)],
+      );
+      return response;
+    }
+    return options.responseSchema.parse(stored);
   }
 
   const response = await operation();
