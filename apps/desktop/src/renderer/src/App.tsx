@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -8,48 +7,41 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import {
+  MessageTimeline,
+  WorkspaceMessageRow,
+  type MessageTimelineContext,
+} from "./message-timeline";
 
 import {
   ATTACHMENTS_PER_MESSAGE_MAX,
   type Attachment,
-  type AuthenticatedSessionContext,
   type AuthCapabilities,
+  type AuthenticatedSessionContext,
   type ChannelAccess,
   type ChannelMode,
   type ChatSessionState,
-  type TimestampFormatPreference,
   type Message,
   type NotificationContext,
   type ProtocolHandlerState,
   type Reaction,
-  type ReactionEmoji,
   type Task,
   type UpdateState,
-  type User,
 } from "@hype-comms/contracts";
 
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
-import { AiChannel } from "./ai-channel";
-import { AgentEnrollmentsView } from "./agent-enrollments-view";
-import {
-  useWorkspaceSelection,
-  selectWorkspaceView,
-  equalWorkspaceView,
-} from "./workspace-selection";
-import { collectionRecovery } from "./workspace-recovery";
-import type { CollectionIdentity } from "./workspace-collections";
-import { WorkspaceTypingIndicator } from "./workspace-typing-indicator";
 import { PresenceIndicator } from "./activity-indicators";
-import { Avatar } from "./avatar";
+import { AgentEnrollmentsView } from "./agent-enrollments-view";
+import { AiChannel } from "./ai-channel";
 import { BrandMark } from "./brand-mark";
+import { isBuiltInConversation } from "./built-in-channels";
 import { ChannelCreatePopover } from "./channel-create-popover";
-import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
+import { CommunicationPathsView } from "./communication-paths-view";
 import { CompactHotzone } from "./compact-hotzone";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
-import { CommunicationPathsView } from "./communication-paths-view";
 import { ConversationHealth } from "./conversation-health";
 import {
   ChannelIcon,
@@ -64,20 +56,11 @@ import {
 } from "./conversation-states";
 import { ConversationSwitcher } from "./conversation-switcher";
 import type { DevicePreferencesRuntime } from "./device-preferences-runtime";
-import { FilesView } from "./files-view";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
-import { MessageBody } from "./message-body";
-import { MessageComposer } from "./message-composer";
+import { FilesView } from "./files-view";
+import { ipcErrorMessage } from "./ipc-error-message";
 import { mentionedMemberIds } from "./mentions";
-import { isMessageContinuation } from "./message-grouping";
-import {
-  isReadTrackingEligible,
-  isTimelineAtBottom,
-  lastReadEligibleMessageId,
-} from "./message-read-tracking";
-import { canRetractOwnMessage, retractWindowRemainingMs } from "./message-retract";
-import { MessageReactions } from "./message-reactions";
+import { MessageComposer } from "./message-composer";
 import { createNotificationActivityView } from "./notification-activity";
 import {
   NotificationSessionRuntime,
@@ -85,21 +68,28 @@ import {
 } from "./notification-session-runtime";
 import { PreferencesPage, type PreferencesPageHandle } from "./preferences-page";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
-import { ThemeSelector } from "./theme-selector";
-import type { ThemeRuntime } from "./theme-runtime";
 import { TasksView } from "./tasks-view";
+import type { ThemeRuntime } from "./theme-runtime";
+import { ThemeSelector } from "./theme-selector";
 import { listUnreadConversations, unreadBadgeTotals } from "./unread-conversations";
-import { UnreadDivider, useUnreadDividerMessageId } from "./unread-divider";
+import { useUnreadDividerMessageId } from "./unread-divider";
 import { UnreadsIcon, UnreadsView } from "./unreads-view";
 import { useBackgroundUnreadSignal } from "./use-background-unread-signal";
 import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
-import { useConversationDrafts } from "./use-conversation-drafts";
 import { useDevicePreferences } from "./use-device-preferences";
-import { ipcErrorMessage } from "./ipc-error-message";
-import { WorkspaceSearch } from "./workspace-search";
-import type { OutboxItem } from "./workspace-cache";
+import { useMessageComposer } from "./use-message-composer";
+import { useMessagePane } from "./use-message-pane";
+import type { CollectionIdentity } from "./workspace-collections";
+import { collectionRecovery } from "./workspace-recovery";
 import { cacheFallbackNotice, WorkspaceRuntime } from "./workspace-runtime";
+import { WorkspaceSearch } from "./workspace-search";
+import {
+  equalWorkspaceView,
+  selectWorkspaceView,
+  useWorkspaceSelection,
+} from "./workspace-selection";
+import { WorkspaceTypingIndicator } from "./workspace-typing-indicator";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
 type WorkspaceDestination =
@@ -139,37 +129,6 @@ export function recoverableAuthenticatedSession(
 function attachmentUploadScopeKey(session: ChatSessionState): string | null {
   const context = recoverableAuthenticatedSession(session);
   return context === null ? null : `${context.userId}:${context.workspaceId}`;
-}
-
-// Constructing an Intl.DateTimeFormat is expensive and every visible message row formats a time on
-// each render, so the formatters are built once per format and reused.
-const messageTimeFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function messageTimeFormatter(
-  format: TimestampFormatPreference,
-  locale?: Intl.LocalesArgument,
-): Intl.DateTimeFormat {
-  const key = `${format}\u0000${locale === undefined ? "" : JSON.stringify(locale)}`;
-  const cached = messageTimeFormatters.get(key);
-  if (cached !== undefined) return cached;
-
-  const formatter = new Intl.DateTimeFormat(locale, {
-    hour: "numeric",
-    minute: "2-digit",
-    ...(format === "system"
-      ? {}
-      : { hourCycle: format === "12-hour" ? ("h12" as const) : ("h23" as const) }),
-  });
-  messageTimeFormatters.set(key, formatter);
-  return formatter;
-}
-
-export function formatMessageTime(
-  value: string,
-  format: TimestampFormatPreference,
-  locale?: Intl.LocalesArgument,
-): string {
-  return messageTimeFormatter(format, locale).format(new Date(value));
 }
 
 export function visibleTimelineMessages(
@@ -472,280 +431,6 @@ function AgentRequestsIcon() {
   );
 }
 
-const PARTICIPANT_COLOR_COUNT = 8;
-
-export function participantColorIndex(userId: string): number {
-  let hash = 2_166_136_261;
-  for (let index = 0; index < userId.length; index += 1) {
-    hash ^= userId.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  return (hash >>> 0) % PARTICIPANT_COLOR_COUNT;
-}
-
-export function MessageRow({
-  message,
-  members,
-  reactions,
-  attachments = [],
-  currentUserId,
-  reactionsDisabled,
-  onAddReaction,
-  onRemoveReaction,
-  onOpenAttachment,
-  onCreateTask,
-  onRetract,
-  highlighted,
-  continuation,
-  onOpenThread,
-  replyCount = 0,
-  domIdPrefix = "message",
-  channelReferences,
-  onOpenChannel,
-  timestampFormat = "system",
-}: {
-  readonly message: Message;
-  readonly members: readonly User[];
-  readonly reactions: readonly Reaction[];
-  readonly attachments?: readonly Attachment[];
-  readonly currentUserId: string;
-  readonly reactionsDisabled: boolean;
-  readonly onAddReaction: (emoji: ReactionEmoji) => Promise<void>;
-  readonly onRemoveReaction: (emoji: ReactionEmoji) => Promise<void>;
-  readonly onOpenAttachment?: (attachmentId: string) => Promise<void>;
-  readonly onCreateTask?: () => Promise<void>;
-  readonly onRetract?: () => Promise<void>;
-  readonly highlighted: boolean;
-  readonly continuation: boolean;
-  readonly onOpenThread?: () => void;
-  readonly replyCount?: number;
-  readonly domIdPrefix?: string;
-  readonly channelReferences?: readonly ChannelReferenceTarget[];
-  readonly onOpenChannel?: (conversationId: string) => void;
-  readonly timestampFormat?: TimestampFormatPreference;
-}) {
-  const author = members.find((member) => member.id === message.authorId);
-  const authorName = author?.displayName ?? missingAuthorName(message.authorId);
-  const participantId = message.authorId ?? "former-member";
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [retracting, setRetracting] = useState(false);
-  const [retractError, setRetractError] = useState("");
-  const retractVisible =
-    onRetract !== undefined && canRetractOwnMessage(message, currentUserId, nowMs);
-  useEffect(() => {
-    if (!retractVisible) return;
-    const remaining = retractWindowRemainingMs(message.createdAt, nowMs);
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining);
-    return () => window.clearTimeout(timer);
-  }, [message.createdAt, nowMs, retractVisible]);
-  const threadActionLabel =
-    replyCount === 0
-      ? "Reply in thread"
-      : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
-  const threadSummaryLabel = `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
-  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${authorName}`;
-  return (
-    <article
-      className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
-        highlighted ? " search-target" : ""
-      }`}
-      id={`${domIdPrefix}-${message.id}`}
-      data-message-id={message.id}
-      data-message-sequence={message.conversationSequence}
-    >
-      {continuation ? (
-        <time className="message-continuation-time" dateTime={message.createdAt} aria-hidden="true">
-          {formatMessageTime(message.createdAt, timestampFormat)}
-        </time>
-      ) : (
-        <Avatar user={author} />
-      )}
-      <div>
-        <header className={continuation ? "sr-only" : undefined}>
-          <strong>{authorName}</strong>
-          {author?.title != null && <span className="message-author-title">{author.title}</span>}
-          <time dateTime={message.createdAt}>
-            {formatMessageTime(message.createdAt, timestampFormat)}
-          </time>
-        </header>
-        <MessageBody
-          body={message.body}
-          channels={channelReferences}
-          members={members}
-          onOpenChannel={onOpenChannel}
-        />
-        {attachments.length > 0 && (
-          <ul className="message-attachments" aria-label="Attachments">
-            {attachments.map((attachment) => (
-              <li key={attachment.id}>
-                <button
-                  type="button"
-                  className="message-attachment"
-                  onClick={() => void onOpenAttachment?.(attachment.id)}
-                >
-                  <span>{attachment.fileName}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <MessageReactions
-          reactions={reactions}
-          members={members}
-          currentUserId={currentUserId}
-          disabled={reactionsDisabled}
-          onAdd={onAddReaction}
-          onRemove={onRemoveReaction}
-          leadingActions={
-            onOpenThread === undefined ? undefined : (
-              <button
-                className="message-reply-action"
-                type="button"
-                aria-label={threadActionLabel}
-                title={threadActionLabel}
-                onClick={onOpenThread}
-              >
-                <svg aria-hidden="true" viewBox="0 0 20 20">
-                  <path d="M4 4.5h12v8H9l-4 3v-3H4z" />
-                  <path d="M7 8.5h6" />
-                </svg>
-                {replyCount > 0 && <span aria-hidden="true">{replyCount}</span>}
-              </button>
-            )
-          }
-          trailingActions={
-            onCreateTask === undefined && !retractVisible ? undefined : (
-              <>
-                {onCreateTask === undefined ? undefined : (
-                  <button
-                    className="message-task-action"
-                    type="button"
-                    onClick={() => void onCreateTask()}
-                  >
-                    + Task
-                  </button>
-                )}
-                {retractVisible ? (
-                  <button
-                    className="message-retract-action"
-                    type="button"
-                    disabled={retracting}
-                    aria-label="Retract message"
-                    title="Retract this message. It disappears for everyone. Available for five minutes."
-                    onClick={() => {
-                      if (onRetract === undefined || retracting) return;
-                      setRetracting(true);
-                      setRetractError("");
-                      void onRetract()
-                        .catch((caught: unknown) => {
-                          setRetractError(
-                            caught instanceof Error && caught.message !== ""
-                              ? caught.message
-                              : "Could not retract the message",
-                          );
-                        })
-                        .finally(() => setRetracting(false));
-                    }}
-                  >
-                    Retract
-                  </button>
-                ) : null}
-              </>
-            )
-          }
-        />
-        {replyCount > 0 && onOpenThread !== undefined && (
-          <button
-            className="thread-summary"
-            type="button"
-            aria-label={threadSummaryAccessibilityLabel}
-            onClick={onOpenThread}
-          >
-            {threadSummaryLabel}
-          </button>
-        )}
-        {retractError !== "" && (
-          <p className="retract-error" role="alert">
-            {retractError}
-          </p>
-        )}
-      </div>
-    </article>
-  );
-}
-
-export function PendingMessageRow({
-  item,
-  currentUser,
-  members = [],
-  continuation,
-  editing,
-  onEdit,
-  onRetry,
-  onDiscard,
-  mutationsDisabled = false,
-  channelReferences,
-  onOpenChannel,
-  timestampFormat = "system",
-}: {
-  readonly item: OutboxItem;
-  readonly currentUser: User;
-  readonly members?: readonly User[];
-  readonly continuation: boolean;
-  readonly editing: boolean;
-  readonly onEdit: () => void;
-  readonly onRetry: () => void;
-  readonly onDiscard: () => void;
-  readonly mutationsDisabled?: boolean;
-  readonly channelReferences?: readonly ChannelReferenceTarget[];
-  readonly onOpenChannel?: (conversationId: string) => void;
-  readonly timestampFormat?: TimestampFormatPreference;
-}) {
-  const pendingStatus = editing ? "editing" : item.status.replaceAll("_", " ");
-  return (
-    <article
-      className={`message participant-color-${String(participantColorIndex(currentUser.id))} pending-message${continuation ? " message-continuation" : ""}`}
-    >
-      {continuation ? (
-        <time className="message-continuation-time" dateTime={item.createdAt} aria-hidden="true">
-          {formatMessageTime(item.createdAt, timestampFormat)}
-        </time>
-      ) : (
-        <Avatar user={currentUser} />
-      )}
-      <div>
-        <header className={continuation ? "sr-only" : undefined}>
-          <strong>{currentUser.displayName}</strong>
-          <span>{pendingStatus}</span>
-        </header>
-        <MessageBody
-          body={item.operation.message.body}
-          channels={channelReferences}
-          members={members}
-          onOpenChannel={onOpenChannel}
-          suffix={
-            continuation ? <span className="pending-status"> · {pendingStatus}</span> : undefined
-          }
-        />
-        {item.status === "permanent_failure" && (
-          <div className="message-actions">
-            <button type="button" disabled={mutationsDisabled} onClick={onEdit}>
-              Edit
-            </button>
-            <button type="button" disabled={mutationsDisabled} onClick={onRetry}>
-              Retry
-            </button>
-            <button type="button" onClick={onDiscard}>
-              Discard
-            </button>
-          </div>
-        )}
-      </div>
-    </article>
-  );
-}
-
 function isTextEntryControl(element: Element): boolean {
   return element.matches('input, textarea, [contenteditable]:not([contenteditable="false"])');
 }
@@ -795,16 +480,44 @@ export function App({
   const isHeadless = client.isHeadless === true;
   const runtimeState = useWorkspaceSelection(runtime, selectWorkspaceView, equalWorkspaceView);
   const [session, setSession] = useState<ChatSessionState | null>(null);
-  const { draft, setDraft, clearDraft, resetDrafts } = useConversationDrafts(
-    runtimeState.selectedConversationId,
+  const setComposerTyping = useCallback(
+    (conversationId: string, typing: boolean) => runtime.setTyping(conversationId, typing),
+    [runtime],
   );
-  const [threadDrafts, setThreadDrafts] = useState<Readonly<Record<string, string>>>({});
-  const [editingClientMessageId, setEditingClientMessageId] = useState<string | null>(null);
-  const [threadEditingClientMessageId, setThreadEditingClientMessageId] = useState<string | null>(
-    null,
-  );
-  const [composerError, setComposerError] = useState("");
-  const [threadComposerError, setThreadComposerError] = useState("");
+  const {
+    draft,
+    setDraft,
+    clearDraft,
+    resetDrafts,
+    editingId: editingClientMessageId,
+    setEditingId: setEditingClientMessageId,
+    error: composerError,
+    setError: setComposerError,
+    updateDraft: updateMainDraft,
+  } = useMessageComposer({
+    conversationId: runtimeState.selectedConversationId,
+    threadRootId: null,
+    kind: "conversation",
+    outbox: runtimeState.outbox,
+    setTyping: setComposerTyping,
+  });
+  const {
+    draft: threadDraft,
+    setDraft: setThreadDraft,
+    clearDraft: clearThreadDraft,
+    resetDrafts: resetThreadDrafts,
+    editingId: threadEditingClientMessageId,
+    setEditingId: setThreadEditingClientMessageId,
+    error: threadComposerError,
+    setError: setThreadComposerError,
+    updateDraft: updateThreadDraft,
+  } = useMessageComposer({
+    conversationId: runtimeState.selectedConversationId,
+    threadRootId: runtimeState.selectedThreadRootId,
+    kind: "thread",
+    outbox: runtimeState.outbox,
+    setTyping: setComposerTyping,
+  });
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
   const previousSelectedConversationId = useRef<string | null>(runtimeState.selectedConversationId);
@@ -850,32 +563,8 @@ export function App({
       },
     });
   }, [notificationTransport, runtime]);
-  const messageList = useRef<HTMLDivElement>(null);
-  const timelineConversationId = useRef<string | null>(null);
-  const stickToTimelineBottom = useRef(true);
-  const [timelineAtLiveTail, setTimelineAtLiveTail] = useState(false);
-  const readTrackingFrame = useRef<number | null>(null);
-  const readTrackingConversationId = useRef<string | null>(null);
-  const messageVisibilityMemory = useRef({
-    observedStarts: new Set<string>(),
-    observedEnds: new Set<string>(),
-  });
-  const threadList = useRef<HTMLDivElement>(null);
   const composerInput = useRef<HTMLTextAreaElement>(null);
   const threadComposer = useRef<HTMLTextAreaElement>(null);
-  const stickToThreadBottom = useRef(true);
-  const [threadAtLiveTail, setThreadAtLiveTail] = useState(false);
-  const threadReadTrackingFrame = useRef<number | null>(null);
-  const threadReadTrackingRootId = useRef<string | null>(null);
-  const threadMessageVisibilityMemory = useRef({
-    observedStarts: new Set<string>(),
-    observedEnds: new Set<string>(),
-  });
-  const threadScrollState = useRef<{
-    readonly rootId: string | null;
-    readonly newestReplyId: string | null;
-    readonly pendingCount: number;
-  }>({ rootId: null, newestReplyId: null, pendingCount: 0 });
   const compact = useCompactModeEnabled(compactMode);
   const chrome = useCompactChrome(compact);
 
@@ -1049,7 +738,7 @@ export function App({
         setDestination("workspace");
         setAiChannelVisited(false);
         resetDrafts();
-        setThreadDrafts({});
+        resetThreadDrafts();
         setEditingClientMessageId(null);
         setThreadEditingClientMessageId(null);
         setComposerError("");
@@ -1059,7 +748,7 @@ export function App({
         void runtime.stop();
       }
     },
-    [notificationSession, resetDrafts, runtime, startWorkspaceSession],
+    [notificationSession, resetDrafts, resetThreadDrafts, runtime, startWorkspaceSession],
   );
 
   const retrySession = useCallback(async (): Promise<void> => {
@@ -1214,25 +903,6 @@ export function App({
       ),
     [runtimeState.outbox, runtimeState.selectedConversationId],
   );
-  const threadDraft =
-    selectedThreadRootId === null ? "" : (threadDrafts[selectedThreadRootId] ?? "");
-  const updateMainDraft = useCallback(
-    (value: string): void => {
-      setDraft(value);
-      const conversationId = runtimeState.selectedConversationId;
-      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
-    },
-    [runtime, runtimeState.selectedConversationId, setDraft],
-  );
-  const updateThreadDraft = useCallback(
-    (value: string): void => {
-      if (selectedThreadRootId === null) return;
-      setThreadDrafts((current) => ({ ...current, [selectedThreadRootId]: value }));
-      const conversationId = runtimeState.selectedConversationId;
-      if (conversationId !== null) runtime.setTyping(conversationId, value.trim() !== "");
-    },
-    [runtime, runtimeState.selectedConversationId, selectedThreadRootId],
-  );
   useEffect(() => {
     const conversationId = runtimeState.selectedConversationId;
     return () => {
@@ -1242,27 +912,12 @@ export function App({
   const selectedThreadSummary =
     selectedThreadRootId === null ? undefined : threadSummaryByRoot.get(selectedThreadRootId);
   const threadReplyCount = Math.max(selectedThreadSummary?.replyCount ?? 0, threadReplies.length);
-  const editingItem =
-    editingClientMessageId === null
-      ? undefined
-      : runtimeState.outbox.find(
-          (item) => item.operation.message.clientMessageId === editingClientMessageId,
-        );
-  const threadEditingItem =
-    threadEditingClientMessageId === null
-      ? undefined
-      : runtimeState.outbox.find(
-          (item) => item.operation.message.clientMessageId === threadEditingClientMessageId,
-        );
-
   useEffect(() => {
     const previous = previousSelectedConversationId.current;
     const next = runtimeState.selectedConversationId;
     previousSelectedConversationId.current = next;
     if (previous === next) return;
     setPaneView("chat");
-    setTimelineAtLiveTail(false);
-    setThreadAtLiveTail(false);
     // The first assignment is workspace load, not a user switch. Dismissing People there
     // races first paint and closes the directory the user just opened from the header.
     if (previous !== null) setPeopleSource(null);
@@ -1289,224 +944,36 @@ export function App({
     chrome.notifyUnread,
   );
 
-  useEffect(() => {
-    if (editingClientMessageId === null) return;
-    if (
-      editingItem === undefined ||
-      editingItem.status !== "permanent_failure" ||
-      editingItem.operation.conversationId !== runtimeState.selectedConversationId ||
-      editingItem.operation.message.threadRootId !== null
-    ) {
-      setEditingClientMessageId(null);
-    }
-  }, [editingClientMessageId, editingItem, runtimeState.selectedConversationId]);
-
-  const markVisibleMessagesRead = useCallback((): void => {
-    const conversationId = runtimeState.selectedConversationId;
-    const list = messageList.current;
-    if (
-      destination !== "workspace" ||
-      conversationId === null ||
-      list === null ||
-      !isReadTrackingEligible(isHeadless, document.visibilityState, document.hasFocus())
-    ) {
-      return;
-    }
-    if (readTrackingConversationId.current !== conversationId) {
-      readTrackingConversationId.current = conversationId;
-      messageVisibilityMemory.current.observedStarts.clear();
-      messageVisibilityMemory.current.observedEnds.clear();
-    }
-    const messageId = lastReadEligibleMessageId(
-      list,
-      messageVisibilityMemory.current,
-      selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
-    );
-    if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
-  }, [
-    destination,
-    isHeadless,
-    runtime,
-    runtimeState.selectedConversationId,
-    selectedSummary?.readCursor,
-  ]);
-
-  const scheduleReadTracking = useCallback((): void => {
-    if (readTrackingFrame.current !== null) return;
-    readTrackingFrame.current = window.requestAnimationFrame(() => {
-      readTrackingFrame.current = null;
-      markVisibleMessagesRead();
-    });
-  }, [markVisibleMessagesRead]);
-
-  const handleTimelineScroll = useCallback((): void => {
-    const list = messageList.current;
-    if (list !== null) {
-      const atLiveTail = isTimelineAtBottom(list);
-      stickToTimelineBottom.current = atLiveTail;
-      setTimelineAtLiveTail(atLiveTail);
-    }
-    scheduleReadTracking();
-  }, [scheduleReadTracking]);
-
-  const markVisibleThreadMessagesRead = useCallback((): void => {
-    const conversationId = runtimeState.selectedConversationId;
-    const threadRootId = runtimeState.selectedThreadRootId;
-    const list = threadList.current;
-    if (
-      destination !== "workspace" ||
-      conversationId === null ||
-      threadRootId === null ||
-      list === null ||
-      !isReadTrackingEligible(isHeadless, document.visibilityState, document.hasFocus())
-    ) {
-      return;
-    }
-    const trackingKey = `${conversationId}:${threadRootId}`;
-    if (threadReadTrackingRootId.current !== trackingKey) {
-      threadReadTrackingRootId.current = trackingKey;
-      threadMessageVisibilityMemory.current.observedStarts.clear();
-      threadMessageVisibilityMemory.current.observedEnds.clear();
-    }
-    const messageId = lastReadEligibleMessageId(
-      list,
-      threadMessageVisibilityMemory.current,
-      selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
-    );
-    if (messageId !== null) runtime.markConversationReadThrough(conversationId, messageId);
-  }, [
-    destination,
-    isHeadless,
-    runtime,
-    runtimeState.selectedConversationId,
-    runtimeState.selectedThreadRootId,
-    selectedSummary?.readCursor,
-  ]);
-
-  const scheduleThreadReadTracking = useCallback((): void => {
-    if (threadReadTrackingFrame.current !== null) return;
-    threadReadTrackingFrame.current = window.requestAnimationFrame(() => {
-      threadReadTrackingFrame.current = null;
-      markVisibleThreadMessagesRead();
-    });
-  }, [markVisibleThreadMessagesRead]);
-
-  const handleThreadScroll = useCallback((): void => {
-    const list = threadList.current;
-    if (list !== null) {
-      const atLiveTail = isTimelineAtBottom(list);
-      stickToThreadBottom.current = atLiveTail;
-      setThreadAtLiveTail(atLiveTail);
-    }
-    scheduleThreadReadTracking();
-  }, [scheduleThreadReadTracking]);
-
-  useEffect(() => {
-    const handleFocus = (): void => {
-      scheduleReadTracking();
-      scheduleThreadReadTracking();
-    };
-    window.addEventListener("focus", handleFocus);
-    document.addEventListener("visibilitychange", handleFocus);
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-      document.removeEventListener("visibilitychange", handleFocus);
-    };
-  }, [scheduleReadTracking, scheduleThreadReadTracking]);
-
-  useEffect(
-    () => () => {
-      if (readTrackingFrame.current !== null) {
-        window.cancelAnimationFrame(readTrackingFrame.current);
-        readTrackingFrame.current = null;
-      }
-      if (threadReadTrackingFrame.current !== null) {
-        window.cancelAnimationFrame(threadReadTrackingFrame.current);
-        threadReadTrackingFrame.current = null;
-      }
-    },
-    [],
+  const markPaneRead = useCallback(
+    (conversationId: string, messageId: string) =>
+      runtime.markConversationReadThrough(conversationId, messageId),
+    [runtime],
   );
-
-  useEffect(() => {
-    if (threadEditingClientMessageId === null) return;
-    if (
-      threadEditingItem === undefined ||
-      threadEditingItem.status !== "permanent_failure" ||
-      threadEditingItem.operation.message.threadRootId !== selectedThreadRootId
-    ) {
-      setThreadEditingClientMessageId(null);
-    }
-  }, [selectedThreadRootId, threadEditingClientMessageId, threadEditingItem]);
-
-  useEffect(() => setThreadComposerError(""), [selectedThreadRootId]);
-
-  useEffect(() => setThreadAtLiveTail(false), [selectedThreadRootId]);
-
-  useEffect(() => {
-    if (selectedThreadRootId !== null) return;
-    threadReadTrackingRootId.current = null;
-    threadMessageVisibilityMemory.current.observedStarts.clear();
-    threadMessageVisibilityMemory.current.observedEnds.clear();
-  }, [selectedThreadRootId]);
-
-  useEffect(() => {
-    const list = messageList.current;
-    const conversationId = runtimeState.selectedConversationId;
-    if (destination !== "workspace") {
-      // Returning from AI must be treated like entering the timeline again so missed messages
-      // land at the unread divider instead of inheriting the hidden pane's at-bottom state.
-      timelineConversationId.current = null;
-      stickToTimelineBottom.current = false;
-      setTimelineAtLiveTail(false);
-      return;
-    }
-    if (list === null || conversationId === null) return;
-    if (timelineConversationId.current !== conversationId) {
-      timelineConversationId.current = conversationId;
-      const divider = document.getElementById(`unread-${conversationId}`);
-      list.scrollTop =
-        divider === null
-          ? list.scrollHeight
-          : Math.max(0, divider.offsetTop - list.clientHeight / 2);
-    } else if (stickToTimelineBottom.current) {
-      list.scrollTop = list.scrollHeight;
-    }
-    const atLiveTail = isTimelineAtBottom(list);
-    stickToTimelineBottom.current = atLiveTail;
-    setTimelineAtLiveTail(atLiveTail);
-    scheduleReadTracking();
-  }, [
-    destination,
-    messages.length,
-    pending.length,
-    runtimeState.selectedConversationId,
-    scheduleReadTracking,
-    unreadDividerMessageId,
-  ]);
-
-  useEffect(() => {
-    const previous = threadScrollState.current;
-    const next = {
-      rootId: selectedThreadRootId,
-      newestReplyId: threadReplies.at(-1)?.id ?? null,
-      pendingCount: threadPending.length,
-    };
-    threadScrollState.current = next;
-    const rootChanged = previous.rootId !== next.rootId;
-    const replyChanged = previous.newestReplyId !== next.newestReplyId;
-    const pendingGrew = previous.pendingCount < next.pendingCount;
-    const shouldScrollToLatest =
-      rootChanged || pendingGrew || (replyChanged && stickToThreadBottom.current);
-    const list = threadList.current;
-    if (list !== null && shouldScrollToLatest) {
-      list.scrollTop = list.scrollHeight;
-      const atLiveTail = isTimelineAtBottom(list);
-      stickToThreadBottom.current = atLiveTail;
-      setThreadAtLiveTail(atLiveTail);
-    }
-    scheduleThreadReadTracking();
-  }, [scheduleThreadReadTracking, selectedThreadRootId, threadPending.length, threadReplies]);
+  const mainPane = useMessagePane({
+    position: { kind: "conversation", unreadDividerMessageId },
+    conversationId: runtimeState.selectedConversationId,
+    active: destination === "workspace",
+    isHeadless,
+    messages,
+    pendingCount: pending.length,
+    lastReadSequence: selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
+    focusedMessageId: runtimeState.focusedMessageId,
+    markRead: markPaneRead,
+  });
+  const threadPane = useMessagePane({
+    position: { kind: "thread", rootId: selectedThreadRootId },
+    conversationId: runtimeState.selectedConversationId,
+    active: destination === "workspace",
+    isHeadless,
+    // The root is rendered outside the reply timeline but shares this read/scroll container.
+    messages: threadRoot === undefined ? threadReplies : [threadRoot, ...threadReplies],
+    pendingCount: threadPending.length,
+    lastReadSequence: selectedSummary?.readCursor?.lastReadConversationSequence ?? null,
+    focusedMessageId: runtimeState.focusedThreadMessageId,
+    markRead: markPaneRead,
+  });
+  const timelineAtLiveTail = mainPane.atLiveTail;
+  const threadAtLiveTail = threadPane.atLiveTail;
 
   useEffect(() => {
     if (notificationSession === null || notificationContext?.status !== "active") return;
@@ -1530,26 +997,6 @@ export function App({
     selectedThreadRootId,
     threadAtLiveTail,
     timelineAtLiveTail,
-  ]);
-
-  useEffect(() => {
-    const focusedMessageId = runtimeState.focusedMessageId;
-    if (focusedMessageId === null) return;
-    document.getElementById(`message-${focusedMessageId}`)?.scrollIntoView({ block: "center" });
-  }, [messages.length, runtimeState.focusedMessageId, runtimeState.selectedConversationId]);
-
-  useEffect(() => {
-    const focusedMessageId = runtimeState.focusedThreadMessageId;
-    if (focusedMessageId === null) return;
-    document.getElementById(`thread-message-${focusedMessageId}`)?.scrollIntoView({
-      block: "center",
-    });
-    scheduleThreadReadTracking();
-  }, [
-    runtimeState.focusedThreadMessageId,
-    scheduleThreadReadTracking,
-    selectedThreadRootId,
-    threadReplies.length,
   ]);
 
   // Composer focus policy. A navigation records a focus intent — main composer on a conversation
@@ -1975,12 +1422,7 @@ export function App({
         await runtime.replaceFailedMessage(threadEditingClientMessageId, body, mentionedUserIds);
         setThreadEditingClientMessageId(null);
       }
-      setThreadDrafts((current) => {
-        if (current[threadRootId] !== submittedDraft) return current;
-        const next = { ...current };
-        delete next[threadRootId];
-        return next;
-      });
+      clearThreadDraft(submittedDraft);
       runtime.setTyping(conversationId, false);
       if (key !== null) replacePendingAttachments(key, () => []);
       setThreadComposerError("");
@@ -2162,6 +1604,23 @@ export function App({
     summary.conversation.slug === null
       ? []
       : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
+  );
+  const timelineContext: MessageTimelineContext = {
+    members: bootstrap.members,
+    currentUser: bootstrap.currentUser.user,
+    reactions: reactionsByMessage,
+    attachments: attachmentsByMessage,
+    archived: selectedSummary?.conversation.isArchived ?? true,
+    timestampFormat: preferences.timestampFormat,
+    channelReferences,
+    onOpenChannel: selectConversation,
+    actions: runtime,
+  };
+  const selectedTimelineLoaded = runtimeState.collections.some(
+    (collection) =>
+      collection.loaded &&
+      collection.identity.kind === "timeline" &&
+      collection.identity.conversationId === runtimeState.selectedConversationId,
   );
   const currentUserId = bootstrap.currentUser.user.id;
   const selectedCollection: CollectionIdentity | null =
@@ -2738,132 +2197,82 @@ export function App({
           <>
             <div
               className="message-list"
-              ref={messageList}
+              ref={mainPane.list}
               aria-live="polite"
-              onScroll={handleTimelineScroll}
+              onScroll={mainPane.handleScroll}
             >
               {runtimeState.selectedConversationId !== null &&
+                selectedTimelineLoaded &&
                 runtime.hasOlder(runtimeState.selectedConversationId) && (
                   <button
                     className="load-older"
                     type="button"
                     onClick={() => {
                       const conversationId = runtimeState.selectedConversationId;
-                      if (conversationId !== null) void runtime.loadOlder(conversationId);
+                      if (conversationId !== null)
+                        void runtime.loadOlder(conversationId).catch(() => undefined);
                     }}
                   >
                     Load older messages
                   </button>
                 )}
-              {messages.length === 0 && pending.length === 0 ? (
-                <ConversationEmptyState
-                  conversationName={
-                    selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
-                  }
-                  kind={selectedSummary?.conversation.kind ?? null}
-                  personal={selectedIsPersonal === true}
-                  archived={selectedSummary?.conversation.isArchived ?? false}
-                  channelMode={selectedSummary?.conversation.channelMode ?? null}
-                />
-              ) : (
-                messages.map((message, index) => (
-                  <Fragment key={message.id}>
-                    {shouldShowDateSeparator(
-                      message.createdAt,
-                      messages[index - 1]?.createdAt ?? null,
-                    ) && <MessageDateSeparator value={message.createdAt} />}
-                    {message.id === unreadDividerMessageId &&
-                      runtimeState.selectedConversationId !== null && (
-                        <UnreadDivider conversationId={runtimeState.selectedConversationId} />
-                      )}
-                    <MessageRow
-                      message={message}
-                      members={bootstrap.members}
-                      reactions={reactionsByMessage.get(message.id) ?? []}
-                      attachments={attachmentsByMessage.get(message.id) ?? []}
-                      currentUserId={currentUserId}
-                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
-                      reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                      onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
-                      onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
-                      onCreateTask={
-                        tasksAvailable ? () => createTaskFromMessage(message) : undefined
+              {messages.length === 0 &&
+                pending.length === 0 &&
+                (selectedTimelineLoaded ? (
+                  <ConversationEmptyState
+                    conversationName={
+                      selectedSummary === undefined
+                        ? null
+                        : runtime.conversationName(selectedSummary)
+                    }
+                    kind={selectedSummary?.conversation.kind ?? null}
+                    personal={selectedIsPersonal === true}
+                    archived={selectedSummary?.conversation.isArchived ?? false}
+                    channelMode={selectedSummary?.conversation.channelMode ?? null}
+                  />
+                ) : (
+                  <p className="thread-loading" role="status">
+                    {selectedRecovery?.status === "blocked"
+                      ? "Messages could not be loaded."
+                      : "Loading messages…"}
+                  </p>
+                ))}
+              <MessageTimeline
+                context={timelineContext}
+                messages={messages}
+                pending={pending}
+                groupConsecutive={preferences.groupConsecutiveMessages}
+                highlightedId={runtimeState.focusedMessageId}
+                editingId={editingClientMessageId}
+                onEditPending={(item) => {
+                  setDraft(item.operation.message.body);
+                  setEditingClientMessageId(item.operation.message.clientMessageId);
+                }}
+                unread={
+                  runtimeState.selectedConversationId === null
+                    ? undefined
+                    : {
+                        conversationId: runtimeState.selectedConversationId,
+                        messageId: unreadDividerMessageId,
                       }
-                      onRetract={() => runtime.retractMessage(message.id)}
-                      highlighted={message.id === runtimeState.focusedMessageId}
-                      continuation={
-                        preferences.groupConsecutiveMessages &&
-                        isMessageContinuation(message, messages[index - 1] ?? null)
-                      }
-                      timestampFormat={preferences.timestampFormat}
-                      channelReferences={channelReferences}
-                      onOpenChannel={selectConversation}
-                      replyCount={Math.max(
-                        threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
-                        loadedReplyCountByRoot.get(message.id) ?? 0,
-                      )}
-                      onOpenThread={
-                        runtimeState.threadsSupported &&
-                        message.threadRootId === null &&
-                        (!(selectedSummary?.conversation.isArchived ?? true) ||
-                          threadSummaryByRoot.has(message.id) ||
-                          loadedReplyCountByRoot.has(message.id) ||
-                          pendingThreadRootIds.has(message.id))
-                          ? () => void runtime.openThread(message.id)
-                          : undefined
-                      }
-                    />
-                  </Fragment>
-                ))
-              )}
-              {pending.map((item, index) => {
-                const previousTimestamp =
-                  pending[index - 1]?.createdAt ?? messages.at(-1)?.createdAt ?? null;
-                const continuation =
-                  preferences.groupConsecutiveMessages &&
-                  isMessageContinuation(
-                    {
-                      authorId: currentUserId,
-                      createdAt: item.createdAt,
-                      conversationSequence: null,
-                    },
-                    index > 0
-                      ? {
-                          authorId: currentUserId,
-                          createdAt: pending[index - 1]?.createdAt ?? item.createdAt,
-                          conversationSequence: null,
-                        }
-                      : (messages.at(-1) ?? null),
-                  );
-                return (
-                  <Fragment key={item.operation.message.clientMessageId}>
-                    {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
-                      <MessageDateSeparator value={item.createdAt} />
-                    )}
-                    <PendingMessageRow
-                      item={item}
-                      currentUser={bootstrap.currentUser.user}
-                      members={bootstrap.members}
-                      continuation={continuation}
-                      timestampFormat={preferences.timestampFormat}
-                      editing={editingClientMessageId === item.operation.message.clientMessageId}
-                      mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                      onEdit={() => {
-                        setDraft(item.operation.message.body);
-                        setEditingClientMessageId(item.operation.message.clientMessageId);
-                      }}
-                      onRetry={() =>
-                        void runtime.retryMessage(item.operation.message.clientMessageId)
-                      }
-                      onDiscard={() =>
-                        void runtime.discardMessage(item.operation.message.clientMessageId)
-                      }
-                      channelReferences={channelReferences}
-                      onOpenChannel={selectConversation}
-                    />
-                  </Fragment>
-                );
-              })}
+                }
+                onCreateTask={tasksAvailable ? createTaskFromMessage : undefined}
+                replyFor={(message) => ({
+                  count: Math.max(
+                    threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
+                    loadedReplyCountByRoot.get(message.id) ?? 0,
+                  ),
+                  open:
+                    runtimeState.threadsSupported &&
+                    message.threadRootId === null &&
+                    (!(selectedSummary?.conversation.isArchived ?? true) ||
+                      threadSummaryByRoot.has(message.id) ||
+                      loadedReplyCountByRoot.has(message.id) ||
+                      pendingThreadRootIds.has(message.id))
+                      ? () => void runtime.openThread(message.id)
+                      : undefined,
+                })}
+              />
             </div>
 
             {selectedSummary?.conversation.isArchived === true ? (
@@ -2939,9 +2348,9 @@ export function App({
 
           <div
             className="thread-message-list"
-            ref={threadList}
+            ref={threadPane.list}
             aria-live="polite"
-            onScroll={handleThreadScroll}
+            onScroll={threadPane.handleScroll}
           >
             {runtimeState.threadError !== null && (
               <p className="thread-error" role="alert">
@@ -2957,23 +2366,11 @@ export function App({
               </div>
             ) : (
               <>
-                <MessageRow
+                <WorkspaceMessageRow
+                  context={timelineContext}
                   message={threadRoot}
-                  members={bootstrap.members}
-                  reactions={reactionsByMessage.get(threadRoot.id) ?? []}
-                  attachments={attachmentsByMessage.get(threadRoot.id) ?? []}
-                  currentUserId={currentUserId}
-                  onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
-                  reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                  onAddReaction={(emoji) => runtime.addReaction(threadRoot.id, emoji)}
-                  onRemoveReaction={(emoji) => runtime.removeReaction(threadRoot.id, emoji)}
-                  onRetract={() => runtime.retractMessage(threadRoot.id)}
-                  highlighted={threadRoot.id === runtimeState.focusedThreadMessageId}
-                  continuation={false}
-                  timestampFormat={preferences.timestampFormat}
+                  highlightedId={runtimeState.focusedThreadMessageId}
                   domIdPrefix="thread-message"
-                  channelReferences={channelReferences}
-                  onOpenChannel={selectConversation}
                 />
                 <div className="thread-replies-heading" role="separator">
                   <span>
@@ -2992,94 +2389,26 @@ export function App({
                     Load older replies
                   </button>
                 )}
-                {threadReplies.map((message, index) => (
-                  <Fragment key={message.id}>
-                    {shouldShowDateSeparator(
-                      message.createdAt,
-                      threadReplies[index - 1]?.createdAt ?? null,
-                    ) && <MessageDateSeparator value={message.createdAt} />}
-                    <MessageRow
-                      message={message}
-                      members={bootstrap.members}
-                      reactions={reactionsByMessage.get(message.id) ?? []}
-                      attachments={attachmentsByMessage.get(message.id) ?? []}
-                      currentUserId={currentUserId}
-                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
-                      reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                      onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
-                      onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
-                      onRetract={() => runtime.retractMessage(message.id)}
-                      highlighted={message.id === runtimeState.focusedThreadMessageId}
-                      continuation={
-                        preferences.groupConsecutiveMessages &&
-                        isMessageContinuation(message, threadReplies[index - 1] ?? null)
-                      }
-                      timestampFormat={preferences.timestampFormat}
-                      domIdPrefix="thread-message"
-                      channelReferences={channelReferences}
-                      onOpenChannel={selectConversation}
-                    />
-                  </Fragment>
-                ))}
-                {threadReplies.length === 0 && threadPending.length === 0 && (
-                  <p className="thread-empty">Start the thread with a reply.</p>
-                )}
-                {threadPending.map((item, index) => {
-                  const previousTimestamp =
-                    threadPending[index - 1]?.createdAt ??
-                    threadReplies.at(-1)?.createdAt ??
-                    threadRoot.createdAt;
-                  const continuation =
-                    preferences.groupConsecutiveMessages &&
-                    isMessageContinuation(
-                      {
-                        authorId: currentUserId,
-                        createdAt: item.createdAt,
-                        conversationSequence: null,
-                      },
-                      index > 0
-                        ? {
-                            authorId: currentUserId,
-                            createdAt: threadPending[index - 1]?.createdAt ?? item.createdAt,
-                            conversationSequence: null,
-                          }
-                        : (threadReplies.at(-1) ?? null),
-                    );
-                  return (
-                    <Fragment key={item.operation.message.clientMessageId}>
-                      {shouldShowDateSeparator(item.createdAt, previousTimestamp) && (
-                        <MessageDateSeparator value={item.createdAt} />
-                      )}
-                      <PendingMessageRow
-                        item={item}
-                        currentUser={bootstrap.currentUser.user}
-                        members={bootstrap.members}
-                        continuation={continuation}
-                        timestampFormat={preferences.timestampFormat}
-                        editing={
-                          threadEditingClientMessageId === item.operation.message.clientMessageId
-                        }
-                        mutationsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                        onEdit={() => {
-                          setThreadDrafts((current) => ({
-                            ...current,
-                            [selectedThreadRootId]: item.operation.message.body,
-                          }));
-                          setThreadEditingClientMessageId(item.operation.message.clientMessageId);
-                          threadComposer.current?.focus();
-                        }}
-                        onRetry={() =>
-                          void runtime.retryMessage(item.operation.message.clientMessageId)
-                        }
-                        onDiscard={() =>
-                          void runtime.discardMessage(item.operation.message.clientMessageId)
-                        }
-                        channelReferences={channelReferences}
-                        onOpenChannel={selectConversation}
-                      />
-                    </Fragment>
-                  );
-                })}
+                <MessageTimeline
+                  context={timelineContext}
+                  messages={threadReplies}
+                  pending={threadPending}
+                  groupConsecutive={preferences.groupConsecutiveMessages}
+                  highlightedId={runtimeState.focusedThreadMessageId}
+                  editingId={threadEditingClientMessageId}
+                  domIdPrefix="thread-message"
+                  pendingTimestampFallback={threadRoot.createdAt}
+                  onEditPending={(item) => {
+                    setThreadDraft(item.operation.message.body);
+                    setThreadEditingClientMessageId(item.operation.message.clientMessageId);
+                    threadComposer.current?.focus();
+                  }}
+                />
+                {threadReplies.length === 0 &&
+                  threadPending.length === 0 &&
+                  !runtimeState.threadLoading && (
+                    <p className="thread-empty">Start the thread with a reply.</p>
+                  )}
                 {runtimeState.threadLoading && <p className="thread-loading">Loading replies…</p>}
               </>
             )}
