@@ -107,8 +107,6 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
       to: "hmm-notification-authorization.node",
     },
   ]);
-  assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
-  assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
   assert.equal(productionBuild.nsis.buildUniversalInstaller, false);
   assert.equal(productionBuild.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
   for (const packageScript of Object.values(desktopPackage.scripts).filter((script) =>

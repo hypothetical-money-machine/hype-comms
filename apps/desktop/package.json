@@ -29,11 +29,8 @@
     "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac --publish never",
     "package:mac:arm64": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac dmg:arm64 zip:arm64 --publish never",
     "package:win": "npm run build && electron-builder --config electron-builder.config.mjs --win --x64 --arm64 --publish never",
-    "package:win:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --win nsis:arm64 --publish never",
     "package:linux": "npm run build && electron-builder --config electron-builder.config.mjs --linux --x64 --arm64 --publish never",
-    "package:linux:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage:arm64 deb:arm64 --publish never",
-    "package:linux:appimage": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage --x64 --arm64 --publish never",
-    "package:linux:appimage:arm64": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage:arm64 --publish never"
+    "package:linux:appimage": "npm run build && electron-builder --config electron-builder.config.mjs --linux AppImage --x64 --arm64 --publish never"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
