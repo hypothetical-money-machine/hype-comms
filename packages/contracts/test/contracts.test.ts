@@ -1341,19 +1341,32 @@ describe("transport contracts", () => {
     ).toThrow();
     expect(
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: null,
       }),
     ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
       attachments: [],
       nextCursor: null,
     });
-    expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
+    expect(
+      messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [],
+        nextCursor: null,
+      }),
+    ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [],
       threadSummaries: [],
       threadsSupported: false,
@@ -1362,9 +1375,11 @@ describe("transport contracts", () => {
     });
     expect(() =>
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [],
         threadSummaries: [],
-        reactions: [],
+        unexpected: [],
         nextCursor: null,
       }),
     ).toThrow();
@@ -1403,8 +1418,15 @@ describe("transport contracts", () => {
     } as const;
 
     expect(
-      messageHistoryResponseSchema.parse({ messages: [root, reply], nextCursor: null }),
+      messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [root, reply],
+        nextCursor: null,
+      }),
     ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [root, reply],
       threadSummaries: [],
       threadsSupported: false,
@@ -1413,6 +1435,8 @@ describe("transport contracts", () => {
     });
     expect(
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [root],
         threadSummaries: [{ threadRootId: MESSAGE_ID, replyCount: 1, latestReply: reply }],
         nextCursor: null,
@@ -1422,10 +1446,18 @@ describe("transport contracts", () => {
       threadsSupported: false,
     });
     expect(
-      messageThreadResponseSchema.parse({ root, replies: [reply], nextCursor: null }),
+      messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        root,
+        replies: [reply],
+        nextCursor: null,
+      }),
     ).toMatchObject({ root: { id: MESSAGE_ID }, replies: [{ id: REPLY_ID }] });
     expect(() =>
       messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         root: reply,
         replies: [],
         nextCursor: null,
@@ -1433,6 +1465,8 @@ describe("transport contracts", () => {
     ).toThrow();
     expect(() =>
       messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         root,
         replies: [{ ...reply, threadRootId: REPLY_ID }],
         nextCursor: null,

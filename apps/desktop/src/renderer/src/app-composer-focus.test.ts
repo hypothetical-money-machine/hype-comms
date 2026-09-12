@@ -282,6 +282,9 @@ function createHarness(): Harness {
       hasMore: false,
     }),
     getConversationMessages: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: snapshotCursor,
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
@@ -298,13 +301,21 @@ function createHarness(): Harness {
       // the thread search-jump regression below depends on.
       await new Promise((resolve) => setTimeout(resolve, 0));
       return {
+        attachments: [],
+        reactions: [],
+        snapshotPosition: snapshotCursor,
         root: threadRoot,
         replies: [threadReply],
         nextCursor: null,
       };
     },
     listMessageReactions: async () => ({ reactions: [] }),
-    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listConversationFiles: async () => ({
+      snapshotPosition: snapshotCursor,
+      files: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     listMessageAttachments: async () => ({ attachments: [] }),
     chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
       attachmentUploadRequests.push({ conversationId, maxFiles });
@@ -319,8 +330,18 @@ function createHarness(): Harness {
       results: [{ message: launchMessage }, { message: threadReply }],
       nextCursor: null,
     }),
-    listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
+    listConversationTasks: async () => ({
+      snapshotPosition: snapshotCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
+    listMyTasks: async () => ({
+      snapshotPosition: snapshotCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     advanceReadCursor: async () => undefined,
     syncWorkspace: async (after: string) =>
       ({
