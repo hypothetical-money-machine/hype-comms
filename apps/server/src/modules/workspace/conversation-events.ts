@@ -2,8 +2,8 @@ import type { WorkspaceEvent } from "@hype-comms/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
 import { DomainError } from "../../domain-errors.js";
 import type { ConversationRow } from "./records.js";
-import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 import { insertSyncEvent, insertSyncEventWithSequence } from "./sync-events.js";
+import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 
 /** Conversation mutations publish through the caller's transaction client. */
 export class ConversationEventWriter {
@@ -29,10 +29,6 @@ export class ConversationEventWriter {
       entityVersion: input.entityVersion,
       payload: input.payload,
       audienceUserIds: input.audienceUserIds,
-      stripChannelMode: !(await this.announcementChannelsAvailable(
-        client,
-        identity.currentUser.workspaceId,
-      )),
     });
   }
 
@@ -58,10 +54,6 @@ export class ConversationEventWriter {
       entityVersion: input.entityVersion,
       payload: input.payload,
       audienceUserIds: input.audienceUserIds,
-      stripChannelMode: !(await this.announcementChannelsAvailable(
-        client,
-        identity.currentUser.workspaceId,
-      )),
     });
   }
 

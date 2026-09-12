@@ -2,65 +2,13 @@ import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
 
-export type RealtimePrincipal =
-  | {
-      readonly userId: string;
-      readonly workspaceId: string;
-      /** The human device session the ticket was bound to. */
-      readonly deviceSessionId: string;
-      readonly agentTokenId: null;
-      /** False/absent for tickets issued to clients predating reaction sync events. */
-      readonly reactionEvents?: boolean;
-      /** False/absent for tickets issued to clients predating canonical read-state events. */
-      readonly readStateEvents?: boolean;
-      /** False/absent for tickets issued to clients predating conversation task events. */
-      readonly taskEvents?: boolean;
-      /** False/absent for tickets issued to clients predating announcement channels. */
-      readonly announcementChannels?: boolean;
-      /** False/absent for tickets predating recipient-specific thread notification reasons. */
-      readonly participatedThreadNotifications?: boolean;
-      /** False/absent for tickets predating message.retracted sync events. */
-      readonly messageRetractEvents?: boolean;
-      /** False/absent for tickets issued to clients predating member profile titles. */
-      readonly memberProfiles?: boolean;
-      /** False/absent for tickets issued to clients predating ephemeral activity frames. */
-      readonly ephemeralActivity?: boolean;
-      /** False/absent for tickets issued to clients predating group direct messages. */
-      readonly groupDirectMessages?: boolean;
-      /** False/absent for tickets issued to clients predating humans-only channels. */
-      readonly humansOnlyChannels?: boolean;
-      /** False/absent for tickets issued to clients predating built-in channels. */
-      readonly systemChannels?: boolean;
-    }
-  | {
-      readonly userId: string;
-      readonly workspaceId: string;
-      readonly deviceSessionId: null;
-      /** The agent credential the ticket was bound to. */
-      readonly agentTokenId: string;
-      /** False/absent for tickets issued to clients predating reaction sync events. */
-      readonly reactionEvents?: boolean;
-      /** False/absent for tickets issued to clients predating canonical read-state events. */
-      readonly readStateEvents?: boolean;
-      /** False/absent for tickets issued to clients predating conversation task events. */
-      readonly taskEvents?: boolean;
-      /** False/absent for tickets issued to clients predating announcement channels. */
-      readonly announcementChannels?: boolean;
-      /** False/absent for tickets predating recipient-specific thread notification reasons. */
-      readonly participatedThreadNotifications?: boolean;
-      /** False/absent for tickets predating message.retracted sync events. */
-      readonly messageRetractEvents?: boolean;
-      /** False/absent for tickets issued to clients predating member profile titles. */
-      readonly memberProfiles?: boolean;
-      /** False/absent for tickets issued to clients predating ephemeral activity frames. */
-      readonly ephemeralActivity?: boolean;
-      /** False/absent for tickets issued to clients predating group direct messages. */
-      readonly groupDirectMessages?: boolean;
-      /** False/absent for tickets issued to clients predating humans-only channels. */
-      readonly humansOnlyChannels?: boolean;
-      /** False/absent for tickets issued to clients predating built-in channels. */
-      readonly systemChannels?: boolean;
-    };
+export type RealtimePrincipal = {
+  readonly userId: string;
+  readonly workspaceId: string;
+} & (
+  | { readonly deviceSessionId: string; readonly agentTokenId: null }
+  | { readonly deviceSessionId: null; readonly agentTokenId: string }
+);
 
 /**
  * Outcome of re-checking a live connection's bound credential and workspace membership.

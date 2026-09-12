@@ -1,25 +1,31 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
+import {
+  WORKSPACE_PROTOCOL_HEADER,
+  WORKSPACE_PROTOCOL_MAJOR,
+  WORKSPACE_PROTOCOL_PREFIX,
+  WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+} from "@hype-comms/contracts";
 import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { ApiError, registerErrorHandling } from "./errors.js";
 import { Lifecycle } from "./lifecycle.js";
 import type { MetricsRegistry } from "./metrics.js";
 import type { BotService } from "./modules/bots/service.js";
-import { authKitRoutes } from "./modules/identity/authkit-routes.js";
-import type { AuthKitService } from "./modules/identity/authkit-service.js";
 import type { AgentEnrollmentModule } from "./modules/identity/agent-enrollment.js";
+import { authKitCallbackRoutes, authKitRoutes } from "./modules/identity/authkit-routes.js";
+import type { AuthKitService } from "./modules/identity/authkit-service.js";
 import { workOSWebhookRoutes } from "./modules/identity/authkit-webhook-routes.js";
 import type { WorkOSWebhookProcessor } from "./modules/identity/authkit-webhook.js";
 import { identityLandingRoutes, identityRoutes } from "./modules/identity/routes.js";
 import type { IdentityService } from "./modules/identity/service.js";
-import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import { EphemeralActivityHub } from "./modules/realtime/activity-hub.js";
+import { denyRealtimeTickets, type ConsumeRealtimeTicket } from "./modules/realtime/auth.js";
 import type { RealtimeEventHub } from "./modules/realtime/hub.js";
 import { realtimeRoutes } from "./modules/realtime/routes.js";
 import { systemRoutes } from "./modules/system/routes.js";
-import { channelWebhookRoutes } from "./modules/webhooks/routes.js";
+import { channelWebhookRoutes, incomingWebhookRoutes } from "./modules/webhooks/routes.js";
 import type { WorkspaceRepository } from "./modules/workspace/repository.js";
 import { workspaceRoutes } from "./modules/workspace/routes.js";
 import type { FixedWindowAttemptThrottle } from "./throttle.js";
@@ -70,19 +76,30 @@ export async function buildApp(options: BuildAppOptions = {}) {
     options.workspace === undefined
       ? undefined
       : (options.workspace.activityHub ??
-        new EphemeralActivityHub(
-          (workspaceId, userId, conversationId, includeGroupDirectMessages) =>
-            options.workspace!.repository.canViewConversation(
-              workspaceId,
-              userId,
-              conversationId,
-              includeGroupDirectMessages,
-            ),
+        new EphemeralActivityHub((workspaceId, userId, conversationId) =>
+          options.workspace!.repository.canViewConversation(workspaceId, userId, conversationId),
         ));
 
   registerErrorHandling(app);
   app.addHook("onRequest", async (request, reply) => {
     void reply.header("x-request-id", request.id);
+    const pathname = request.url.split("?", 1)[0] ?? "";
+    if (!/^\/v[0-9]+(?:\/|$)/.test(pathname)) return;
+    void reply.header(WORKSPACE_PROTOCOL_HEADER, String(WORKSPACE_PROTOCOL_MAJOR));
+    if (
+      pathname === WORKSPACE_PROTOCOL_PREFIX ||
+      pathname.startsWith(`${WORKSPACE_PROTOCOL_PREFIX}/`)
+    )
+      return;
+    if (
+      pathname === "/v1/auth/workos/callback" ||
+      pathname === "/v1/auth/workos/webhook" ||
+      /^\/v1\/webhooks\/incoming\/[^/]+$/.test(pathname)
+    )
+      return;
+    throw new ApiError(426, "CONFLICT", WORKSPACE_PROTOCOL_UPGRADE_MESSAGE, [
+      { field: "protocol", issue: "Workspace protocol 2 is required" },
+    ]);
   });
   if (options.metrics !== undefined) {
     app.addHook("onResponse", async (request, reply) => {
@@ -146,9 +163,35 @@ export async function buildApp(options: BuildAppOptions = {}) {
   ) {
     await options.workspace.repository.enableDefaultAgentAgency();
   }
+  if (options.identity !== undefined) {
+    await app.register(authKitCallbackRoutes, {
+      prefix: "/v1",
+      authKitAdmissionEnabled: options.identity.authKitAdmissionEnabled ?? false,
+      ...(options.identity.authKitService === undefined
+        ? {}
+        : { authKitService: options.identity.authKitService }),
+    });
+    if (options.identity.workosWebhookProcessor !== undefined) {
+      await app.register(workOSWebhookRoutes, {
+        prefix: "/v1",
+        processor: options.identity.workosWebhookProcessor,
+      });
+    }
+    if (options.workspace !== undefined && options.identity.botService !== undefined) {
+      await app.register(incomingWebhookRoutes, {
+        prefix: "/v1",
+        identityService: options.identity.service,
+        botService: options.identity.botService,
+        repository: options.workspace.repository,
+        ...(options.identity.webhookThrottle === undefined
+          ? {}
+          : { throttle: options.identity.webhookThrottle }),
+      });
+    }
+  }
   await app.register(
-    async (v1) => {
-      await v1.register(realtimeRoutes, {
+    async (v2) => {
+      await v2.register(realtimeRoutes, {
         allowedOrigins,
         consumeTicket:
           options.consumeRealtimeTicket ?? consumeWorkspaceTicket ?? denyRealtimeTickets,
@@ -166,7 +209,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
             }),
       });
       if (options.identity !== undefined) {
-        await v1.register(identityRoutes, {
+        await v2.register(identityRoutes, {
           service: options.identity.service,
           ...(options.identity.agentEnrollment === undefined
             ? {}
@@ -179,7 +222,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           agentProvisioningEnabled: options.identity.agentProvisioningEnabled ?? true,
           defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
-        await v1.register(authKitRoutes, {
+        await v2.register(authKitRoutes, {
           identityService: options.identity.service,
           cookieSecure: options.cookieSecure ?? true,
           magicLinkAvailable: options.identity.selfServiceMagicLink ?? true,
@@ -188,14 +231,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
             ? {}
             : { authKitService: options.identity.authKitService }),
         });
-        if (options.identity.workosWebhookProcessor !== undefined) {
-          await v1.register(workOSWebhookRoutes, {
-            processor: options.identity.workosWebhookProcessor,
-          });
-        }
       }
       if (options.identity !== undefined && options.workspace !== undefined) {
-        await v1.register(workspaceRoutes, {
+        await v2.register(workspaceRoutes, {
           identityService: options.identity.service,
           ...(options.identity.botService === undefined
             ? {}
@@ -204,7 +242,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           defaultAgentAgencyEnabled: options.identity.service.defaultAgentAgencyEnabled,
         });
         if (options.identity.botService !== undefined) {
-          await v1.register(channelWebhookRoutes, {
+          await v2.register(channelWebhookRoutes, {
             identityService: options.identity.service,
             botService: options.identity.botService,
             repository: options.workspace.repository,
@@ -215,7 +253,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         }
       }
     },
-    { prefix: "/v1" },
+    { prefix: WORKSPACE_PROTOCOL_PREFIX },
   );
 
   if (options.identity !== undefined) {

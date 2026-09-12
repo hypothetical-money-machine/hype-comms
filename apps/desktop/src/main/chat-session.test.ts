@@ -1,5 +1,10 @@
-import { deferred } from "./test-support/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "./test-support/deferred";
+import { serverResponse } from "./test-support/server-response";
+import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
+import { scopedWorkspaceSession } from "./scoped-workspace-session";
+import { WorkspaceSessionOwner } from "./workspace-session-owner";
+import { WorkspaceTransport } from "./workspace-transport";
 
 import type {
   AuthenticatedSessionContext,
@@ -11,20 +16,20 @@ import {
   AUTHKIT_FAILED_MESSAGE,
   ChatSession,
   ChatSessionError,
-  INVALID_MAGIC_LINK_MESSAGE,
   describeNetworkError,
+  INVALID_MAGIC_LINK_MESSAGE,
   SESSION_SERVER_ERROR_MESSAGE,
   SESSION_UNREACHABLE_MESSAGE,
+  type AuthenticatedSessionContextPersistence,
   type SessionCookieStore,
   type SessionFetch,
-  type AuthenticatedSessionContextPersistence,
 } from "./chat-session";
 
 const API_ORIGIN = "https://chat.example";
 const TOKEN = "A".repeat(43) as MagicLinkToken;
 const NOW = "2026-07-24T12:00:00.000Z";
-const CURRENT_USER_URL = "https://chat.example/v1/auth/me";
-const SESSION_REFRESH_URL = "https://chat.example/v1/auth/session/refresh";
+const CURRENT_USER_URL = "https://chat.example/v2/auth/me";
+const SESSION_REFRESH_URL = "https://chat.example/v2/auth/session/refresh";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const FIVE_MINUTES_MS = 5 * 60_000;
@@ -111,14 +116,14 @@ class MemoryAuthenticatedContexts implements AuthenticatedSessionContextPersiste
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+  return serverResponse(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
   });
 }
 
 function emptyResponse(status = 204): Response {
-  return new Response(null, { status });
+  return serverResponse(null, { status });
 }
 
 function createSession(
@@ -155,13 +160,132 @@ function expectPreservedCredential(cookies: MemoryCookies): void {
 }
 
 describe("ChatSession restore", () => {
+  it("publishes an upgrade after retiring the request owner and can explicitly recover", async () => {
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    let incompatible = false;
+    const request = vi.fn<SessionFetch>(async (url) => {
+      if (incompatible) return new Response(null, { status: 426 });
+      return jsonResponse(url === CURRENT_USER_URL ? CURRENT_USER : { members: [] });
+    });
+    const chat = createSession(request, cookies, "production", contexts);
+    const retired = vi.fn();
+    const sessions = new WorkspaceSessionOwner<{ transport: WorkspaceTransport }>((owner) => {
+      owner.onDispose(retired);
+      return { transport: new WorkspaceTransport(API_ORIGIN, scopedWorkspaceSession(chat, owner)) };
+    });
+    const publish = vi.fn();
+    const lifecycle = new DesktopSessionLifecycle({
+      source: chat,
+      sessions,
+      publish,
+      reportFailure: vi.fn(),
+    });
+    try {
+      await chat.restore();
+      await lifecycle.readState();
+      const owner = sessions.current!;
+      const context = contexts.session;
+      incompatible = true;
+      await expect(
+        owner.run(({ transport }) =>
+          transport.send({
+            conversationId: "10000000-0000-4000-8000-000000000003",
+            idempotencyKey: "10000000-0000-4000-8000-000000000004",
+            message: {
+              clientMessageId: "10000000-0000-4000-8000-000000000005",
+              body: "Keep this send",
+              attachmentIds: [],
+              bodyFormat: "hype_comms_markdown_v1",
+              mentionedUserIds: [],
+              threadRootId: null,
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      const unavailable = await lifecycle.readState();
+      expect(unavailable).toMatchObject({
+        status: "session-unavailable",
+        reason: "protocol_mismatch",
+        lastAuthenticatedSession: context,
+      });
+      expect(publish).toHaveBeenLastCalledWith(unavailable);
+      expect(retired).toHaveBeenCalledOnce();
+      expect(owner.signal.aborted).toBe(true);
+      expect(sessions.current).toBeNull();
+      expect(chat.cacheAuthorizationState).toEqual(unavailable);
+      expectPreservedCredential(cookies);
+      incompatible = false;
+      await lifecycle.replaceAuthentication(() => chat.restore());
+      expect((await lifecycle.readState()).status).toBe("signed-in");
+      expect(sessions.current).not.toBe(owner);
+      await expect(sessions.current!.run(({ transport }) => transport.members())).resolves.toEqual({
+        members: [],
+      });
+      expect(contexts.session).toEqual(context);
+    } finally {
+      await lifecycle.dispose();
+      chat.stop();
+    }
+  });
+
+  it("preserves credentials and cache authorization when a product request detects an incompatible server", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    try {
+      const cookies = storedIdentityCookies();
+      const contexts = new MemoryAuthenticatedContexts();
+      const request = vi.fn<SessionFetch>(async (url) =>
+        url === CURRENT_USER_URL ? jsonResponse(CURRENT_USER) : new Response(null, { status: 426 }),
+      );
+      const session = createSession(request, cookies, "production", contexts);
+      await session.restore();
+      const preservedContext = contexts.session;
+      await expect(session.fetch(`${API_ORIGIN}/v2/tasks/mine`)).rejects.toThrow(
+        "Update Hype Comms",
+      );
+      expect(session.state).toMatchObject({
+        status: "session-unavailable",
+        reason: "protocol_mismatch",
+        lastAuthenticatedSession: preservedContext,
+      });
+      expect(session.cacheAuthorizationState).toEqual(session.state);
+      expectPreservedCredential(cookies);
+      expect(contexts.session).toEqual(preservedContext);
+      const count = request.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(THIRTY_DAYS_MS);
+      await expect(session.fetch(`${API_ORIGIN}/v2/bootstrap`)).rejects.toThrow(
+        "Update Hype Comms",
+      );
+      expect(request).toHaveBeenCalledTimes(count);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let an aborted old request block the replacement session", async () => {
+    const pending = deferred<Response>();
+    const request = vi.fn<SessionFetch>(async (url) =>
+      url === CURRENT_USER_URL ? jsonResponse(CURRENT_USER) : pending.promise,
+    );
+    const session = createSession(request, storedIdentityCookies());
+    await session.restore();
+    const abort = new AbortController();
+    const old = session.fetch(`${API_ORIGIN}/v2/bootstrap`, { signal: abort.signal });
+    abort.abort();
+    pending.resolve(new Response(null, { status: 426 }));
+    await expect(old).rejects.toThrow("Update Hype Comms");
+    expect(session.state.status).toBe("signed-in");
+    await expect(session.fetch(CURRENT_USER_URL)).resolves.toHaveProperty("status", 200);
+  });
+
   it("restores the invited member identity without exposing its cookie", async () => {
     const requests: string[] = [];
     const cookies = new MemoryCookies();
     cookies.values.set("hype_comms_session", "identity-cookie");
     const session = createSession(async (url, init) => {
       requests.push(`${init.method} ${url}`);
-      if (url.endsWith("/v1/auth/me")) return jsonResponse(CURRENT_USER);
+      if (url.endsWith("/v2/auth/me")) return jsonResponse(CURRENT_USER);
       throw new Error(`Unexpected request ${url}`);
     }, cookies);
 
@@ -173,7 +297,7 @@ describe("ChatSession restore", () => {
       userId: CURRENT_USER.user.id,
       workspaceId: CURRENT_USER.workspaceId,
     });
-    expect(requests).toEqual(["GET https://chat.example/v1/auth/me"]);
+    expect(requests).toEqual(["GET https://chat.example/v2/auth/me"]);
   });
 
   it("clears a rejected identity session only after a single refresh attempt fails", async () => {
@@ -391,7 +515,7 @@ describe("ChatSession lifecycle", () => {
     const cookies = new MemoryCookies(events);
     const session = createSession(async (url, init) => {
       events.push(`${init.method} ${new URL(url).pathname}`);
-      return url.endsWith("/v1/auth/session") ? jsonResponse(CURRENT_USER) : emptyResponse();
+      return url.endsWith("/v2/auth/session") ? jsonResponse(CURRENT_USER) : emptyResponse();
     }, cookies);
 
     await expect(session.exchangeMagicLink(TOKEN)).resolves.toEqual({
@@ -402,7 +526,7 @@ describe("ChatSession lifecycle", () => {
       userId: CURRENT_USER.user.id,
       workspaceId: CURRENT_USER.workspaceId,
     });
-    expect(events).toEqual(["POST /v1/auth/session"]);
+    expect(events).toEqual(["POST /v2/auth/session"]);
   });
 
   it("clears the identity cookie on sign-out", async () => {
@@ -421,7 +545,7 @@ describe("ChatSession lifecycle", () => {
     const cookies = storedIdentityCookies();
     const session = createSession(
       async () =>
-        new Response(null, {
+        serverResponse(null, {
           status: 204,
           headers: { "x-hype-comms-authkit-logout-url": logoutUrl },
         }),
@@ -440,7 +564,7 @@ describe("ChatSession lifecycle", () => {
     const cookies = storedIdentityCookies();
     const session = createSession(
       async () =>
-        new Response(null, {
+        serverResponse(null, {
           status: 204,
           headers: {
             "x-hype-comms-authkit-logout-url": "https://evil.example/logout?access_token=secret",
@@ -544,7 +668,7 @@ describe("ChatSession magic links", () => {
     const cookies = storedIdentityCookies();
     const session = createSession(async (url) => {
       if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
-      return new Response("not json");
+      return serverResponse("not json");
     }, cookies);
     await session.restore();
     const precedingState = session.state;
@@ -636,7 +760,7 @@ describe("ChatSession magic links", () => {
   it("keeps the stored credential when the exchange returns an unparseable body", async () => {
     const cookies = storedIdentityCookies();
     // A proxy or gateway notice answered in place of the exchange: not a refusal of the link.
-    const session = createSession(async () => new Response("not json"), cookies);
+    const session = createSession(async () => serverResponse("not json"), cookies);
 
     await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
     expect(session.state).toEqual({
@@ -680,7 +804,7 @@ describe("ChatSession magic links", () => {
       cookies,
     );
 
-    // `POST /v1/auth/session` answers 409 when the workspace is full. That refuses the request,
+    // `POST /v2/auth/session` answers 409 when the workspace is full. That refuses the request,
     // never the link, so the credential this device already holds is untouched.
     await expect(session.exchangeMagicLink(TOKEN)).rejects.toThrow(ChatSessionError);
     expect(session.state).toEqual({
@@ -760,18 +884,15 @@ describe("ChatSession magic links", () => {
 });
 
 describe("ChatSession AuthKit", () => {
-  it("discovers AuthKit while retaining a legacy-server magic-link fallback", async () => {
+  it("discovers AuthKit and rejects an old server without a fallback", async () => {
     const capable = createSession(async () => jsonResponse({ authKit: true, magicLink: false }));
     await expect(capable.getAuthCapabilities()).resolves.toEqual({
       authKit: true,
       magicLink: false,
     });
 
-    const legacy = createSession(async () => jsonResponse({ error: "not found" }, 404));
-    await expect(legacy.getAuthCapabilities()).resolves.toEqual({
-      authKit: false,
-      magicLink: true,
-    });
+    const legacy = createSession(async () => new Response(null, { status: 404 }));
+    await expect(legacy.getAuthCapabilities()).rejects.toThrow("Update Hype Comms");
   });
 
   it("starts only with a strict desktop challenge and state", async () => {
@@ -793,7 +914,7 @@ describe("ChatSession AuthKit", () => {
       authorizationUrl: "https://api.workos.com/user_management/authorize",
     });
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.url).toBe("https://chat.example/v1/auth/desktop-authorizations");
+    expect(requests[0]?.url).toBe("https://chat.example/v2/auth/desktop-authorizations");
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
       codeChallenge: AUTHKIT_CHALLENGE,
       state: AUTHKIT_STATE,
@@ -873,7 +994,7 @@ describe("ChatSession AuthKit", () => {
         appVersion: "0.1.23",
       }),
     ).resolves.toMatchObject({ status: "signed-in", email: "morgan@example.com" });
-    expect(requests[0]?.url).toBe("https://chat.example/v1/auth/exchange");
+    expect(requests[0]?.url).toBe("https://chat.example/v2/auth/exchange");
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
       code: AUTHKIT_CODE,
       codeVerifier: AUTHKIT_VERIFIER,
@@ -1047,7 +1168,7 @@ describe("ChatSession request lifetime", () => {
       });
     const session = createSession(request);
     const controller = new AbortController();
-    const response = session.fetch(API_ORIGIN + "/v1/bootstrap", { signal: controller.signal });
+    const response = session.fetch(API_ORIGIN + "/v2/bootstrap", { signal: controller.signal });
     const signal = await entered.promise;
     controller.abort(new Error("caller cancelled"));
     expect(signal.aborted).toBe(true);

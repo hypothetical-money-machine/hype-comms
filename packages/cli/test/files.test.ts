@@ -11,12 +11,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serverResponse } from "./helpers.js";
 
-import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-} from "@hype-comms/contracts";
+import {} from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli } from "../src/cli.js";
@@ -27,11 +24,6 @@ import { jsonResponse, testRuntime } from "./helpers.js";
 
 const ATTACHMENT_ID = "66666666-6666-4666-8666-666666666666";
 const TOKEN = `hype_comms_agent_${"a".repeat(43)}`;
-const FILE_CAPABILITIES = [
-  ATTACHMENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-].join(",");
 
 async function directory(): Promise<string> {
   return mkdtemp(join(await realpath(tmpdir()), "hype-comms-cli-files-"));
@@ -138,13 +130,13 @@ describe("safe attachment files", () => {
     expect(await readdir(join(realDirectory, "nested"))).toEqual([]);
   });
 
-  it("lists conversation files and advertises attachments-v1", async () => {
+  it("lists conversation files without capability negotiation", async () => {
     const homeDirectory = await directory();
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       expect(String(url)).toBe(
-        `https://chat.example.test/v1/conversations/${CONVERSATION_ID}/files?limit=50`,
+        `https://chat.example.test/v2/conversations/${CONVERSATION_ID}/files?limit=50`,
       );
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       return jsonResponse({ files: [attachment()], nextCursor: null, hasMore: false });
     });
     const value = runtime(homeDirectory, fetch);
@@ -160,10 +152,10 @@ describe("safe attachment files", () => {
   it("queries attachment metadata for one realtime message ID", async () => {
     const homeDirectory = await directory();
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe("https://chat.example.test/v1/attachments/query");
+      expect(String(url)).toBe("https://chat.example.test/v2/attachments/query");
       expect(init?.method).toBe("POST");
       expect(JSON.parse(String(init?.body))).toEqual({ messageIds: [MESSAGE_ID] });
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       return jsonResponse({ attachments: [attachment()] });
     });
     const value = runtime(homeDirectory, fetch);
@@ -182,11 +174,11 @@ describe("safe attachment files", () => {
     const bytes = new TextEncoder().encode("hello");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe(`https://chat.example.test/v1/files/${ATTACHMENT_ID}/content`);
+      expect(String(url)).toBe(`https://chat.example.test/v2/files/${ATTACHMENT_ID}/content`);
       const headers = new Headers(init?.headers);
       expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
       expect(headers.get("accept-encoding")).toBe("identity");
-      return new Response(bytes, {
+      return serverResponse(bytes, {
         headers: { "content-length": String(bytes.byteLength), "x-content-sha256": sha256 },
       });
     });
@@ -213,14 +205,13 @@ describe("safe attachment files", () => {
     const bytes = new TextEncoder().encode("hello");
     const value = runtime(
       homeDirectory,
-      vi.fn<typeof globalThis.fetch>(
-        async () =>
-          new Response(bytes, {
-            headers: {
-              "content-length": String(bytes.byteLength),
-              "x-content-sha256": "a".repeat(64),
-            },
-          }),
+      vi.fn<typeof globalThis.fetch>(async () =>
+        serverResponse(bytes, {
+          headers: {
+            "content-length": String(bytes.byteLength),
+            "x-content-sha256": "a".repeat(64),
+          },
+        }),
       ),
     );
 
@@ -235,13 +226,13 @@ describe("safe attachment files", () => {
     });
   });
 
-  it("advertises attachments-v1 for history and message hydration", async () => {
+  it("reads history and message hydration without capability negotiation", async () => {
     const homeDirectory = await directory();
     const paths: string[] = [];
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
       const path = new URL(String(url)).pathname;
       paths.push(path);
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(FILE_CAPABILITIES);
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       if (init?.method === "POST") {
         return jsonResponse({
           message: {
@@ -286,8 +277,8 @@ describe("safe attachment files", () => {
       ),
     ).toBe(EXIT_SUCCESS);
     expect(paths).toEqual([
-      `/v1/conversations/${CONVERSATION_ID}/messages`,
-      `/v1/conversations/${CONVERSATION_ID}/messages`,
+      `/v2/conversations/${CONVERSATION_ID}/messages`,
+      `/v2/conversations/${CONVERSATION_ID}/messages`,
     ]);
   });
 });

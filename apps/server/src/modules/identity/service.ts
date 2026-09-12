@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   agentTokenSecretSchema,
   currentUserSchema,
@@ -11,8 +9,8 @@ import {
   type AgentScope,
   type AgentToken,
   type AuthKitProviderSessionId,
-  type CurrentUser,
   type CurrentPrincipal,
+  type CurrentUser,
   type DeviceSession,
   type Email,
   type EntityId,
@@ -22,7 +20,7 @@ import {
   type SessionToken,
   type User,
 } from "@hype-comms/contracts";
-
+import { randomUUID } from "node:crypto";
 import { ApiError } from "../../errors.js";
 import type { SignInThrottle } from "../../throttle.js";
 import type { EmailSender } from "./email.js";
@@ -31,11 +29,10 @@ import { hashToken, issueAgentToken, issueToken } from "./tokens.js";
 
 /** displayNameSchema's upper bound, which is narrower than userSchema.displayName's. */
 const DISPLAY_NAME_MAX_LENGTH = 80;
-const MAGIC_LINK_TTL_MS = 15 * 60 * 1_000;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAGIC_LINK_TTL_MS = 15 * 60 * 1000;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ACTIVE_MEMBERS = 25;
-const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-
+const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export interface RedeemedSession {
   readonly token: SessionToken;
   readonly expiresAt: string;
@@ -377,7 +374,10 @@ export class IdentityService {
 
   async createAgent(
     actorUserId: EntityId,
-    input: { readonly username: string; readonly displayName: string },
+    input: {
+      readonly username: string;
+      readonly displayName: string;
+    },
   ): Promise<Agent> {
     return this.#repository.transaction(async (repository) => {
       const owner = await this.#requireLockedOwner(
@@ -436,25 +436,25 @@ export class IdentityService {
       return true;
     });
   }
-
-  async listAgentTokens(
-    actorUserId: EntityId,
-    agentUserId: EntityId,
-    includeEffectiveScopes = false,
-  ): Promise<AgentToken[]> {
+  async listAgentTokens(actorUserId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
     const owner = await this.#requireOwner(actorUserId, this.#repository);
     if ((await this.#repository.findAgent(owner.workspaceId, agentUserId)) === null) {
       throw new ApiError(404, "NOT_FOUND", "Agent not found");
     }
-    return this.#repository.listAgentTokens(owner.workspaceId, agentUserId, includeEffectiveScopes);
+    return this.#repository.listAgentTokens(owner.workspaceId, agentUserId);
   }
 
   async createAgentToken(
     actorUserId: EntityId,
     agentUserId: EntityId,
-    input: { readonly label: string; readonly scopes: readonly AgentScope[] },
-    includeEffectiveScopes = false,
-  ): Promise<{ readonly token: string; readonly agentToken: AgentToken }> {
+    input: {
+      readonly label: string;
+      readonly scopes: readonly AgentScope[];
+    },
+  ): Promise<{
+    readonly token: string;
+    readonly agentToken: AgentToken;
+  }> {
     return this.#repository.transaction(async (repository) => {
       const owner = await this.#requireLockedOwner(
         actorUserId,
@@ -470,19 +470,16 @@ export class IdentityService {
       const uniqueScopes = new Set(input.scopes);
       const scopes = AGENT_SCOPE_ORDER.filter((scope) => uniqueScopes.has(scope));
       const issued = issueAgentToken();
-      const agentToken = await repository.insertAgentToken(
-        {
-          id: randomUUID(),
-          workspaceId: owner.workspaceId,
-          agentUserId,
-          tokenHash: issued.hash,
-          label: input.label,
-          scopes,
-          createdBy: actorUserId,
-          createdAt: iso(this.#clock()),
-        },
-        includeEffectiveScopes,
-      );
+      const agentToken = await repository.insertAgentToken({
+        id: randomUUID(),
+        workspaceId: owner.workspaceId,
+        agentUserId,
+        tokenHash: issued.hash,
+        label: input.label,
+        scopes,
+        createdBy: actorUserId,
+        createdAt: iso(this.#clock()),
+      });
       return { token: agentTokenSecretSchema.parse(issued.token), agentToken };
     });
   }

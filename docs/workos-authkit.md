@@ -9,7 +9,7 @@ local revocation. Existing magic links remain compatible during rollout.
 
 1. Electron main creates a random desktop state and RFC 7636 verifier/challenge. It persists the
    state and verifier through Electron `safeStorage` before making a request.
-2. `POST /v1/auth/desktop-authorizations` asks the server to begin AuthKit. The server asks WorkOS
+2. `POST /v2/auth/desktop-authorizations` asks the server to begin AuthKit. The server asks WorkOS
    for a second PKCE transaction, hashes the provider state, and encrypts the provider verifier
    with AES-256-GCM for ten minutes.
 3. Electron opens the credential-free WorkOS HTTPS authorization URL in the system browser.
@@ -26,7 +26,7 @@ local revocation. Existing magic links remain compatible during rollout.
    variant uses `hype-comms-dev://auth/callback` with the same query shape. Provider codes, tokens,
    errors, and email never enter either URL.
 7. Electron constant-time matches state, deletes its pending verifier before exchange, and sends
-   the five-minute handoff plus verifier to `POST /v1/auth/exchange`. The server consumes it once
+   the five-minute handoff plus verifier to `POST /v2/auth/exchange`. The server consumes it once
    and creates the existing 30-day rotating `hype_comms_session` device session.
 
 An indeterminate handoff exchange is terminal and is never retried automatically. Starting again
@@ -141,7 +141,7 @@ A safe rollout is:
 1. Back up PostgreSQL. Configure the four provider values, webhook secret, and exact trusted proxy
    IP/CIDR, but leave `HYPE_COMMS_AUTHKIT_ADMISSION_ENABLED=false`.
 2. Deploy migration `0017` and the AuthKit-capable server to every serving instance. With the gate
-   still false, verify `/v1/auth/capabilities` reports `authKit: false` and the three admission
+   still false, verify `/v2/auth/capabilities` reports `authKit: false` and the three admission
    routes are unavailable.
 3. Verify signed `session.revoked` delivery in the WorkOS dashboard. Webhook processing,
    active-session reconciliation, and expired-state cleanup remain active while admission is

@@ -3,12 +3,7 @@ import type { Pool, QueryResultRow } from "pg";
 import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
 import type { SystemBulletin } from "../system-channels/release-notes.js";
 import { conversationAudience } from "./conversation-access.js";
-import {
-  mapMessage,
-  mapStoredConversation,
-  type ConversationRow,
-  type MessageRow,
-} from "./records.js";
+import { mapConversation, mapMessage, type ConversationRow, type MessageRow } from "./records.js";
 import {
   insertSyncEvent,
   insertSyncEventWithSequence,
@@ -149,7 +144,7 @@ export class SystemChannelSeeder {
         type: "channel.created",
         conversationId: row.id,
         payload: {
-          conversation: mapStoredConversation(row),
+          conversation: mapConversation(row),
           participantIds: audienceUserIds,
         },
         audienceUserIds,
@@ -241,7 +236,6 @@ export class SystemChannelSeeder {
         conversationSequence,
         payload: { message: mapMessage(row), mentionedUserIds: [] },
         audienceUserIds,
-        stripChannelMode: false,
       });
       return { workspaceId: current.workspace_id, conversationId: current.id };
     });
