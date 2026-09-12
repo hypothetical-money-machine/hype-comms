@@ -1,4 +1,5 @@
 import { type SyncPosition } from "@hype-comms/contracts";
+import { createWorkspaceSelection } from "./workspace-selection";
 import { testPosition } from "../../shared/test-support/sync-position";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1622,6 +1623,41 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("keeps selected snapshots stable and notifies even when another subscriber reads first", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "second"),
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    let readEarly: () => void = () => undefined;
+    const unsubscribeEarly = runtime.subscribe(() => readEarly());
+    const selection = createWorkspaceSelection(
+      runtime,
+      (state) => ({ selected: state.selectedConversationId }),
+      (left, right) => left.selected === right.selected,
+    );
+    readEarly = () => {
+      selection.getSnapshot();
+    };
+    const listener = vi.fn();
+    const unsubscribe = selection.subscribe(listener);
+    const original = selection.getSnapshot();
+    await runtime.loadConversationTasks(CONVERSATION_ID);
+    expect(selection.getSnapshot()).toBe(original);
+    expect(listener).not.toHaveBeenCalled();
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    expect(selection.getSnapshot()).toEqual({ selected: SECOND_CONVERSATION_ID });
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    unsubscribeEarly();
+    await runtime.stop();
+  });
+
   it.each(["fresh", "cached"] as const)(
     "opens a %s 50-conversation workspace before background metadata finishes",
     async (mode) => {
@@ -1840,6 +1876,64 @@ describe("WorkspaceRuntime", () => {
       expect(api.startedCursors).toEqual(["10"]);
       expect(runtime.state.error).toBeNull();
       expect(runtime.state.taskError).toBe("Task service unavailable");
+      expect(runtime.state.stale).toBe(false);
+      expect(runtime.collectionStale({ kind: "tasks", conversationId: CONVERSATION_ID })).toBe(
+        true,
+      );
+      expect(runtime.collectionStale({ kind: "timeline", conversationId: CONVERSATION_ID })).toBe(
+        false,
+      );
+      expect(runtime.state.recovery).toContainEqual(
+        expect.objectContaining({
+          collection: { kind: "tasks", conversationId: CONVERSATION_ID },
+          status: "blocked",
+          reason: "Task service unavailable",
+        }),
+      );
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("keeps a failed timeline warning with its conversation through navigation and retry", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "second"),
+        ],
+      }),
+    );
+    const load = api.getConversationMessages.bind(api);
+    vi.spyOn(api, "getConversationMessages").mockImplementation(async (input) => {
+      if (input.conversationId === SECOND_CONVERSATION_ID) throw new Error("Timeline unavailable");
+      return load(input);
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    const failedCollection = { kind: "timeline" as const, conversationId: SECOND_CONVERSATION_ID };
+    try {
+      await runtime.start(session);
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      await settle(
+        () => runtime.state.recovery.some((entry) => entry.reason === "Timeline unavailable"),
+        "failed selected timeline",
+      );
+      await drain();
+      runtime.selectConversation(CONVERSATION_ID);
+      expect(runtime.state.error).toBeNull();
+      expect(runtime.state.stale).toBe(false);
+      expect(runtime.collectionStale({ kind: "timeline", conversationId: CONVERSATION_ID })).toBe(
+        false,
+      );
+      expect(runtime.state.recovery).toContainEqual(
+        expect.objectContaining({ collection: failedCollection, status: "blocked" }),
+      );
+      vi.mocked(api.getConversationMessages).mockImplementation(load);
+      await runtime.loadOlder(SECOND_CONVERSATION_ID);
+      expect(runtime.collectionStale(failedCollection)).toBe(false);
+      expect(runtime.state.recovery.some((entry) => entry.reason === "Timeline unavailable")).toBe(
+        false,
+      );
     } finally {
       await runtime.stop();
     }
@@ -5829,6 +5923,11 @@ describe("WorkspaceRuntime", () => {
       reason: "credential_store_unavailable",
     };
     api.bootstrapResults.push(replacementBootstrap.promise);
+    const publishedUsers: (string | null)[] = [];
+    const unsubscribe = runtime.subscribe((state) => {
+      publishedUsers.push(state.bootstrap?.currentUser.user.id ?? null);
+    });
+    publishedUsers.length = 0;
     const replacement = runtime.start(otherSession);
 
     expect(runtime.state).toMatchObject({
@@ -5844,6 +5943,8 @@ describe("WorkspaceRuntime", () => {
     replacementBootstrap.resolve(otherBootstrapAt("20"));
     await replacement;
     expect(runtime.state.bootstrap?.currentUser.user.id).toBe(OTHER_USER_ID);
+    expect(publishedUsers).not.toContain(USER_ID);
+    unsubscribe();
   });
 
   it("does not let delayed old-scope cache initialization replace the current cache", async () => {
@@ -7944,6 +8045,51 @@ describe("WorkspaceRuntime", () => {
       // The recovery must come from the directory retry itself, not from a sync pass.
       expect(api.syncedFrom.length).toBe(syncsAfterStart);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an in-flight catalog stale after an independent member retry succeeds", async () => {
+    vi.useFakeTimers();
+    const catalog = deferred<HumanWorkspaceBootstrapResponse>();
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    let refreshing: Promise<void> | undefined;
+    try {
+      await runtime.start(session);
+      api.memberFailures = 1;
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(
+        () =>
+          runtime.state.recovery.some(
+            (work) => work.key === "members" && work.status === "blocked",
+          ),
+        "blocked member refresh",
+      );
+      api.bootstrapResults.push(catalog.promise);
+      api.channelResults.push({
+        conversation: channel(CONVERSATION_ID, "general"),
+        syncCursor: testPosition("11"),
+      });
+      refreshing = runtime.archiveChannel(CONVERSATION_ID);
+      await settle(() => api.bootstrapRequests === 2, "held catalog refresh");
+      api.members = [user];
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle(
+        () => !runtime.state.recovery.some((work) => work.key === "members"),
+        "member owner completes",
+      );
+      expect(runtime.state.recovery).toContainEqual(
+        expect.objectContaining({ key: "catalog", status: "pending" }),
+      );
+      expect(runtime.state.stale).toBe(true);
+      catalog.resolve(bootstrapAt("11", { members: [user] }));
+      await refreshing;
+      expect(runtime.state.stale).toBe(false);
+    } finally {
+      catalog.resolve(bootstrapAt("11", { members: [user] }));
+      await refreshing;
+      await runtime.stop();
       vi.useRealTimers();
     }
   });
