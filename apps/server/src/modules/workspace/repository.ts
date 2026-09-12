@@ -27,7 +27,6 @@ import {
   communicationPathsResponseSchema,
   conversationMutationResponseSchema,
   conversationSchema,
-  conversationSummarySchema,
   listConversationsResponseSchema,
   listPublicChannelsResponseSchema,
   listMessageReactionsResponseSchema,
@@ -35,11 +34,9 @@ import {
   messageHistoryResponseSchema,
   messageByIdResponseSchema,
   messageSearchResponseSchema,
-  messageSchema,
   messageThreadResponseSchema,
   reactionEmojiSchema,
   reactionSchema,
-  readCursorSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
   retractMessageResponseSchema,
@@ -86,7 +83,6 @@ import {
   type ListPublicChannelsResponse,
   type ListMessageReactionsResponse,
   type ListMembersResponse,
-  type Message,
   type MessageHistoryResponse,
   type MessageByIdResponse,
   type MessageSearchResponse,
@@ -153,6 +149,19 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 type AuthenticatedTaskIdentity = AuthenticatedIdentity | AuthenticatedBotIdentity;
 
+import {
+  iso,
+  nullableIso,
+  mapConversation,
+  mapMessage,
+  mapReadCursor,
+  participants,
+  type ConversationRow,
+  type MessageRow,
+  type ReadCursorRow,
+} from "./records.js";
+import { readConversationSummaries, readUnreadCounts } from "./conversation-summary-reader.js";
+
 interface WorkspaceRow extends QueryResultRow {
   id: string;
   name: string;
@@ -172,26 +181,6 @@ interface UserRow extends QueryResultRow {
   display_name: string;
   avatar_url: string | null;
   title: string | null;
-  created_at: Date | string;
-  updated_at: Date | string;
-}
-
-interface ConversationRow extends QueryResultRow {
-  id: string;
-  workspace_id: string;
-  kind: "channel" | "direct_message" | "group_direct_message";
-  name: string | null;
-  slug: string | null;
-  topic: string | null;
-  channel_access: "workspace" | "members" | null;
-  human_only: boolean;
-  channel_mode: "chat" | "announcement" | null;
-  is_system: boolean;
-  is_archived: boolean;
-  created_by: string | null;
-  dm_user_low_id: string | null;
-  dm_user_high_id: string | null;
-  last_task_number: string;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -222,24 +211,6 @@ interface CommunicationPathRow extends QueryResultRow {
   shared_channel_count: string;
   channel_message_count: string;
   last_activity_at: Date | string | null;
-}
-
-interface MessageRow extends QueryResultRow {
-  id: string;
-  conversation_id: string;
-  conversation_sequence: string;
-  committed_workspace_sequence: string;
-  version: number;
-  client_message_id: string;
-  request_fingerprint: Buffer;
-  author_id: string;
-  thread_root_id: string | null;
-  body: string;
-  body_format: "hype_comms_markdown_v1";
-  edited_at: Date | string | null;
-  deleted_at: Date | string | null;
-  created_at: Date | string;
-  updated_at: Date | string;
 }
 
 interface AgentContextMessageRow extends MessageRow {
@@ -332,15 +303,6 @@ interface TaskRow extends QueryResultRow {
 interface ReactionCountRow extends QueryResultRow {
   total: string;
   member_total: string;
-}
-
-interface ReadCursorRow extends QueryResultRow {
-  conversation_id: string;
-  user_id: string;
-  last_read_message_id: string | null;
-  last_read_conversation_sequence: string;
-  last_read_at: Date | string | null;
-  updated_at: Date | string;
 }
 
 interface EventRow extends QueryResultRow {
@@ -462,14 +424,6 @@ export interface WorkspacePrincipal {
 
 export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
 
-function iso(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
-}
-
-function nullableIso(value: Date | string | null): string | null {
-  return value === null ? null : iso(value);
-}
-
 function mapWorkspace(row: WorkspaceRow) {
   return workspaceSchema.parse({
     id: row.id,
@@ -493,26 +447,6 @@ function mapUser(row: UserRow) {
     displayName: row.display_name,
     avatarUrl: row.avatar_url,
     title: row.title,
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  });
-}
-
-function mapConversation(row: ConversationRow): Conversation {
-  return conversationSchema.parse({
-    id: row.id,
-    workspaceId: row.workspace_id,
-    kind: row.kind,
-    name: row.name,
-    slug: row.slug,
-    topic: row.topic,
-    access: row.human_only ? "humans" : row.channel_access,
-    channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
-    // Emitted only for built-in channels: the key is absent, never false, so payloads for ordinary
-    // channels stay byte-identical for clients whose schema predates built-in channels.
-    ...(row.is_system ? { isBuiltIn: true as const } : {}),
-    isArchived: row.is_archived,
-    createdBy: row.created_by,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
@@ -645,31 +579,6 @@ function directMessagePair(actorId: string, memberId: string): { low: string; hi
   return { low, high };
 }
 
-function participants(row: ConversationRow): string[] {
-  if (row.dm_user_low_id === null || row.dm_user_high_id === null) return [];
-  return row.dm_user_low_id === row.dm_user_high_id
-    ? [row.dm_user_low_id]
-    : [row.dm_user_low_id, row.dm_user_high_id];
-}
-
-function mapMessage(row: MessageRow): Message {
-  return messageSchema.parse({
-    id: row.id,
-    conversationId: row.conversation_id,
-    conversationSequence: row.conversation_sequence,
-    version: row.version,
-    clientMessageId: row.client_message_id,
-    authorId: row.author_id,
-    threadRootId: row.thread_root_id,
-    body: row.body,
-    bodyFormat: row.body_format,
-    editedAt: nullableIso(row.edited_at),
-    deletedAt: nullableIso(row.deleted_at),
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
-  });
-}
-
 function mapAgentContextAuthor(row: UserRow): AgentContextAuthor {
   return {
     id: row.id,
@@ -777,17 +686,6 @@ function mapTask(row: TaskRow): Task {
 
 function mapTaskRecord(row: TaskRow): TaskRecord {
   return taskRecordSchema.parse({ ...mapTask(row), updatedBy: row.updated_by });
-}
-
-function mapReadCursor(row: ReadCursorRow) {
-  return readCursorSchema.parse({
-    conversationId: row.conversation_id,
-    userId: row.user_id,
-    lastReadMessageId: row.last_read_message_id,
-    lastReadConversationSequence: row.last_read_conversation_sequence,
-    lastReadAt: nullableIso(row.last_read_at),
-    updatedAt: iso(row.updated_at),
-  });
 }
 
 function encodeHistoryCursor(sequence: string): string {
@@ -1446,24 +1344,24 @@ export class WorkspaceRepository {
     includeSystemChannels = false,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
-    const client = await this.pool.connect();
-    try {
-      const page = await this.#conversationSummaries(
-        client,
-        identity,
-        anchorId,
-        limit,
-        includeGroupDirectMessages,
-        includeSystemChannels,
-      );
-      return listConversationsResponseSchema.parse({
-        conversations: page.conversations,
-        nextCursor: page.nextCursor,
-        hasMore: page.hasMore,
-      });
-    } finally {
-      client.release();
-    }
+    return this.#transaction(
+      async (client) => {
+        const page = await this.#conversationSummaries(
+          client,
+          identity,
+          anchorId,
+          limit,
+          includeGroupDirectMessages,
+          includeSystemChannels,
+        );
+        return listConversationsResponseSchema.parse({
+          conversations: page.conversations,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listPublicChannels(
@@ -4869,8 +4767,7 @@ export class WorkspaceRepository {
    * `(kind, lower(coalesce(name, '')), created_at, id)`. Because that tuple ends in the primary
    * key it is a total order, so the row-value comparison against the anchor row walks every
    * conversation exactly once with no duplicates and no skips. `LIMIT pageLimit + 1` is what
-   * detects a further page, and bounding the page is also what bounds the per-conversation summary
-   * queries below.
+   * detects a further page. Summary details are read in batches for the selected IDs only.
    *
    * The page size is clamped to the contract's maximum as well as validated at the route, so no
    * caller can ever produce a response too large for its own schema to accept.
@@ -4938,10 +4835,7 @@ export class WorkspaceRepository {
       ],
     );
     const rows = result.rows.slice(0, pageLimit);
-    const summaries: ConversationSummary[] = [];
-    for (const row of rows) {
-      summaries.push(await this.#conversationSummary(client, identity, row));
-    }
+    const summaries = await readConversationSummaries(client, identity.currentUser.user.id, rows);
     const last = rows.at(-1);
     const nextCursor =
       result.rows.length > pageLimit && last !== undefined
@@ -4955,28 +4849,11 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversation: ConversationRow,
   ): Promise<ConversationSummary> {
-    const latestResult = await client.query<MessageRow>(
-      `SELECT * FROM messages
-        WHERE conversation_id = $1
-          AND deleted_at IS NULL
-        ORDER BY conversation_sequence DESC
-        LIMIT 1`,
-      [conversation.id],
-    );
-    const cursorResult = await client.query<ReadCursorRow>(
-      `SELECT * FROM conversation_read_cursors
-        WHERE conversation_id = $1 AND user_id = $2`,
-      [conversation.id, identity.currentUser.user.id],
-    );
-    const counts = await this.#unreadCounts(client, identity.currentUser.user.id, conversation.id);
-    return conversationSummarySchema.parse({
-      conversation: mapConversation(conversation),
-      participantIds: await this.#conversationParticipants(client, conversation),
-      membershipRole: await this.#membershipRole(client, identity, conversation),
-      lastMessage: latestResult.rows[0] === undefined ? null : mapMessage(latestResult.rows[0]),
-      ...counts,
-      readCursor: cursorResult.rows[0] === undefined ? null : mapReadCursor(cursorResult.rows[0]),
-    });
+    const [summary] = await readConversationSummaries(client, identity.currentUser.user.id, [
+      conversation,
+    ]);
+    if (summary === undefined) throw new Error("Conversation summary is missing");
+    return summary;
   }
 
   async #threadSummaries(
@@ -5016,38 +4893,8 @@ export class WorkspaceRepository {
     userId: string,
     conversationId: string,
   ): Promise<UnreadCounts> {
-    const unreadResult = await client.query<{ count: string } & QueryResultRow>(
-      `SELECT count(*)::text AS count
-         FROM messages AS message
-         LEFT JOIN conversation_read_cursors AS cursor
-           ON cursor.conversation_id = message.conversation_id
-          AND cursor.user_id = $2
-        WHERE message.conversation_id = $1
-          AND message.author_id <> $2
-          AND message.deleted_at IS NULL
-          AND message.conversation_sequence
-              > coalesce(cursor.last_read_conversation_sequence, 0)`,
-      [conversationId, userId],
-    );
-    const mentionResult = await client.query<{ count: string } & QueryResultRow>(
-      `SELECT count(*)::text AS count
-         FROM messages AS message
-         JOIN message_mentions AS mention ON mention.message_id = message.id
-         LEFT JOIN conversation_read_cursors AS cursor
-           ON cursor.conversation_id = message.conversation_id
-          AND cursor.user_id = $2
-        WHERE message.conversation_id = $1
-          AND mention.mentioned_user_id = $2
-          AND message.author_id <> $2
-          AND message.deleted_at IS NULL
-          AND message.conversation_sequence
-              > coalesce(cursor.last_read_conversation_sequence, 0)`,
-      [conversationId, userId],
-    );
-    return {
-      unreadCount: Number(unreadResult.rows[0]?.count ?? "0"),
-      mentionCount: Number(mentionResult.rows[0]?.count ?? "0"),
-    };
+    const counts = await readUnreadCounts(client, userId, [conversationId]);
+    return counts.get(conversationId) ?? { unreadCount: 0, mentionCount: 0 };
   }
 
   #requireTaskConversation(
@@ -5561,28 +5408,6 @@ export class WorkspaceRepository {
          ) AS audience
         ORDER BY audience.user_id`,
       [conversation.id, conversation.human_only],
-    );
-    return result.rows.map((row) => row.user_id);
-  }
-
-  async #conversationParticipants(
-    client: PoolClient,
-    conversation: ConversationRow,
-  ): Promise<string[]> {
-    if (conversation.kind !== "group_direct_message") {
-      return this.#conversationAudience(client, conversation);
-    }
-    // Group membership is fixed history. Disabled members stop receiving events and cannot
-    // authenticate, but remain participants in summaries so the group never collapses into a 1:1.
-    const result = await client.query<{ user_id: string } & QueryResultRow>(
-      `SELECT membership.user_id
-         FROM conversation_memberships AS membership
-         JOIN users AS user_account ON user_account.id = membership.user_id
-        WHERE membership.conversation_id = $1
-          AND membership.left_at IS NULL
-          AND user_account.kind IN ('human', 'agent')
-        ORDER BY membership.user_id`,
-      [conversation.id],
     );
     return result.rows.map((row) => row.user_id);
   }
