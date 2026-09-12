@@ -34,6 +34,31 @@ import {
   type WorkspaceSnapshot,
 } from "@hype-comms/contracts";
 
+import {
+  acceptsTaskVersion,
+  applyRetractReservation,
+  applyRetractReservationsToConversations,
+  applyRetractReservationsToMessages,
+  compareConversations,
+  compareMembers,
+  compareMessages,
+  compareReactions,
+  compareTasks,
+  mergeConversationProjection,
+  preferRetainedMessage,
+  projectConversationMembershipChange,
+  projectConversationSummary,
+  projectCreatedMessageSummary,
+  projectReadCursorSummary,
+  reconcileRetractedConversationSummary,
+  reserveTombstonedMessages,
+  retractReservationMap,
+  retractedMessageIds,
+  tombstoneMessage,
+  trimRetractReservations,
+  type RetractReservation,
+  upsertRetractReservation,
+} from "./workspace-projection";
 import { mentionedMemberIds } from "./mentions";
 
 const CACHE_SCHEMA_VERSION = 1 as const;
@@ -42,8 +67,6 @@ const MAX_ACKNOWLEDGED_MESSAGES = 20_000;
 // Live creates retain exact mention IDs while a retract can still reach the message. The hard cap
 // keeps this auxiliary runtime-only map bounded during a busy desktop session.
 export const MAX_RECENT_MESSAGE_MENTIONS = 20_000;
-/** Bounds tombstones retained solely to defeat an in-flight stale response after eviction. */
-export const MAX_RETRACT_RESERVATIONS = 20_000;
 const MAX_MESSAGE_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 /**
  * Mirrors `workspaceSnapshotSchema.members`, which is `z.array(userSchema).max(25)`. `load()`
@@ -75,12 +98,6 @@ export interface MembershipRepairMarker {
   readonly position: SyncPosition;
   readonly conversationId: string;
   readonly selfRemoval: boolean;
-}
-
-export interface RetractReservation {
-  readonly messageId: string;
-  readonly deletedAt: string;
-  readonly entityVersion: number;
 }
 
 export interface CachedWorkspaceState {
@@ -393,12 +410,6 @@ class WorkspaceCacheDatabase extends Dexie {
 type ProtectedStore =
   "workspace" | "member" | "conversation" | "message" | "reaction" | "task" | "outbox";
 
-function compareSequence(left: string, right: string): number {
-  const leftValue = BigInt(left);
-  const rightValue = BigInt(right);
-  return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
-}
-
 const MEMBERSHIP_REPAIR_MARKER_KEYS = [
   "conversationId",
   "eventId",
@@ -473,86 +484,6 @@ function sameMembershipRepair(
   );
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-export function projectConversationMembershipChange(
-  summary: ConversationSummary,
-  event: MembershipChangedEvent,
-): ConversationSummary {
-  const participantIds =
-    event.payload.action === "added"
-      ? [...new Set([...summary.participantIds, event.payload.memberId])].sort(compareText)
-      : event.payload.action === "removed"
-        ? summary.participantIds.filter((memberId) => memberId !== event.payload.memberId)
-        : summary.participantIds;
-  return conversationSummarySchema.parse({ ...summary, participantIds });
-}
-
-/**
- * Sequences are decimal strings, so IndexedDB's lexicographic index order is not the numeric
- * order the UI needs ("10" sorts before "9"). Every read therefore sorts numerically in JS; the
- * stored index exists for lookups, not for ordering.
- */
-function compareMessages(left: Message, right: Message): number {
-  return compareSequence(left.conversationSequence, right.conversationSequence);
-}
-
-export function isUnreadMessage(
-  summary: ConversationSummary,
-  currentUserId: string,
-  message: Message,
-): boolean {
-  return (
-    message.authorId !== currentUserId &&
-    (summary.readCursor === null ||
-      compareSequence(
-        message.conversationSequence,
-        summary.readCursor.lastReadConversationSequence,
-      ) > 0)
-  );
-}
-
-export function newestLiveMessage(
-  messages: readonly Message[],
-  conversationId: string,
-): Message | null {
-  let newest: Message | null = null;
-  for (const message of messages) {
-    if (message.conversationId !== conversationId || message.deletedAt !== null) continue;
-    if (
-      newest === null ||
-      compareSequence(message.conversationSequence, newest.conversationSequence) > 0
-    ) {
-      newest = message;
-    }
-  }
-  return newest;
-}
-
-function reconcileRetractedConversationSummary(
-  summary: ConversationSummary,
-  source: Message,
-  messages: readonly Message[],
-  currentUser: User | null,
-  mentionedUserIds: readonly string[],
-): ConversationSummary {
-  // `applyEvent()` rejects duplicate event IDs and stale cursors before this runs. A history page
-  // can have already supplied the tombstone, so the event—not `source.deletedAt`—is the
-  // exactly-once boundary for its unread and mention contribution.
-  const unread = currentUser !== null && isUnreadMessage(summary, currentUser.id, source);
-  const mentioned = currentUser !== null && unread && mentionedUserIds.includes(currentUser.id);
-  return conversationSummarySchema.parse({
-    ...summary,
-    ...(summary.lastMessage?.id === source.id
-      ? { lastMessage: newestLiveMessage(messages, summary.conversation.id) }
-      : {}),
-    unreadCount: Math.max(0, summary.unreadCount - (unread ? 1 : 0)),
-    mentionCount: Math.max(0, summary.mentionCount - (mentioned ? 1 : 0)),
-  });
-}
-
 function matchingRetractSource(
   event: Extract<WorkspaceEvent, { type: "message.retracted" }>,
   retractSource: Message | undefined,
@@ -599,53 +530,6 @@ function trimRecentMessageMentions(mentions: Map<string, readonly string[]>): vo
     if (oldestMessageId === undefined) return;
     mentions.delete(oldestMessageId);
   }
-}
-
-function compareReactions(left: Reaction, right: Reaction): number {
-  const byMessage = compareText(left.messageId, right.messageId);
-  if (byMessage !== 0) return byMessage;
-  const byCreatedAt = compareText(left.createdAt, right.createdAt);
-  return byCreatedAt !== 0 ? byCreatedAt : compareText(left.id, right.id);
-}
-
-export function compareTasks(left: Task, right: Task): number {
-  const byConversation = compareText(left.conversationId, right.conversationId);
-  if (byConversation !== 0) return byConversation;
-  const statuses: Record<Task["status"], number> = { todo: 0, in_progress: 1, done: 2 };
-  const byStatus = statuses[left.status] - statuses[right.status];
-  if (byStatus !== 0) return byStatus;
-  const byRank = compareSequence(left.rank, right.rank);
-  return byRank !== 0 ? byRank : compareText(left.id, right.id);
-}
-
-/**
- * Mirrors the server's `ORDER BY lower(display_name), id`. Exported so the runtime's in-memory
- * projection orders realtime-delivered rows the same way a cold `load()` does, instead of growing a
- * second ordering that drifts from this one.
- */
-export function compareMembers(left: User, right: User): number {
-  const leftName = left.displayName.toLowerCase();
-  const rightName = right.displayName.toLowerCase();
-  const byName = leftName.localeCompare(rightName);
-  return byName !== 0 ? byName : compareText(left.id, right.id);
-}
-
-/**
- * Mirrors the server's `ORDER BY kind, lower(coalesce(name, '')), created_at, id`. Exported for the
- * same reason as {@link compareMembers}.
- */
-export function compareConversations(
-  left: ConversationSummary,
-  right: ConversationSummary,
-): number {
-  const byKind = compareText(left.conversation.kind, right.conversation.kind);
-  if (byKind !== 0) return byKind;
-  const leftName = (left.conversation.name ?? "").toLowerCase();
-  const rightName = (right.conversation.name ?? "").toLowerCase();
-  const byName = leftName.localeCompare(rightName);
-  if (byName !== 0) return byName;
-  const byCreatedAt = compareText(left.conversation.createdAt, right.conversation.createdAt);
-  return byCreatedAt !== 0 ? byCreatedAt : compareText(left.conversation.id, right.conversation.id);
 }
 
 /**
@@ -784,73 +668,6 @@ async function decryptRows<T>(
   return values;
 }
 
-export function tombstoneMessage(
-  message: Message,
-  event: Extract<WorkspaceEvent, { type: "message.retracted" }>,
-): Message {
-  return messageSchema.parse({
-    ...message,
-    deletedAt: event.payload.deletedAt,
-    version: event.entityVersion,
-    updatedAt: event.payload.deletedAt,
-  });
-}
-
-export function preferRetainedMessage(current: Message | undefined, incoming: Message): Message {
-  if (current === undefined) return incoming;
-  if (current.deletedAt !== null && incoming.deletedAt === null) return current;
-  if (incoming.version < current.version) return current;
-  return incoming;
-}
-
-export function retractReservationMap(
-  reservations: readonly RetractReservation[],
-): Map<string, RetractReservation> {
-  return new Map(reservations.map((reservation) => [reservation.messageId, reservation]));
-}
-
-export function upsertRetractReservation(
-  reservations: readonly RetractReservation[],
-  reservation: RetractReservation,
-): RetractReservation[] {
-  const next = retractReservationMap(reservations);
-  const current = next.get(reservation.messageId);
-  if (current !== undefined && current.entityVersion > reservation.entityVersion) {
-    return trimRetractReservations([...next.values()]);
-  }
-  next.delete(reservation.messageId);
-  next.set(reservation.messageId, reservation);
-  return trimRetractReservations([...next.values()]);
-}
-
-function trimRetractReservations(
-  reservations: readonly RetractReservation[],
-): RetractReservation[] {
-  if (reservations.length <= MAX_RETRACT_RESERVATIONS) return [...reservations];
-  return reservations.slice(-MAX_RETRACT_RESERVATIONS);
-}
-
-/**
- * A DELETE response contains the same durable tombstone facts as a later realtime retract event.
- * Record them immediately so an in-flight history or snapshot response cannot bring the live body
- * back before that event reaches this device.
- */
-function reserveTombstonedMessages(
-  reservations: readonly RetractReservation[],
-  messages: readonly Message[],
-): RetractReservation[] {
-  let next = [...reservations];
-  for (const message of messages) {
-    if (message.deletedAt === null) continue;
-    next = upsertRetractReservation(next, {
-      messageId: message.id,
-      deletedAt: message.deletedAt,
-      entityVersion: message.version,
-    });
-  }
-  return next;
-}
-
 function sameRetractReservations(
   left: readonly RetractReservation[],
   right: readonly RetractReservation[],
@@ -898,53 +715,6 @@ function sameMessageRows(
     }
   }
   return true;
-}
-
-export function retractedMessageIds(
-  messages: readonly Message[],
-  reservations: ReadonlyMap<string, RetractReservation>,
-): ReadonlySet<string> {
-  const ids = new Set(reservations.keys());
-  for (const message of messages) {
-    if (message.deletedAt !== null) ids.add(message.id);
-  }
-  return ids;
-}
-
-export function applyRetractReservation(
-  message: Message,
-  reservations: ReadonlyMap<string, RetractReservation>,
-): Message {
-  const reservation = reservations.get(message.id);
-  if (reservation === undefined) return message;
-  const tombstone = messageSchema.parse({
-    ...message,
-    deletedAt: reservation.deletedAt,
-    version: reservation.entityVersion,
-    updatedAt: reservation.deletedAt,
-  });
-  if (message.deletedAt !== null) return preferRetainedMessage(message, tombstone);
-  return tombstone;
-}
-
-function applyRetractReservationsToMessages(
-  messages: readonly Message[],
-  reservations: ReadonlyMap<string, RetractReservation>,
-): Message[] {
-  if (reservations.size === 0) return [...messages];
-  return messages.map((message) => applyRetractReservation(message, reservations));
-}
-
-function applyRetractReservationsToConversations(
-  conversations: readonly ConversationSummary[],
-  reservations: ReadonlyMap<string, RetractReservation>,
-): ConversationSummary[] {
-  if (reservations.size === 0) return [...conversations];
-  return conversations.map((summary) => {
-    if (summary.lastMessage === null) return summary;
-    const lastMessage = applyRetractReservation(summary.lastMessage, reservations);
-    return lastMessage === summary.lastMessage ? summary : { ...summary, lastMessage };
-  });
 }
 
 function mergeMetadataRow(
@@ -1023,50 +793,6 @@ function taskRow(task: Task, encrypted: ReadonlyMap<string, CacheCiphertext>): T
     updatedAt: task.updatedAt,
     value: encryptedValue(encrypted, "task", task.id),
   };
-}
-
-function mergeConversationProjection(
-  incoming: ConversationSummary,
-  current: ConversationSummary | null,
-): ConversationSummary {
-  if (current === null) return incoming;
-  const currentLast = current.lastMessage;
-  const incomingLast = incoming.lastMessage;
-  const lastMessage =
-    currentLast !== null &&
-    (incomingLast === null ||
-      compareSequence(currentLast.conversationSequence, incomingLast.conversationSequence) >= 0)
-      ? currentLast
-      : incomingLast;
-  const currentRead = current.readCursor;
-  const incomingRead = incoming.readCursor;
-  const readCursor =
-    currentRead !== null &&
-    (incomingRead === null ||
-      compareSequence(
-        currentRead.lastReadConversationSequence,
-        incomingRead.lastReadConversationSequence,
-      ) >= 0)
-      ? currentRead
-      : incomingRead;
-  return conversationSummarySchema.parse({
-    ...incoming,
-    lastMessage,
-    unreadCount: current.unreadCount,
-    mentionCount: current.mentionCount,
-    readCursor,
-  });
-}
-
-/** Group creation events have a fixed audience but no recipient-specific membership role. */
-export function membershipRoleForConversationEvent(
-  conversation: ConversationSummary["conversation"],
-  retainedRole: ConversationSummary["membershipRole"] | null | undefined,
-  currentUserId: string,
-): ConversationSummary["membershipRole"] {
-  if (retainedRole !== null && retainedRole !== undefined) return retainedRole;
-  if (conversation.kind !== "group_direct_message") return null;
-  return conversation.createdBy === currentUserId ? "owner" : "member";
 }
 
 export class PersistentWorkspaceCache implements WorkspaceCache {
@@ -1530,20 +1256,15 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       // The workspace row can be missing while a resync is in flight. Store the message and skip
       // the unread bookkeeping instead of throwing, matching MemoryWorkspaceCache.
       const currentUserId = await this.#currentUserId();
-      const fromAnotherMember = created.authorId !== currentUserId;
       const nextSummary =
         currentSummary === null || currentUserId === null || created.deletedAt !== null
           ? null
-          : conversationSummarySchema.parse({
-              ...currentSummary,
-              lastMessage: created,
-              unreadCount: currentSummary.unreadCount + (fromAnotherMember ? 1 : 0),
-              mentionCount:
-                currentSummary.mentionCount +
-                (fromAnotherMember && parsed.payload.mentionedUserIds.includes(currentUserId)
-                  ? 1
-                  : 0),
-            });
+          : projectCreatedMessageSummary(
+              currentSummary,
+              created,
+              currentUserId,
+              parsed.payload.mentionedUserIds,
+            );
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("message", created.id, created),
         ...(nextSummary === null
@@ -1652,7 +1373,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.events,
         async () => {
           const current = await this.#database.tasks.get(task.id);
-          if (current?.version === undefined || current.version <= task.version) {
+          if (acceptsTaskVersion(current?.version, task.version)) {
             await this.#database.tasks.put(taskRow(task, encrypted));
           }
           await this.#recordEvent(parsed, signal);
@@ -1762,27 +1483,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         // sent. MemoryWorkspaceCache makes the same choice. The event is still recorded, so the
         // sync cursor advances past it rather than replaying it forever.
         if (current !== null) {
-          nextSummary = conversationSummarySchema.parse({
-            ...current,
-            readCursor: parsed.payload.readCursor,
-            unreadCount: parsed.payload.unreadCount ?? current.unreadCount,
-            mentionCount: parsed.payload.mentionCount ?? current.mentionCount,
-          });
+          nextSummary = projectReadCursorSummary(current, parsed);
         }
       } else {
-        nextSummary = conversationSummarySchema.parse({
-          conversation: parsed.payload.conversation,
-          participantIds: parsed.payload.participantIds,
-          membershipRole: membershipRoleForConversationEvent(
-            parsed.payload.conversation,
-            current?.membershipRole,
-            this.#scope.userId,
-          ),
-          lastMessage: current?.lastMessage ?? null,
-          unreadCount: current?.unreadCount ?? 0,
-          mentionCount: current?.mentionCount ?? 0,
-          readCursor: current?.readCursor ?? null,
-        });
+        nextSummary = projectConversationSummary(current, parsed, this.#scope.userId);
       }
       if (nextSummary === null) {
         await this.#database.transaction(
@@ -2096,7 +1800,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           );
           const accepted = authorized.filter((task, index) => {
             const existingVersion = existingRows[index]?.version;
-            return existingVersion === undefined || task.version >= existingVersion;
+            return acceptsTaskVersion(existingVersion, task.version);
           });
           await this.#database.tasks.bulkPut(accepted.map((task) => taskRow(task, encrypted)));
           signal?.throwIfAborted();
@@ -2777,17 +2481,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         const current = conversations.get(parsed.conversationId);
         if (current !== undefined) {
           const currentUserId = this.#snapshot.currentUser.user.id;
-          conversations.set(parsed.conversationId, {
-            ...current,
-            lastMessage: created,
-            unreadCount: current.unreadCount + (created.authorId === currentUserId ? 0 : 1),
-            mentionCount:
-              current.mentionCount +
-              (created.authorId !== currentUserId &&
-              parsed.payload.mentionedUserIds.includes(currentUserId)
-                ? 1
-                : 0),
-          });
+          conversations.set(
+            parsed.conversationId,
+            projectCreatedMessageSummary(
+              current,
+              created,
+              currentUserId,
+              parsed.payload.mentionedUserIds,
+            ),
+          );
           this.#snapshot = {
             ...this.#snapshot,
             conversations: [...conversations.values()],
@@ -2802,7 +2504,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       this.#reactionConversationIds.delete(parsed.payload.reaction.id);
     } else if (parsed.type === "task.created" || parsed.type === "task.updated") {
       const current = this.#tasks.get(parsed.payload.task.id);
-      if (current === undefined || parsed.payload.task.version >= current.version) {
+      if (acceptsTaskVersion(current?.version, parsed.payload.task.version)) {
         this.#tasks.set(parsed.payload.task.id, parsed.payload.task);
       }
     } else if (parsed.type === "member.updated") {
@@ -2870,27 +2572,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       const current = conversations.get(parsed.conversationId);
       if (parsed.type === "read_cursor.updated") {
         if (current !== undefined) {
-          conversations.set(parsed.conversationId, {
-            ...current,
-            readCursor: parsed.payload.readCursor,
-            unreadCount: parsed.payload.unreadCount ?? current.unreadCount,
-            mentionCount: parsed.payload.mentionCount ?? current.mentionCount,
-          });
+          conversations.set(parsed.conversationId, projectReadCursorSummary(current, parsed));
         }
       } else {
-        conversations.set(parsed.conversationId, {
-          conversation: parsed.payload.conversation,
-          participantIds: parsed.payload.participantIds,
-          membershipRole: membershipRoleForConversationEvent(
-            parsed.payload.conversation,
-            current?.membershipRole,
-            this.#snapshot.currentUser.user.id,
-          ),
-          lastMessage: current?.lastMessage ?? null,
-          unreadCount: current?.unreadCount ?? 0,
-          mentionCount: current?.mentionCount ?? 0,
-          readCursor: current?.readCursor ?? null,
-        });
+        conversations.set(
+          parsed.conversationId,
+          projectConversationSummary(current, parsed, this.#snapshot.currentUser.user.id),
+        );
       }
       this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
     }
@@ -3042,7 +2730,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       const parsed = taskSchema.parse(task);
       if (!authorizedConversationIds.has(parsed.conversationId)) continue;
       const current = this.#tasks.get(parsed.id);
-      if (current === undefined || parsed.version >= current.version) {
+      if (acceptsTaskVersion(current?.version, parsed.version)) {
         this.#tasks.set(parsed.id, parsed);
         accepted.push(parsed);
       }
