@@ -180,7 +180,13 @@ import {
   FinalQuitCoordinator,
   handleLastWindowClosed,
 } from "./window-lifecycle";
-import { WorkspaceRealtime } from "./workspace-realtime";
+import { WorkspaceRealtime, createRealtimeEpochAllocator } from "./workspace-realtime";
+import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
+import { scopedWorkspaceSession } from "./scoped-workspace-session";
+import { openWorkspaceAttachment } from "./open-workspace-attachment";
+import { suspendLocalAi } from "./suspend-local-ai";
+import { startDesktopSession } from "./start-desktop-session";
+import { WorkspaceSessionOwner, type OwnedWorkspaceSession } from "./workspace-session-owner";
 import { WorkspaceTransport } from "./workspace-transport";
 const RENDERER_ORIGIN = "http://127.0.0.1:5173";
 const WINDOW_MIN_HEIGHT = 640;
@@ -292,7 +298,11 @@ const deepLinkSignInQueue = new DeepLinkSignInQueue({
     const currentSession = chatSession;
     if (currentSession === null) return "failed";
     try {
-      await currentSession.exchangeMagicLink(token);
+      await replaceDesktopAuthentication(async () => {
+        if (callbackIntent !== authIntentGeneration)
+          throw new Error("Authentication was superseded");
+        return currentSession.exchangeMagicLink(token);
+      });
       focusMainWindow();
       return "succeeded";
     } catch (error) {
@@ -356,10 +366,26 @@ let authKitCancellationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authKitCancellationFenced = false;
 let authKitPendingIntentGeneration: number | null = null;
 let authKitStartPromise: Promise<void> | null = null;
-let workspaceTransport: WorkspaceTransport | null = null;
-let workspaceRealtime: WorkspaceRealtime | null = null;
-let presenceController: PresenceController | null = null;
-let stopPowerMonitorPresence: (() => void) | null = null;
+interface WorkspaceResources {
+  readonly transport: WorkspaceTransport;
+  readonly realtime: WorkspaceRealtime;
+  readonly notificationRepair: NotificationProjectionRepairCoordinator | null;
+}
+let workspaceSessions: WorkspaceSessionOwner<WorkspaceResources> | null = null;
+let desktopSessionLifecycle: DesktopSessionLifecycle<WorkspaceResources> | null = null;
+const nextRealtimeEpoch = createRealtimeEpochAllocator();
+function currentWorkspaceSession(): OwnedWorkspaceSession<WorkspaceResources> {
+  const current = workspaceSessions?.current;
+  if (current == null) throw new Error("Workspace transport is unavailable");
+  current.assertActive();
+  return current;
+}
+function currentWorkspaceRealtime(): WorkspaceRealtime | null {
+  return workspaceSessions?.current?.resources.realtime ?? null;
+}
+function currentNotificationRepair(): NotificationProjectionRepairCoordinator | null {
+  return workspaceSessions?.current?.resources.notificationRepair ?? null;
+}
 let macWindowlessRealtimeActive = false;
 let cacheCrypto: CacheCrypto | null = null;
 let realtimeState: RealtimeConnectionState = "offline";
@@ -377,7 +403,6 @@ let notificationSettingsController: NotificationSettingsController | null = null
 let stopNotificationSettingsSubscription: (() => void) | null = null;
 let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
 let notificationController: NotificationController | null = null;
-let notificationProjectionRepairCoordinator: NotificationProjectionRepairCoordinator | null = null;
 let captureNotificationPresenter: CaptureNotificationPresenter | null = null;
 let headlessNotificationCaptureArtifact: HeadlessNotificationCaptureArtifact | null = null;
 let notificationSessionGeneration = 0;
@@ -519,12 +544,10 @@ function deliverAiChannelState(state: AiChannelState): void {
   sendToRenderer(DESKTOP_CHANNELS.aiChannelChanged, boundedAiChannelState(state));
 }
 
-function suspendAiChannel(): void {
-  const controller = aiChannelController;
-  if (controller === null) return;
-  void controller.suspend().catch(() => {
-    reportMainProcessError("Failed to suspend the local AI Channel");
-  });
+function suspendAiChannel(controller = aiChannelController): Promise<void> {
+  return suspendLocalAi(controller, () =>
+    reportMainProcessError("Failed to suspend the local AI Channel"),
+  );
 }
 
 function inactiveNotificationContext(): NotificationContext {
@@ -607,19 +630,6 @@ function transitionNotificationSession(state: ChatSessionState): void {
   }
 }
 
-function sessionStateMatchesNotificationScope(
-  state: ChatSessionState,
-  scope: NonNullable<typeof notificationScope> | null,
-): boolean {
-  return (
-    scope !== null &&
-    state.status === "signed-in" &&
-    state.method === "email" &&
-    state.userId === scope.userId &&
-    state.workspaceId === scope.workspaceId
-  );
-}
-
 function attachmentUploadScopeKey(state: ChatSessionState): string | null {
   if (state.status === "signed-in") return `${state.userId}:${state.workspaceId}`;
   if (state.status === "session-unavailable" && state.lastAuthenticatedSession !== undefined) {
@@ -629,13 +639,29 @@ function attachmentUploadScopeKey(state: ChatSessionState): string | null {
   return null;
 }
 
-function beginSessionReplacement(): void {
+function replaceDesktopAuthentication<T>(operation: () => Promise<T>): Promise<T> {
+  const lifecycle = desktopSessionLifecycle;
+  if (lifecycle === null) throw new Error("Desktop session is unavailable");
+  // Offline Claude can run without an online transport. Retire that work before changing cookies.
+  const localSuspension = workspaceSessions?.current == null ? suspendAiChannel() : undefined;
+  const replacement = lifecycle.replaceAuthentication(async (assertCurrent) => {
+    await localSuspension;
+    assertCurrent();
+    return operation();
+  });
+  void localSuspension?.catch(() => undefined);
   macWindowlessRealtimeActive = false;
-  workspaceRealtime?.resetSession();
-  suspendAiChannel();
   notificationScope = null;
   notificationActiveGeneration = null;
   notificationController?.markReplacing();
+  return replacement;
+}
+
+function runLocalSessionOperation<T>(
+  operation: (assertCurrent: () => void) => Promise<T>,
+): Promise<T> {
+  if (desktopSessionLifecycle === null) throw new Error("Desktop session is unavailable");
+  return desktopSessionLifecycle.run(operation);
 }
 
 function advanceAuthIntent(): number {
@@ -760,7 +786,7 @@ function projectNotificationBootstrap(
       // main's projection; force a fresh coordinator read that starts after this response instead.
       controller.invalidateMemberProjection();
     }
-    const repairCoordinator = notificationProjectionRepairCoordinator;
+    const repairCoordinator = currentNotificationRepair();
     if (repairCoordinator === null) {
       controller.disableConversationProjection();
     } else {
@@ -777,15 +803,6 @@ function projectNotificationBootstrap(
 }
 
 function deliverSessionState(state: ChatSessionState): void {
-  if (state.status !== "signed-in") {
-    // Workspace requests can end the session on a passive 401 without going through the explicit
-    // sign-out handler. Retire local Claude work before the renderer hides the authenticated UI.
-    suspendAiChannel();
-  }
-  if (!sessionStateMatchesNotificationScope(state, notificationScope)) {
-    macWindowlessRealtimeActive = false;
-    workspaceRealtime?.resetSession();
-  }
   try {
     transitionNotificationSession(state);
   } catch {
@@ -855,8 +872,8 @@ function deliverDevicePreferences(preferences: DevicePreferences): void {
 }
 
 function flushPendingRendererEvents(): void {
-  if (chatSession !== null) {
-    sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
+  if (desktopSessionLifecycle?.publishedState != null) {
+    sendToRenderer(DESKTOP_CHANNELS.sessionChanged, desktopSessionLifecycle.publishedState);
   }
   if (updateController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.updateChanged, updateController.state);
@@ -964,7 +981,9 @@ function registerIpcHandlers(): void {
   }));
 
   const handlers: DesktopInvokeHandlers = {
-    ...createWorkspaceInvokeHandlers(() => workspaceTransport),
+    ...createWorkspaceInvokeHandlers((operation) =>
+      currentWorkspaceSession().run(({ transport }) => operation(transport)),
+    ),
     appVersion: () => {
       return app.getVersion();
     },
@@ -1088,65 +1107,70 @@ function registerIpcHandlers(): void {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
       const request = value;
-      return await controller.start(request);
+      return runLocalSessionOperation(() => controller.start(request));
     },
     aiChannelWorkspaceChoose: async () => {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
-      const window = mainWindow;
-      const options: OpenDialogOptions = {
-        title: "Choose a folder for AI Channel",
-        buttonLabel: "Use this folder",
-        properties: ["openDirectory"],
-      };
-      const selection =
-        window === null || window.isDestroyed()
-          ? await dialog.showOpenDialog(options)
-          : await dialog.showOpenDialog(window, options);
-      const selectedPath = selection.filePaths[0];
-      if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
-        return controller.state;
-      }
-      try {
-        const workspacePath = await realpath(selectedPath);
-        if (!(await stat(workspacePath)).isDirectory()) {
-          throw new Error("Not a directory");
+      return runLocalSessionOperation(async (assertCurrent) => {
+        const window = mainWindow;
+        const options: OpenDialogOptions = {
+          title: "Choose a folder for AI Channel",
+          buttonLabel: "Use this folder",
+          properties: ["openDirectory"],
+        };
+        const selection =
+          window === null || window.isDestroyed()
+            ? await dialog.showOpenDialog(options)
+            : await dialog.showOpenDialog(window, options);
+        assertCurrent();
+        const selectedPath = selection.filePaths[0];
+        if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
+          return controller.state;
         }
-        return await controller.chooseWorkspace(workspacePath);
-      } catch {
-        throw new Error("The selected AI Channel folder is unavailable");
-      }
+        try {
+          const workspacePath = await realpath(selectedPath);
+          if (!(await stat(workspacePath)).isDirectory()) {
+            throw new Error("Not a directory");
+          }
+          assertCurrent();
+          return await controller.chooseWorkspace(workspacePath);
+        } catch {
+          throw new Error("The selected AI Channel folder is unavailable");
+        }
+      });
     },
     aiChannelSessionNew: async (_context, value) => {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
       const request = value;
-      return await controller.newSession(request);
+      return runLocalSessionOperation(() => controller.newSession(request));
     },
     aiChannelPromptSend: async (_context, value) => {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
       const request = value;
-      return await controller.sendPrompt(request);
+      return runLocalSessionOperation(() => controller.sendPrompt(request));
     },
     aiChannelPromptCancel: async (_context, value) => {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
       const request = value;
-      return await controller.cancelPrompt(request);
+      return runLocalSessionOperation(() => controller.cancelPrompt(request));
     },
     aiChannelPermissionRespond: async (_context, value) => {
       const controller = aiChannelController;
       if (controller === null) throw new Error("AI Channel is unavailable");
       const request = value;
-      return await controller.respondPermission(request);
+      return runLocalSessionOperation(() => controller.respondPermission(request));
     },
-    sessionState: (): ChatSessionState => {
-      return chatSession?.state ?? { status: "signed-out" };
+    sessionState: async (): Promise<ChatSessionState> => {
+      return (await desktopSessionLifecycle?.readState()) ?? { status: "signed-out" };
     },
     sessionRetry: async (): Promise<ChatSessionState> => {
       if (chatSession === null) throw new Error("Chat is not configured");
-      return chatSession.restore();
+      await chatSession.restore();
+      return (await desktopSessionLifecycle?.readState()) ?? chatSession.state;
     },
     sessionAuthCapabilities: async () => {
       if (chatSession === null) {
@@ -1227,7 +1251,7 @@ function registerIpcHandlers(): void {
       }
     },
     sessionSignOut: async () => {
-      advanceAuthIntent();
+      const signOutIntent = advanceAuthIntent();
       let cancellationFailed = false;
       try {
         await cancelPendingAuthKit();
@@ -1236,8 +1260,15 @@ function registerIpcHandlers(): void {
         reportMainProcessError("Pending AuthKit authorization cancellation will be retried");
       }
 
-      beginSessionReplacement();
-      const state = (await chatSession?.signOut()) ?? { status: "signed-out" as const };
+      if (signOutIntent !== authIntentGeneration) throw new Error("Authentication was superseded");
+      await replaceDesktopAuthentication(async () => {
+        if (signOutIntent !== authIntentGeneration)
+          throw new Error("Authentication was superseded");
+        return chatSession?.signOut();
+      });
+      const state = (await desktopSessionLifecycle?.readState()) ?? {
+        status: "signed-out" as const,
+      };
       const logoutUrl = chatSession?.consumeLogoutUrl() ?? null;
       if (logoutUrl !== null) {
         void shell.openExternal(logoutUrl).catch(() => {
@@ -1376,16 +1407,17 @@ function registerIpcHandlers(): void {
       await cacheCrypto.clear();
     },
     workspaceBootstrap: async () => {
-      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
+      const lifetime = currentWorkspaceSession();
       const scope = notificationScope;
-      const response = await workspaceTransport.bootstrap();
+      const response = await lifetime.run(({ transport }) => transport.bootstrap());
+      lifetime.assertActive();
       if (scope !== null) projectNotificationBootstrap(scope, response);
       return response;
     },
 
     workspaceFileUpload: async (_context, input) => {
-      const transport = workspaceTransport;
-      if (transport === null) throw new Error("Workspace transport is unavailable");
+      const lifetime = currentWorkspaceSession();
+      const { transport } = lifetime.resources;
       const session = chatSession;
       if (session === null || session.state.status !== "signed-in") {
         throw new Error("A signed-in workspace session is required to attach files");
@@ -1395,7 +1427,7 @@ function registerIpcHandlers(): void {
       const uploadAuthIntentGeneration = authIntentGeneration;
       const isCurrentUploadScope = (): boolean =>
         chatSession === session &&
-        workspaceTransport === transport &&
+        !lifetime.signal.aborted &&
         authIntentGeneration === uploadAuthIntentGeneration &&
         attachmentUploadScopeKey(session.state) === uploadScope;
       const request = input;
@@ -1404,44 +1436,32 @@ function registerIpcHandlers(): void {
         window === null || window.isDestroyed()
           ? await dialog.showOpenDialog(attachmentUploadDialogOptions)
           : await dialog.showOpenDialog(window, attachmentUploadDialogOptions);
-      return uploadSelectedConversationFiles(
-        selection,
-        request,
-        (conversationId, filePath) =>
-          transport.uploadLocalFile(conversationId, filePath, () =>
-            assertCurrentUploadScope(isCurrentUploadScope),
-          ),
-        isCurrentUploadScope,
+      return lifetime.run(() =>
+        uploadSelectedConversationFiles(
+          selection,
+          request,
+          (conversationId, filePath) =>
+            transport.uploadLocalFile(conversationId, filePath, () =>
+              assertCurrentUploadScope(isCurrentUploadScope),
+            ),
+          isCurrentUploadScope,
+        ),
       );
     },
-    workspaceFileOpen: async (_context, attachmentId) => {
-      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-      const id = attachmentId;
-      const file = await workspaceTransport.downloadFile(id);
-      const safeName = file.fileName.replace(/[\\/]/g, "_");
-      const destination = path.join(tmpdir(), `hype-comms-${id}-${safeName}`);
-      await writeFile(destination, file.bytes);
-      const openError = await shell.openPath(destination);
-      if (openError !== "") {
-        throw new Error(openError);
-      }
-      return { opened: true };
-    },
+    workspaceFileOpen: (_context, attachmentId) =>
+      openWorkspaceAttachment(currentWorkspaceSession(), attachmentId, {
+        destination: (id, name) => path.join(tmpdir(), `hype-comms-${id}-${name}`),
+        write: (destination, bytes) => writeFile(destination, bytes),
+        open: (destination) => shell.openPath(destination),
+      }),
 
     workspaceReadAdvance: async (_context, input) => {
       if (!shouldAdvanceReadCursor(headlessDesktopConfiguration)) {
         throw new Error("Read cursors are disabled for headless automation clients");
       }
-      if (workspaceTransport === null) throw new Error("Workspace transport is unavailable");
-      if (
-        typeof input !== "object" ||
-        input === null ||
-        !("conversationId" in input) ||
-        !("lastReadMessageId" in input)
-      ) {
-        throw new Error("Invalid read-cursor request");
-      }
-      return workspaceTransport.advanceRead(input.conversationId, input.lastReadMessageId);
+      return currentWorkspaceSession().run(({ transport }) =>
+        transport.advanceRead(input.conversationId, input.lastReadMessageId),
+      );
     },
 
     workspaceRealtimeStart: (_context, after) => {
@@ -1449,30 +1469,30 @@ function registerIpcHandlers(): void {
       if (state?.status !== "signed-in" || state.method !== "email") {
         throw new Error("A signed-in member session is required for realtime");
       }
-      if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
-      return workspaceRealtime.prepare({
+      const { realtime } = currentWorkspaceSession().resources;
+      return realtime.prepare({
         after: after,
         userId: state.userId,
         workspaceId: state.workspaceId,
       });
     },
     workspaceRealtimeActivate: (_context, value) => {
-      if (workspaceRealtime === null) throw new Error("Workspace realtime is unavailable");
+      const { realtime } = currentWorkspaceSession().resources;
       const scope = value;
-      if (!workspaceRealtime.activate(scope)) {
+      if (!realtime.activate(scope)) {
         throw new Error("The realtime scope was superseded before activation");
       }
       macWindowlessRealtimeActive = false;
     },
     workspaceRealtimeStop: (_context, value) => {
       if (value !== undefined) {
-        workspaceRealtime?.stop(value);
+        currentWorkspaceRealtime()?.stop(value);
         return;
       }
       if (macWindowlessRealtimeActive) {
         const state = chatSession?.state;
         if (state?.status === "signed-in" && state.method === "email") {
-          workspaceRealtime?.enterWindowless({
+          currentWorkspaceRealtime()?.enterWindowless({
             userId: state.userId,
             workspaceId: state.workspaceId,
           });
@@ -1480,13 +1500,13 @@ function registerIpcHandlers(): void {
         }
         macWindowlessRealtimeActive = false;
       }
-      workspaceRealtime?.stop();
+      currentWorkspaceRealtime()?.stop();
     },
     workspaceRealtimeAcknowledge: (_context, value) => {
-      workspaceRealtime?.acknowledge(value);
+      currentWorkspaceRealtime()?.acknowledge(value);
     },
     workspaceActivityTypingSet: (_context, value) => {
-      workspaceRealtime?.setTyping(value);
+      currentWorkspaceRealtime()?.setTyping(value);
     },
     realtimeStateGet: () => {
       return realtimeState;
@@ -1611,7 +1631,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
       setRendererReady: (ready) => {
         rendererReady = ready;
         if (!ready) {
-          workspaceRealtime?.rendererUnavailable();
+          currentWorkspaceRealtime()?.rendererUnavailable();
           suspendAiChannel();
         }
       },
@@ -1859,17 +1879,21 @@ async function drainPendingAuthCallbacks(): Promise<void> {
           continue;
         }
 
-        if (!(await confirmDeepLinkSignIn())) continue;
+        if (!(await confirmDeepLinkSignIn()) || callbackIntent !== authIntentGeneration) continue;
 
         // Once enqueued, ChatSession serializes this exchange against sign-out. The generation
         // check covers a sign-out that completed while protected state was being read; a later
         // sign-out queues behind the exchange and therefore wins.
-        await currentSession.exchangeAuthKitHandoff({
-          code: outcome.handoff.callback.code,
-          codeVerifier: outcome.handoff.codeVerifier,
-          installationId,
-          platform: authDevicePlatformSchema.parse(process.platform),
-          appVersion: authAppVersionSchema.parse(app.getVersion()),
+        await replaceDesktopAuthentication(async () => {
+          if (callbackIntent !== authIntentGeneration)
+            throw new Error("Authentication was superseded");
+          return currentSession.exchangeAuthKitHandoff({
+            code: outcome.handoff.callback.code,
+            codeVerifier: outcome.handoff.codeVerifier,
+            installationId,
+            platform: authDevicePlatformSchema.parse(process.platform),
+            appVersion: authAppVersionSchema.parse(app.getVersion()),
+          });
         });
         focusMainWindow();
       } catch (error) {
@@ -2016,7 +2040,7 @@ if (!hasSingleInstanceLock) {
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
 
-      pendingNotificationAuthorizationBarrier = new PendingNotificationAuthorizationBarrier({
+      const notificationAuthorizationBarrier = new PendingNotificationAuthorizationBarrier({
         source: notificationSettingsController,
         authorizationPending:
           macosNotificationAuthorization !== null &&
@@ -2024,6 +2048,8 @@ if (!hasSingleInstanceLock) {
           initializedNotificationSettings.state.nativeSupport === "supported" &&
           initializedNotificationSettings.state.osPermission === "unknown",
       });
+
+      pendingNotificationAuthorizationBarrier = notificationAuthorizationBarrier;
 
       if (__HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__) {
         notificationController = new NotificationController({
@@ -2065,7 +2091,7 @@ if (!hasSingleInstanceLock) {
             setImmediate(operation);
           },
           onRepairRequested: (reason) => {
-            void notificationProjectionRepairCoordinator?.request(reason);
+            void currentNotificationRepair()?.request(reason);
           },
         });
       }
@@ -2112,44 +2138,77 @@ if (!hasSingleInstanceLock) {
         authKitCancellationFenced = true;
         scheduleAuthKitCancellationRetry();
       }
-      workspaceTransport = new WorkspaceTransport(__HYPE_COMMS_API_ORIGIN__, chatSession);
-      if (notificationController !== null) {
-        notificationProjectionRepairCoordinator = new NotificationProjectionRepairCoordinator({
-          transport: workspaceTransport,
-          target: notificationController,
-          getScope: currentNotificationRepairScope,
-          onFailure: reportNotificationProjectionRepairFailure,
+      const sessionClient = chatSession;
+      workspaceSessions = new WorkspaceSessionOwner((lifetime) => {
+        const localAiChannel = aiChannelController;
+        lifetime.onDispose(() => suspendAiChannel(localAiChannel));
+        lifetime.onDispose(() => {
+          macWindowlessRealtimeActive = false;
+          notificationScope = null;
+          notificationActiveGeneration = null;
+          notificationController?.markReplacing();
         });
-      }
-      workspaceRealtime = new WorkspaceRealtime({
-        apiOrigin: __HYPE_COMMS_API_ORIGIN__,
-        rendererOrigin: app.isPackaged ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}` : RENDERER_ORIGIN,
-        transport: workspaceTransport,
-        onEvent: deliverWorkspaceEvent,
-        onActivity: deliverWorkspaceActivity,
-        onWindowlessEvent: observeWindowlessWorkspaceEvent,
-        onState: deliverRealtimeState,
+        const transport = new WorkspaceTransport(
+          __HYPE_COMMS_API_ORIGIN__,
+          scopedWorkspaceSession(sessionClient, lifetime),
+        );
+        const notificationRepair =
+          notificationController === null
+            ? null
+            : new NotificationProjectionRepairCoordinator({
+                transport,
+                target: notificationController,
+                getScope: () => (lifetime.signal.aborted ? null : currentNotificationRepairScope()),
+                onFailure: reportNotificationProjectionRepairFailure,
+              });
+        const realtime = new WorkspaceRealtime({
+          apiOrigin: __HYPE_COMMS_API_ORIGIN__,
+          rendererOrigin: app.isPackaged
+            ? `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}`
+            : RENDERER_ORIGIN,
+          transport,
+          nextSessionEpoch: nextRealtimeEpoch,
+          onEvent: (frame) => !lifetime.signal.aborted && deliverWorkspaceEvent(frame),
+          onActivity: (frame) => !lifetime.signal.aborted && deliverWorkspaceActivity(frame),
+          onWindowlessEvent: (event) => {
+            if (!lifetime.signal.aborted) observeWindowlessWorkspaceEvent(event);
+          },
+          onState: (state) => {
+            if (!lifetime.signal.aborted) deliverRealtimeState(state);
+          },
+        });
+        lifetime.onDispose(() => {
+          realtime.resetSession();
+          deliverRealtimeState("offline");
+        });
+        const presence = new PresenceController({
+          getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+          publish: (state) => realtime.setPresence(state),
+        });
+        lifetime.onDispose(() => presence.stop());
+        const handleSuspend = (): void => presence.suspend();
+        const handleResume = (): void => presence.resume();
+        lifetime.onDispose(() => {
+          powerMonitor.removeListener("suspend", handleSuspend);
+          powerMonitor.removeListener("resume", handleResume);
+        });
+        powerMonitor.on("suspend", handleSuspend);
+        powerMonitor.on("resume", handleResume);
+        presence.start();
+        return { transport, realtime, notificationRepair };
       });
-      presenceController = new PresenceController({
-        getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
-        publish: (state) => workspaceRealtime?.setPresence(state),
-      });
-      const handleSuspend = (): void => presenceController?.suspend();
-      const handleResume = (): void => presenceController?.resume();
-      powerMonitor.on("suspend", handleSuspend);
-      powerMonitor.on("resume", handleResume);
-      stopPowerMonitorPresence = () => {
-        powerMonitor.removeListener("suspend", handleSuspend);
-        powerMonitor.removeListener("resume", handleResume);
-      };
-      presenceController.start();
       cacheCrypto = new CacheCrypto({
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
         platform: process.platform,
         safeStorage,
         userDataPath: app.getPath("userData"),
       });
-      chatSession.subscribe(deliverSessionState);
+      desktopSessionLifecycle = new DesktopSessionLifecycle({
+        source: chatSession,
+        sessions: workspaceSessions,
+        publish: deliverSessionState,
+        reportFailure: () => reportMainProcessError("Desktop session transition failed"),
+      });
       updateController = new UpdateController({
         updater: createUpdateSource(),
         isProductionBuild: IS_PRODUCTION_BUILD,
@@ -2211,58 +2270,62 @@ if (!hasSingleInstanceLock) {
         });
       }
 
-      await createMainWindow();
-
-      // Show the window before an upgraded enabled preference can prompt. The request runs beside
-      // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
-      // native authorization and its capability refresh settle.
-      void settlePendingNotificationAuthorization({
-        barrier: pendingNotificationAuthorizationBarrier,
-        request: () =>
-          requestAuthorizationForPersistedEnabledPreference({
-            authorization: macosNotificationAuthorization,
-            current: initializedNotificationSettings.state,
-            refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+      const restoredSession = await startDesktopSession({
+        showWindow: createMainWindow,
+        authorizeNotifications: () =>
+          settlePendingNotificationAuthorization({
+            barrier: notificationAuthorizationBarrier,
+            request: () =>
+              requestAuthorizationForPersistedEnabledPreference({
+                authorization: macosNotificationAuthorization,
+                current: initializedNotificationSettings.state,
+                refreshCapability: () => initializedNotificationSettings.refreshCapability(),
+              }),
+            onFailure: (error) => {
+              reportMainProcessError("Failed to request persisted notification permission", error);
+            },
           }),
-        onFailure: (error) => {
-          reportMainProcessError("Failed to request persisted notification permission", error);
+        reportAuthorizationFailure: () =>
+          reportMainProcessError("Failed to request persisted notification permission"),
+        beforeRestore: async () => {
+          if (macosNativeNotificationEvidenceConfiguration !== null) {
+            mainWindow?.hide();
+            app.hide();
+            macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
+              configuration: macosNativeNotificationEvidenceConfiguration,
+              presenter: new ElectronNotificationPresenter(Notification, applicationIconPath),
+              requestAuthorization: async () => {
+                if (macosNotificationAuthorization === null) return "unknown";
+                return macosNotificationAuthorization.request();
+              },
+              getHistory: () => Notification.getHistory(),
+              onClick: async () => {
+                app.show();
+                await showOrRecreateMainWindow();
+                const window = mainWindow;
+                if (window === null || window.isDestroyed()) {
+                  throw new Error("Native notification evidence could not restore the main window");
+                }
+                void dialog.showMessageBox(window, {
+                  type: "info",
+                  message: "Native notification click received",
+                  detail:
+                    "Hype Comms restored its installed window through the native notification callback.",
+                  buttons: ["Done"],
+                });
+              },
+            });
+            void macosNativeNotificationEvidenceSession.delivery.catch((error: unknown) => {
+              reportMainProcessError("Native notification evidence delivery failed", error);
+            });
+          }
+        },
+        restore: async () => {
+          await sessionClient.restore();
+          if (desktopSessionLifecycle === null) throw new Error("Desktop session is unavailable");
+          return desktopSessionLifecycle.readState();
         },
       });
-
-      if (macosNativeNotificationEvidenceConfiguration !== null) {
-        mainWindow?.hide();
-        app.hide();
-        macosNativeNotificationEvidenceSession = await startMacosNativeNotificationEvidence({
-          configuration: macosNativeNotificationEvidenceConfiguration,
-          presenter: new ElectronNotificationPresenter(Notification, applicationIconPath),
-          requestAuthorization: async () => {
-            if (macosNotificationAuthorization === null) return "unknown";
-            return macosNotificationAuthorization.request();
-          },
-          getHistory: () => Notification.getHistory(),
-          onClick: async () => {
-            app.show();
-            await showOrRecreateMainWindow();
-            const window = mainWindow;
-            if (window === null || window.isDestroyed()) {
-              throw new Error("Native notification evidence could not restore the main window");
-            }
-            void dialog.showMessageBox(window, {
-              type: "info",
-              message: "Native notification click received",
-              detail:
-                "Hype Comms restored its installed window through the native notification callback.",
-              buttons: ["Done"],
-            });
-          },
-        });
-        void macosNativeNotificationEvidenceSession.delivery.catch((error: unknown) => {
-          reportMainProcessError("Native notification evidence delivery failed", error);
-        });
-      }
-
-      // Restores a session left over from a previous run; the cookie outlives the process.
-      const restoredSession = await chatSession.restore();
       if (restoredSession.status !== "signed-out") {
         advanceAuthIntent();
         await cancelPendingAuthKit().catch(() => {
@@ -2310,33 +2373,40 @@ if (!hasSingleInstanceLock) {
         const state = chatSession?.state;
         if (state?.status !== "signed-in" || state.method !== "email") {
           macWindowlessRealtimeActive = false;
-          workspaceRealtime?.stop();
+          currentWorkspaceRealtime()?.stop();
           return;
         }
         macWindowlessRealtimeActive = true;
-        workspaceRealtime?.enterWindowless({
+        currentWorkspaceRealtime()?.enterWindowless({
           userId: state.userId,
           workspaceId: state.workspaceId,
         });
       },
       stopRealtime: () => {
         macWindowlessRealtimeActive = false;
-        workspaceRealtime?.stop();
+        currentWorkspaceRealtime()?.stop();
       },
       quit: () => app.quit(),
     });
   });
 
+  let sessionDisposal: Promise<void> | undefined;
   let quittingAiChannel: AiChannelController | null = null;
   const beforeQuitCoordinator = new BeforeQuitCoordinator({
     cleanup: () => {
+      sessionDisposal = desktopSessionLifecycle?.dispose();
+      void sessionDisposal?.catch(() => undefined);
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
     },
     teardown: async () => {
       const localAiChannel = quittingAiChannel;
       quittingAiChannel = null;
-      await localAiChannel?.dispose();
+      try {
+        await sessionDisposal;
+      } finally {
+        await localAiChannel?.dispose();
+      }
     },
     reportCleanupFailure: () => {
       reportMainProcessError("Failed to prepare application cleanup before quitting");
@@ -2373,14 +2443,8 @@ if (!hasSingleInstanceLock) {
       disposeIpcInitialValues?.();
       disposeIpcInitialValues = null;
       macWindowlessRealtimeActive = false;
-      stopPowerMonitorPresence?.();
-      stopPowerMonitorPresence = null;
-      presenceController?.stop();
-      presenceController = null;
-      workspaceRealtime?.resetSession();
       notificationScope = null;
       notificationActiveGeneration = null;
-      notificationProjectionRepairCoordinator = null;
       notificationController?.shutdown();
       notificationController = null;
       pendingNotificationAuthorizationBarrier?.dispose();

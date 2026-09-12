@@ -1,3 +1,4 @@
+import { deferred } from "./test-support/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -1032,5 +1033,54 @@ describe("describeNetworkError", () => {
     const second = new Error("second", { cause: first });
     Object.defineProperty(first, "cause", { value: second });
     expect(describeNetworkError(first)).toBeNull();
+  });
+});
+
+describe("ChatSession request lifetime", () => {
+  it("passes caller cancellation to the actual network request", async () => {
+    const entered = deferred<AbortSignal>();
+    const request: SessionFetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init.signal!;
+        entered.resolve(signal);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    const session = createSession(request);
+    const controller = new AbortController();
+    const response = session.fetch(API_ORIGIN + "/v1/bootstrap", { signal: controller.signal });
+    const signal = await entered.promise;
+    controller.abort(new Error("caller cancelled"));
+    expect(signal.aborted).toBe(true);
+    await expect(response).rejects.toThrow("caller cancelled");
+  });
+
+  it("checks a queued passive sign-out after a replacement login finishes", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    let current = true;
+    const session = createSession(
+      async (url) => {
+        if (url === CURRENT_USER_URL) return jsonResponse(OTHER_USER);
+        entered.resolve();
+        await release.promise;
+        return jsonResponse(OTHER_USER);
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+    const exchange = session.exchangeMagicLink(TOKEN);
+    await entered.promise;
+    const oldRejection = session.markSignedOut(() => current);
+    current = false;
+    release.resolve();
+    await exchange;
+    await oldRejection;
+    expect(session.state).toMatchObject({ status: "signed-in", userId: OTHER_USER.user.id });
+    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+    expect(contexts.session?.userId).toBe(OTHER_USER.user.id);
+    await session.markSignedOut();
   });
 });
