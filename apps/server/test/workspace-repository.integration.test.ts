@@ -3685,6 +3685,89 @@ describe("WorkspaceRepository", () => {
     },
   );
 
+  it.each(["upload", "complete"] as const)(
+    "can retry attachment %s after a commit failure without losing stored bytes",
+    async (stage) => {
+      const bytes = Buffer.from("Keep this unsent attachment");
+      const contentSha256 = sha256Hex(bytes);
+      const staged = await repository.createFileUpload(
+        owner,
+        {
+          conversationId: generalId,
+          fileName: "unsent.txt",
+          contentType: "text/plain",
+          sizeBytes: bytes.byteLength,
+          contentSha256,
+        },
+        randomUUID(),
+      );
+      const attachmentId = staged.attachment.id;
+      const key = randomUUID();
+      const input = { sizeBytes: bytes.byteLength, contentSha256 };
+      if (stage === "complete") {
+        await repository.putFileContent(owner, attachmentId, "text/plain", bytes);
+      }
+      const metadata = async () =>
+        (await pool.query("SELECT * FROM attachments WHERE id = $1", [attachmentId])).rows;
+      const responses = async () =>
+        (
+          await pool.query(
+            "SELECT * FROM api_idempotency_records ORDER BY actor_user_id, route, idempotency_key",
+          )
+        ).rows;
+      const beforeMetadata = await metadata();
+      const beforeResponses = await responses();
+      await pool.query(`CREATE FUNCTION reject_test_attachment_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'Injected attachment commit failure';
+        END;
+        $$`);
+      try {
+        await pool.query(`CREATE CONSTRAINT TRIGGER reject_test_attachment_commit
+          AFTER UPDATE ON attachments DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION reject_test_attachment_commit()`);
+        await expect(
+          stage === "upload"
+            ? repository.putFileContent(owner, attachmentId, "text/plain", bytes)
+            : repository.completeFileUpload(owner, attachmentId, input, key),
+        ).rejects.toThrow("Injected attachment commit failure");
+        expect(await metadata()).toEqual(beforeMetadata);
+        expect(await responses()).toEqual(beforeResponses);
+        // Object storage is outside the database transaction. A retry can reuse these bytes.
+        expect(await attachmentStore.read(workspaceId, attachmentId)).toEqual(bytes);
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_attachment_commit ON attachments");
+        await pool.query("DROP FUNCTION reject_test_attachment_commit()");
+      }
+      if (stage === "upload") {
+        await repository.putFileContent(owner, attachmentId, "text/plain", bytes);
+      }
+      const completed = await repository.completeFileUpload(owner, attachmentId, input, key);
+      expect(completed.attachment).toMatchObject({
+        id: attachmentId,
+        status: "ready",
+        messageId: null,
+      });
+      const committedMetadata = await metadata();
+      const committedResponses = await responses();
+      await expect(repository.completeFileUpload(owner, attachmentId, input, key)).resolves.toEqual(
+        completed,
+      );
+      expect(await metadata()).toEqual(committedMetadata);
+      expect(await responses()).toEqual(committedResponses);
+      const sent = await repository.sendMessage(owner, generalId, {
+        ...message(randomUUID(), "The preserved file"),
+        mentionedUserIds: [],
+        attachmentIds: [attachmentId],
+      });
+      expect(sent.attachments).toEqual([
+        expect.objectContaining({ id: attachmentId, messageId: sent.message.id }),
+      ]);
+      expect(await attachmentStore.read(workspaceId, attachmentId)).toEqual(bytes);
+    },
+  );
+
   it("uses the database clock for attachment upload expiry", async () => {
     const bytes = Buffer.from("database time");
     const contentSha256 = sha256Hex(bytes);
