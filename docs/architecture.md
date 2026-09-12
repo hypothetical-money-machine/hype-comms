@@ -60,6 +60,13 @@ A platform lane covers every cell of its row. Partial coverage—one architectur
 format, or one OS version—does not pass that platform's lane and must not be recorded as if it
 did.
 
+## Retired desktop Wake integration
+
+The desktop Wake integration, its dedicated CLI/server protocol, and pilot evidence tooling have
+been removed. Ordinary agent identities, Hermes, realtime delivery, and external polling jobs are
+unchanged. Upgrades do not open or delete old Wake configuration and journal files. Historical
+database migrations remain unchanged.
+
 ## System shape and trust boundaries
 
 ### Current pilot delivery

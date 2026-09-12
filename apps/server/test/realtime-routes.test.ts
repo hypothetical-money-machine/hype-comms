@@ -1,7 +1,6 @@
 import { once } from "node:events";
 
 import {
-  agentWakeCheckpointSchema,
   systemConnectedEventSchema,
   type ConversationSummary,
   type NotificationState,
@@ -273,6 +272,25 @@ async function connectedApp(
 }
 
 describe("realtime session revalidation", () => {
+  it("rejects removed realtime options before consuming a ticket", async () => {
+    const repository = new FakeWorkspaceRepository();
+    const app = await buildApp({
+      allowedOrigins: ["app://bundle"],
+      workspace: {
+        repository: repository.asRepository(),
+        realtimeHub: new FakeRealtimeEventHub().asHub(),
+      },
+    });
+    apps.push(app);
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      headers: { origin: "app://bundle" },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(repository.consumedTickets).toEqual([]);
+  });
+
   it("keeps an initial message replay quiet across the server and desktop boundary", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.syncResponse = {
@@ -337,51 +355,7 @@ describe("realtime session revalidation", () => {
     expect(presenter.present).not.toHaveBeenCalled();
   });
 
-  it("sends an opted-in agent its requested-cursor preamble before replay", async () => {
-    const repository = new FakeWorkspaceRepository();
-    repository.consumedPrincipal = {
-      workspaceId,
-      userId,
-      deviceSessionId: null,
-      agentTokenId: "10000000-0000-4000-8000-000000000010",
-    };
-    repository.syncResponse = {
-      events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
-      hasMore: false,
-    };
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      workspace: {
-        repository: repository.asRepository(),
-        realtimeHub: new FakeRealtimeEventHub().asHub(),
-      },
-    });
-    apps.push(app);
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
-      { origin: "app://bundle" },
-    );
-    sockets.push(socket);
-
-    const frames = await new Promise<unknown[]>((resolve) => {
-      const received: unknown[] = [];
-      socket.on("message", (data) => {
-        received.push(JSON.parse(data.toString()));
-        if (received.length === 2) resolve(received);
-      });
-    });
-
-    expect(frames).toMatchObject([
-      { type: "system.connected", workspaceSequence: "9" },
-      { type: "member.updated", workspaceSequence: "10" },
-    ]);
-    expect(repository.revalidations).toHaveLength(1);
-  });
-
-  it("preserves replay ordering without sending Wake scan controls to a plain agent", async () => {
+  it("sends authorized agent replay before the connected handshake", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {
       workspaceId,
@@ -425,69 +399,6 @@ describe("realtime session revalidation", () => {
     expect(repository.revalidations).toHaveLength(1);
   });
 
-  it("ignores the agent-wake preamble opt-in for a human principal", async () => {
-    const repository = new FakeWorkspaceRepository();
-    repository.syncResponse = {
-      events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
-      hasMore: false,
-    };
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      workspace: {
-        repository: repository.asRepository(),
-        realtimeHub: new FakeRealtimeEventHub().asHub(),
-      },
-    });
-    apps.push(app);
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
-      { origin: "app://bundle" },
-    );
-    sockets.push(socket);
-
-    const frames = await new Promise<unknown[]>((resolve) => {
-      const received: unknown[] = [];
-      socket.on("message", (data) => {
-        received.push(JSON.parse(data.toString()));
-        if (received.length === 2) resolve(received);
-      });
-    });
-
-    expect(frames).toMatchObject([
-      { type: "member.updated", workspaceSequence: "10" },
-      { type: "system.connected", workspaceSequence: "10" },
-    ]);
-  });
-
-  it("rejects an unknown realtime preamble before consuming the ticket", async () => {
-    const repository = new FakeWorkspaceRepository();
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      workspace: {
-        repository: repository.asRepository(),
-        realtimeHub: new FakeRealtimeEventHub().asHub(),
-      },
-    });
-    apps.push(app);
-
-    const response = await app.inject({
-      method: "GET",
-      url: `/v1/realtime?ticket=${ticket}&after=9&preamble=unknown`,
-      headers: {
-        connection: "upgrade",
-        upgrade: "websocket",
-        origin: "app://bundle",
-      },
-    });
-
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ error: { code: "BAD_REQUEST" } });
-    expect(repository.consumedTickets).toEqual([]);
-  });
-
   it("loads the next agent replay page concurrently but sends it only after authorization", async () => {
     const repository = new FakeWorkspaceRepository();
     repository.consumedPrincipal = {
@@ -527,7 +438,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -537,148 +448,14 @@ describe("realtime session revalidation", () => {
     await authorizationStarted.promise;
     try {
       await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9", "10"]));
-      await vi.waitFor(() => expect(frames).toHaveLength(2));
-      expect(frames).toMatchObject([
-        { type: "system.connected", workspaceSequence: "9" },
-        { type: "member.updated", workspaceSequence: "10" },
-      ]);
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(frames).toMatchObject([{ type: "member.updated", workspaceSequence: "10" }]);
     } finally {
       releaseAuthorization.resolve();
     }
     await vi.waitFor(() => expect(frames).toHaveLength(3));
-    expect(frames[2]).toMatchObject({ type: "member.updated", workspaceSequence: "11" });
-  });
-
-  it("reports Wake scan progress across invisible replay rows", async () => {
-    const repository = new FakeWorkspaceRepository();
-    repository.consumedPrincipal = {
-      workspaceId,
-      userId,
-      deviceSessionId: null,
-      agentTokenId: "10000000-0000-4000-8000-000000000014",
-    };
-    repository.syncResponses.push(
-      {
-        events: [],
-        nextCursor: "10",
-        highWaterCursor: "12",
-        hasMore: true,
-      },
-      {
-        events: [secondReplayEvent],
-        nextCursor: "12",
-        highWaterCursor: "12",
-        hasMore: false,
-      },
-    );
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      workspace: {
-        repository: repository.asRepository(),
-        realtimeHub: new FakeRealtimeEventHub().asHub(),
-      },
-    });
-    apps.push(app);
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
-      { origin: "app://bundle" },
-    );
-    sockets.push(socket);
-    const frames: unknown[] = [];
-    socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
-
-    await vi.waitFor(() => expect(frames).toHaveLength(4));
-
-    expect(frames).toMatchObject([
-      { type: "system.connected", workspaceSequence: "9" },
-      { type: "agent.wake.checkpoint", cursor: "10" },
-      { type: "member.updated", workspaceSequence: "11" },
-      { type: "agent.wake.checkpoint", cursor: "12" },
-    ]);
-    expect(agentWakeCheckpointSchema.parse(frames[1])).toEqual({
-      version: 1,
-      type: "agent.wake.checkpoint",
-      workspaceId,
-      agentUserId: userId,
-      cursor: "10",
-    });
-    expect(agentWakeCheckpointSchema.parse(frames[3])).toEqual({
-      version: 1,
-      type: "agent.wake.checkpoint",
-      workspaceId,
-      agentUserId: userId,
-      cursor: "12",
-    });
-  });
-
-  it("waits for a durable frame write before loading the next replay page", async () => {
-    const repository = new FakeWorkspaceRepository();
-    repository.consumedPrincipal = {
-      workspaceId,
-      userId,
-      deviceSessionId: null,
-      agentTokenId: "10000000-0000-4000-8000-000000000015",
-    };
-    repository.syncResponses.push(
-      {
-        events: [replayEvent],
-        nextCursor: "10",
-        highWaterCursor: "11",
-        hasMore: true,
-      },
-      {
-        events: [secondReplayEvent],
-        nextCursor: "11",
-        highWaterCursor: "11",
-        hasMore: false,
-      },
-    );
-    const app = await buildApp({
-      allowedOrigins: ["app://bundle"],
-      workspace: {
-        repository: repository.asRepository(),
-        realtimeHub: new FakeRealtimeEventHub().asHub(),
-      },
-    });
-    apps.push(app);
-    const firstSendAttempt = Promise.withResolvers<void>();
-    let releaseFirstSend: (() => void) | undefined;
-    app.websocketServer.once("connection", (serverSocket: WebSocket) => {
-      const originalSend = serverSocket.send.bind(serverSocket);
-      let intercepted = false;
-      serverSocket.send = ((
-        data: Parameters<WebSocket["send"]>[0],
-        callback?: (error?: Error) => void,
-      ): void => {
-        if (!intercepted && callback !== undefined) {
-          intercepted = true;
-          firstSendAttempt.resolve();
-          releaseFirstSend = () => {
-            serverSocket.send = originalSend;
-            callback?.();
-          };
-          return;
-        }
-        originalSend(data, callback);
-      }) as WebSocket["send"];
-    });
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
-      { origin: "app://bundle" },
-    );
-    sockets.push(socket);
-    await once(socket, "open");
-
-    try {
-      await firstSendAttempt.promise;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(repository.syncedCursors).toEqual(["9"]);
-    } finally {
-      releaseFirstSend?.();
-    }
-    await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9", "10"]));
+    expect(frames[1]).toMatchObject({ type: "member.updated", workspaceSequence: "11" });
+    expect(frames[2]).toMatchObject({ type: "system.connected", workspaceSequence: "11" });
   });
 
   it("sends only the body-free recovery control when the replay cursor has expired", async () => {
@@ -738,7 +515,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
